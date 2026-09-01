@@ -5,6 +5,7 @@ import type {
   CostRollup,
   GenerationCostEntry,
   GenerationJob,
+  GenerationPlan,
   ImportRecord,
   LearningSession,
   LessonDraft,
@@ -195,6 +196,12 @@ export const api = {
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd })
   }),
   generationJob: (jobId: string) => request<GenerationJob>(`/api/v1/generation-jobs/${encodeURIComponent(jobId)}`),
+  createGenerationPlan: (materialVersionId: string, pageIds: string[], budgetUsd: number, options: { qualityMode?: string; language?: string; sourceImportId?: string; holdForReview?: boolean } = {}) => request<{ plan: GenerationPlan; currentJob?: GenerationJob }>("/api/v1/generation-plans", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({ materialVersionId, pageIds, budgetUsd, ...options })
+  }),
+  generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
   writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {
     const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])));

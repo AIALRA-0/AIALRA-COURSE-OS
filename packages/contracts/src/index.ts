@@ -41,6 +41,8 @@ export type JobState =
   | "cancelled"
   | "failed";
 
+export type GenerationPlanState = "queued" | "running" | "awaiting_review" | "completed" | "cancelled" | "failed";
+
 export interface Provenance {
   sourceMaterialVersionId: Identifier;
   pageId: Identifier;
@@ -388,7 +390,11 @@ export interface ImportRecord {
   language?: string;
   autoGenerate?: boolean;
   generationJobId?: Identifier;
-  generationState?: JobState | "not_requested";
+  generationJobIds?: Identifier[];
+  generationPlanId?: Identifier;
+  generationCompletedPageIds?: Identifier[];
+  generationFailedPageIds?: Identifier[];
+  generationState?: JobState | GenerationPlanState | "not_requested";
   sensitivity: "private" | "restricted" | "public";
   state: "quarantined" | "accepted" | "processing" | "syncing" | "ready" | "rejected" | "failed";
   issues: string[];
@@ -445,6 +451,9 @@ export interface GenerationJob {
   workspaceId: Identifier;
   materialVersionId: Identifier;
   sourceImportId?: Identifier;
+  planId?: Identifier;
+  batchIndex?: number;
+  batchCount?: number;
   qualityMode?: "economy" | "balanced" | "quality";
   language?: string;
   writingPolicySnapshotId?: Identifier;
@@ -456,6 +465,29 @@ export interface GenerationJob {
   failedPageIds: Identifier[];
   attempt: number;
   cancelRequested: boolean;
+  createdAt: ISODateTime;
+  updatedAt: ISODateTime;
+}
+
+export interface GenerationPlan {
+  id: Identifier;
+  workspaceId: Identifier;
+  materialVersionId: Identifier;
+  sourceImportId?: Identifier;
+  qualityMode: "economy" | "balanced" | "quality";
+  language: string;
+  writingPolicySnapshotId: Identifier;
+  modelRoutes?: Array<{ provider: string; model: string }>;
+  pageIds: Identifier[];
+  completedPageIds: Identifier[];
+  failedPageIds: Identifier[];
+  jobIds: Identifier[];
+  currentJobId?: Identifier;
+  lastJobId?: Identifier;
+  budgetUsd: number;
+  spentUsd: number;
+  holdForReview: boolean;
+  state: GenerationPlanState;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
 }

@@ -617,7 +617,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .sidebar-footer strong { font-size: 12px; }
 .sidebar-footer span { font-size: 11px; }
 .sidebar-footer .icon-button { width: 30px; min-height: 30px; }
-.sidebar-resize-handle { position: absolute; top: 0; right: -4px; z-index: 40; width: 8px; height: 100%; cursor: col-resize; touch-action: none; }
+.sidebar-resize-handle { position: absolute; top: 0; right: 0; z-index: 40; width: 8px; height: 100%; cursor: col-resize; touch-action: none; }
 .sidebar-resize-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms ease; }
 .sidebar-resize-handle:hover::after, .sidebar-resize-handle:focus-visible::after { background: var(--brand); }
 .course-sidebar-collapsed { grid-template-rows: auto auto auto 1fr auto; align-items: start; justify-items: center; padding: 10px 6px; background: var(--panel); }
@@ -947,6 +947,40 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   justify-content: flex-end;
   gap: 6px;
   flex: 0 0 auto;
+}
+
+.sidebar-heading {
+  min-width: 0;
+  gap: 8px;
+}
+
+.sidebar-heading > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.sidebar-heading > div:first-child strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-sidebar {
+  min-width: 0;
+  overflow: hidden;
+}
+
+@media (min-width: 901px) {
+  .learning-grid {
+    grid-template-columns: minmax(0, 55%) minmax(0, 45%);
+  }
+
+  .studio-columns {
+    grid-template-columns: minmax(0, 1fr) clamp(280px, 32%, 318px);
+  }
 }
 
 .tree-row {

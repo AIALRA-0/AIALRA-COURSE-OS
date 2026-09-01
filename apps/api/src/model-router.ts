@@ -91,6 +91,7 @@ const teachingPackageSchema = {
     questions: {
       type: "array",
       minItems: 4,
+      maxItems: 4,
       items: {
         type: "object",
         properties: {
@@ -193,8 +194,8 @@ interface RouterResponseBody {
   usage?: Partial<ModelRouterUsage>;
 }
 
-function modelInput(input: { pageTitle: string; pageNumber: number; sourceText: string; sourceImageDataUrl?: string; writingPolicySnapshotId: string }): string | Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "high" }> }> {
-  const text = `写作策略快照：${input.writingPolicySnapshotId}\n页面编号：${input.pageNumber}\n页面标题：${input.pageTitle}\n\n离线提取的来源内容：\n${input.sourceText.slice(0, 45_000)}\n\n请把原始页面图像作为第一手来源，逐项核对文字、公式、箭头、图表和图片区域；离线文字只用于辅助检索，图像与文字冲突时必须明确标记冲突，不得静默猜测`;
+function modelInput(input: { pageTitle: string; pageNumber: number; sourceText: string; sourceImageDataUrl?: string; writingPolicySnapshotId: string; language?: string; qualityMode?: string }): string | Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "high" }> }> {
+  const text = `写作策略快照：${input.writingPolicySnapshotId}\n任务契约：GENERATE + TEACHING\n用户提供语言：${input.language || "zh-CN"}\n用户提供质量模式：${input.qualityMode || "balanced"}\n阅读单位：独立教学页面，不能假设读者看过其他页面\n页面编号：${input.pageNumber}\n页面标题：${input.pageTitle}\n\n离线提取的来源内容：\n${input.sourceText.slice(0, 45_000)}\n\n请把原始页面图像作为第一手来源，逐项核对文字、公式、箭头、图表和图片区域；离线文字只用于辅助检索，图像与文字冲突时必须明确标记冲突，不得静默猜测`;
   if (!input.sourceImageDataUrl) return text;
   return [{ role: "user", content: [{ type: "input_text", text }, { type: "input_image", image_url: input.sourceImageDataUrl, detail: "high" }] }];
 }
@@ -504,6 +505,8 @@ export function professorInstructions(language: string): string {
 
 人类可读写作硬约束：${language === "en" ? "use plain, direct English with short sentences, concrete headings, and explicit next steps" : "使用自然、具体、短句化的简体中文；先说结论，再解释原因和步骤；标题与列表承担结构，不堆砌“本页”“这里”“需要注意”等空话；保留必要英文术语但不要重复翻译；避免模板腔、宣传腔和没有证据的绝对判断"}
 
+当前人类可读技术写作策略的个人配置是强制规则：独立页面必须能够单独阅读；普通中文正文禁止使用中文句号，段落结尾不保留中文句号或中文分号，短停顿使用逗号，较长并列使用分号；逐字引文、来源日志和代码按原文保留；两个以上并列定义、步骤、事实、原因或动作必须换行缩进；第一次出现的专业术语要给出正式中文、官方英文、缩写、定义、名称含义、当前作用和实际影响；没有可靠官方写法时明确标为未知，不自行创造
+
 输入边界：原始页面图片、提取文字、公式、图形、表格、代码和页面原子属于 SOURCE；语言、质量模式和课程目标属于 USER_SUPPLIED；补充的外部知识必须明确标为 EXTERNAL_BACKGROUND；根据页面作出的结论必须明确标为 INFERENCE，不得冒充课件原文
 来源分层：SOURCE 中能直接观察或逐字读取的事实优先写成“来源事实”；外部知识单独写成“外部背景”并说明必要性；模型得出的联系、解释或结论单独写成“推断”并说明依据与置信边界；不要把三层内容混在同一句中
 保真要求：完整保留主体、条件、否定、范围、数字、变量和因果关系；解释概念是什么、为什么需要、解决什么问题，并覆盖页面中所有有效元素；OCR 不确定处要标明不确定，不得擅自补齐
@@ -511,6 +514,7 @@ export function professorInstructions(language: string): string {
 代码与伪代码：保留原对象，逐行说明输入、读取对象、状态变化、输出、副作用、失败条件和复杂度；不能用一段泛泛总结代替逐行说明
 图形与表格：先保留并识别原对象，再说明坐标轴、单位、图例、序列、结构、趋势、限制；所有有效行、列、单元格或连接关系都要有对应解释，并分开记录观察事实、外部背景和推断
 图片：先说明可直接观察到的对象与关系，再单独说明背景和推断；不得捏造页面没有提供的信息
+输出顺序：先保留或概括原始对象，再给“来源事实”、必要的“外部背景”和有依据的“推断”，三者使用清晰的小标题或列表分开；删除测试只允许删除不影响理解、判断、行动、证据边界和下一步的装饰性句子；每个段落和列表项只承担一个清晰任务
 覆盖证据：coverageEvidence 只能引用输入中真实存在的 atomId；coveredFields 只能填写正文中确实解释过的字段；explanation 必须指出对应讲解，不得虚报覆盖；没有证据就不要声明已覆盖
 教学充分性：完整讲解至少包含一个可复算或复现的例子，以及前提、特殊情况、失败条件和下一步检查；先验知识和易错点中的每项只表达一个完整意思
 题目：生成 2 道理解题和 2 道选择题；理解题的 options 必须为空数组；选择题必须有 4 个选项，expectedAnswer 必须与其中一个选项完全一致；题目答案说明只能使用页面证据或明确标注的背景
@@ -519,9 +523,9 @@ export function professorInstructions(language: string): string {
 }
 
 function validateTeachingPackage(value: TeachingPackage): void {
-  if (!value || !Array.isArray(value.learningObjectives) || !Array.isArray(value.questions) || value.questions.length < 4 || value.fullExplanationMarkdown.length < 300) throw new Error("MODEL_ROUTER_INVALID_TEACHING_PACKAGE");
+  if (!value || !Array.isArray(value.learningObjectives) || !Array.isArray(value.questions) || value.questions.length !== 4 || value.fullExplanationMarkdown.length < 300) throw new Error("MODEL_ROUTER_INVALID_TEACHING_PACKAGE");
   const comprehension = value.questions.filter((item) => item.kind === "comprehension").length;
   const choices = value.questions.filter((item) => item.kind === "multiple_choice").length;
-  if (comprehension < 2 || choices < 2) throw new Error("MODEL_ROUTER_QUESTION_MIX_INVALID");
+  if (comprehension !== 2 || choices !== 2) throw new Error("MODEL_ROUTER_QUESTION_MIX_INVALID");
   for (const item of value.questions.filter((candidate) => candidate.kind === "multiple_choice")) if (!item.options || item.options.length !== 4 || !item.options.includes(item.expectedAnswer)) throw new Error("MODEL_ROUTER_CHOICE_INVALID");
 }

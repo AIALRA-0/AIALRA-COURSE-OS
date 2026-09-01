@@ -15,6 +15,7 @@ import type {
   CostRollup,
   GenerationCostEntry,
   GenerationJob,
+  GenerationPlan,
   IdempotentWriteContext,
   ImportRecord,
   LessonSection,
@@ -520,6 +521,17 @@ export function createApp(dependencies: AppDependencies): Express {
       const baseReleaseId = String(request.body.baseReleaseId || "");
       const base = await getWorkspaceRelease(dependencies.readweave, baseReleaseId, request.header("X-Workspace-Id") || "personal");
       if (!base) return sendError(request, response, 404, "BASE_RELEASE_NOT_FOUND", "没有找到用于发布的基础课程版本", false);
+      if (base.candidateBaseReleaseId) {
+        const workspaceId = request.header("X-Workspace-Id") || "personal";
+        const plan = (await dependencies.operations.read()).generationPlans.find((item) => item.materialVersionId === base.id && item.workspaceId === workspaceId);
+        if (!plan || !["awaiting_review", "completed"].includes(plan.state) || plan.failedPageIds.length > 0 || !sameStringSet(plan.pageIds, base.pageIds)) {
+          return sendError(request, response, 409, "CANDIDATE_PUBLISH_NOT_READY", "候选版本尚未完成全部页面生成和审核，暂时不能发布正式版本", false, { generationPlanId: plan?.id, generationState: plan?.state, failedPageIds: plan?.failedPageIds ?? [], remainingPageCount: plan ? base.pageIds.filter((pageId) => !plan.completedPageIds.includes(pageId)).length : base.pageIds.length });
+        }
+        const policy = await currentWritingPolicy();
+        if (policy.validator.status !== "passed" || policy.policySnapshotId !== plan.writingPolicySnapshotId) {
+          return sendError(request, response, 409, "WRITING_POLICY_SNAPSHOT_CHANGED", "当前写作策略已经变化，请重新生成候选版本后再发布", false, { policySnapshotId: policy.policySnapshotId, generationPolicySnapshotId: plan.writingPolicySnapshotId });
+        }
+      }
       const drafts = await dependencies.readweave.listDrafts();
       const pages = base.pages.map((page) => drafts.find((draft) => draft.pageId === page.id)?.page ?? page);
       const issues = pages.flatMap((page) => validatePageForPublication(page).map((issue) => `${page.id}:${issue}`));
@@ -598,12 +610,22 @@ export function createApp(dependencies: AppDependencies): Express {
       }
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       const cas = await dependencies.cas.put(request.file.buffer);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const source = canonicalImportSource(String(request.body.source || "user_upload"));
+      let deduplicated = false;
       const record = await dependencies.operations.mutate((state) => {
+        const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256 && canonicalImportSource(item.source) === source);
+        if (duplicate) {
+          deduplicated = true;
+          state.idempotency[idempotencyKey] = { kind: "import", objectId: duplicate.id };
+          dependencies.operations.appendEvent(state, duplicate.id, "import.deduplicated", { sha256: duplicate.sha256, source: duplicate.source });
+          return structuredClone(duplicate);
+        }
         const now = new Date().toISOString();
         const autoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
         const item = {
           id: randomUUID(),
-          workspaceId: request.header("X-Workspace-Id") || "personal",
+          workspaceId,
            courseId: asOptionalString(request.body.courseId),
            parentNodeId: asOptionalString(request.body.parentNodeId),
           originalName: request.file!.originalname,
@@ -612,7 +634,7 @@ export function createApp(dependencies: AppDependencies): Express {
           sizeBytes: request.file!.size,
           sha256: cas.sha256,
           casPath: cas.absolutePath,
-          source: String(request.body.source || "user_upload"),
+          source,
           license: String(request.body.license || "private_course_material"),
           qualityMode: normalizeQualityMode(request.body.qualityMode),
           language: String(request.body.language || "zh-CN"),
@@ -629,7 +651,7 @@ export function createApp(dependencies: AppDependencies): Express {
         return item;
       });
       if (record.state === "accepted") queueMicrotask(() => processImport(record.id, dependencies).catch(() => undefined));
-      response.status(inspection.accepted ? 201 : 422).json(record);
+      response.status(deduplicated ? 200 : inspection.accepted ? 201 : 422).json(record);
     } catch (error) { next(error); }
   });
 
@@ -638,6 +660,12 @@ export function createApp(dependencies: AppDependencies): Express {
       const snapshot = await dependencies.operations.read();
       const record = snapshot.imports.find((item) => item.id === request.params.id);
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
+      const plan = snapshot.generationPlans.find((item) => item.id === record.generationPlanId || item.sourceImportId === record.id);
+      if (plan) {
+        const jobId = plan.currentJobId || plan.lastJobId;
+        response.json({ ...record, generationPlanId: plan.id, generationJobId: jobId, generationJobIds: plan.jobIds, generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, generationState: plan.state });
+        return;
+      }
       const job = snapshot.jobs.find((item) => item.id === record.generationJobId || item.sourceImportId === record.id);
       response.json(job ? { ...record, generationJobId: job.id, generationState: job.state } : record);
     } catch (error) { next(error); }
@@ -668,12 +696,16 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const idempotencyKey = requireIdempotencyKey(request);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const replay = (await dependencies.operations.read()).idempotency[idempotencyKey];
+      const initialSnapshot = await dependencies.operations.read();
+      const replay = initialSnapshot.idempotency[idempotencyKey];
       if (replay) {
         const replayRelease = await dependencies.readweave.getRelease(replay.objectId);
         if (replayRelease) {
-          const replayJob = (await dependencies.operations.read()).jobs.find((job) => job.materialVersionId === replayRelease.id && job.workspaceId === workspaceId);
-          return response.status(200).json({ candidate: replayRelease, generationJob: replayJob });
+          const replaySnapshot = await dependencies.operations.read();
+          const replayPlan = replaySnapshot.generationPlans.find((plan) => plan.materialVersionId === replayRelease.id && plan.workspaceId === workspaceId);
+          const replayJob = replaySnapshot.jobs.find((job) => job.id === (replayPlan?.currentJobId || replayPlan?.lastJobId))
+            || replaySnapshot.jobs.find((job) => job.materialVersionId === replayRelease.id && job.workspaceId === workspaceId);
+          return response.status(200).json({ candidate: replayRelease, generationPlan: replayPlan, generationJob: replayJob });
         }
       }
       const baseReleaseId = String(request.body.baseReleaseId || "").trim();
@@ -682,27 +714,41 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(candidateId)) return sendError(request, response, 422, "CANDIDATE_RELEASE_ID_INVALID", "候选版本编号只能包含字母、数字、点、下划线和短横线", false);
       const base = await getWorkspaceRelease(dependencies.readweave, baseReleaseId, workspaceId);
       if (!base || base.lifecycle === "draft_source") return sendError(request, response, 404, "BASE_RELEASE_NOT_FOUND", "没有找到可用于建立候选版本的正式基础版本", false);
+      const pageNumbers = parseCandidatePageNumbers(request.body.pageNumbers, base.pages.length);
+      if (pageNumbers === "invalid") return sendError(request, response, 422, "CANDIDATE_PAGE_NUMBERS_INVALID", "候选页面必须是材料范围内的不重复页码", false);
       const existing = await dependencies.readweave.getRelease(candidateId);
       if (existing) {
         if (existing.lifecycle !== "draft_source" || existing.candidateBaseReleaseId !== base.id || existing.courseId !== base.courseId || existing.moduleId !== base.moduleId) return sendError(request, response, 409, "CANDIDATE_RELEASE_EXISTS", "候选版本编号已经被其他内容占用，请换一个编号", false);
         const savedDrafts = await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request);
         const policy = await currentWritingPolicy();
         const snapshot = await dependencies.operations.read();
-        let existingJob = snapshot.jobs.find((job) => job.materialVersionId === existing.id && job.workspaceId === workspaceId);
-        if (!existingJob && policy.validator.status === "passed" && policy.policySnapshotId === existing.writingPolicySnapshotId) {
+        const selectedPageIds = pageNumbers ? pageNumbers.map((number) => existing.pages.find((page) => page.pageNumber === number)!.id) : existing.pageIds;
+        const existingPlan = snapshot.generationPlans.find((plan) => plan.materialVersionId === existing.id && plan.workspaceId === workspaceId);
+        let existingJob = snapshot.jobs.find((job) => job.id === (existingPlan?.currentJobId || existingPlan?.lastJobId))
+          || snapshot.jobs.find((job) => job.materialVersionId === existing.id && job.workspaceId === workspaceId);
+        if (existingPlan && !sameStringArray(existingPlan.pageIds, selectedPageIds)) return sendError(request, response, 409, "CANDIDATE_GENERATION_SELECTION_CONFLICT", "这个候选版本已经绑定了另一组生成页面，请使用新的候选版本编号", false);
+        if (!existingPlan && existingJob && !sameStringArray(existingJob.pageIds, selectedPageIds)) return sendError(request, response, 409, "CANDIDATE_GENERATION_SELECTION_CONFLICT", "这个候选版本已经绑定了另一组生成页面，请使用新的候选版本编号", false);
+        let generationPlan = existingPlan;
+        let planCreated = false;
+        let jobCreated = false;
+        if (!existingJob && !generationPlan && policy.validator.status === "passed" && policy.policySnapshotId === existing.writingPolicySnapshotId) {
           const qualityMode = normalizeQualityMode(request.body.qualityMode || "quality");
           const budgetUsd = Number(request.body.budgetUsd ?? generationBudget(qualityMode));
           if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 8) return sendError(request, response, 422, "BUDGET_INVALID", "单次候选生成预算必须大于 0 且不超过 8 美元", false);
           const language = String(request.body.language || "zh-CN").trim() || "zh-CN";
-          const generation = await persistGenerationJob({ idempotencyKey: `${idempotencyKey}:generation`, workspaceId, materialVersionId: existing.id, pageIds: existing.pageIds, budgetUsd, qualityMode, language, writingPolicySnapshotId: existing.writingPolicySnapshotId }, dependencies);
+          const generation = await createGenerationPlan({ idempotencyKey: `${idempotencyKey}:generation-plan`, workspaceId, materialVersionId: existing.id, pageIds: selectedPageIds, budgetUsd, qualityMode, language, writingPolicySnapshotId: existing.writingPolicySnapshotId, holdForReview: pageNumbers !== undefined && request.body.holdForReview !== false }, dependencies);
+          generationPlan = generation.plan;
           existingJob = generation.job;
-          if (generation.created) startGenerationJob(generation.job.id, dependencies);
+          planCreated = generation.created;
+          jobCreated = generation.jobCreated;
         }
-        if (!existingJob && (policy.validator.status !== "passed" || policy.policySnapshotId !== existing.writingPolicySnapshotId)) {
+        if (!existingJob && !generationPlan && (policy.validator.status !== "passed" || policy.policySnapshotId !== existing.writingPolicySnapshotId)) {
           return sendError(request, response, 409, "CANDIDATE_POLICY_CHANGED", "这个候选版本绑定的写作策略已经变化，请使用新的候选版本编号继续生成", false);
         }
+        if (existingJob && generationPlan) existingJob = snapshot.jobs.find((job) => job.id === (generationPlan?.currentJobId || generationPlan?.lastJobId)) || existingJob;
         await rememberCandidateIdempotency(dependencies, idempotencyKey, existing.id);
-        return response.status(200).json({ candidate: existing, generationJob: existingJob, draftIds: savedDrafts.map((draft) => draft.id) });
+        if (existingJob && (planCreated || jobCreated)) startGenerationJob(existingJob.id, dependencies);
+        return response.status(planCreated || jobCreated ? 202 : 200).json({ candidate: existing, generationPlan, generationJob: existingJob, draftIds: savedDrafts.map((draft) => draft.id) });
       }
       const policy = await currentWritingPolicy();
       if (policy.validator.status !== "passed") return sendError(request, response, 503, "WRITING_POLICY_UNAVAILABLE", "当前写作策略未通过验证，暂时不能建立候选版本", true, { issues: policy.validator.issues });
@@ -714,19 +760,68 @@ export function createApp(dependencies: AppDependencies): Express {
       const candidate = createReleaseCandidate(base, candidateId, policy, now);
       await dependencies.readweave.registerDraftSource(candidate, writeContext(request, `${idempotencyKey}:source`));
       const savedDrafts = await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request);
-      const generation = await persistGenerationJob({
-        idempotencyKey: `${idempotencyKey}:generation`,
+      const selectedPageIds = pageNumbers ? pageNumbers.map((number) => candidate.pages.find((page) => page.pageNumber === number)!.id) : candidate.pageIds;
+      const generation = await createGenerationPlan({
+        idempotencyKey: `${idempotencyKey}:generation-plan`,
         workspaceId,
         materialVersionId: candidate.id,
-        pageIds: candidate.pageIds,
+        pageIds: selectedPageIds,
         budgetUsd,
         qualityMode,
         language,
-        writingPolicySnapshotId: policy.policySnapshotId
+        writingPolicySnapshotId: policy.policySnapshotId,
+        holdForReview: pageNumbers !== undefined && request.body.holdForReview !== false
       }, dependencies);
       await rememberCandidateIdempotency(dependencies, idempotencyKey, candidate.id);
-      if (generation.created) startGenerationJob(generation.job.id, dependencies);
-      response.status(202).json({ candidate, generationJob: generation.job, draftIds: savedDrafts.map((draft) => draft.id) });
+      if (generation.job && (generation.created || generation.jobCreated)) startGenerationJob(generation.job.id, dependencies);
+      response.status(202).json({ candidate, generationPlan: generation.plan, generationJob: generation.job, draftIds: savedDrafts.map((draft) => draft.id) });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/v1/generation-plans", async (request, response, next) => {
+    try {
+      const idempotencyKey = requireIdempotencyKey(request);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const materialVersionId = String(request.body.materialVersionId || "").trim();
+      if (!materialVersionId) return sendError(request, response, 422, "MATERIAL_VERSION_REQUIRED", "生成计划必须指定材料版本", false);
+      const release = await getWorkspaceRelease(dependencies.readweave, materialVersionId, workspaceId);
+      if (!release) return sendError(request, response, 404, "MATERIAL_VERSION_NOT_FOUND", "没有找到要生成的材料版本", false);
+      const pageIds = Array.isArray(request.body.pageIds)
+        ? uniqueStrings(request.body.pageIds.map((value: unknown) => String(value).trim()).filter(Boolean))
+        : [];
+      if (!pageIds.length) return sendError(request, response, 422, "PAGE_IDS_REQUIRED", "生成计划至少要包含 1 个页面", false);
+      const unknownPageIds = pageIds.filter((pageId) => !release.pageIds.includes(pageId));
+      if (unknownPageIds.length) return sendError(request, response, 422, "PAGE_IDS_INVALID", "生成计划包含不属于材料版本的页面", false, { pageIds: unknownPageIds });
+      const currentPolicy = await currentWritingPolicy();
+      if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== release.writingPolicySnapshotId) return sendError(request, response, 409, "WRITING_POLICY_SNAPSHOT_CHANGED", "当前写作策略已经变化，请重新建立生成计划", false, { policySnapshotId: currentPolicy.policySnapshotId, releasePolicySnapshotId: release.writingPolicySnapshotId });
+      const qualityMode = request.body.qualityMode === "economy" || request.body.qualityMode === "balanced" || request.body.qualityMode === "quality" ? request.body.qualityMode : "balanced";
+      const budgetUsd = Number(request.body.budgetUsd ?? generationBudget(qualityMode));
+      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 8) return sendError(request, response, 422, "BUDGET_INVALID", "单批生成预算必须大于 0 且不超过 8 美元", false);
+      const result = await createGenerationPlan({
+        idempotencyKey,
+        workspaceId,
+        materialVersionId,
+        pageIds,
+        budgetUsd,
+        sourceImportId: asOptionalString(request.body.sourceImportId),
+        qualityMode,
+        language: String(request.body.language || "zh-CN").trim() || "zh-CN",
+        writingPolicySnapshotId: release.writingPolicySnapshotId,
+        holdForReview: request.body.holdForReview === true
+      }, dependencies);
+      if (result.job && (result.created || result.jobCreated)) startGenerationJob(result.job.id, dependencies);
+      response.status(result.created ? 202 : 200).json({ plan: result.plan, currentJob: result.job });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/generation-plans/:id", async (request, response, next) => {
+    try {
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const snapshot = await dependencies.operations.read();
+      const plan = snapshot.generationPlans.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
+      if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
+      const currentJob = snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
+      response.json({ plan, currentJob });
     } catch (error) { next(error); }
   });
 
@@ -801,6 +896,16 @@ export function createApp(dependencies: AppDependencies): Express {
         current.cancelRequested = true;
         const cancelled = transitionJob(current, "cancelled");
         Object.assign(current, cancelled);
+        if (current.planId) {
+          const plan = state.generationPlans.find((item) => item.id === current.planId);
+          if (plan) {
+            plan.state = "cancelled";
+            plan.currentJobId = undefined;
+            plan.updatedAt = new Date().toISOString();
+            syncImportGenerationPlan(state, plan);
+            dependencies.operations.appendEvent(state, plan.id, "plan.cancelled", { jobId: current.id });
+          }
+        }
         dependencies.operations.appendEvent(state, current.id, "job.cancelled", { completedPageIds: current.completedPageIds });
         return current;
       });
@@ -818,13 +923,25 @@ export function createApp(dependencies: AppDependencies): Express {
         if (!job) return undefined;
         if (!["failed", "completed"].includes(job.state)) throw new Error("GENERATION_RETRY_STATE_INVALID");
         if (job.failedPageIds.length === 0) throw new Error("GENERATION_RETRY_HAS_NO_FAILED_PAGES");
+        if (job.planId && state.jobs.some((item) => item.planId === job.planId && item.id !== job.id && ["queued", "running", "pending_sync"].includes(item.state))) throw new Error("GENERATION_PLAN_BUSY");
         const retryPageIds = [...job.failedPageIds];
         Object.assign(job, transitionJob(job, "queued"), { pageIds: retryPageIds, completedPageIds: [], failedPageIds: [], cancelRequested: false });
+        if (job.planId) {
+          const plan = state.generationPlans.find((item) => item.id === job.planId);
+          if (plan) {
+            plan.currentJobId = job.id;
+            plan.lastJobId = job.id;
+            plan.state = "queued";
+            plan.updatedAt = new Date().toISOString();
+            syncImportGenerationPlan(state, plan);
+            dependencies.operations.appendEvent(state, plan.id, "plan.retry.queued", { jobId: job.id, pageIds: retryPageIds });
+          }
+        }
         dependencies.operations.appendEvent(state, job.id, "job.retry.queued", { pageIds: retryPageIds, nextAttempt: job.attempt + 1 });
         return structuredClone(job);
       });
       if (!retried) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => runLocalJob(retried.id, dependencies).catch(() => undefined));
+      startGenerationJob(retried.id, dependencies);
       response.status(202).json(retried);
     } catch (error) { next(error); }
   });
@@ -835,7 +952,7 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!expected || request.header("X-Course-Worker-Token") !== expected) return sendError(request, response, 404, "WORKER_ENDPOINT_NOT_FOUND", "后台任务入口未启用", false);
       const job = (await dependencies.operations.read()).jobs.find((item) => item.id === request.params.id && item.workspaceId === (request.header("X-Workspace-Id") || "personal"));
       if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      if (job.state === "queued" && !job.cancelRequested) queueMicrotask(() => runLocalJob(job.id, dependencies).catch(() => undefined));
+      if (job.state === "queued" && !job.cancelRequested) queueMicrotask(() => executeGenerationJob(job.id, dependencies).catch(() => undefined));
       response.status(202).json(job);
     } catch (error) { next(error); }
   });
@@ -1474,7 +1591,11 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("TREE_NODE_STALE") || raw.includes("TREE_NODE_NOT_FOUND")) return { status: 409, code: "TREE_NODE_STALE", message: "这个项目已经不在当前课程树中，请重新载入后再试", retryable: false };
   if (raw.includes("TREE_TARGET_NOT_FOUND") || raw.includes("TREE_PARENT_NOT_FOUND")) return { status: 422, code: "TREE_TARGET_NOT_FOUND", message: "目标位置不存在，请重新选择课程或材料", retryable: false };
   if (raw.includes("TREE_PARENT_CYCLE")) return { status: 422, code: "TREE_PARENT_CYCLE", message: "不能把项目移动到自己或自己的下级项目中", retryable: false };
-  if (raw.includes("CANDIDATE_RELEASE_EXISTS") || raw.includes("CANDIDATE_ID_COLLISION") || raw.includes("CANDIDATE_PAGE_ID_COLLISION") || raw.includes("CANDIDATE_POLICY_CHANGED")) return { status: 409, code: "CANDIDATE_CONFLICT", message: "候选版本已经存在冲突，请换用新的候选版本编号", retryable: false };
+  if (raw.includes("CANDIDATE_RELEASE_EXISTS") || raw.includes("CANDIDATE_ID_COLLISION") || raw.includes("CANDIDATE_PAGE_ID_COLLISION") || raw.includes("CANDIDATE_POLICY_CHANGED") || raw.includes("CANDIDATE_GENERATION_SELECTION_CONFLICT")) return { status: 409, code: "CANDIDATE_CONFLICT", message: "候选版本已经存在冲突，请换用新的候选版本编号", retryable: false };
+  if (raw.includes("GENERATION_PLAN_IDEMPOTENCY_CONFLICT")) return { status: 409, code: "GENERATION_PLAN_IDEMPOTENCY_CONFLICT", message: "这个唯一请求编号已经用于另一种生成操作，请换一个编号", retryable: false };
+  if (raw.includes("GENERATION_RETRY_STATE_INVALID") || raw.includes("GENERATION_RETRY_HAS_NO_FAILED_PAGES")) return { status: 409, code: "GENERATION_RETRY_NOT_ALLOWED", message: "当前生成任务没有可重试的失败页面", retryable: false };
+  if (raw.includes("GENERATION_PLAN_BUSY")) return { status: 409, code: "GENERATION_PLAN_BUSY", message: "这个生成计划还有其他任务运行，请等待当前批次结束后再重试", retryable: true };
+  if (raw.includes("WRITING_POLICY_SNAPSHOT_CHANGED") || raw.includes("WRITING_POLICY_VALIDATION_FAILED")) return { status: 409, code: "WRITING_POLICY_SNAPSHOT_CHANGED", message: "当前写作策略已经变化或未通过验证，请重新建立生成计划", retryable: false };
   if (raw.startsWith("READWEAVE_ETAPI_") || raw.startsWith("READWEAVE_HTTP_") || raw.includes("READWEAVE_UNAVAILABLE")) return { status: 503, code: "READWEAVE_UNAVAILABLE", message: "ReadWeave 暂时不可访问，这项操作尚未保存，请稍后重试", retryable: true };
   if (raw.includes("NOT_FOUND")) return { status: 404, code: "RESOURCE_NOT_FOUND", message: "没有找到请求的课程内容，请重新载入后再试", retryable: false };
   if (raw.includes("PERMANENT_DELETE_UNSUPPORTED")) return { status: 409, code: "PERMANENT_DELETE_UNSUPPORTED", message: "当前 ReadWeave 不支持安全永久删除，这条记录会继续保留在回收站", retryable: false };
@@ -1977,6 +2098,9 @@ interface PersistGenerationJobInput {
   pageIds: string[];
   budgetUsd: number;
   sourceImportId?: string;
+  planId?: string;
+  batchIndex?: number;
+  batchCount?: number;
   qualityMode: "economy" | "balanced" | "quality";
   language: string;
   writingPolicySnapshotId: string;
@@ -1995,6 +2119,9 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       workspaceId: input.workspaceId,
       materialVersionId: input.materialVersionId,
       sourceImportId: input.sourceImportId,
+      planId: input.planId,
+      batchIndex: input.batchIndex,
+      batchCount: input.batchCount,
       qualityMode: input.qualityMode,
       language: input.language,
       writingPolicySnapshotId: input.writingPolicySnapshotId,
@@ -2016,8 +2143,192 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
   });
 }
 
+interface CreateGenerationPlanInput {
+  idempotencyKey: string;
+  workspaceId: string;
+  materialVersionId: string;
+  pageIds: string[];
+  budgetUsd: number;
+  sourceImportId?: string;
+  qualityMode: "economy" | "balanced" | "quality";
+  language: string;
+  writingPolicySnapshotId: string;
+  holdForReview: boolean;
+}
+
+interface GenerationPlanResult {
+  plan: GenerationPlan;
+  job?: GenerationJob;
+  created: boolean;
+  jobCreated: boolean;
+}
+
+async function createGenerationPlan(input: CreateGenerationPlanInput, dependencies: AppDependencies): Promise<GenerationPlanResult> {
+  const persisted = await dependencies.operations.mutate((state) => {
+    const replay = state.idempotency[input.idempotencyKey];
+    if (replay) {
+      if (replay.kind !== "generation_plan") throw new Error("GENERATION_PLAN_IDEMPOTENCY_CONFLICT");
+      const existing = state.generationPlans.find((item) => item.id === replay.objectId);
+      if (!existing) throw new Error("GENERATION_PLAN_IDEMPOTENCY_CORRUPT");
+      return { plan: structuredClone(existing), created: false };
+    }
+    const now = new Date().toISOString();
+    const plan: GenerationPlan = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      materialVersionId: input.materialVersionId,
+      sourceImportId: input.sourceImportId,
+      qualityMode: input.qualityMode,
+      language: input.language,
+      writingPolicySnapshotId: input.writingPolicySnapshotId,
+      modelRoutes: [],
+      pageIds: [...input.pageIds],
+      completedPageIds: [],
+      failedPageIds: [],
+      jobIds: [],
+      budgetUsd: input.budgetUsd,
+      spentUsd: 0,
+      holdForReview: input.holdForReview,
+      state: "queued",
+      createdAt: now,
+      updatedAt: now
+    };
+    state.generationPlans.push(plan);
+    state.idempotency[input.idempotencyKey] = { kind: "generation_plan", objectId: plan.id };
+    dependencies.operations.appendEvent(state, plan.id, "plan.queued", { pages: plan.pageIds.length, budgetUsd: plan.budgetUsd, holdForReview: plan.holdForReview, sourceImportId: plan.sourceImportId, writingPolicySnapshotId: plan.writingPolicySnapshotId });
+    return { plan: structuredClone(plan), created: true };
+  });
+  const next = await queueNextGenerationPlanJob(persisted.plan.id, dependencies);
+  const plan = await getGenerationPlanSnapshot(persisted.plan.id, dependencies) || persisted.plan;
+  return { plan, job: next?.job || (plan.currentJobId ? (await dependencies.operations.read()).jobs.find((item) => item.id === plan.currentJobId) : plan.lastJobId ? (await dependencies.operations.read()).jobs.find((item) => item.id === plan.lastJobId) : undefined), created: persisted.created, jobCreated: Boolean(next?.created) };
+}
+
+async function getGenerationPlanSnapshot(planId: string, dependencies: AppDependencies): Promise<GenerationPlan | undefined> {
+  return (await dependencies.operations.read()).generationPlans.find((item) => item.id === planId);
+}
+
+async function queueNextGenerationPlanJob(planId: string, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean } | undefined> {
+  const snapshot = await dependencies.operations.read();
+  const plan = snapshot.generationPlans.find((item) => item.id === planId);
+  if (!plan || ["awaiting_review", "completed", "cancelled", "failed"].includes(plan.state)) return undefined;
+  const active = snapshot.jobs.find((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
+  if (active) return { job: active, created: false };
+  const completed = new Set(snapshot.jobs.filter((item) => item.planId === plan.id).flatMap((item) => item.completedPageIds));
+  const failed = new Set(snapshot.jobs.filter((item) => item.planId === plan.id).flatMap((item) => item.failedPageIds));
+  const remaining = plan.pageIds.filter((pageId) => !completed.has(pageId) && !failed.has(pageId));
+  if (remaining.length === 0) {
+    await settleGenerationPlan(plan.id, dependencies);
+    return undefined;
+  }
+  const batchIndex = plan.jobIds.length;
+  const pageId = remaining[0]!;
+  const result = await persistGenerationJob({
+    idempotencyKey: `generation-plan:${plan.id}:batch:${batchIndex}`,
+    workspaceId: plan.workspaceId,
+    materialVersionId: plan.materialVersionId,
+    pageIds: [pageId],
+    budgetUsd: plan.budgetUsd,
+    sourceImportId: plan.sourceImportId,
+    planId: plan.id,
+    batchIndex,
+    batchCount: plan.pageIds.length,
+    qualityMode: plan.qualityMode,
+    language: plan.language,
+    writingPolicySnapshotId: plan.writingPolicySnapshotId
+  }, dependencies);
+  const linked = await dependencies.operations.mutate((state) => {
+    const current = state.generationPlans.find((item) => item.id === plan.id);
+    if (!current) return false;
+    if (!current.jobIds.includes(result.job.id)) current.jobIds.push(result.job.id);
+    current.currentJobId = result.job.id;
+    current.lastJobId = result.job.id;
+    current.state = "queued";
+    current.updatedAt = new Date().toISOString();
+    syncImportGenerationPlan(state, current);
+    dependencies.operations.appendEvent(state, current.id, "plan.batch.queued", { jobId: result.job.id, batchIndex, pageId });
+    return true;
+  });
+  return linked ? result : undefined;
+}
+
+async function settleGenerationPlan(planId: string, dependencies: AppDependencies): Promise<void> {
+  await dependencies.operations.mutate((state) => {
+    const plan = state.generationPlans.find((item) => item.id === planId);
+    if (!plan) return;
+    const jobs = state.jobs.filter((item) => item.planId === plan.id);
+    plan.completedPageIds = uniqueStrings(jobs.flatMap((item) => item.completedPageIds));
+    plan.failedPageIds = uniqueStrings(jobs.flatMap((item) => item.failedPageIds));
+    plan.spentUsd = roundGenerationMoney(jobs.reduce((sum, item) => sum + item.spentUsd, 0));
+    plan.currentJobId = undefined;
+    plan.lastJobId = jobs.at(-1)?.id || plan.lastJobId;
+    plan.updatedAt = new Date().toISOString();
+    const remaining = plan.pageIds.filter((pageId) => !plan.completedPageIds.includes(pageId) && !plan.failedPageIds.includes(pageId));
+    if (remaining.length > 0) plan.state = "queued";
+    else if (plan.failedPageIds.length > 0) plan.state = "failed";
+    else if (plan.holdForReview) plan.state = "awaiting_review";
+    else plan.state = "completed";
+    syncImportGenerationPlan(state, plan);
+    dependencies.operations.appendEvent(state, plan.id, `plan.${plan.state}`, { completedPageIds: plan.completedPageIds, failedPageIds: plan.failedPageIds, spentUsd: plan.spentUsd, remainingPages: remaining.length });
+  });
+}
+
+async function advanceGenerationPlanForJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const snapshot = await dependencies.operations.read();
+  const job = snapshot.jobs.find((item) => item.id === jobId);
+  if (!job?.planId || !["completed", "failed", "cancelled"].includes(job.state)) return;
+  const plan = snapshot.generationPlans.find((item) => item.id === job.planId);
+  if (!plan) return;
+  if (job.state === "cancelled") {
+    await dependencies.operations.mutate((state) => {
+      const current = state.generationPlans.find((item) => item.id === job.planId);
+      if (!current) return;
+      current.state = "cancelled";
+      current.currentJobId = undefined;
+      current.updatedAt = new Date().toISOString();
+      syncImportGenerationPlan(state, current);
+      dependencies.operations.appendEvent(state, current.id, "plan.cancelled", { jobId });
+    });
+    return;
+  }
+  await settleGenerationPlan(plan.id, dependencies);
+  const updated = await getGenerationPlanSnapshot(plan.id, dependencies);
+  if (!updated || updated.state !== "queued") return;
+  const next = await queueNextGenerationPlanJob(plan.id, dependencies);
+  if (next?.job && next.created) startGenerationJob(next.job.id, dependencies);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function syncImportGenerationPlan(state: OperationalState, plan: GenerationPlan): void {
+  if (!plan.sourceImportId) return;
+  const record = state.imports.find((item) => item.id === plan.sourceImportId);
+  if (!record) return;
+  record.generationPlanId = plan.id;
+  record.generationJobIds = [...plan.jobIds];
+  record.generationJobId = plan.currentJobId || plan.lastJobId;
+  record.generationCompletedPageIds = [...plan.completedPageIds];
+  record.generationFailedPageIds = [...plan.failedPageIds];
+  record.generationState = plan.state;
+}
+
+function roundGenerationMoney(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
 function startGenerationJob(jobId: string, dependencies: AppDependencies): void {
-  if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => runLocalJob(jobId, dependencies).catch(() => undefined));
+  if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => executeGenerationJob(jobId, dependencies).catch(() => undefined));
+}
+
+async function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  try {
+    await runLocalJob(jobId, dependencies);
+  } catch (error) {
+    await failGenerationJob(jobId, safeGenerationIssue(error), dependencies);
+  } finally {
+    await advanceGenerationPlanForJob(jobId, dependencies);
+  }
 }
 
 async function runLocalJob(jobId: string, dependencies: AppDependencies): Promise<void> {
@@ -2025,6 +2336,16 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "queued" || job.cancelRequested) return;
     Object.assign(job, transitionJob(job, "running"), { attempt: job.attempt + 1 });
+    if (job.planId) {
+      const plan = state.generationPlans.find((item) => item.id === job.planId);
+      if (plan) {
+        plan.currentJobId = job.id;
+        plan.lastJobId = job.id;
+        plan.state = "running";
+        plan.updatedAt = new Date().toISOString();
+        dependencies.operations.appendEvent(state, plan.id, "plan.running", { jobId: job.id, attempt: job.attempt });
+      }
+    }
     dependencies.operations.appendEvent(state, job.id, "job.running", { attempt: job.attempt });
   });
   const initial = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
@@ -2374,6 +2695,13 @@ function unavailablePriceSnapshot(provider: string, model: string) {
 function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: OperationalState, dependencies: AppDependencies): void {
   job.spentUsd = Math.round((job.spentUsd + cost.actualMicrousd / 1_000_000) * 1_000_000) / 1_000_000;
   job.updatedAt = new Date().toISOString();
+  if (job.planId) {
+    const plan = state.generationPlans.find((item) => item.id === job.planId);
+    if (plan) {
+      const routes = plan.modelRoutes ?? (plan.modelRoutes = []);
+      if (!routes.some((route) => route.provider === cost.provider && route.model === cost.model)) routes.push({ provider: cost.provider, model: cost.model });
+    }
+  }
   dependencies.operations.appendEvent(state, job.id, "generation.cost.recorded", { costEntryId: cost.id, status: cost.status, actualMicrousd: cost.actualMicrousd, spentUsd: job.spentUsd });
 }
 
@@ -2410,7 +2738,17 @@ export async function resumeIncompleteJobs(dependencies: AppDependencies): Promi
         dependencies.operations.appendEvent(state, current.id, "job.recovered", { previousState: "running", attempt: current.attempt });
       });
     }
-    if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => runLocalJob(job.id, dependencies).catch(() => undefined));
+    startGenerationJob(job.id, dependencies);
+  }
+  const plans = (await dependencies.operations.read()).generationPlans.filter((item) => ["queued", "running"].includes(item.state));
+  for (const plan of plans) {
+    const current = (await dependencies.operations.read()).jobs.find((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
+    if (current) continue;
+    await settleGenerationPlan(plan.id, dependencies);
+    const refreshed = await getGenerationPlanSnapshot(plan.id, dependencies);
+    if (refreshed?.state !== "queued") continue;
+    const next = await queueNextGenerationPlanJob(plan.id, dependencies);
+    if (next?.job && next.created) startGenerationJob(next.job.id, dependencies);
   }
 }
 
@@ -2531,8 +2869,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         dependencies.operations.appendEvent(state, importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
     }
-    const generation = record.autoGenerate === true ? await persistGenerationJob({
-      idempotencyKey: `import:${importId}:generation`,
+    const generationPlan = record.autoGenerate === true ? await createGenerationPlan({
+      idempotencyKey: `import:${importId}:generation-plan`,
       workspaceId: record.workspaceId,
       materialVersionId,
       pageIds: convertedPages.map((entry) => entry.page.id),
@@ -2540,7 +2878,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       sourceImportId: importId,
       qualityMode: record.qualityMode || "balanced",
       language: record.language || "zh-CN",
-      writingPolicySnapshotId: writingPolicy.policySnapshotId
+      writingPolicySnapshotId: writingPolicy.policySnapshotId,
+      holdForReview: false
     }, dependencies) : undefined;
     await dependencies.operations.mutate((state) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
@@ -2551,11 +2890,15 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.draftIds = savedDrafts.map((draft) => draft.id);
       item.convertedAt = conversion.completedAt;
       item.state = "ready";
-      item.generationJobId = generation?.job.id;
-      item.generationState = generation?.job.state || "not_requested";
-      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
+      item.generationPlanId = generationPlan?.plan.id;
+      item.generationJobIds = generationPlan?.plan.jobIds;
+      item.generationJobId = generationPlan?.job?.id;
+      item.generationCompletedPageIds = generationPlan?.plan.completedPageIds;
+      item.generationFailedPageIds = generationPlan?.plan.failedPageIds;
+      item.generationState = generationPlan?.plan.state || "not_requested";
+      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds, generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
-    if (generation?.created) startGenerationJob(generation.job.id, dependencies);
+    if (generationPlan?.job && (generationPlan.created || generationPlan.jobCreated)) startGenerationJob(generationPlan.job.id, dependencies);
   } catch (error) {
     const issue = safeImportIssue(error);
     await dependencies.operations.mutate((state) => {
@@ -2759,6 +3102,23 @@ async function rememberCandidateIdempotency(dependencies: AppDependencies, idemp
   });
 }
 
+function parseCandidatePageNumbers(value: unknown, pageCount: number): number[] | "invalid" | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) return "invalid";
+  const numbers = value.map((item) => Number(item));
+  if (numbers.some((item) => !Number.isInteger(item) || item < 1 || item > pageCount)) return "invalid";
+  const sorted = [...numbers].sort((left, right) => left - right);
+  return new Set(sorted).size === sorted.length ? sorted : "invalid";
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && new Set(left).size === left.length && new Set(right).size === right.length && left.every((value) => right.includes(value));
+}
+
 interface WritingPolicyManifestFile {
   path: string;
   sourcePath: string;
@@ -2843,6 +3203,17 @@ function sendError(request: Request, response: Response, status: number, code: s
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function canonicalImportSource(value: string): string {
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return trimmed;
+  }
 }
 
 function normalizeQualityMode(value: unknown): "economy" | "balanced" | "quality" {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
-import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
+import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
@@ -584,6 +584,7 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
   const [qualityMode, setQualityMode] = useState(localStorage.getItem("course-os-budget") || "balanced");
   const [language, setLanguage] = useState(localStorage.getItem("course-os-language") || "zh-CN");
   const [autoGenerate, setAutoGenerate] = useState(true);
+  const [generationPlan, setGenerationPlan] = useState<GenerationPlan>();
   const [generationJob, setGenerationJob] = useState<GenerationJob>();
   const [generationCosts, setGenerationCosts] = useState<GenerationCostEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -601,9 +602,20 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
           completedNotified.current = true;
           onImported(updated);
         }
-        if (updated.generationJobId) {
+        if (updated.generationPlanId) {
+          const [planResult, costs] = await Promise.all([
+            api.generationPlan(updated.generationPlanId),
+            api.costs(updated.materialVersionId ? { materialVersionId: updated.materialVersionId } : {})
+          ]);
+          if (!cancelled) {
+            setGenerationPlan(planResult.plan);
+            setGenerationJob(planResult.currentJob);
+            setGenerationCosts(costs.entries);
+          }
+        } else if (updated.generationJobId) {
           const [job, costs] = await Promise.all([api.generationJob(updated.generationJobId), api.costs({ jobId: updated.generationJobId })]);
           if (!cancelled) {
+            setGenerationPlan(undefined);
             setGenerationJob(job);
             setGenerationCosts(costs.entries);
           }
@@ -641,25 +653,28 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
         <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
         <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!file || busy} onClick={upload}><Icon name="sparkles" />{busy ? "正在安全检查" : "导入并开始解析"}</button></footer>
-      </> : <ImportProgress record={record} job={generationJob} costs={generationCosts} onClose={onClose} />}
+      </> : <ImportProgress record={record} plan={generationPlan} job={generationJob} costs={generationCosts} onClose={onClose} />}
     </section>
   </div>;
 }
 
-function ImportProgress({ record, job, costs, onClose }: { record: ImportRecord; job?: GenerationJob; costs: GenerationCostEntry[]; onClose: () => void }) {
+function ImportProgress({ record, plan, job, costs, onClose }: { record: ImportRecord; plan?: GenerationPlan; job?: GenerationJob; costs: GenerationCostEntry[]; onClose: () => void }) {
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
-  const terminalJob = !auto || Boolean(job && ["completed", "failed", "cancelled"].includes(job.state));
+  const planState = plan?.state;
+  const terminalJob = !auto || Boolean(planState && ["awaiting_review", "completed", "failed", "cancelled"].includes(planState)) || Boolean(!plan && job && ["completed", "failed", "cancelled"].includes(job.state));
   const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && terminalJob);
-  const generated = job?.completedPageIds.length ?? 0;
-  const total = job?.pageIds.length ?? record.pageIds?.length ?? 0;
+  const generated = plan?.completedPageIds.length ?? job?.completedPageIds.length ?? 0;
+  const total = plan?.pageIds.length ?? job?.pageIds.length ?? record.pageIds?.length ?? 0;
   const generationProgress = total ? generated / total : 0;
   const progress = record.state === "ready" && auto ? 65 + generationProgress * 35 : importInfo.progress;
-  const failed = job?.failedPageIds.length ?? 0;
+  const failed = plan?.failedPageIds.length ?? job?.failedPageIds.length ?? 0;
   const latestCost = costs.at(-1);
-  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料草稿已经就绪" : !job ? "正在建立整套生成任务" : job.state === "completed" ? "候选讲解已经生成" : job.state === "failed" ? "生成任务已停止" : job.state === "cancelled" ? "生成任务已取消" : "正在逐页生成候选讲解";
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : job ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : "转换结果已保存，正在建立唯一的幂等生成任务";
-  return <div className={`import-success import-state-${record.state}`}><span>{record.state === "failed" || record.state === "rejected" || job?.state === "failed" ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "等待首次调用"}</dd></div><div><dt>累计成本</dt><dd>${(job?.spentUsd ?? 0).toFixed(4)}</dd></div><div><dt>发布状态</dt><dd>候选草稿，未发布</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
+  const spentUsd = plan?.spentUsd ?? job?.spentUsd ?? 0;
+  const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || job?.state === "failed";
+  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料草稿已经就绪" : !plan && !job ? "正在建立整套生成任务" : planState === "awaiting_review" ? "候选讲解已暂停，等待审核" : planState === "completed" || job?.state === "completed" ? "候选讲解已经生成" : planState === "failed" || job?.state === "failed" ? "生成任务已停止" : planState === "cancelled" || job?.state === "cancelled" ? "生成任务已取消" : "正在逐页生成候选讲解";
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : plan ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}${planState === "awaiting_review" ? "，当前批次已暂停" : ""}` : job ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : "转换结果已保存，正在建立唯一的幂等生成计划";
+  return <div className={`import-success import-state-${record.state}`}><span>{failedState ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "等待首次调用"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div><div><dt>发布状态</dt><dd>候选草稿，未发布</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
 }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {

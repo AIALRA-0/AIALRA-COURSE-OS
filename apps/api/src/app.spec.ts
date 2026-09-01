@@ -16,10 +16,10 @@ async function testApp() {
   return createApp(createDefaultDependencies(root, readweave));
 }
 
-async function seededApp(modelRouter?: ModelRouterClient) {
+async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRelease()) {
   const root = await mkdtemp(join(tmpdir(), "course-os-api-seeded-"));
   const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
-  const release = testRelease();
+  const release = seededRelease;
   await readweave.publishRelease(release, testManifest(release.id), {
     idempotencyKey: "seed-release",
     actor: "test",
@@ -118,6 +118,97 @@ describe("Course OS API", () => {
     expect(replay.body.candidate.id).toBe(created.body.candidate.id);
     expect((await readweave.listReleases()).filter((item) => item.id === "test-release-v2-candidate")).toHaveLength(1);
   }, 45_000);
+
+  it("runs a generation plan one single-page batch at a time", async () => {
+    const { app, operations, release } = await seededApp(undefined, testReleaseWithPages(3));
+    const created = await request(app).post("/api/v1/release-candidates")
+      .set("Idempotency-Key", "candidate-plan-serial")
+      .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    const completed = await waitForPlan(app, created.body.generationPlan.id);
+    expect(completed).toMatchObject({ state: "completed", pageIds: [
+      "test-release-v2-serial-candidate:page:1",
+      "test-release-v2-serial-candidate:page:2",
+      "test-release-v2-serial-candidate:page:3"
+    ], completedPageIds: [
+      "test-release-v2-serial-candidate:page:1",
+      "test-release-v2-serial-candidate:page:2",
+      "test-release-v2-serial-candidate:page:3"
+    ] });
+    expect(completed.jobIds).toHaveLength(3);
+    const jobs = (await operations.read()).jobs.filter((job) => job.planId === completed.id);
+    expect(jobs).toHaveLength(3);
+    expect(jobs.every((job) => job.pageIds.length === 1)).toBe(true);
+    expect(jobs.map((job) => job.batchIndex)).toEqual([0, 1, 2]);
+    expect(jobs.every((job) => job.batchCount === 3)).toBe(true);
+  }, 45_000);
+
+  it("holds a selected candidate anchor plan for review without generating other pages", async () => {
+    const { app, readweave, release } = await seededApp(undefined, testReleaseWithPages(8));
+    const created = await request(app).post("/api/v1/release-candidates")
+      .set("Idempotency-Key", "candidate-plan-anchors")
+      .send({ baseReleaseId: release.id, releaseId: "test-release-v2-anchor-candidate", pageNumbers: [1, 2, 3, 4, 5, 6], holdForReview: true, budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    const completed = await waitForPlan(app, created.body.generationPlan.id);
+    expect(completed).toMatchObject({ state: "awaiting_review", pageIds: [
+      "test-release-v2-anchor-candidate:page:1",
+      "test-release-v2-anchor-candidate:page:2",
+      "test-release-v2-anchor-candidate:page:3",
+      "test-release-v2-anchor-candidate:page:4",
+      "test-release-v2-anchor-candidate:page:5",
+      "test-release-v2-anchor-candidate:page:6"
+    ] });
+    expect(completed.completedPageIds).toHaveLength(6);
+    expect(completed.jobIds).toHaveLength(6);
+    const candidate = await readweave.getRelease("test-release-v2-anchor-candidate");
+    expect(candidate?.lifecycle).toBe("draft_source");
+    expect((await readweave.getRelease(release.id))?.lifecycle).not.toBe("draft_source");
+  }, 45_000);
+
+  it("continues after a failed page and retries only that page", async () => {
+    const keys: string[] = [];
+    let calls = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        keys.push(input.idempotencyKey);
+        calls += 1;
+        if (calls === 1) throw new ModelRouterGenerationError("MODEL_ROUTER_FAILED:TEMPORARY", "gpt-5.6-sol", { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, apiEquivalentUsd: 0, durationMs: 10 });
+        return testTeachingResult(0.001);
+      }
+    };
+    const { app, operations, release } = await seededApp(modelRouter, testReleaseWithPages(2));
+    const created = await request(app).post("/api/v1/release-candidates")
+      .set("Idempotency-Key", "candidate-plan-retry")
+      .send({ baseReleaseId: release.id, releaseId: "test-release-v2-retry-candidate", budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    const failedPlan = await waitForPlan(app, created.body.generationPlan.id);
+    expect(failedPlan).toMatchObject({ state: "failed", failedPageIds: ["test-release-v2-retry-candidate:page:1"], completedPageIds: ["test-release-v2-retry-candidate:page:2"] });
+    const failedJob = (await operations.read()).jobs.find((job) => job.id === failedPlan.jobIds[0]);
+    expect(failedJob?.failedPageIds).toEqual(["test-release-v2-retry-candidate:page:1"]);
+    await request(app).post(`/api/v1/generation-jobs/${failedJob!.id}:retry`).set("Idempotency-Key", "candidate-plan-retry-page").expect(202);
+    const recovered = await waitForPlan(app, failedPlan.id);
+    expect(recovered).toMatchObject({ state: "completed", failedPageIds: [], completedPageIds: ["test-release-v2-retry-candidate:page:1", "test-release-v2-retry-candidate:page:2"] });
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toContain("test-release-v2-retry-candidate:page:1");
+    expect(keys[1]).toContain("test-release-v2-retry-candidate:page:2");
+    expect(keys[2]).toContain("test-release-v2-retry-candidate:page:1");
+  }, 60_000);
+
+  it("deduplicates the same uploaded source even when the idempotency key changes", async () => {
+    const app = await testApp();
+    const source = Buffer.from("# Same source\nThe source must be stored once");
+    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-source-1").field("autoGenerate", "false").attach("file", source, { filename: "same.md", contentType: "text/markdown" }).expect(201);
+    await waitForImport(app, first.body.id);
+    const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-source-2").field("autoGenerate", "false").attach("file", source, { filename: "same.md", contentType: "text/markdown" }).expect(200);
+    expect(second.body.id).toBe(first.body.id);
+  }, 45_000);
+
+  it("rejects a generation plan when its release uses a different writing policy snapshot", async () => {
+    const { app, release } = await seededApp();
+    await request(app).post("/api/v1/generation-plans").set("Idempotency-Key", "policy-mismatch-plan").send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 2 }).expect(409).expect((response) => {
+      expect(response.body.error).toMatchObject({ code: "WRITING_POLICY_SNAPSHOT_CHANGED" });
+    });
+  });
 
   it("removes an exact rejected import without affecting other records", async () => {
     const app = await testApp();
@@ -411,6 +502,55 @@ async function waitForJob(app: ReturnType<typeof createApp>, jobId: string) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("GENERATION_TEST_TIMEOUT");
+}
+
+async function waitForPlan(app: ReturnType<typeof createApp>, planId: string) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const current = await request(app).get(`/api/v1/generation-plans/${planId}`).expect(200);
+    if (["awaiting_review", "completed", "failed", "cancelled"].includes(current.body.plan.state)) return current.body.plan;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("GENERATION_PLAN_TEST_TIMEOUT");
+}
+
+function testReleaseWithPages(count: number): CourseRelease {
+  const release = testRelease();
+  const firstPage = release.pages[0]!;
+  const sourceIds = collectTestObjectIds(firstPage);
+  const pages = Array.from({ length: count }, (_, index) => {
+    let page = replaceTestIds(structuredClone(firstPage), "page-1", `page-${index + 1}`);
+    if (index > 0) for (const sourceId of sourceIds) if (sourceId !== "page-1") page = replaceTestIds(page, sourceId, `${sourceId}:page:${index + 1}`);
+    return page;
+  });
+  pages.forEach((page, index) => {
+    page.pageNumber = index + 1;
+    page.title = `测试页面 ${index + 1}`;
+  });
+  release.pageIds = pages.map((page) => page.id);
+  release.pages = pages;
+  return release;
+}
+
+function collectTestObjectIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(collectTestObjectIds);
+  if (!value || typeof value !== "object") return [];
+  const result: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "id" && typeof child === "string" && child) result.push(child);
+    result.push(...collectTestObjectIds(child));
+  }
+  return result;
+}
+
+function replaceTestIds<T>(value: T, from: string, to: string): T {
+  if (typeof value === "string") return value.split(from).join(to) as T;
+  if (Array.isArray(value)) return value.map((item) => replaceTestIds(item, from, to)) as T;
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) result[key] = replaceTestIds(child, from, to);
+    return result as T;
+  }
+  return value;
 }
 
 function testRelease(): CourseRelease {

@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-import type { AssessmentAttempt, GenerationJob, ImportRecord, LearningSession, OrderedEvent, ReviewPlan, ReviewSession } from "@course-os/contracts";
+import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, OrderedEvent, ReviewPlan, ReviewSession } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
 
@@ -8,6 +8,7 @@ export interface OperationalState {
   schemaVersion: "1.0.0";
   imports: ImportRecord[];
   jobs: GenerationJob[];
+  generationPlans: GenerationPlan[];
   sessions: LearningSession[];
   reviewPlans: ReviewPlan[];
   reviewSessions: ReviewSession[];
@@ -20,6 +21,7 @@ export const EMPTY: OperationalState = {
   schemaVersion: "1.0.0",
   imports: [],
   jobs: [],
+  generationPlans: [],
   sessions: [],
   reviewPlans: [],
   reviewSessions: [],
@@ -152,6 +154,7 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     schemaVersion: "1.0.0",
     imports: Array.isArray(value?.imports) ? value.imports : [],
     jobs: Array.isArray(value?.jobs) ? value.jobs : [],
+    generationPlans: Array.isArray(value?.generationPlans) ? value.generationPlans : [],
     sessions: Array.isArray(value?.sessions) ? value.sessions : [],
     reviewPlans: Array.isArray(value?.reviewPlans) ? value.reviewPlans : [],
     reviewSessions: Array.isArray(value?.reviewSessions) ? value.reviewSessions : [],

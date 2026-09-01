@@ -411,7 +411,7 @@ paths:
                 parentNodeId: { type: string, description: Course or material parent for the imported material }
                 qualityMode: { type: string, enum: [economy, balanced, quality] }
                 language: { type: string }
-                autoGenerate: { type: boolean, default: true, description: Create one full-material draft generation job after conversion }
+                autoGenerate: { type: boolean, default: true, description: Create one durable full-material draft generation plan after conversion }
       responses:
         '201': { description: Accepted import }
         '422': { description: Quarantined import }
@@ -443,6 +443,8 @@ paths:
                 qualityMode: { type: string, enum: [economy, balanced, quality], default: quality }
                 language: { type: string, default: zh-CN }
                 budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 8, default: 8 }
+                pageNumbers: { type: array, minItems: 1, uniqueItems: true, items: { type: integer, minimum: 1 }, description: Optional page-number selection for an isolated candidate anchor batch }
+                holdForReview: { type: boolean, default: true, description: Pause a selected candidate batch in awaiting_review instead of generating unselected pages }
       responses:
         '202': { description: Candidate draft created and generation queued }
         '409': { description: Candidate identifier already belongs to another release }
@@ -487,6 +489,38 @@ paths:
       operationId: getCurrentWritingPolicy
       responses:
         '200': { description: Safe current policy snapshot, prompt template and validator state without private paths or credentials }
+  /generation-plans:
+    post:
+      operationId: createGenerationPlan
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [materialVersionId, pageIds, budgetUsd]
+              properties:
+                materialVersionId: { type: string, minLength: 1 }
+                pageIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
+                sourceImportId: { type: string }
+                qualityMode: { type: string, enum: [economy, balanced, quality], default: balanced }
+                language: { type: string, default: zh-CN }
+                budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 8 }
+                holdForReview: { type: boolean, default: false }
+      responses:
+        '202': { description: Plan created with its first single-page batch queued }
+        '200': { description: Idempotent replay of an existing plan }
+        '409': { description: Writing policy snapshot changed or plan request conflicts }
+  /generation-plans/{id}:
+    get:
+      operationId: getGenerationPlan
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+      responses:
+        '200': { description: Durable plan aggregate with completed, failed, current and historical child jobs; model routes are reported after generation calls }
+        '404': { description: Generation plan not found }
   /generation-jobs/{id}:cancel:
     post:
       operationId: cancelGenerationJob
