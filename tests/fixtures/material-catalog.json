@@ -1,0 +1,37 @@
+[
+  {
+    "id": "algorithm-pptx",
+    "originalName": "algorithm-teaching.pptx",
+    "kind": "pptx",
+    "expectedPages": 12,
+    "titlePrefix": "Algorithm"
+  },
+  {
+    "id": "mathematics-pdf",
+    "originalName": "mathematics-formulas.pdf",
+    "kind": "pdf",
+    "expectedPages": 6,
+    "titlePrefix": "Mathematics"
+  },
+  {
+    "id": "engineering-pptx",
+    "originalName": "engineering-diagrams.pptx",
+    "kind": "pptx",
+    "expectedPages": 8,
+    "titlePrefix": "Engineering"
+  },
+  {
+    "id": "data-pdf",
+    "originalName": "data-charts.pdf",
+    "kind": "pdf",
+    "expectedPages": 6,
+    "titlePrefix": "Data"
+  },
+  {
+    "id": "course-syllabus",
+    "originalName": "course-syllabus.md",
+    "kind": "syllabus",
+    "expectedPages": 5,
+    "titlePrefix": "Week"
+  }
+]

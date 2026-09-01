@@ -1,0 +1,29 @@
+{
+  "name": "@course-os/web",
+  "version": "2.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4173",
+    "start": "vite preview --host 0.0.0.0 --port 4173",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@course-os/contracts": "workspace:*",
+    "@course-os/quality": "workspace:*",
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "typescript": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "latest",
+    "remark-math": "latest",
+    "rehype-katex": "latest",
+    "katex": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}

@@ -1,0 +1,47 @@
+server {
+    listen 80;
+    server_name ${COURSE_OS_PUBLIC_HOST};
+
+    location /.well-known/acme-challenge/ {
+        root ${COURSE_OS_ACME_ROOT};
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${COURSE_OS_PUBLIC_HOST};
+
+    ssl_certificate ${COURSE_OS_TLS_CERTIFICATE};
+    ssl_certificate_key ${COURSE_OS_TLS_CERTIFICATE_KEY};
+
+    include ${COURSE_OS_AUTH_ENDPOINTS_SNIPPET};
+    include ${COURSE_OS_AUTH_PROTECT_SNIPPET};
+
+    location /api/ {
+        include ${COURSE_OS_AUTH_IDENTITY_HEADERS_SNIPPET};
+        proxy_pass ${COURSE_OS_API_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-Id $request_id;
+    }
+
+    location /healthz {
+        include ${COURSE_OS_AUTH_IDENTITY_HEADERS_SNIPPET};
+        proxy_pass ${COURSE_OS_API_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-Id $request_id;
+    }
+
+    location / {
+        include ${COURSE_OS_AUTH_IDENTITY_HEADERS_SNIPPET};
+        proxy_pass ${COURSE_OS_WEB_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-Id $request_id;
+    }
+}

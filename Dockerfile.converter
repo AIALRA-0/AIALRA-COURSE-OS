@@ -1,0 +1,6 @@
+ARG COURSE_OS_RUNTIME_IMAGE=course-os-runtime:2.4.0-local
+FROM ${COURSE_OS_RUNTIME_IMAGE}
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-impress poppler-utils python3 fonts-dejavu-core fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+CMD ["node", "--import", "tsx", "apps/converter/src/index.ts"]

@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.pptx binary
+docs/research/2026-08-28-course-os-decision-report.md -text whitespace=-trailing-space

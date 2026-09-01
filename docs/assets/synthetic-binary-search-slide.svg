@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="title description">
+  <title id="title">Binary search synthetic lesson slide</title>
+  <desc id="description">A sorted array with the middle element highlighted and a target value of twenty-three</desc>
+  <rect width="1280" height="720" fill="#ffffff"/>
+  <rect width="1280" height="118" fill="#263447"/>
+  <rect y="108" width="1280" height="10" fill="#d45a45"/>
+  <text x="72" y="72" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#ffffff">Binary Search</text>
+  <text x="72" y="164" font-family="Arial, sans-serif" font-size="24" fill="#263447">Find target = 23 in a sorted array</text>
+  <text x="72" y="214" font-family="Arial, sans-serif" font-size="20" fill="#667085">Invariant: if the target exists, it remains inside [left, right]</text>
+  <g font-family="Arial, sans-serif" font-size="28" text-anchor="middle">
+    <rect x="90" y="324" width="130" height="104" rx="12" fill="#f1f4f8" stroke="#cbd3df" stroke-width="2"/><text x="155" y="386" fill="#263447">2</text>
+    <rect x="232" y="324" width="130" height="104" rx="12" fill="#f1f4f8" stroke="#cbd3df" stroke-width="2"/><text x="297" y="386" fill="#263447">5</text>
+    <rect x="374" y="324" width="130" height="104" rx="12" fill="#f1f4f8" stroke="#cbd3df" stroke-width="2"/><text x="439" y="386" fill="#263447">8</text>
+    <rect x="516" y="306" width="130" height="140" rx="12" fill="#fff0ee" stroke="#b83a32" stroke-width="4"/><text x="581" y="386" fill="#8f2924" font-weight="700">12</text>
+    <rect x="658" y="324" width="130" height="104" rx="12" fill="#f1f4f8" stroke="#cbd3df" stroke-width="2"/><text x="723" y="386" fill="#263447">16</text>
+    <rect x="800" y="324" width="130" height="104" rx="12" fill="#e9f6f3" stroke="#0b6f68" stroke-width="3"/><text x="865" y="386" fill="#0b6f68" font-weight="700">23</text>
+    <rect x="942" y="324" width="130" height="104" rx="12" fill="#f1f4f8" stroke="#cbd3df" stroke-width="2"/><text x="1007" y="386" fill="#263447">31</text>
+  </g>
+  <path d="M581 270 L581 298" stroke="#b83a32" stroke-width="5"/><path d="M568 284 L581 299 L594 284" fill="none" stroke="#b83a32" stroke-width="5"/>
+  <text x="581" y="248" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#8f2924">middle</text>
+  <path d="M632 490 C710 545, 800 545, 850 466" fill="none" stroke="#0b6f68" stroke-width="5"/>
+  <path d="M836 477 L850 466 L853 484" fill="none" stroke="#0b6f68" stroke-width="5"/>
+  <text x="738" y="566" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#0b6f68">12 &lt; 23, keep the right half</text>
+  <rect y="674" width="1280" height="46" fill="#f1f4f8"/>
+  <text x="72" y="705" font-family="Arial, sans-serif" font-size="17" fill="#667085">Synthetic material for Course OS public smoke testing</text>
+</svg>

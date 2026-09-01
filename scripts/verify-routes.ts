@@ -1,0 +1,81 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const sourcePath = resolve("apps/api/src/app.ts");
+const source = await readFile(sourcePath, "utf8");
+const required: Array<[string, string]> = [
+  ["GET health", 'app.get("/healthz"'],
+  ["GET tree", 'app.get("/api/v1/workspaces/:id/tree"'],
+  ["GET courses", 'app.get("/api/v1/courses"'],
+  ["POST courses", 'app.post("/api/v1/courses"'],
+  ["POST modules", 'app.post("/api/v1/modules"'],
+  ["PATCH tree node", 'app.patch("/api/v1/tree/nodes/:id"'],
+  ["POST duplicate", "tree\\/nodes\\/[^/]+:duplicate"],
+  ["POST move", "tree\\/nodes\\/[^/]+:move"],
+  ["POST trash", "tree\\/nodes\\/[^/]+:trash"],
+  ["GET trash", 'app.get("/api/v1/trash"'],
+  ["POST restore", "trash\\/[^/]+:restore"],
+  ["GET ReadWeave link", 'app.get("/api/v1/readweave/links/:noteId"'],
+  ["GET node properties", 'app.get("/api/v1/tree/nodes/:id/properties"'],
+  ["GET node versions", 'app.get("/api/v1/tree/nodes/:id/versions"'],
+  ["GET settings", 'app.get("/api/v1/settings"'],
+  ["PATCH settings", 'app.patch("/api/v1/settings"'],
+  ["GET providers", 'app.get("/api/v1/model-providers"'],
+  ["PATCH provider", 'app.patch("/api/v1/model-providers/:id"'],
+  ["PUT provider credential", 'app.put("/api/v1/model-providers/:id/credential"'],
+  ["POST provider test", "model-providers\\/[^/]+:test"],
+  ["GET provider models", 'app.get("/api/v1/model-providers/models"'],
+  ["GET route policy", 'app.get("/api/v1/model-route-policy"'],
+  ["PUT route policy", 'app.put("/api/v1/model-route-policy"'],
+  ["GET sync", 'app.get("/api/v1/sync/status"'],
+  ["GET conflicts", 'app.get("/api/v1/conflicts"'],
+  ["POST conflict resolve", "conflicts\\/[^/]+:resolve"],
+  ["GET draft", 'app.get("/api/v1/pages/:id/draft"'],
+  ["GET lesson", 'app.get("/api/v1/pages/:id/lesson"'],
+  ["PATCH draft", 'app.patch("/api/v1/pages/:id/draft"'],
+  ["POST validate", "pages\\/[^/]+:validate"],
+  ["GET releases", 'app.get("/api/v1/releases"'],
+  ["POST releases", 'app.post("/api/v1/releases"'],
+  ["GET release", 'app.get("/api/v1/releases/:id"'],
+  ["GET manifest", 'app.get("/api/v1/releases/:id/manifest"'],
+  ["GET media", 'app.get("/api/v1/media/:sha256"'],
+  ["POST imports", 'app.post("/api/v1/imports"'],
+  ["GET import", 'app.get("/api/v1/imports/:id"'],
+  ["DELETE import", 'app.delete("/api/v1/imports/:id"'],
+  ["GET import events", 'app.get("/api/v1/imports/:id/events"'],
+  ["POST generation", 'app.post("/api/v1/generation-jobs"'],
+  ["GET generation", 'app.get("/api/v1/generation-jobs/:id"'],
+  ["GET costs", 'app.get("/api/v1/costs"'],
+  ["POST generation cancel", "generation-jobs\\/[^/]+:cancel"],
+  ["POST generation retry", "generation-jobs\\/[^/]+:retry"],
+  ["GET generation events", 'app.get("/api/v1/generation-jobs/:id/events"'],
+  ["POST sessions", 'app.post("/api/v1/sessions"'],
+  ["PATCH session", 'app.patch("/api/v1/sessions/:id"'],
+  ["POST session questions", 'app.post("/api/v1/sessions/:id/questions"'],
+  ["POST page question select", "pages\\/[^/]+\\/questions:select"],
+  ["POST page question refill", "pages\\/[^/]+\\/questions:refill"],
+  ["POST question retract", "questions\\/[^/]+:retract"],
+  ["PATCH question policy", 'app.patch("/api/v1/questions/:id/review-policy"'],
+  ["POST question attempt", 'app.post("/api/v1/question-attempts"'],
+  ["POST assessment attempt", 'app.post("/api/v1/assessment-attempts"'],
+  ["GET review map", 'app.get("/api/v1/review-map"'],
+  ["POST review plan", 'app.post("/api/v1/review-plans"'],
+  ["GET review plan", 'app.get("/api/v1/review-plans/:id"'],
+  ["GET review plan events", 'app.get("/api/v1/review-plans/:id/events"'],
+  ["POST review plan retry", "review-plans\\/[^/]+:retry"],
+  ["POST review plan cancel", "review-plans\\/[^/]+:cancel"],
+  ["POST review plan start", "review-plans\\/[^/]+:start"],
+  ["GET current review session", 'app.get("/api/v1/review-sessions/current"'],
+  ["GET review queue", 'app.get("/api/v1/review-queue"'],
+  ["POST legacy review session", 'app.post("/api/v1/review-sessions"'],
+  ["GET review session", 'app.get("/api/v1/review-sessions/:id"'],
+  ["POST review attempts", 'app.post("/api/v1/review-sessions/:id/attempts"'],
+  ["POST review skip", 'app.post("/api/v1/review-sessions/:id/skip"']
+];
+
+const missing = required.filter(([, marker]) => !source.includes(marker)).map(([label]) => label);
+const duplicateLabels = required.filter(([label], index) => required.findIndex(([candidate]) => candidate === label) !== index).map(([label]) => label);
+const rawErrorLeak = /sendError\([^\n]+READWEAVE_TREE_NODE_NOT_FOUND/.test(source);
+const report = { status: missing.length || duplicateLabels.length || rawErrorLeak ? "failed" : "passed", checkedAt: new Date().toISOString(), routeCount: required.length, missing, duplicateLabels, rawErrorLeak, sourcePath };
+process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+if (report.status === "failed") process.exitCode = 1;

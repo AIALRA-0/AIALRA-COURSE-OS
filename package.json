@@ -1,0 +1,40 @@
+{
+  "name": "course-os",
+  "version": "2.4.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --parallel --filter @course-os/api --filter @course-os/web dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.scripts.json --noEmit",
+    "seed:ee680": "tsx scripts/seed-ee680.ts",
+    "seed:synthetic": "tsx scripts/seed-synthetic.ts",
+    "verify:archive": "tsx scripts/verify-archive.ts",
+    "verify:course": "tsx scripts/verify-course.ts",
+    "verify:tree": "tsx scripts/verify-tree.ts",
+    "verify:writing": "tsx scripts/verify-writing.ts",
+    "verify:routes": "tsx scripts/verify-routes.ts",
+    "verify:public": "tsx scripts/verify-public.ts",
+    "promote:readweave": "tsx scripts/promote-readweave-state.ts",
+    "migrate:ee680-v4": "tsx scripts/migrate-ee680-v4.ts",
+    "migrate:pseudocode-v5": "tsx scripts/migrate-pseudocode-v5.ts",
+    "test:e2e": "vitest run apps/api/src/app.spec.ts apps/api/src/routes.e2e.spec.ts packages/readweave-adapter/src/index.spec.ts",
+    "test:readweave:contract": "vitest run packages/readweave-adapter/src/index.spec.ts",
+    "test:readweave:smoke": "vitest run packages/readweave-adapter/src/index.spec.ts --testNamePattern \"ETAPI adapter|stable material|ReadWeave HTTP deep links\""
+  },
+  "devDependencies": {
+    "@course-os/contracts": "workspace:*",
+    "@course-os/domain": "workspace:*",
+    "@course-os/quality": "workspace:*",
+    "@course-os/readweave-adapter": "workspace:*",
+    "@course-os/storage": "workspace:*",
+    "@course-os/teaching": "workspace:*",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}

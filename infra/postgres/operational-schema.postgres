@@ -1,0 +1,89 @@
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS operational_state (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    state JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS imports (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    original_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('pptx', 'pdf', 'syllabus')),
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    sha256 CHAR(64) NOT NULL,
+    source TEXT NOT NULL,
+    license TEXT NOT NULL,
+    sensitivity TEXT NOT NULL,
+    state TEXT NOT NULL,
+    issues JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS imports_sha256_idx ON imports (sha256);
+
+CREATE TABLE IF NOT EXISTS generation_jobs (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    material_version_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'pending_sync', 'completed', 'paused', 'cancelled', 'failed')),
+    budget_usd NUMERIC(10, 6) NOT NULL CHECK (budget_usd > 0 AND budget_usd <= 8),
+    spent_usd NUMERIC(10, 6) NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+    page_ids JSONB NOT NULL,
+    completed_page_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    failed_page_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    cancel_requested BOOLEAN NOT NULL DEFAULT false,
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (spent_usd <= budget_usd)
+);
+
+CREATE INDEX IF NOT EXISTS generation_jobs_claim_idx ON generation_jobs (state, lease_expires_at, created_at);
+
+CREATE TABLE IF NOT EXISTS ordered_events (
+    id BIGSERIAL PRIMARY KEY,
+    stream_id UUID NOT NULL,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (stream_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS ordered_events_stream_idx ON ordered_events (stream_id, id);
+
+CREATE TABLE IF NOT EXISTS outbox (
+    id UUID PRIMARY KEY,
+    aggregate_id UUID NOT NULL,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    payload JSONB NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'confirmed', 'failed')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    confirmed_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS outbox_delivery_idx ON outbox (state, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS learning_sessions (
+    id UUID PRIMARY KEY,
+    course_release_id TEXT NOT NULL,
+    current_page_id TEXT NOT NULL,
+    current_anchor_id TEXT,
+    explanation_scroll DOUBLE PRECISION NOT NULL DEFAULT 0,
+    zoom DOUBLE PRECISION NOT NULL DEFAULT 1,
+    pan_x DOUBLE PRECISION NOT NULL DEFAULT 0,
+    pan_y DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMIT;

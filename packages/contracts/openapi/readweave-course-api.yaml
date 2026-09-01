@@ -1,0 +1,269 @@
+openapi: 3.1.0
+info:
+  title: ReadWeave Course Authority API
+  version: 2.4.0
+  description: Versioned semantic-authority API used only by Course OS services
+servers:
+  - url: /api/course/v1
+paths:
+  /draft-sources:
+    post:
+      operationId: registerDraftSource
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Draft material source registered without publishing it }
+  /draft-sources/{id}:
+    delete:
+      operationId: removeDraftSource
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Exact draft material source and its generated note subtree removed }
+        '404': { description: Draft source not found }
+  /courses:
+    get:
+      operationId: listAuthorityCourses
+      responses:
+        '200': { description: Course definitions, including empty courses }
+    post:
+      operationId: createAuthorityCourse
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Actor'
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SchemaVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '201': { description: Course and readable knowledge tree created }
+  /drafts:
+    get:
+      operationId: listLessonDrafts
+      responses:
+        '200': { description: Current structured lesson drafts }
+    post:
+      operationId: saveLessonDraft
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Actor'
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SchemaVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200': { description: Draft stored and read back }
+        '409': { description: expectedRevision mismatch and conflict object created }
+  /drafts/by-page/{id}:
+    get:
+      operationId: getLessonDraftByPage
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+      responses:
+        '200': { description: Draft composed from ReadWeave block notes }
+        '404': { description: Draft not found }
+  /conflicts:
+    get:
+      operationId: listAuthorityConflicts
+      responses:
+        '200': { description: Three-way content conflicts }
+  /tree/nodes/{id}/properties:
+    get:
+      operationId: getAuthorityTreeNodeProperties
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+      responses:
+        '200': { description: Tree node properties and verified deep link }
+        '404': { description: Tree node not found }
+  /conflicts/{id}:resolve:
+    post:
+      operationId: resolveAuthorityConflict
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Conflict resolution and new draft revision }
+  /sync/status:
+    get:
+      operationId: getAuthoritySyncStatus
+      responses:
+        '200': { description: ReadWeave authority health and cursor status }
+  /model-providers/{id}/credential:
+    put:
+      operationId: saveModelProviderCredentialStatus
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential:
+                  type: object
+                  required: [configured, maskedValue]
+                  properties:
+                    configured: { const: true }
+                    maskedValue: { type: string, minLength: 4 }
+                    updatedAt: { type: string, format: date-time }
+      responses:
+        '200': { description: Masked provider credential status stored without receiving the provider secret }
+  /releases:
+    get:
+      operationId: listCourseReleases
+      responses:
+        '200': { description: Immutable course releases }
+    post:
+      operationId: publishCourseRelease
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Actor'
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SchemaVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '201': { description: Published and read-back verified release }
+        '409': { description: Immutable version or semantic conflict }
+  /releases/{id}:
+    get:
+      operationId: getCourseRelease
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+      responses:
+        '200': { description: Release }
+        '404': { description: Not found }
+  /releases/{id}/manifest:
+    get:
+      operationId: getReleaseManifest
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+      responses:
+        '200': { description: Release manifest }
+  /questions:
+    get:
+      operationId: listPageQuestions
+      responses:
+        '200': { description: Page QA records including retracted revisions }
+    post:
+      operationId: savePageQuestion
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Stored anchored question }
+  /questions/{id}:
+    patch:
+      operationId: updatePageQuestion
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Question retraction or review policy revision stored }
+        '409': { description: expectedRevision mismatch }
+  /question-selections:
+    post:
+      operationId: saveQuestionSelection
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Random seed and selected question order stored }
+  /question-attempts:
+    post:
+      operationId: saveQuestionAttempt
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Question attempt and misconception evidence stored }
+  /review-plans:
+    post:
+      operationId: saveReviewPlan
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Review plan stored as an authoritative ReadWeave object }
+  /review-plans/{id}:
+    get:
+      operationId: getReviewPlan
+      responses:
+        '200': { description: Review plan and synchronization state }
+        '404': { description: Review plan not found }
+    patch:
+      operationId: updateReviewPlan
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Review plan revision stored }
+        '409': { description: Expected revision mismatch }
+  /cost-entries:
+    get:
+      operationId: listGenerationCostEntries
+      responses:
+        '200': { description: Filterable authoritative generation cost ledger }
+    post:
+      operationId: appendGenerationCostEntry
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Immutable generation call cost entry appended }
+  /assessment-attempts:
+    post:
+      operationId: saveAssessmentAttempt
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Stored attempt and mastery update }
+  /mastery:
+    get:
+      operationId: listMastery
+      responses:
+        '200': { description: Mastery records }
+  /research-archives:
+    post:
+      operationId: archiveResearch
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Immutable research archive }
+  /research-archives/search:
+    get:
+      operationId: searchResearch
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        '200': { description: Matching archive snippets }
+components:
+  parameters:
+    ObjectId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1 }
+    Actor:
+      name: X-Actor
+      in: header
+      required: true
+      schema: { type: string }
+    WorkspaceId:
+      name: X-Workspace-Id
+      in: header
+      required: true
+      schema: { type: string }
+    SchemaVersion:
+      name: X-Schema-Version
+      in: header
+      required: true
+      schema: { const: 2.4.0 }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: true
+      schema: { type: string }

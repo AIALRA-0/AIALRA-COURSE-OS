@@ -1,0 +1,122 @@
+name: course-os
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: course_os
+      POSTGRES_USER: course_os
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U course_os -d course_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    image: ${COURSE_OS_RUNTIME_IMAGE:-course-os-runtime:2.4.0-local}
+    build:
+      context: .
+      args: { COURSE_OS_APP: api }
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      COURSE_OS_HOST: 0.0.0.0
+      COURSE_OS_PORT: 4100
+      COURSE_OS_DATA_DIR: /data
+      READWEAVE_MODE: ${READWEAVE_MODE:-file}
+      READWEAVE_BASE_URL: ${READWEAVE_BASE_URL:-http://readweave:37840}
+      READWEAVE_API_TOKEN_FILE: /run/secrets/readweave_api_token
+      COURSE_OS_SETTINGS_KEY_FILE: /run/secrets/course_os_settings_key
+      COURSE_OS_EXTERNAL_WORKER: "false"
+    command: ["sh", "-c", "export DATABASE_URL=postgresql://course_os:$$(cat /run/secrets/postgres_password)@postgres:5432/course_os; pnpm --filter @course-os/api start"]
+    secrets: [postgres_password, readweave_api_token, course_os_settings_key]
+    volumes:
+      - course-data:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+    expose: ["4100"]
+    restart: unless-stopped
+
+  worker:
+    image: ${COURSE_OS_RUNTIME_IMAGE:-course-os-runtime:2.4.0-local}
+    build:
+      context: .
+      args: { COURSE_OS_APP: worker }
+    environment:
+      COURSE_OS_EXTERNAL_WORKER: "false"
+    secrets: [postgres_password]
+    command: ["sh", "-c", "export DATABASE_URL=postgresql://course_os:$$(cat /run/secrets/postgres_password)@postgres:5432/course_os; pnpm --filter @course-os/worker start"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  web:
+    image: ${COURSE_OS_RUNTIME_IMAGE:-course-os-runtime:2.4.0-local}
+    build:
+      context: .
+      args: { COURSE_OS_APP: web }
+    expose: ["4173"]
+    restart: unless-stopped
+
+  converter:
+    image: ${COURSE_OS_CONVERTER_IMAGE:-course-os-converter:2.4.0-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.converter
+      args:
+        COURSE_OS_RUNTIME_IMAGE: ${COURSE_OS_RUNTIME_IMAGE:-course-os-runtime:2.4.0-local}
+    environment:
+      COURSE_OS_DATA_DIR: /data
+    volumes:
+      - course-data:/data
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+    profiles: [conversion]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on: [api, web]
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["production"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN_FILE: /run/secrets/cloudflare_tunnel_token
+    secrets: [cloudflare_tunnel_token]
+    depends_on: [caddy]
+    restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: ./var/secrets/postgres_password
+  readweave_api_token:
+    file: ./var/secrets/readweave_api_token
+  course_os_settings_key:
+    file: ./var/secrets/course_os_settings_key
+  cloudflare_tunnel_token:
+    file: ./var/secrets/cloudflare_tunnel_token
+
+volumes:
+  postgres-data:
+  course-data:
+  caddy-data:

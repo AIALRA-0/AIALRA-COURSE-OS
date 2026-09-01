@@ -1,0 +1,16 @@
+:8080 {
+    encode zstd gzip
+
+    @api path /api/* /healthz
+    reverse_proxy @api api:4100
+
+    reverse_proxy web:4173
+
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
+    }
+}

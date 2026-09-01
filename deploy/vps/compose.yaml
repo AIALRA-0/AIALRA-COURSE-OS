@@ -1,0 +1,143 @@
+name: ${COURSE_OS_COMPOSE_PROJECT:-course-os}
+
+x-logging: &course-os-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-course-os-runtime: &course-os-runtime
+  image: ${COURSE_OS_RUNTIME_IMAGE:?Set COURSE_OS_RUNTIME_IMAGE to an immutable tag}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: course_os
+      POSTGRES_USER: course_os
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../infra/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U course_os -d course_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *course-os-logging
+    networks: [course-private]
+    restart: unless-stopped
+
+  api:
+    <<: *course-os-runtime
+    environment:
+      NODE_ENV: production
+      COURSE_OS_APP: api
+      COURSE_OS_HOST: 0.0.0.0
+      COURSE_OS_PORT: 4100
+      COURSE_OS_DATA_DIR: /data
+      COURSE_OS_WORKSPACE_ID: ${COURSE_OS_WORKSPACE_ID:-personal}
+      COURSE_OS_CONVERSION_QUEUE_MODE: file
+      COURSE_OS_EXTERNAL_WORKER: "true"
+      COURSE_OS_API_URL: http://api:4100
+      COURSE_OS_WORKER_TOKEN_FILE: /run/secrets/course_os_worker_token
+      COURSE_OS_SETTINGS_KEY_FILE: /run/secrets/course_os_settings_key
+      READWEAVE_MODE: etapi
+      READWEAVE_BASE_URL: ${READWEAVE_BASE_URL:?Set READWEAVE_BASE_URL on the VPS}
+      READWEAVE_ROOT_NOTE_ID: ${READWEAVE_ROOT_NOTE_ID:-root}
+      READWEAVE_PUBLIC_URL: ${READWEAVE_PUBLIC_URL:-https://readweave.example.com}
+      READWEAVE_API_TOKEN_FILE: /run/secrets/readweave_api_token
+      MODEL_ROUTER_URL: ${MODEL_ROUTER_URL:-}
+      MODEL_ROUTER_API_KEY_FILE: /run/secrets/model_router_api_key
+    command:
+      - sh
+      - -c
+      - >-
+        export DATABASE_URL="postgresql://course_os:$$(cat /run/secrets/postgres_password)@postgres:5432/course_os";
+        pnpm --filter @course-os/api start
+    secrets: [postgres_password, readweave_api_token, course_os_worker_token, course_os_settings_key, model_router_api_key]
+    volumes:
+      - ./data:/data
+    ports:
+      - ${COURSE_OS_API_BIND:-127.0.0.1:14100}:4100
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [course-private, model-router]
+    logging: *course-os-logging
+    restart: unless-stopped
+
+  converter:
+    image: ${COURSE_OS_CONVERTER_IMAGE:?Set COURSE_OS_CONVERTER_IMAGE to an immutable tag}
+    environment:
+      NODE_ENV: production
+      COURSE_OS_DATA_DIR: /data
+    command: ["node", "--import", "tsx", "apps/converter/src/index.ts"]
+    volumes:
+      - ./data:/data
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 3g
+    cpus: 2
+    logging: *course-os-logging
+    restart: unless-stopped
+
+  worker:
+    <<: *course-os-runtime
+    environment:
+      NODE_ENV: production
+      COURSE_OS_APP: worker
+      COURSE_OS_EXTERNAL_WORKER: "true"
+      COURSE_OS_API_URL: http://api:4100
+      COURSE_OS_WORKER_TOKEN_FILE: /run/secrets/course_os_worker_token
+    command:
+      - sh
+      - -c
+      - >-
+        export DATABASE_URL="postgresql://course_os:$$(cat /run/secrets/postgres_password)@postgres:5432/course_os";
+        pnpm --filter @course-os/worker start
+    secrets: [postgres_password, course_os_worker_token]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [course-private]
+    logging: *course-os-logging
+    restart: unless-stopped
+
+  web:
+    <<: *course-os-runtime
+    environment:
+      NODE_ENV: production
+      COURSE_OS_APP: web
+    ports:
+      - ${COURSE_OS_WEB_BIND:-127.0.0.1:14173}:4173
+    networks: [course-private]
+    logging: *course-os-logging
+    restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: ${COURSE_OS_SECRET_DIR:-./secrets}/postgres_password
+  readweave_api_token:
+    file: ${COURSE_OS_SECRET_DIR:-./secrets}/readweave_api_token
+  course_os_worker_token:
+    file: ${COURSE_OS_SECRET_DIR:-./secrets}/course_os_worker_token
+  course_os_settings_key:
+    file: ${COURSE_OS_SECRET_DIR:-./secrets}/course_os_settings_key
+  model_router_api_key:
+    file: ${COURSE_OS_SECRET_DIR:-./secrets}/model_router_api_key
+
+volumes:
+  postgres-data:
+
+networks:
+  course-private:
+    external: true
+    name: ${COURSE_OS_PRIVATE_NETWORK:?Set COURSE_OS_PRIVATE_NETWORK on the VPS}
+  model-router:
+    external: true
+    name: ${MODEL_ROUTER_NETWORK:?Set MODEL_ROUTER_NETWORK on the VPS}
