@@ -61,8 +61,8 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
-body { min-height: 100vh; background: var(--canvas); color: var(--ink); }
+html, body, #root { width: 100%; height: 100%; min-width: 320px; margin: 0; overflow: hidden; }
+body { background: var(--canvas); color: var(--ink); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -71,7 +71,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 button svg { flex: 0 0 auto; }
 kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; }
 
-.product-shell { height: 100dvh; display: grid; grid-template-rows: var(--topbar) minmax(0, 1fr); overflow: hidden; }
+.product-shell { width: 100%; height: 100dvh; min-height: 0; display: grid; grid-template-rows: var(--topbar) minmax(0, 1fr); overflow: hidden; }
 .product-topbar { display: grid; grid-template-columns: var(--sidebar) 1fr auto; align-items: center; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(18px); z-index: 30; }
 .product-brand { height: 100%; padding: 0 16px; display: flex; align-items: center; gap: 11px; border-right: 1px solid var(--line); }
 .brand-symbol { width: 34px; height: 34px; position: relative; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--brand-ink); color: white; font-size: 10px; font-weight: 700; letter-spacing: -.06em; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
@@ -103,8 +103,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .sync-degraded .live-dot { background: var(--amber); }
 .profile-button { width: 32px; height: 32px; border: 0; border-radius: 50%; background: #c9d8cd; color: #284b39; font-size: 12px; font-weight: 700; }
 
-.product-body { min-height: 0; display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); }
-.product-content { min-width: 0; min-height: 0; overflow: hidden; background: var(--canvas); }
+.product-body { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); }
+.product-content { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--canvas); }
 .course-sidebar { min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 16px 14px 10px; }
 .sidebar-heading > div { display: grid; gap: 3px; }
@@ -130,7 +130,6 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-row.selected .tree-kind { color: var(--brand); }
 .tree-copy { min-width: 0; display: grid; gap: 1px; }
 .tree-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
-.tree-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 9px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
 .status-published { background: var(--green); }
 .status-draft, .status-syncing { background: var(--blue); }
@@ -1045,7 +1044,6 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-row[data-node-kind="trash"].drop-target { color: var(--red); box-shadow: inset 0 -2px 0 var(--red); }
 
 .tree-copy strong { font-size: 14px !important; font-weight: 600 !important; }
-.tree-copy small { min-width: 0; font-size: 12px !important; line-height: 1.35; }
 
 .tree-context-menu {
   max-height: min(76dvh, 520px);

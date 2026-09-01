@@ -142,7 +142,6 @@ export function App() {
     }
     location.hash = navigation.toString();
     const activeSession = session?.courseReleaseId === release.id ? session : undefined;
-    setView((current) => page.id === activeSession?.currentPageId ? current : { zoom: 1, panX: 0, panY: 0 });
     if (activeSession) api.updateSession(activeSession.id, { currentPageId: page.id }).then(setSession).catch(() => undefined);
   }, [mode, pageIndex, page?.id, release?.id]);
 
@@ -334,6 +333,21 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
 }) {
   const page = release.pages[pageIndex]!;
   const [pageDockOpen, setPageDockOpen] = useState(false);
+  const lessonColumnRef = useRef<HTMLDivElement>(null);
+  const lessonStripRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    lessonColumnRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    if (!pageDockOpen) return;
+    const strip = lessonStripRef.current;
+    const active = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!strip || !active) return;
+    strip.scrollTo({
+      left: active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2,
+      behavior: "auto",
+    });
+  }, [page.id, pageDockOpen, release.id]);
+
   return <div className="learning-workspace">
     <header className="learning-header">
       <div><div className="breadcrumbs"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span></div><h1>{page.title}</h1></div>
@@ -350,7 +364,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
       <div className="visual-column"><SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} /></div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column"><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div><Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} /></Suspense></div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div><Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} /></Suspense></div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
@@ -359,7 +373,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
         <button className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起全部页面" : `展开全部 ${release.pages.length} 页`}</small><Icon name={pageDockOpen ? "chevronUp" : "chevronDown"} /></button>
         <button data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
       </div>
-      {pageDockOpen && <nav className="lesson-strip" aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已验证" : "等待审核"}</small></div></button>)}</nav>}
+      {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已验证" : "等待审核"}</small></div></button>)}</nav>}
     </footer>
   </div>;
 }
