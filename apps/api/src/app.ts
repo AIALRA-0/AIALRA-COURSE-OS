@@ -2568,7 +2568,7 @@ interface WritingPolicyManifestFileState {
 }
 
 async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
-  const manifest = JSON.parse(await readFile(join(process.cwd(), "config", "writing-policy-manifest.json"), "utf8")) as WritingPolicyManifestFileState;
+  const manifest = JSON.parse(await readFile(new URL("../../../config/writing-policy-manifest.json", import.meta.url), "utf8")) as WritingPolicyManifestFileState;
   const issues: string[] = [];
   const aggregate = sha256Text(stableStringify(manifest.files.map(({ path, sha256 }) => ({ path, sha256 }))));
   if (aggregate !== manifest.aggregateSha256 || manifest.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) issues.push("WRITING_POLICY_MANIFEST_HASH_MISMATCH");
