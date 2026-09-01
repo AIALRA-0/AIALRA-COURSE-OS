@@ -33,6 +33,17 @@ describe("strict math", () => {
     expect(validateMarkdownMath("价格是 $5 美元")).toEqual([]);
     expect(normalizeLegacyMathDelimiters("价格是 $5 美元")).toBe("价格是 $5 美元");
   });
+
+  it("wraps high-confidence bare TeX while preserving code, URLs and ordinary backslashes", () => {
+    const formula = "\\sum_{i=1}^{k}\\sum_{j=1}^{k}c_{ij},\\quad i\\ne j";
+    expect(normalizeLegacyMathDelimiters(formula)).toBe(`$$\n${formula}\n$$`);
+    expect(normalizeLegacyMathDelimiters(`- ${formula}`)).toBe(`- $${formula}$`);
+    expect(normalizeLegacyMathDelimiters(`连接目标是 ${formula}，值越小越好`)).toBe(`连接目标是 $${formula}$，值越小越好`);
+    expect(normalizeLegacyMathDelimiters(`$$\n${formula}\n$$`)).toBe(`$$\n${formula}\n$$`);
+    expect(normalizeLegacyMathDelimiters("```txt\n\\sum_{i=1}^{k}\n```\n`\\sum_{i=1}^{k}` https://example.com/\\sum C:\\Users\\demo"))
+      .toBe("```txt\n\\sum_{i=1}^{k}\n```\n`\\sum_{i=1}^{k}` https://example.com/\\sum C:\\Users\\demo");
+    expect(validateMarkdownMath(formula)).toEqual([]);
+  });
 });
 
 describe("coverage", () => {

@@ -175,6 +175,17 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '201': { description: Question attempt and misconception evidence stored }
+  /question-attempt-transactions:
+    post:
+      operationId: saveQuestionAttemptTransaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Actor'
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SchemaVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '201': { description: Question attempt, assessment attempt, mastery record and answer note stored atomically }
   /review-plans:
     post:
       operationId: saveReviewPlan

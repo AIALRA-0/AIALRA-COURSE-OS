@@ -98,7 +98,7 @@ describe("Course OS API", () => {
   });
 
   it("stores QA changes, reproducible mixed questions, attempts and generation costs in ReadWeave", async () => {
-    const { app, operations, release } = await seededApp();
+    const { app, operations, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
     const asked = await request(app).post(`/api/v1/sessions/${session.body.id}/questions`).set("Idempotency-Key", "qa-create").send({ pageId: "page-1", learnerAttempt: "先比较输入", question: "为什么要检查前提", hintLevel: 1, anchorIds: [] }).expect(201);
     expect(asked.body).toMatchObject({ reviewPolicy: "include", status: "active", revision: 1 });
@@ -112,7 +112,12 @@ describe("Course OS API", () => {
     expect(second.body.questions.map((item: { id: string }) => item.id)).toEqual(first.body.questions.map((item: { id: string }) => item.id));
     expect(first.body.questions.map((item: { kind: string }) => item.kind)).toEqual(["comprehension", "multiple_choice"]);
     const question = first.body.questions[0];
-    await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "attempt-1").send({ selectionId: first.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1", questionId: question.id, answer: question.expectedAnswer, usedHintLevel: 0 }).expect(201);
+    const attemptPayload = { selectionId: first.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1", questionId: question.id, answer: question.expectedAnswer, usedHintLevel: 0 };
+    const savedAttempt = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "attempt-1").send(attemptPayload).expect(201);
+    const replayedAttempt = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "attempt-1").send({ ...attemptPayload, answer: "这次请求不应新增记录" }).expect(201);
+    expect(replayedAttempt.body).toMatchObject({ attempt: { id: savedAttempt.body.attempt.id, answer: question.expectedAnswer }, mastery: savedAttempt.body.mastery });
+    expect(await readweave.listQuestionAttempts()).toHaveLength(1);
+    expect(await readweave.listAssessmentAttempts()).toHaveLength(1);
 
     const createdJob = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "generate-page-1").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
     const completed = await waitForJob(app, createdJob.body.id);

@@ -27,7 +27,9 @@ export function validateMathAtoms(expressions: MathExpression[]): string[] {
 }
 
 export function validateMarkdownMath(markdown: string): string[] {
-  const scanned = scanMarkdownMath(markdown);
+  const initial = scanMarkdownMath(markdown);
+  const normalized = normalizeBareTexFragments(initial.normalized);
+  const scanned = normalized === initial.normalized ? initial : scanMarkdownMath(normalized);
   return [...scanned.issues, ...scanned.formulas.flatMap((tex) => {
     const result = validateTex(tex);
     return result.valid ? [] : [result.error];
@@ -40,7 +42,7 @@ export function validateMarkdownMath(markdown: string): string[] {
  * `\\(`, so ordinary Chinese square brackets remain ordinary text
  */
 export function normalizeLegacyMathDelimiters(markdown: string): string {
-  return scanMarkdownMath(markdown).normalized;
+  return normalizeBareTexFragments(scanMarkdownMath(markdown).normalized);
 }
 
 interface MathScanResult {
@@ -178,6 +180,54 @@ function looksLikeTeX(value: string): boolean {
   if (!text) return false;
   const hasMathSyntax = /[=^_{}]/.test(text) || /\\(?:frac|binom|sqrt|sum|prod|int|cup|cap|in|subset|leq|geq|neq|varnothing|times|cdot|operatorname|text|left|right|quad|qquad|alpha|beta|gamma|delta|lambda|mu|pi|sigma|infty|partial|nabla|begin|end)\b/.test(text);
   return hasMathSyntax && (/\\[A-Za-z]+/.test(text) || /[=^_{}]/.test(text));
+}
+
+const HIGH_CONFIDENCE_TEX_COMMAND = /\\(?:frac|binom|sqrt|sum|prod|int|operatorname|begin|lim|max|min|argmax|argmin)(?![A-Za-z])/;
+
+function normalizeBareTexFragments(markdown: string): string {
+  const lines = markdown.match(/[^\r\n]*(?:\r?\n|$)/g) ?? [];
+  let fence: string | undefined;
+  let displayMath = false;
+  return lines.map((line) => {
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      if (!fence) fence = fenceMatch[1];
+      else if (line.trimStart().startsWith(fence)) fence = undefined;
+      return line;
+    }
+    if (fence) return line;
+    const displayDelimiterCount = line.match(/(?<!\\)\$\$/g)?.length ?? 0;
+    if (displayMath || displayDelimiterCount > 0) {
+      if (displayDelimiterCount % 2 === 1) displayMath = !displayMath;
+      return line;
+    }
+    if (/`|https?:\/\/|www\./i.test(line) || /(?:\$|\\\(|\\\[)/.test(line)) return line;
+    const parts = line.match(/^(\s*(?:(?:[-+*]|\d+[.)])\s+)?)(.*?)(\r?\n?)$/);
+    if (!parts) return line;
+    const prefix = parts[1]!;
+    const content = parts[2]!;
+    const ending = parts[3]!;
+    const commandIndex = content.search(HIGH_CONFIDENCE_TEX_COMMAND);
+    if (commandIndex < 0) return line;
+    const before = content.slice(0, commandIndex);
+    const remainder = content.slice(commandIndex);
+    const boundary = remainder.search(/[，。；！？\u3400-\u9fff]/);
+    const candidate = (boundary < 0 ? remainder : remainder.slice(0, boundary)).trimEnd();
+    const after = boundary < 0 ? "" : remainder.slice(candidate.length);
+    if (!looksLikeTeX(candidate) || !balanced(candidate, "{", "}")) return line;
+    if (!before.trim() && !after.trim() && !prefix.trim()) return `$$\n${candidate}\n$$${ending}`;
+    return `${prefix}${before}$${candidate}$${after}${ending}`;
+  }).join("");
+}
+
+function balanced(value: string, open: string, close: string): boolean {
+  let depth = 0;
+  for (const character of value) {
+    if (character === open) depth += 1;
+    if (character === close) depth -= 1;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
 }
 
 export function validatePseudoCodeLines(lines: PseudoCodeLine[]): string[] {

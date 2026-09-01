@@ -29,6 +29,14 @@ import type {
 import { writeJsonAtomic } from "@course-os/storage";
 import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
 
+export interface QuestionAttemptTransactionResult {
+  attempt: QuestionAttempt;
+  assessmentAttempt: AssessmentAttempt;
+  mastery: MasteryRecord;
+}
+
+export type MasteryReducer = (previous: MasteryRecord | undefined) => MasteryRecord;
+
 export interface ReadWeaveCourseApi {
   listCourses(): Promise<CourseProject[]>;
   createCourse(course: CourseProject, context: IdempotentWriteContext): Promise<CourseProject>;
@@ -43,6 +51,7 @@ export interface ReadWeaveCourseApi {
   listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]>;
   saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection>;
   saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt>;
+  saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult>;
   getReviewPlan(planId: string): Promise<ReviewPlan | undefined>;
   saveReviewPlan(plan: ReviewPlan, context: IdempotentWriteContext): Promise<ReviewPlan>;
   updateReviewPlan(plan: ReviewPlan, expectedRevision: number, context: IdempotentWriteContext): Promise<ReviewPlan>;
@@ -581,6 +590,21 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.appendAuthorityObject("questionAttempt", attempt, context, "questionAttempts");
   }
 
+  async saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult> {
+    return this.mutate(async (state) => {
+      const replay = state.idempotency[context.idempotencyKey];
+      if (replay) return replayQuestionAttemptTransaction(state, replay.objectId);
+      const mastery = reduceMastery(state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId));
+      state.questionAttempts.push(structuredClone(attempt));
+      state.attempts.push(structuredClone(assessmentAttempt));
+      const masteryIndex = state.mastery.findIndex((item) => item.objectiveId === mastery.objectiveId);
+      if (masteryIndex >= 0) state.mastery[masteryIndex] = structuredClone(mastery);
+      else state.mastery.push(structuredClone(mastery));
+      state.idempotency[context.idempotencyKey] = { kind: "question_attempt_transaction", objectId: attempt.id };
+      return { attempt: structuredClone(attempt), assessmentAttempt: structuredClone(assessmentAttempt), mastery: structuredClone(mastery) };
+    });
+  }
+
   async getReviewPlan(planId: string): Promise<ReviewPlan | undefined> {
     return (await this.read()).reviewPlans.find((item) => item.id === planId);
   }
@@ -981,6 +1005,16 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.request<QuestionAttempt>("/question-attempts", { method: "POST", body: JSON.stringify(attempt), headers: this.writeHeaders(context) });
   }
 
+  async saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult> {
+    const previous = (await this.listMastery()).find((item) => item.objectiveId === assessmentAttempt.objectiveId);
+    const mastery = reduceMastery(previous);
+    return this.request<QuestionAttemptTransactionResult>("/question-attempt-transactions", {
+      method: "POST",
+      body: JSON.stringify({ attempt, assessmentAttempt, mastery }),
+      headers: this.writeHeaders(context)
+    });
+  }
+
   async getReviewPlan(planId: string): Promise<ReviewPlan | undefined> {
     const response = await this.fetchWithRetry(`${this.baseUrl}/review-plans/${encodeURIComponent(planId)}`, { headers: this.headers() });
     if (response.status === 404) return undefined;
@@ -1205,6 +1239,14 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!response.ok) throw new Error(`READWEAVE_HTTP_${response.status}:${await response.text()}`);
     return response.json() as Promise<T>;
   }
+}
+
+function replayQuestionAttemptTransaction(state: ReadWeaveFileState, attemptId: string): QuestionAttemptTransactionResult {
+  const attempt = state.questionAttempts.find((item) => item.id === attemptId);
+  const assessmentAttempt = state.attempts.find((item) => item.id === attemptId);
+  const mastery = assessmentAttempt && state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId);
+  if (!attempt || !assessmentAttempt || !mastery) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
+  return { attempt: structuredClone(attempt), assessmentAttempt: structuredClone(assessmentAttempt), mastery: structuredClone(mastery) };
 }
 
 function shouldRetryHttpStatus(status: number): boolean {

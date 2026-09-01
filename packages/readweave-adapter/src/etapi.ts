@@ -27,7 +27,7 @@ import type {
   CourseTreeNode,
   TreeNodeProperties
 } from "@course-os/contracts";
-import type { ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
+import type { MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
 import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings } from "./index.js";
 import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
 
@@ -348,6 +348,30 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.questionAttempts.push(structuredClone(attempt));
       state.idempotency[context.idempotencyKey] = { kind: "question_attempt", objectId: attempt.id };
       return attempt;
+    }, context);
+  }
+
+  async saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult> {
+    return this.mutate(async (state) => {
+      const replay = state.idempotency[context.idempotencyKey];
+      if (replay) return replayQuestionAttemptTransaction(state, replay.objectId);
+      const mastery = reduceMastery(state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId));
+      const release = state.releases.find((item) => item.id === attempt.courseReleaseId);
+      if (release) {
+        const course = await this.ensureCourseProjection(state, release);
+        const draft = state.drafts.find((item) => item.pageId === attempt.pageId);
+        const projection = draft ? state.projections.drafts[draft.id] : undefined;
+        await this.createNote(projection?.sectionNoteIds.assessment ?? course.reviewNoteId, `作答 · ${attempt.pageId}`, `<pre>${escapeHtml(JSON.stringify({ attempt, assessmentAttempt, mastery }, null, 2))}</pre>`, "text", undefined, {
+          courseOsType: "question_attempt_transaction", courseOsObjectId: attempt.id, courseOsPageId: attempt.pageId
+        });
+      }
+      state.questionAttempts.push(structuredClone(attempt));
+      state.attempts.push(structuredClone(assessmentAttempt));
+      const masteryIndex = state.mastery.findIndex((item) => item.objectiveId === mastery.objectiveId);
+      if (masteryIndex >= 0) state.mastery[masteryIndex] = structuredClone(mastery);
+      else state.mastery.push(structuredClone(mastery));
+      state.idempotency[context.idempotencyKey] = { kind: "question_attempt_transaction", objectId: attempt.id };
+      return { attempt: structuredClone(attempt), assessmentAttempt: structuredClone(assessmentAttempt), mastery: structuredClone(mastery) };
     }, context);
   }
 
@@ -1659,6 +1683,14 @@ function treePath(state: EtapiState, nodeId: string): string[] {
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function replayQuestionAttemptTransaction(state: ReadWeaveFileState, attemptId: string): QuestionAttemptTransactionResult {
+  const attempt = state.questionAttempts.find((item) => item.id === attemptId);
+  const assessmentAttempt = state.attempts.find((item) => item.id === attemptId);
+  const mastery = assessmentAttempt && state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId);
+  if (!attempt || !assessmentAttempt || !mastery) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
+  return { attempt: structuredClone(attempt), assessmentAttempt: structuredClone(assessmentAttempt), mastery: structuredClone(mastery) };
 }
 
 function trustedPublicBase(publicUrl: string): URL {

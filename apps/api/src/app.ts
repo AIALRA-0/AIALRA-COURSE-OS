@@ -931,12 +931,9 @@ export function createApp(dependencies: AppDependencies): Express {
         attemptedAt: new Date().toISOString()
       };
       const context = writeContext(request, requireIdempotencyKey(request));
-      await dependencies.readweave.saveQuestionAttempt(attempt, context);
-      const previous = (await dependencies.readweave.listMastery()).find((record) => record.objectiveId === item.objectiveId);
       const masteryAttempt: AssessmentAttempt = { id: attempt.id, itemId: item.id, objectiveId: item.objectiveId, answer, correct, usedHintLevel: attempt.usedHintLevel, misconception: attempt.misconception, attemptedAt: attempt.attemptedAt };
-      const mastery = applyAttempt(previous, masteryAttempt);
-      await dependencies.readweave.saveAttempt(masteryAttempt, mastery, { ...context, idempotencyKey: `${context.idempotencyKey}:mastery` });
-      response.status(201).json({ attempt, mastery, feedback: correct ? item.explanation : attempt.misconception });
+      const saved = await dependencies.readweave.saveQuestionAttemptTransaction(attempt, masteryAttempt, (previous) => applyAttempt(previous, masteryAttempt), context);
+      response.status(201).json({ attempt: saved.attempt, mastery: saved.mastery, feedback: saved.attempt.correct ? item.explanation : saved.attempt.misconception });
     } catch (error) { next(error); }
   });
 
