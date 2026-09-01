@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
@@ -12,6 +12,19 @@ const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) 
 type MobileMode = "visual" | "lesson" | "practice";
 type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
+
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_DEFAULT_WIDTH = 276;
+
+function clampSidebarWidth(value: number): number {
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(value)));
+}
+
+function readSidebarWidth(): number {
+  const saved = Number(localStorage.getItem("course-os-sidebar-width"));
+  return Number.isFinite(saved) ? clampSidebarWidth(saved) : SIDEBAR_DEFAULT_WIDTH;
+}
 
 export function App() {
   const initialNavigation = useRef(readNavigationHash());
@@ -35,6 +48,8 @@ export function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
   const [rightCollapsed, setRightCollapsed] = useState(() => localStorage.getItem("course-os-right-collapsed") === "true");
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+  const sidebarResizeCleanup = useRef<(() => void) | undefined>(undefined);
   const [historyNode, setHistoryNode] = useState<CourseTreeNode>();
   const [moveNode, setMoveNode] = useState<CourseTreeNode>();
   const [textAction, setTextAction] = useState<TreeTextAction>();
@@ -105,6 +120,8 @@ export function App() {
 
   useEffect(() => { localStorage.setItem("course-os-left-collapsed", String(leftCollapsed)); }, [leftCollapsed]);
   useEffect(() => { localStorage.setItem("course-os-right-collapsed", String(rightCollapsed)); }, [rightCollapsed]);
+  useEffect(() => { localStorage.setItem("course-os-sidebar-width", String(sidebarWidth)); }, [sidebarWidth]);
+  useEffect(() => () => sidebarResizeCleanup.current?.(), []);
 
   useEffect(() => {
     if (!toast) return;
@@ -179,10 +196,44 @@ export function App() {
     }).catch(() => undefined);
   };
 
-  const runTreeAction = async (action: () => Promise<void>, success: string) => {
-    try { await action(); await refreshMetadata(); setToast(success); }
+  const runTreeAction = async (action: () => Promise<unknown>, success: string, pending = "正在保存…", refresh = true) => {
+    setToast(pending);
+    try { await action(); if (refresh) await refreshMetadata(); setToast(success); }
     catch (reason) { setToast(reason instanceof Error ? reason.message : "课程树操作失败"); }
   };
+
+  const updateTreeAfterRename = (updated: CourseTreeNode) => {
+    const replace = (nodes: CourseTreeNode[]): CourseTreeNode[] => nodes.map((node) => node.id === updated.id
+      ? { ...node, ...updated, children: node.children }
+      : { ...node, children: replace(node.children) });
+    setTree((current) => current ? { ...current, courses: replace(current.courses), rootMaterials: replace(current.rootMaterials ?? []) } : current);
+  };
+
+  const adjustSidebarWidth = (delta: number) => setSidebarWidth((current) => clampSidebarWidth(current + delta));
+  const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth <= 900) return;
+    event.preventDefault();
+    sidebarResizeCleanup.current?.();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const move = (moveEvent: globalThis.PointerEvent) => setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      sidebarResizeCleanup.current = undefined;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    sidebarResizeCleanup.current = finish;
+  };
+
+  const shellStyle = { "--course-sidebar": `${sidebarWidth}px` } as CSSProperties;
 
   const openTreeNode = (node: CourseTreeNode, nextMode: "learn" | "studio") => {
     const candidateReleaseId = node.currentReleaseId ?? node.releaseId;
@@ -239,21 +290,21 @@ export function App() {
 
   if (error) return <main className="empty-state"><span className="empty-logo">CO</span><h1>Course OS 暂时无法启动</h1><p>{error}</p><button className="primary-button" data-action="app-reload" onClick={() => location.reload()}>重新载入</button></main>;
   if (loading) return <main className="empty-state"><div className="loader" /><h1>正在建立课程工作区</h1><p>正在读取 ReadWeave、课程树和固定发布版本</p></main>;
-  if (!release || !page) return <div className="product-shell">
+  if (!release || !page) return <div className="product-shell" style={shellStyle}>
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
-       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className="product-content empty-course-workspace"><span className="empty-logo">CO</span><h1>建立第一门课程</h1><p>先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></section></div>
+       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className="product-content empty-course-workspace"><span className="empty-logo">CO</span><h1>建立第一门课程</h1><p>先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></section></div>
      <MobileTreeDrawer tree={tree} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
      {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onImported={handleImported} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
     {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
-    {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then(() => undefined), "名称已更新"); }} />}
+    {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
     {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
     {toast && <div className="app-toast" role="status">{toast}</div>}
   </div>;
 
   return (
-    <div className="product-shell">
+    <div className="product-shell" style={shellStyle}>
       <header className="product-topbar">
         <div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div>
 
@@ -273,7 +324,7 @@ export function App() {
       </header>
 
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
-        <CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
+        <CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className="product-content">
           <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -288,7 +339,7 @@ export function App() {
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
-      {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then(() => undefined), "名称已更新"); }} />}
+      {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
       {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
       {toast && <div className="app-toast" role="status">{toast}</div>}
     </div>

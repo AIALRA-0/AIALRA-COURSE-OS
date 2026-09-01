@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
 
@@ -21,11 +21,14 @@ export interface CourseTreeActions {
 
 type TreeMenuState = { node: CourseTreeNode; x: number; y: number };
 
-export function CourseTree({ tree, selectedPageId, collapsed = false, onCollapse, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
+export function CourseTree({ tree, selectedPageId, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
   collapsed?: boolean;
   onCollapse?: () => void;
+  sidebarWidth?: number;
+  onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeKeyboard?: (delta: number) => void;
   onSelectPage: (releaseId: string, pageId: string) => void;
   onImport: () => void;
   onCreateCourse: () => void;
@@ -149,6 +152,24 @@ export function CourseTree({ tree, selectedPageId, collapsed = false, onCollapse
       <div><strong>个人工作区</strong><span>ReadWeave 权威存储</span></div>
       <button className="icon-button" data-action="tree-open-settings" aria-label="工作区设置" onClick={onSettings} title="工作区设置"><Icon name="settings" /></button>
     </div>
+    {onResizeStart && <div
+      className="sidebar-resize-handle"
+      role="separator"
+      tabIndex={0}
+      aria-orientation="vertical"
+      aria-valuemin={220}
+      aria-valuemax={420}
+      aria-valuenow={sidebarWidth}
+      aria-label="调整课程树宽度"
+      title="拖动调整课程树宽度；键盘使用左右箭头"
+      onPointerDown={onResizeStart}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          event.preventDefault();
+          onResizeKeyboard?.(event.key === "ArrowRight" ? 16 : -16);
+        }
+      }}
+    />}
     <div className="sr-only" aria-live="polite" id="tree-drag-status">{dragAnnouncement}</div>
     {menu && actions && <TreeContextMenu menu={menu} actions={actions} onClose={() => setMenu(undefined)} />}
   </aside>;

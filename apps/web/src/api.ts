@@ -67,13 +67,17 @@ type QuestionRefillResponse = {
 const questionSelectionRequests = new Map<string, Promise<QuestionSelectionResponse>>();
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || "GET").toUpperCase();
+  const headers = new Headers(init?.headers);
+  headers.set("X-Request-Id", requestId());
+  headers.set("X-Workspace-Id", WORKSPACE_ID);
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-Actor", "personal-user");
+    headers.set("X-Schema-Version", "2.4.0");
+  }
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      ...(init?.headers || {}),
-      "X-Request-Id": requestId(),
-      "X-Workspace-Id": WORKSPACE_ID
-    }
+    headers
   });
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ error: { message: response.statusText } }));

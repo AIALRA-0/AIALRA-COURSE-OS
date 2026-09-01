@@ -101,6 +101,24 @@ describe("Course OS API", () => {
     expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
 
+  it("creates an idempotent isolated candidate without changing the formal release", async () => {
+    const { app, readweave } = await seededApp();
+    const created = await request(app).post("/api/v1/release-candidates")
+      .set("Idempotency-Key", "candidate-release-1")
+      .send({ baseReleaseId: "test-release-v1", releaseId: "test-release-v2-candidate", budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:2b5c992fa06643bd" });
+    expect(created.body.candidate.pages[0].id).not.toBe("page-1");
+    expect(created.body.candidate.pages[0].blocks[0].id).toContain("test-release-v2-candidate:page:1");
+    expect((await readweave.listReleases()).filter((item) => item.lifecycle !== "draft_source")).toHaveLength(1);
+    const replay = await request(app).post("/api/v1/release-candidates")
+      .set("Idempotency-Key", "candidate-release-1")
+      .send({ baseReleaseId: "test-release-v1", releaseId: "test-release-v2-candidate" })
+      .expect(200);
+    expect(replay.body.candidate.id).toBe(created.body.candidate.id);
+    expect((await readweave.listReleases()).filter((item) => item.id === "test-release-v2-candidate")).toHaveLength(1);
+  }, 45_000);
+
   it("removes an exact rejected import without affecting other records", async () => {
     const app = await testApp();
     const rejected = await request(app)

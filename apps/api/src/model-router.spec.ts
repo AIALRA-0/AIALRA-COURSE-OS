@@ -8,12 +8,14 @@ describe("AIALRA Model Router teaching client", () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as {
         input: Array<{ content: Array<{ type: string }> }>;
+        instructions: string;
         metadata: { writing_policy_snapshot_id: string };
         text: { format: { schema: { required: string[]; properties: { questions: { items: { required: string[] } } } } } };
       };
       expect(request.text.format.schema.properties.questions.items.required).toContain("options");
       expect(request.text.format.schema.required).toContain("coverageEvidence");
       expect(request.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
+      expect(request.instructions).toContain("人类可读写作硬约束");
       expect(request.metadata.writing_policy_snapshot_id).toBe("writing-policy:test");
       return Response.json({
         status: "succeeded",

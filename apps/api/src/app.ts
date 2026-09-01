@@ -664,6 +664,72 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/imports/:id/events", streamEvents(dependencies.operations));
 
+  app.post("/api/v1/release-candidates", async (request, response, next) => {
+    try {
+      const idempotencyKey = requireIdempotencyKey(request);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const replay = (await dependencies.operations.read()).idempotency[idempotencyKey];
+      if (replay) {
+        const replayRelease = await dependencies.readweave.getRelease(replay.objectId);
+        if (replayRelease) {
+          const replayJob = (await dependencies.operations.read()).jobs.find((job) => job.materialVersionId === replayRelease.id && job.workspaceId === workspaceId);
+          return response.status(200).json({ candidate: replayRelease, generationJob: replayJob });
+        }
+      }
+      const baseReleaseId = String(request.body.baseReleaseId || "").trim();
+      const candidateId = String(request.body.releaseId || "").trim();
+      if (!baseReleaseId) return sendError(request, response, 422, "BASE_RELEASE_REQUIRED", "建立候选版本时必须指定基础版本", false);
+      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(candidateId)) return sendError(request, response, 422, "CANDIDATE_RELEASE_ID_INVALID", "候选版本编号只能包含字母、数字、点、下划线和短横线", false);
+      const base = await getWorkspaceRelease(dependencies.readweave, baseReleaseId, workspaceId);
+      if (!base || base.lifecycle === "draft_source") return sendError(request, response, 404, "BASE_RELEASE_NOT_FOUND", "没有找到可用于建立候选版本的正式基础版本", false);
+      const existing = await dependencies.readweave.getRelease(candidateId);
+      if (existing) {
+        if (existing.lifecycle !== "draft_source" || existing.candidateBaseReleaseId !== base.id || existing.courseId !== base.courseId || existing.moduleId !== base.moduleId) return sendError(request, response, 409, "CANDIDATE_RELEASE_EXISTS", "候选版本编号已经被其他内容占用，请换一个编号", false);
+        const savedDrafts = await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request);
+        const policy = await currentWritingPolicy();
+        const snapshot = await dependencies.operations.read();
+        let existingJob = snapshot.jobs.find((job) => job.materialVersionId === existing.id && job.workspaceId === workspaceId);
+        if (!existingJob && policy.validator.status === "passed" && policy.policySnapshotId === existing.writingPolicySnapshotId) {
+          const qualityMode = normalizeQualityMode(request.body.qualityMode || "quality");
+          const budgetUsd = Number(request.body.budgetUsd ?? generationBudget(qualityMode));
+          if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 8) return sendError(request, response, 422, "BUDGET_INVALID", "单次候选生成预算必须大于 0 且不超过 8 美元", false);
+          const language = String(request.body.language || "zh-CN").trim() || "zh-CN";
+          const generation = await persistGenerationJob({ idempotencyKey: `${idempotencyKey}:generation`, workspaceId, materialVersionId: existing.id, pageIds: existing.pageIds, budgetUsd, qualityMode, language, writingPolicySnapshotId: existing.writingPolicySnapshotId }, dependencies);
+          existingJob = generation.job;
+          if (generation.created) startGenerationJob(generation.job.id, dependencies);
+        }
+        if (!existingJob && (policy.validator.status !== "passed" || policy.policySnapshotId !== existing.writingPolicySnapshotId)) {
+          return sendError(request, response, 409, "CANDIDATE_POLICY_CHANGED", "这个候选版本绑定的写作策略已经变化，请使用新的候选版本编号继续生成", false);
+        }
+        await rememberCandidateIdempotency(dependencies, idempotencyKey, existing.id);
+        return response.status(200).json({ candidate: existing, generationJob: existingJob, draftIds: savedDrafts.map((draft) => draft.id) });
+      }
+      const policy = await currentWritingPolicy();
+      if (policy.validator.status !== "passed") return sendError(request, response, 503, "WRITING_POLICY_UNAVAILABLE", "当前写作策略未通过验证，暂时不能建立候选版本", true, { issues: policy.validator.issues });
+      const qualityMode = normalizeQualityMode(request.body.qualityMode || "quality");
+      const budgetUsd = Number(request.body.budgetUsd ?? generationBudget(qualityMode));
+      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 8) return sendError(request, response, 422, "BUDGET_INVALID", "单次候选生成预算必须大于 0 且不超过 8 美元", false);
+      const language = String(request.body.language || "zh-CN").trim() || "zh-CN";
+      const now = new Date().toISOString();
+      const candidate = createReleaseCandidate(base, candidateId, policy, now);
+      await dependencies.readweave.registerDraftSource(candidate, writeContext(request, `${idempotencyKey}:source`));
+      const savedDrafts = await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request);
+      const generation = await persistGenerationJob({
+        idempotencyKey: `${idempotencyKey}:generation`,
+        workspaceId,
+        materialVersionId: candidate.id,
+        pageIds: candidate.pageIds,
+        budgetUsd,
+        qualityMode,
+        language,
+        writingPolicySnapshotId: policy.policySnapshotId
+      }, dependencies);
+      await rememberCandidateIdempotency(dependencies, idempotencyKey, candidate.id);
+      if (generation.created) startGenerationJob(generation.job.id, dependencies);
+      response.status(202).json({ candidate, generationJob: generation.job, draftIds: savedDrafts.map((draft) => draft.id) });
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/v1/generation-jobs", async (request, response, next) => {
     try {
       const idempotencyKey = requireIdempotencyKey(request);
@@ -1408,6 +1474,7 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("TREE_NODE_STALE") || raw.includes("TREE_NODE_NOT_FOUND")) return { status: 409, code: "TREE_NODE_STALE", message: "这个项目已经不在当前课程树中，请重新载入后再试", retryable: false };
   if (raw.includes("TREE_TARGET_NOT_FOUND") || raw.includes("TREE_PARENT_NOT_FOUND")) return { status: 422, code: "TREE_TARGET_NOT_FOUND", message: "目标位置不存在，请重新选择课程或材料", retryable: false };
   if (raw.includes("TREE_PARENT_CYCLE")) return { status: 422, code: "TREE_PARENT_CYCLE", message: "不能把项目移动到自己或自己的下级项目中", retryable: false };
+  if (raw.includes("CANDIDATE_RELEASE_EXISTS") || raw.includes("CANDIDATE_ID_COLLISION") || raw.includes("CANDIDATE_PAGE_ID_COLLISION") || raw.includes("CANDIDATE_POLICY_CHANGED")) return { status: 409, code: "CANDIDATE_CONFLICT", message: "候选版本已经存在冲突，请换用新的候选版本编号", retryable: false };
   if (raw.startsWith("READWEAVE_ETAPI_") || raw.startsWith("READWEAVE_HTTP_") || raw.includes("READWEAVE_UNAVAILABLE")) return { status: 503, code: "READWEAVE_UNAVAILABLE", message: "ReadWeave 暂时不可访问，这项操作尚未保存，请稍后重试", retryable: true };
   if (raw.includes("NOT_FOUND")) return { status: 404, code: "RESOURCE_NOT_FOUND", message: "没有找到请求的课程内容，请重新载入后再试", retryable: false };
   if (raw.includes("PERMANENT_DELETE_UNSUPPORTED")) return { status: 409, code: "PERMANENT_DELETE_UNSUPPORTED", message: "当前 ReadWeave 不支持安全永久删除，这条记录会继续保留在回收站", retryable: false };
@@ -1972,6 +2039,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
     return;
   }
   const runtimeModelRouter = await resolveRuntimeModelRouter(dependencies);
+  if (initial.writingPolicySnapshotId?.startsWith("writing-policy:")) {
+    const currentPolicy = await currentWritingPolicy();
+    if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== initial.writingPolicySnapshotId) {
+      await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies);
+      return;
+    }
+  }
   for (const pageId of initial.pageIds) {
     const currentJob = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
@@ -2001,6 +2075,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         : deterministicTeachingPackage(page);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
+      assertTeachingCoverageEvidence(page, generation.content);
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
       const issues = validatePageForPublication(generatedPage);
@@ -2168,6 +2243,12 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
   return { ...page, blocks, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+}
+
+function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): void {
+  const atomIds = new Set(page.atoms.map((atom) => atom.id));
+  const unknown = [...new Set(content.coverageEvidence.map((item) => item.atomId).filter((atomId) => !atomIds.has(atomId)))];
+  if (unknown.length > 0) throw new Error("TEACHING_COVERAGE_ATOM_UNKNOWN");
 }
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {
@@ -2373,7 +2454,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     const treeNodes = await dependencies.readweave.listTreeNodes();
     const parentNode = record.parentNodeId ? treeNodes.find((node) => node.id === record.parentNodeId) : undefined;
     const parentCourseId = resolveParentCourseId(parentNode, treeNodes, record.courseId);
-    const course = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, dependencies);
+    const course = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies);
     const materialVersionId = `material-version:${record.id}`;
     const moduleId = parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`;
     const createdAt = new Date().toISOString();
@@ -2402,9 +2483,24 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       if (item) item.state = "syncing";
       dependencies.operations.appendEvent(state, importId, "readweave.sync.started", { materialVersionId, pages: convertedPages.length });
     });
-    await dependencies.readweave.registerDraftSource(sourceRelease, systemWriteContext(`import:${importId}:source`, record.workspaceId));
+    const existingSource = await dependencies.readweave.getRelease(materialVersionId);
+    if (existingSource) {
+      const sameSource = existingSource.lifecycle === "draft_source"
+        && existingSource.manifestHash === sourceRelease.manifestHash
+        && existingSource.pageIds.length === sourceRelease.pageIds.length
+        && existingSource.pageIds.every((pageId, index) => pageId === sourceRelease.pageIds[index]);
+      if (!sameSource) throw new Error("READWEAVE_IMPORT_SOURCE_CONFLICT");
+    } else {
+      await dependencies.readweave.registerDraftSource(sourceRelease, systemWriteContext(`import:${importId}:source`, record.workspaceId));
+    }
     const savedDrafts: LessonDraft[] = [];
     for (const converted of convertedPages) {
+      const existingDraft = await dependencies.readweave.getDraftByPage(converted.page.id);
+      if (existingDraft) {
+        if (existingDraft.sourceReleaseId !== materialVersionId || existingDraft.courseId !== course.id) throw new Error("READWEAVE_IMPORT_DRAFT_CONFLICT");
+        savedDrafts.push(existingDraft);
+        continue;
+      }
       const draft: LessonDraft = {
         id: `draft:${converted.page.id}`,
         workspaceId: record.workspaceId,
@@ -2496,7 +2592,7 @@ function resolveParentCourseId(parentNode: CourseTreeNode | undefined, nodes: Co
   return fallback;
 }
 
-async function ensureImportCourse(courseId: string | undefined, originalName: string, sourceHash: string, dependencies: AppDependencies): Promise<CourseProject> {
+async function ensureImportCourse(courseId: string | undefined, originalName: string, sourceHash: string, workspaceId: string, dependencies: AppDependencies): Promise<CourseProject> {
   const courses = await dependencies.readweave.listCourses();
   if (courseId) {
     const existing = courses.find((item) => item.id === courseId);
@@ -2509,13 +2605,13 @@ async function ensureImportCourse(courseId: string | undefined, originalName: st
   const now = new Date().toISOString();
   return dependencies.readweave.createCourse({
     id,
-    workspaceId: "personal",
+    workspaceId,
     title: `${fileTitle(originalName)} 课程`,
     description: "由离线导入流程建立，名称和课程结构可继续编辑",
     status: "active",
     createdAt: now,
     updatedAt: now
-  }, systemWriteContext(`import-course:${id}`, "personal"));
+  }, systemWriteContext(`import-course:${id}`, workspaceId));
 }
 
 function createImportedPage(sourceHash: string, pageNumber: number, title: string, extractedText: string, imageHash: string): CourseRelease["pages"][number] {
@@ -2549,6 +2645,118 @@ function createImportedPage(sourceHash: string, pageNumber: number, title: strin
     coverageClaims: [{ requirementId: `${pageId}:requirement:${atomId}`, explanationBlockId: coreId, coveredFields: ["label", "observation"], status: "partial" }],
     quality: { highRiskCoverage: 1, generalCoverage: 2 / 3, mathValid: true, publishable: false, issues: ["TEACHING_GENERATION_REQUIRED", "ELEMENT_ANALYSIS_REQUIRED"] }
   };
+}
+
+function createReleaseCandidate(base: CourseRelease, candidateId: string, policy: WritingPolicyCurrent, createdAt: string): CourseRelease {
+  const replacements = new Map<string, string>([[base.id, candidateId]]);
+  const owners = new Map<string, string>();
+  const pages = base.pages.map((original) => {
+    const nextPageId = `${candidateId}:page:${original.pageNumber}`;
+    registerCandidateId(replacements, owners, original.id, nextPageId, original.id);
+    let sequence = 0;
+    for (const id of collectObjectIds(original)) {
+      if (id === original.id) continue;
+      sequence += 1;
+      const suffix = id.startsWith(`${original.id}:`) ? id.slice(original.id.length) : `:entity:${sequence}`;
+      registerCandidateId(replacements, owners, id, `${nextPageId}${suffix}`, original.id);
+    }
+    return replaceDeep(structuredClone(original), replacements) as CourseRelease["pages"][number];
+  });
+  const assessments = base.assessments.map((assessment, index) => {
+    registerCandidateId(replacements, owners, assessment.id, `${candidateId}:assessment:${index + 1}`, `assessment:${index + 1}`);
+    return replaceDeep(structuredClone(assessment), replacements) as CourseRelease["assessments"][number];
+  });
+  const manifestHash = sha256Text(stableStringify({
+    baseReleaseId: base.id,
+    candidateId,
+    writingPolicySnapshotId: policy.policySnapshotId,
+    pageHashes: pages.map((page) => sha256Text(stableStringify(page))),
+    assessmentHashes: assessments.map((assessment) => sha256Text(stableStringify(assessment)))
+  }));
+  return {
+    ...structuredClone(base),
+    id: candidateId,
+    version: base.version + 1,
+    publishedAt: createdAt,
+    pageIds: pages.map((page) => page.id),
+    pages,
+    assessments,
+    manifestHash,
+    writingPolicySnapshotId: policy.policySnapshotId,
+    modelRoute: `${base.modelRoute}+writing-policy-candidate-v1`,
+    qualityHarnessVersion: "course-os-candidate-v1",
+    costUsd: 0,
+    lifecycle: "draft_source",
+    candidateBaseReleaseId: base.id
+  };
+}
+
+async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: string, idempotencyKey: string, updatedAt: string, dependencies: AppDependencies, request: Request): Promise<LessonDraft[]> {
+  const savedDrafts: LessonDraft[] = [];
+  for (const page of candidate.pages) {
+    const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
+    if (existingDraft) {
+      if (existingDraft.sourceReleaseId !== candidate.id || existingDraft.courseId !== candidate.courseId) throw new Error("CANDIDATE_PAGE_ID_COLLISION");
+      savedDrafts.push(existingDraft);
+      continue;
+    }
+    savedDrafts.push(await dependencies.readweave.saveDraft({
+      id: `draft:${page.id}`,
+      workspaceId,
+      courseId: candidate.courseId,
+      moduleId: candidate.moduleId,
+      sourceReleaseId: candidate.id,
+      pageId: page.id,
+      revision: 0,
+      status: "needs_review",
+      page,
+      changedBlockIds: page.blocks.map((block) => block.id),
+      contentHash: sha256Text(stableStringify(page)),
+      updatedAt
+    }, 0, writeContext(request, `${idempotencyKey}:draft:${page.pageNumber}`)));
+  }
+  return savedDrafts;
+}
+
+function registerCandidateId(replacements: Map<string, string>, owners: Map<string, string>, sourceId: string, targetId: string, owner: string): void {
+  const previousOwner = owners.get(sourceId);
+  if (previousOwner && previousOwner !== owner) throw new Error("CANDIDATE_ID_COLLISION");
+  owners.set(sourceId, owner);
+  const previousTarget = replacements.get(sourceId);
+  if (previousTarget && previousTarget !== targetId) throw new Error("CANDIDATE_ID_COLLISION");
+  replacements.set(sourceId, targetId);
+}
+
+function collectObjectIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(collectObjectIds);
+  if (!value || typeof value !== "object") return [];
+  const result: string[] = [];
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "id" && typeof child === "string" && child) result.push(child);
+    result.push(...collectObjectIds(child));
+  }
+  return result;
+}
+
+function replaceDeep<T>(value: T, replacements: Map<string, string>): T {
+  if (typeof value === "string") {
+    let result = value as unknown as string;
+    for (const [from, to] of [...replacements.entries()].sort((left, right) => right[0].length - left[0].length)) result = result.split(from).join(to);
+    return result as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => replaceDeep(item, replacements)) as T;
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) result[key] = replaceDeep(child, replacements);
+    return result as T;
+  }
+  return value;
+}
+
+async function rememberCandidateIdempotency(dependencies: AppDependencies, idempotencyKey: string, candidateId: string): Promise<void> {
+  await dependencies.operations.mutate((state) => {
+    if (!state.idempotency[idempotencyKey]) state.idempotency[idempotencyKey] = { kind: "release_candidate", objectId: candidateId };
+  });
 }
 
 interface WritingPolicyManifestFile {

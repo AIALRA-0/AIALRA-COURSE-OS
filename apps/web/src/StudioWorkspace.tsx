@@ -252,6 +252,9 @@ function QualityInspector({ page, validation, coverage }: { page: PageLesson; va
   const high = validation?.highRiskCoverage ?? page.quality.highRiskCoverage;
   const general = validation?.generalCoverage ?? page.quality.generalCoverage;
   const pass = validation?.publishable ?? page.quality.publishable;
+  const approvedQuestions = (page.questionBank ?? []).filter((item) => item.status === "approved");
+  const hasActiveUnderstandingCheck = page.blocks.some((block) => block.kind === "check" && block.markdown.trim())
+    || approvedQuestions.some((item) => item.kind === "comprehension" || item.kind === "multiple_choice");
   return <div className="inspector-body">
     <div className={`quality-hero ${pass ? "pass" : "hold"}`}><Icon name={pass ? "check" : "warning"} /><div><strong>{pass ? "满足发布要求" : "需要继续审核"}</strong><span>{pass ? "全部确定性质量门已通过" : "正式版本不会被草稿直接覆盖"}</span></div></div>
     <InspectorSection title="覆盖率">
@@ -263,7 +266,7 @@ function QualityInspector({ page, validation, coverage }: { page: PageLesson; va
       <CheckRow ok={validation?.mathValid ?? page.quality.mathValid} label="数学公式严格解析" />
       <CheckRow ok={(validation?.pseudocodeLines ?? 0) === (validation?.explainedPseudocodeLines ?? 0)} label="伪代码逐行状态说明" />
       <CheckRow ok={page.anchors.length > 0} label="来源锚点可追溯" />
-      <CheckRow ok={page.blocks.some((block) => block.kind === "check")} label="包含主动理解检查" />
+      <CheckRow ok={hasActiveUnderstandingCheck} label="包含主动理解检查" title={approvedQuestions.length > 0 ? `当前页已有 ${approvedQuestions.length} 道已审核理解题；发布质量门要求题库，不要求额外建立 check 块` : undefined} />
     </InspectorSection>
     {validation?.issues.length ? <InspectorSection title={`阻断项 · ${validation.issues.length}`}><ul className="issue-list">{validation.issues.slice(0, 8).map((issue) => <li key={issue}>{issue}</li>)}</ul></InspectorSection> : null}
   </div>;
@@ -365,5 +368,5 @@ function stageLabel(stage: string) { return ({ extract: "来源提取", atomize:
 
 function InspectorSection({ title, children }: { title: string; children: ReactNode }) { return <section className="inspector-section"><h3>{title}</h3>{children}</section>; }
 function Metric({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className="metric-row"><span>{label}</span><strong className={`metric-${tone}`}>{value}</strong></div>; }
-function CheckRow({ ok, label }: { ok: boolean; label: string }) { return <div className="check-row"><span className={ok ? "ok" : "fail"}><Icon name={ok ? "check" : "warning"} /></span><span>{label}</span></div>; }
+function CheckRow({ ok, label, title }: { ok: boolean; label: string; title?: string }) { return <div className="check-row" title={title}><span className={ok ? "ok" : "fail"}><Icon name={ok ? "check" : "warning"} /></span><span>{label}</span></div>; }
 function Definition({ label, value }: { label: string; value: string }) { return <div className="definition-row"><span>{label}</span><code title={value}>{value}</code></div>; }

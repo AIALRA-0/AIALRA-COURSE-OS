@@ -936,9 +936,11 @@ export { EtapiReadWeaveCourseApi, type EtapiReadWeaveConfig } from "./etapi.js";
 
 export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly fetchImpl: typeof fetch;
+  private readonly requestTimeoutMs: number;
 
-  constructor(private readonly baseUrl: string, private readonly token: string, fetchImpl: typeof fetch = fetch, private readonly publicUrl = "https://readweave.example.com") {
+  constructor(private readonly baseUrl: string, private readonly token: string, fetchImpl: typeof fetch = fetch, private readonly publicUrl = "https://readweave.example.com", requestTimeoutMs = 15_000) {
     this.fetchImpl = fetchImpl;
+    this.requestTimeoutMs = Math.max(1_000, requestTimeoutMs);
   }
 
   async listCourses(): Promise<CourseProject[]> {
@@ -1221,8 +1223,10 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async fetchWithRetry(input: string, init?: RequestInit): Promise<Response> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
       try {
-        const response = await this.fetchImpl(input, init);
+        const response = await this.fetchImpl(input, { ...init, signal: controller.signal });
         if (!shouldRetryHttpStatus(response.status) || attempt === 2) return response;
         await delayForRetry(attempt);
         continue;
@@ -1230,6 +1234,8 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
         lastError = error;
         if (attempt === 2) throw new Error(`READWEAVE_HTTP_NETWORK:${error instanceof Error ? error.message : "REQUEST_FAILED"}`);
         await delayForRetry(attempt);
+      } finally {
+        clearTimeout(timeout);
       }
     }
     throw new Error(`READWEAVE_HTTP_NETWORK:${lastError instanceof Error ? lastError.message : "REQUEST_FAILED"}`);

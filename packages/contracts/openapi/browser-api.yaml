@@ -425,6 +425,27 @@ paths:
           description: Ordered server-sent event stream
           content:
             text/event-stream: {}
+  /release-candidates:
+    post:
+      operationId: createReleaseCandidate
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseReleaseId, releaseId]
+              properties:
+                baseReleaseId: { type: string }
+                releaseId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+                qualityMode: { type: string, enum: [economy, balanced, quality], default: quality }
+                language: { type: string, default: zh-CN }
+                budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 8, default: 8 }
+      responses:
+        '202': { description: Candidate draft created and generation queued }
+        '409': { description: Candidate identifier already belongs to another release }
   /imports/{id}:
     get:
       operationId: getImport

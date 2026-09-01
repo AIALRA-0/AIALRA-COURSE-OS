@@ -43,6 +43,7 @@ const required: Array<[string, string]> = [
   ["GET import", 'app.get("/api/v1/imports/:id"'],
   ["DELETE import", 'app.delete("/api/v1/imports/:id"'],
   ["GET import events", 'app.get("/api/v1/imports/:id/events"'],
+  ["POST release candidate", 'app.post("/api/v1/release-candidates"'],
   ["POST generation", 'app.post("/api/v1/generation-jobs"'],
   ["GET generation", 'app.get("/api/v1/generation-jobs/:id"'],
   ["GET costs", 'app.get("/api/v1/costs"'],

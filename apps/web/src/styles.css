@@ -32,26 +32,27 @@
   --radius-lg: 16px;
   --topbar: 60px;
   --sidebar: 276px;
+  --course-sidebar: var(--sidebar);
 }
 
 :root[data-theme="dark"] {
   color: #edf1ed;
-  background: #111513;
+  background: #000000;
   --ink: #edf1ed;
   --ink-soft: #d1d8d3;
   --muted: #99a49d;
   --faint: #707b74;
-  --canvas: #111513;
-  --panel: #171c19;
-  --panel-strong: #1c221e;
-  --soft: #202722;
-  --soft-2: #29312c;
-  --line: #2c352f;
-  --line-strong: #3a453e;
+  --canvas: #000000;
+  --panel: #080808;
+  --panel-strong: #111111;
+  --soft: #171717;
+  --soft-2: #222222;
+  --line: #2e2e2e;
+  --line-strong: #444444;
   --brand: #91c4a8;
   --brand-soft: #253b30;
   --brand-ink: #c1e6d0;
-  --viewer: #080b09;
+  --viewer: #000000;
   --green: #77c59b;
   --amber: #e2a955;
   --red: #dc8379;
@@ -72,7 +73,7 @@ button svg { flex: 0 0 auto; }
 kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; }
 
 .product-shell { width: 100%; height: 100dvh; min-height: 0; display: grid; grid-template-rows: var(--topbar) minmax(0, 1fr); overflow: hidden; }
-.product-topbar { display: grid; grid-template-columns: var(--sidebar) 1fr auto; align-items: center; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(18px); z-index: 30; }
+.product-topbar { display: grid; grid-template-columns: var(--course-sidebar) 1fr auto; align-items: center; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(18px); z-index: 30; }
 .product-brand { height: 100%; padding: 0 16px; display: flex; align-items: center; gap: 11px; border-right: 1px solid var(--line); }
 .brand-symbol { width: 34px; height: 34px; position: relative; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--brand-ink); color: white; font-size: 10px; font-weight: 700; letter-spacing: -.06em; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 :root[data-theme="dark"] .brand-symbol { background: #d9eee1; color: #183628; }
@@ -103,9 +104,9 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .sync-degraded .live-dot { background: var(--amber); }
 .profile-button { width: 32px; height: 32px; border: 0; border-radius: 50%; background: #c9d8cd; color: #284b39; font-size: 12px; font-weight: 700; }
 
-.product-body { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); }
+.product-body { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-columns: var(--course-sidebar) minmax(0, 1fr); }
 .product-content { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--canvas); }
-.course-sidebar { min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+.course-sidebar { position: relative; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 16px 14px 10px; }
 .sidebar-heading > div { display: grid; gap: 3px; }
 .sidebar-heading strong { font-size: 13px; }
@@ -591,8 +592,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 :root { --course-font-scale: 1; }
 
 .product-shell { isolation: isolate; }
-.product-topbar { grid-template-columns: var(--sidebar) minmax(0, 1fr) auto; }
-.product-body { grid-template-columns: var(--sidebar) minmax(0, 1fr); }
+.product-topbar { grid-template-columns: var(--course-sidebar, var(--sidebar)) minmax(0, 1fr) auto; }
+.product-body { grid-template-columns: var(--course-sidebar, var(--sidebar)) minmax(0, 1fr); }
 .product-body.left-collapsed { grid-template-columns: 52px minmax(0, 1fr); }
 
 .sidebar-heading { padding: 18px 15px 12px; }
@@ -616,6 +617,9 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .sidebar-footer strong { font-size: 12px; }
 .sidebar-footer span { font-size: 11px; }
 .sidebar-footer .icon-button { width: 30px; min-height: 30px; }
+.sidebar-resize-handle { position: absolute; top: 0; right: -4px; z-index: 40; width: 8px; height: 100%; cursor: col-resize; touch-action: none; }
+.sidebar-resize-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms ease; }
+.sidebar-resize-handle:hover::after, .sidebar-resize-handle:focus-visible::after { background: var(--brand); }
 .course-sidebar-collapsed { grid-template-rows: auto auto auto 1fr auto; align-items: start; justify-items: center; padding: 10px 6px; background: var(--panel); }
 .sidebar-expand-button, .sidebar-rail-button { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); }
 .sidebar-expand-button:hover, .sidebar-rail-button:hover { border-color: var(--line); background: var(--soft); color: var(--brand); }

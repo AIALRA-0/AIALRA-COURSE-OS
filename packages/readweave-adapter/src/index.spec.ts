@@ -140,6 +140,7 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(created.readweaveNoteId).toMatch(/^note/);
     const renamed = await api.updateTreeNode(created.id, { title: "第一章：基础" }, 0, { ...context, idempotencyKey: "tree-rename" });
     expect(renamed).toMatchObject({ title: "第一章：基础", revision: 1 });
+    expect(remote.requests.find((request) => request.method === "PATCH" && request.path.startsWith("/notes/"))?.headers["content-type"]).toBe("application/json");
     const moved = await api.updateTreeNode(created.id, { parentId: `material:${course.id}:current` }, 1, { ...context, idempotencyKey: "tree-move" });
     expect(moved.parentId).toBe(`material:${course.id}:current`);
     const trashed = await api.trashTreeNode(created.id, { ...context, idempotencyKey: "tree-trash" });

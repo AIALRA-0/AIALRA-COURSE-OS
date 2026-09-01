@@ -39,6 +39,7 @@ export interface EtapiReadWeaveConfig {
   workspaceId?: string;
   seedStatePath?: string;
   fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
 }
 
 interface EtapiNote {
@@ -123,8 +124,11 @@ const SECTION_DEFINITIONS = [
 export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
+  private readonly requestTimeoutMs: number;
   private bootstrapPromise?: Promise<ProjectionIndex>;
   private writeChain: Promise<void> = Promise.resolve();
+  private stateCache?: { state: EtapiState; expiresAt: number };
+  private stateReadInFlight?: Promise<EtapiState>;
   private lastReadAt?: string;
   private lastWriteAt?: string;
   private activeWriteContext?: IdempotentWriteContext;
@@ -132,6 +136,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   constructor(private readonly config: EtapiReadWeaveConfig) {
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.workspaceId = config.workspaceId ?? "personal";
+    this.requestTimeoutMs = Math.max(1_000, config.requestTimeoutMs ?? 15_000);
   }
 
   async listCourses(): Promise<CourseProject[]> {
@@ -490,15 +495,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listDrafts(): Promise<LessonDraft[]> {
-    const state = await this.readState();
-    let changed = false;
-    for (let index = 0; index < state.drafts.length; index += 1) {
-      const reconciled = await this.reconcileDraft(state, state.drafts[index]!);
-      state.drafts[index] = reconciled.draft;
-      changed ||= reconciled.changed;
-    }
-    if (changed) await this.writeState(state);
-    return state.drafts;
+    // Listing drafts is used by the workspace tree and metadata refreshes
+    // where only ownership/counts are needed. Re-reading every explanation
+    // block from ReadWeave here turned one refresh into hundreds of ETAPI
+    // requests. Reconcile the single page when it is opened instead.
+    return (await this.readState()).drafts;
   }
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
@@ -1179,7 +1180,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async createBranch(noteId: string, parentNoteId: string): Promise<EtapiBranch> {
-    return this.request<EtapiBranch>("/branches", { method: "POST", body: JSON.stringify({ noteId, parentNoteId, notePosition: 10, prefix: "", isExpanded: false }) });
+    return this.request<EtapiBranch>("/branches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId, parentNoteId, notePosition: 10, prefix: "", isExpanded: false })
+    });
   }
 
   private async moveBranch(branchId: string, parentBranchId: string): Promise<void> {
@@ -1188,11 +1193,19 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async patchNoteTitle(noteId: string, title: string): Promise<void> {
-    await this.request<EtapiNote>(`/notes/${encodeURIComponent(noteId)}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    await this.request<EtapiNote>(`/notes/${encodeURIComponent(noteId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title })
+    });
   }
 
   private async undeleteNote(noteId: string): Promise<void> {
-    await this.raw(`/notes/${encodeURIComponent(noteId)}/undelete`, { method: "PUT", body: JSON.stringify({ fallbackParentNoteId: this.config.parentNoteId }) });
+    await this.raw(`/notes/${encodeURIComponent(noteId)}/undelete`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fallbackParentNoteId: this.config.parentNoteId })
+    });
   }
 
   private async reconcileDraft(state: EtapiState, draft: LessonDraft): Promise<{ draft: LessonDraft; changed: boolean }> {
@@ -1426,6 +1439,21 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async readState(): Promise<EtapiState> {
+    const now = Date.now();
+    if (this.stateCache && this.stateCache.expiresAt > now) return structuredClone(this.stateCache.state);
+    if (this.stateReadInFlight) return structuredClone(await this.stateReadInFlight);
+    const read = this.readRemoteState();
+    this.stateReadInFlight = read;
+    try {
+      const state = await read;
+      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + 350 };
+      return structuredClone(state);
+    } finally {
+      if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
+    }
+  }
+
+  private async readRemoteState(): Promise<EtapiState> {
     const projection = await this.ensureWorkspace();
     const content = await this.getContent(projection.stateNoteId);
     const parsed = JSON.parse(content) as Partial<EtapiState>;
@@ -1434,8 +1462,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async writeState(state: EtapiState): Promise<void> {
-    await this.putContent(state.projections.stateNoteId, JSON.stringify(state, null, 2));
-    this.lastWriteAt = new Date().toISOString();
+    try {
+      await this.putContent(state.projections.stateNoteId, JSON.stringify(state, null, 2));
+      this.lastWriteAt = new Date().toISOString();
+      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + 350 };
+    } catch (error) {
+      this.invalidateStateCache();
+      throw error;
+    }
   }
 
   private async mutate<T>(change: (state: EtapiState) => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
@@ -1444,6 +1478,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const previousContext = this.activeWriteContext;
       this.activeWriteContext = context;
       try {
+        const pendingRead = this.stateReadInFlight;
+        if (pendingRead) await pendingRead.catch(() => undefined);
+        this.invalidateStateCache();
         const state = await this.readState();
         result = await change(state);
         await this.writeState(state);
@@ -1453,6 +1490,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     });
     await this.writeChain;
     return result;
+  }
+
+  private invalidateStateCache(): void {
+    this.stateCache = undefined;
   }
 
   private async ensureWorkspace(): Promise<ProjectionIndex> {
@@ -1597,6 +1638,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const headers = new Headers(init?.headers);
     headers.set("Authorization", this.config.token);
     headers.set("Accept", "application/json");
+    if (init?.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (this.activeWriteContext) {
       headers.set("Idempotency-Key", this.activeWriteContext.idempotencyKey);
       headers.set("X-Actor", this.activeWriteContext.actor);
@@ -1608,8 +1650,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const input = `${base}/etapi${path}`;
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
       try {
-        const response = await this.fetchImpl(input, { ...init, headers });
+        const response = await this.fetchImpl(input, { ...init, headers, signal: controller.signal });
         if (response.ok) return response;
         if (!shouldRetryHttpStatus(response.status) || attempt === 2) throw new Error(`READWEAVE_ETAPI_${response.status}:${await response.text()}`);
       } catch (error) {
@@ -1617,6 +1661,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const message = error instanceof Error ? error.message : "REQUEST_FAILED";
         if (message.startsWith("READWEAVE_ETAPI_") && !message.startsWith("READWEAVE_ETAPI_NETWORK")) throw error;
         if (attempt === 2) throw new Error(`READWEAVE_ETAPI_NETWORK:${message}`);
+      } finally {
+        clearTimeout(timeout);
       }
       await delayForRetry(attempt);
     }

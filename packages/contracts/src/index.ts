@@ -221,6 +221,8 @@ export interface CourseRelease {
   qualityHarnessVersion: string;
   costUsd: number;
   lifecycle?: "draft_source" | "published";
+  /** Present on an isolated candidate to retain the immutable source release. */
+  candidateBaseReleaseId?: Identifier;
 }
 
 export interface CourseTreeNode {
