@@ -6,6 +6,7 @@ COPY apps ./apps
 COPY packages ./packages
 COPY scripts ./scripts
 COPY infra ./infra
+COPY config ./config
 RUN pnpm install --frozen-lockfile
 RUN pnpm -r build
 

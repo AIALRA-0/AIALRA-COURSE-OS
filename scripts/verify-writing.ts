@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { CourseRelease, MathExpression, PageLesson, PseudoCodeLine } from "@course-os/contracts";
 import { sha256Text, stableStringify } from "@course-os/domain";
@@ -9,6 +9,9 @@ import { validateMarkdownMath, validateMathAtoms, validatePageForPublication, va
 interface WritingPolicyManifest {
   schemaVersion: "1.0.0";
   policySnapshotId: string;
+  status?: "candidate" | "approved";
+  sourceCommit?: string;
+  summary?: string;
   files: Array<{ path: string; sourcePath: string; sha256: string }>;
   aggregateSha256: string;
 }
@@ -16,6 +19,7 @@ interface WritingPolicyManifest {
 const manifestPath = resolve("config/writing-policy-manifest.json");
 const policyIssues: string[] = [];
 let manifest: WritingPolicyManifest | undefined;
+const knownPolicyIds = new Set<string>();
 try {
   manifest = JSON.parse(await readFile(manifestPath, "utf8")) as WritingPolicyManifest;
 } catch {
@@ -23,11 +27,24 @@ try {
 }
 
 if (manifest) {
-  if (manifest.schemaVersion !== "1.0.0") policyIssues.push("WRITING_POLICY_MANIFEST_SCHEMA_UNSUPPORTED");
-  if (!/^writing-policy:[a-f0-9]{16}$/.test(manifest.policySnapshotId)) policyIssues.push("WRITING_POLICY_SNAPSHOT_ID_INVALID");
-  if (!manifest.files.length || manifest.files.some((file) => !/^[a-f0-9]{64}$/.test(file.sha256) || !file.path || !file.sourcePath)) policyIssues.push("WRITING_POLICY_FILE_ENTRY_INVALID");
-  const aggregate = sha256Text(stableStringify(manifest.files.map(({ path, sha256 }) => ({ path, sha256 }))));
-  if (aggregate !== manifest.aggregateSha256 || manifest.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) policyIssues.push("WRITING_POLICY_MANIFEST_HASH_MISMATCH");
+  validateManifest(manifest, "CURRENT");
+  knownPolicyIds.add(manifest.policySnapshotId);
+}
+
+try {
+  const snapshotDir = resolve("config/writing-policy-snapshots");
+  for (const name of await readdir(snapshotDir)) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const historical = JSON.parse(await readFile(resolve(snapshotDir, name), "utf8")) as WritingPolicyManifest;
+      validateManifest(historical, `HISTORICAL:${name}`);
+      knownPolicyIds.add(historical.policySnapshotId);
+    } catch {
+      policyIssues.push(`WRITING_POLICY_HISTORY_INVALID:${name}`);
+    }
+  }
+} catch {
+  policyIssues.push("WRITING_POLICY_HISTORY_MISSING");
 }
 
 const configuredSkillRoot = process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
@@ -75,7 +92,7 @@ if (!state) {
   let pseudocodeLines = 0;
   let mathExpressions = 0;
   for (const release of currentByModule.values()) {
-    if (manifest && release.writingPolicySnapshotId !== manifest.policySnapshotId) issues.push({ releaseId: release.id, code: "WRITING_POLICY_SNAPSHOT_NOT_APPROVED" });
+    if (!knownPolicyIds.has(release.writingPolicySnapshotId)) issues.push({ releaseId: release.id, code: "WRITING_POLICY_SNAPSHOT_UNKNOWN" });
     for (const page of release.pages) inspectPage(release, page);
   }
 
@@ -115,7 +132,15 @@ if (!state) {
 }
 
 function publicPolicyReport() {
-  return manifest ? { manifest: "config/writing-policy-manifest.json", schemaVersion: manifest.schemaVersion, policySnapshotId: manifest.policySnapshotId, files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })), aggregateSha256: manifest.aggregateSha256 } : { manifest: "config/writing-policy-manifest.json" };
+  return manifest ? { manifest: "config/writing-policy-manifest.json", schemaVersion: manifest.schemaVersion, policySnapshotId: manifest.policySnapshotId, status: manifest.status, sourceCommit: manifest.sourceCommit, summary: manifest.summary, files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })), aggregateSha256: manifest.aggregateSha256, knownSnapshotIds: [...knownPolicyIds] } : { manifest: "config/writing-policy-manifest.json" };
+}
+
+function validateManifest(candidate: WritingPolicyManifest, label: string): void {
+  if (candidate.schemaVersion !== "1.0.0") policyIssues.push(`WRITING_POLICY_MANIFEST_SCHEMA_UNSUPPORTED:${label}`);
+  if (!/^writing-policy:[a-f0-9]{16}$/.test(candidate.policySnapshotId)) policyIssues.push(`WRITING_POLICY_SNAPSHOT_ID_INVALID:${label}`);
+  if (!candidate.files.length || candidate.files.some((file) => !/^[a-f0-9]{64}$/.test(file.sha256) || !file.path || !file.sourcePath)) policyIssues.push(`WRITING_POLICY_FILE_ENTRY_INVALID:${label}`);
+  const aggregate = sha256Text(stableStringify(candidate.files.map(({ path, sha256 }) => ({ path, sha256 }))));
+  if (aggregate !== candidate.aggregateSha256 || candidate.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) policyIssues.push(`WRITING_POLICY_MANIFEST_HASH_MISMATCH:${label}`);
 }
 
 function publicCode(value: string): string {

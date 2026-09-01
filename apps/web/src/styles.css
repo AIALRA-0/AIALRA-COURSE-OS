@@ -208,6 +208,10 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .metric-good { color: var(--green); }
 .metric-bad { color: var(--red); }
 .definition-row code { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); font-size: 8px; }
+.policy-summary { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.prompt-inspector { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.prompt-inspector summary { padding: 9px 10px; cursor: pointer; color: var(--ink-soft); font-size: 10px; }
+.prompt-inspector pre { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border-top: 1px solid var(--line); white-space: pre-wrap; color: var(--muted); font: 9px/1.6 "IBM Plex Mono", monospace; }
 .check-row { display: flex; align-items: center; gap: 8px; min-height: 31px; border-bottom: 1px solid var(--line); font-size: 10px; }
 .check-row > span:first-child { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; }
 .check-row svg { width: 11px; height: 11px; }
@@ -461,6 +465,11 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .import-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 18px; }
 .import-options label { display: grid; gap: 5px; color: var(--muted); font-size: 9px; }
 .import-options select { padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-strong); font-size: 10px; }
+.import-auto-generate { display: flex; align-items: flex-start; gap: 9px; margin: 12px 18px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.import-auto-generate input { margin-top: 2px; accent-color: var(--brand); }
+.import-auto-generate span { display: grid; gap: 3px; }
+.import-auto-generate strong { font-size: 10px; }
+.import-auto-generate small { color: var(--muted); font-size: 9px; }
 .compact-dialog { max-width: 560px; }
 .dialog-form { display: grid; gap: 14px; padding: 16px 18px 4px; }
 .dialog-form label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 700; }

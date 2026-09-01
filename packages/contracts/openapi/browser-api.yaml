@@ -411,6 +411,7 @@ paths:
                 parentNodeId: { type: string, description: Course or material parent for the imported material }
                 qualityMode: { type: string, enum: [economy, balanced, quality] }
                 language: { type: string }
+                autoGenerate: { type: boolean, default: true, description: Create one full-material draft generation job after conversion }
       responses:
         '201': { description: Accepted import }
         '422': { description: Quarantined import }
@@ -455,8 +456,16 @@ paths:
                 materialVersionId: { type: string, minLength: 1 }
                 pageIds: { type: array, items: { type: string } }
                 budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 8 }
+                qualityMode: { type: string, enum: [economy, balanced, quality] }
+                language: { type: string }
       responses:
         '202': { description: Queued job }
+        '200': { description: Idempotent replay of an existing job }
+  /writing-policy/current:
+    get:
+      operationId: getCurrentWritingPolicy
+      responses:
+        '200': { description: Safe current policy snapshot, prompt template and validator state without private paths or credentials }
   /generation-jobs/{id}:cancel:
     post:
       operationId: cancelGenerationJob

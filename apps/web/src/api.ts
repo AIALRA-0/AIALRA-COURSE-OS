@@ -25,7 +25,8 @@ import type {
   ReviewMap,
   ReviewPlan,
   ReviewSession,
-  ReviewAttemptResult
+  ReviewAttemptResult,
+  WritingPolicyCurrent
 } from "@course-os/contracts";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -171,7 +172,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseReleaseId })
   }),
-  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string } = {}) => {
+  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean } = {}) => {
     const body = new FormData();
     body.append("file", file);
     body.append("source", "course-os-studio");
@@ -180,6 +181,7 @@ export const api = {
     if (options.qualityMode) body.append("qualityMode", options.qualityMode);
     if (options.language) body.append("language", options.language);
     if (options.parentNodeId) body.append("parentNodeId", options.parentNodeId);
+    body.append("autoGenerate", String(options.autoGenerate !== false));
     return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
   },
   importRecord: (importId: string) => request<ImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`),
@@ -189,6 +191,7 @@ export const api = {
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd })
   }),
   generationJob: (jobId: string) => request<GenerationJob>(`/api/v1/generation-jobs/${encodeURIComponent(jobId)}`),
+  writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {
     const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }>(`/api/v1/costs${query.size ? `?${query}` : ""}`);

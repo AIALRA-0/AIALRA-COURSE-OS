@@ -1,27 +1,31 @@
 {
   "schemaVersion": "1.0.0",
-  "policySnapshotId": "writing-policy:936edd4f13568dc5",
+  "policySnapshotId": "writing-policy:2b5c992fa06643bd",
+  "status": "candidate",
+  "sourceCommit": "da8c8be24ba4a5f3dca6ccba696413aa78668aa2",
+  "summary": "候选写作策略：逐页教学生成、来源边界、内容充分性、数学与代码解释及可追溯验证",
   "files": [
-    {
-      "path": "SKILL.md",
-      "sourcePath": "SKILL.md",
-      "sha256": "763de27e73bd82e482ed979c9520018de6afc6556ee31efd7a53f1384a999683"
-    },
-    {
-      "path": "structured-documents.md",
-      "sourcePath": "references/structured-documents.md",
-      "sha256": "4455cfa0d6b6e401095cc718ee1196dc166ba118437644b47ad5772bad09e12b"
-    },
-    {
-      "path": "technical-content.md",
-      "sourcePath": "references/technical-content.md",
-      "sha256": "1520eb4b5356d2d397573d37db30e61ef98c8e52f176f795f50c624bd5f56902"
-    },
-    {
-      "path": "complex-reports.md",
-      "sourcePath": "references/complex-reports.md",
-      "sha256": "4567296aee373cac9fc73f94bc4064573150956fbe4d8a703b25f0ce91f5a198"
-    }
+    { "path": "SKILL.md", "sourcePath": "SKILL.md", "sha256": "50f7c87e2ac685385e7a52bdcd24ff6c9b19e8b6f40353cd5daa68985d596227" },
+    { "path": "constitution/principles.md", "sourcePath": "constitution/principles.md", "sha256": "8eef8fab9e1d7cd594f50cdb3add5c190ff4ed755d0b04c36f24cf2e843ed1ce" },
+    { "path": "runtime/task-compiler.md", "sourcePath": "runtime/task-compiler.md", "sha256": "79b289ae3ddfce33572ccb98ba41e0105497f881abff47899e501a8c1e8b5ff0" },
+    { "path": "runtime/clarification-gate.md", "sourcePath": "runtime/clarification-gate.md", "sha256": "e6fbef57e605ca0db5b2fc37cf593c237512e4fee349f73e14c7289ea5266cbd" },
+    { "path": "contracts/task-contract.schema.json", "sourcePath": "contracts/task-contract.schema.json", "sha256": "bce8359fe44cd711926a5409b1be3a090d4fc6521e83e19531a4c9b2b1557130" },
+    { "path": "constitution/source-vs-background.md", "sourcePath": "constitution/source-vs-background.md", "sha256": "3ec5d69f2f5cb6df78320f4c68acddc627a7c45a4e6b37269a33ae8c8b77ed79" },
+    { "path": "runtime/source-understanding.md", "sourcePath": "runtime/source-understanding.md", "sha256": "c3ef7396b32d41dfda02255bf6ca7b532d4038cb1e6d6b0792bf7373c5aed5a6" },
+    { "path": "runtime/content-blueprint.md", "sourcePath": "runtime/content-blueprint.md", "sha256": "728a8195a56ee8b145d0364d902c3a8b2da6a04116f500b493cadad9852ba5ad" },
+    { "path": "runtime/constrained-rendering.md", "sourcePath": "runtime/constrained-rendering.md", "sha256": "dc47c6be01ef2d1c72fc1f5b2a36cc891d71156ddb7ad6815ac692c5a5511d89" },
+    { "path": "references/aemp-content-sufficiency.md", "sourcePath": "references/aemp-content-sufficiency.md", "sha256": "cb9b6103827161d9057dedcbb4583b9478b2a83632fceeedcdbe577b98ca7503" },
+    { "path": "profiles/components/images.yaml", "sourcePath": "profiles/components/images.yaml", "sha256": "959cd4190a8afed91850cdac255679e5d94bae4ebee217090cd18f98c1091c9a" },
+    { "path": "profiles/components/tables.yaml", "sourcePath": "profiles/components/tables.yaml", "sha256": "e98afa2a16c26eaf814902d6694635dd58e73020a5adc16a609306d94e0472cd" },
+    { "path": "profiles/components/code.yaml", "sourcePath": "profiles/components/code.yaml", "sha256": "4985d0f7ea3bd4a0d30f485e0e389df56fe4e2e740f77787793f5d64b590577d" },
+    { "path": "profiles/users/lucas.yaml", "sourcePath": "profiles/users/lucas.yaml", "sha256": "8add9a318f579379b2455624a499e4a87531a75a4893b3bbefd2343062e21790" },
+    { "path": "registries/terms.yaml", "sourcePath": "registries/terms.yaml", "sha256": "478c1803a8129cccc845bcb1d12439516a55ffcfeabebc1fbd3d5f86b46e5f30" },
+    { "path": "registries/units.yaml", "sourcePath": "registries/units.yaml", "sha256": "b73a3b5ee6b587c746a2cb044ae8f743ca16c6a9beda5dcef3c7da5df434a6a1" },
+    { "path": "registries/protected-patterns.yaml", "sourcePath": "registries/protected-patterns.yaml", "sha256": "72f4111bd7fb4345142866d1ea6324218d88b62b7d48b559ab8f35fd0d42cf1c" },
+    { "path": "constitution/hard-vs-advisory.md", "sourcePath": "constitution/hard-vs-advisory.md", "sha256": "390f6fdb4eff13d09292cc8794d3b45c3515c8e95e1e74c424b6ff90d8a663b6" },
+    { "path": "validators/rule-severity.yaml", "sourcePath": "validators/rule-severity.yaml", "sha256": "000130b112bb2503ebcba8ccc7afcf00b0b0f467f42b386842f320eddca3166f" },
+    { "path": "runtime/verification-and-repair.md", "sourcePath": "runtime/verification-and-repair.md", "sha256": "141d89fc5e119088570cb615a08157e245fcca01c1369746c16a777048846629" },
+    { "path": "constitution/user-gold-standard.md", "sourcePath": "constitution/user-gold-standard.md", "sha256": "2fe70bf168a809aaac3a542bccdd74ddde06c55bc531d492a7f820af4211bd67" }
   ],
-  "aggregateSha256": "936edd4f13568dc586d51704971d7ba4a148d8c801c0e0c427c822d4ba7459d6"
+  "aggregateSha256": "2b5c992fa06643bd9744a69d741fe31d1101817026f7909ec868a6cfe9be2941"
 }

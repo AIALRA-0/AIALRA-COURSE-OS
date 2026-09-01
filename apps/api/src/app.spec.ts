@@ -51,9 +51,9 @@ describe("Course OS API", () => {
   it("deduplicates an import by idempotency key", async () => {
     const app = await testApp();
     const source = Buffer.from("# Introduction\nAlgorithms and inputs");
-    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-1").attach("file", source, { filename: "lecture.md", contentType: "text/markdown" }).expect(201);
+    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-1").field("autoGenerate", "false").attach("file", source, { filename: "lecture.md", contentType: "text/markdown" }).expect(201);
     await waitForImport(app, first.body.id);
-    const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-1").attach("file", source, { filename: "lecture.md", contentType: "text/markdown" }).expect(200);
+    const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-1").field("autoGenerate", "false").attach("file", source, { filename: "lecture.md", contentType: "text/markdown" }).expect(200);
     expect(second.body.id).toBe(first.body.id);
   });
 
@@ -62,9 +62,9 @@ describe("Course OS API", () => {
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
     const app = createApp(createDefaultDependencies(root, readweave));
     const course = await request(app).post("/api/v1/courses").set("Idempotency-Key", "import-course").send({ title: "通用算法课" }).expect(201);
-    const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "syllabus-import").field("courseId", course.body.id).field("qualityMode", "quality").field("language", "zh-CN").attach("file", Buffer.from("# Week 1\nAlgorithms and complexity\n\n# Week 2\nGraphs and cuts"), { filename: "syllabus.md", contentType: "text/markdown" }).expect(201);
+    const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "syllabus-import").field("courseId", course.body.id).field("qualityMode", "quality").field("language", "zh-CN").field("autoGenerate", "false").attach("file", Buffer.from("# Week 1\nAlgorithms and complexity\n\n# Week 2\nGraphs and cuts"), { filename: "syllabus.md", contentType: "text/markdown" }).expect(201);
     const ready = await waitForImport(app, accepted.body.id);
-    expect(ready).toMatchObject({ state: "ready", courseId: course.body.id, qualityMode: "quality", language: "zh-CN" });
+    expect(ready).toMatchObject({ state: "ready", courseId: course.body.id, qualityMode: "quality", language: "zh-CN", autoGenerate: false, generationState: "not_requested" });
     expect(ready.pageIds).toHaveLength(1);
     expect(ready.draftIds).toHaveLength(1);
     const releases = await request(app).get("/api/v1/releases").expect(200);
@@ -74,6 +74,32 @@ describe("Course OS API", () => {
     expect(draft?.page.imageUrl).toMatch(/^\/api\/v1\/media\/[a-f0-9]{64}$/);
     expect((await request(app).get("/healthz").expect(200)).body.publishedReleases).toBe(0);
   }, 45_000);
+
+  it("creates one idempotent draft generation job after an import without publishing a release", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-api-auto-generate-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    const dependencies = createDefaultDependencies(root, readweave);
+    const app = createApp(dependencies);
+    const source = Buffer.from("# Partitioning\nSplit the system into smaller connected parts");
+    const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").field("qualityMode", "economy").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(201);
+    const ready = await waitForImport(app, accepted.body.id);
+    expect(ready).toMatchObject({ state: "ready", autoGenerate: true });
+    expect(["queued", "running", "completed"]).toContain(ready.generationState);
+    expect(ready.generationJobId).toBeTruthy();
+    const job = await waitForJob(app, ready.generationJobId);
+    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:2b5c992fa06643bd", budgetUsd: 2 });
+    const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(200);
+    expect(replay.body.id).toBe(ready.id);
+    expect((await dependencies.operations.read()).jobs).toHaveLength(1);
+    expect((await readweave.listReleases()).filter((release) => release.lifecycle !== "draft_source")).toHaveLength(0);
+  }, 45_000);
+
+  it("returns a safe candidate writing policy without private paths", async () => {
+    const policy = await request(await testApp()).get("/api/v1/writing-policy/current").expect(200);
+    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:2b5c992fa06643bd", sourceCommit: "da8c8be24ba4a5f3dca6ccba696413aa78668aa2", status: "candidate", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
+    expect(policy.body.promptTemplate).toContain("SOURCE");
+    expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
+  });
 
   it("removes an exact rejected import without affecting other records", async () => {
     const app = await testApp();

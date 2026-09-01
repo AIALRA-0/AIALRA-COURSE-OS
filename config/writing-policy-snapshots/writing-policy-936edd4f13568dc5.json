@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0.0",
+  "policySnapshotId": "writing-policy:936edd4f13568dc5",
+  "status": "approved",
+  "sourceCommit": "historical-public-baseline",
+  "summary": "Course OS 2.4 现有正式课程使用的历史写作策略快照",
+  "files": [
+    { "path": "SKILL.md", "sourcePath": "SKILL.md", "sha256": "763de27e73bd82e482ed979c9520018de6afc6556ee31efd7a53f1384a999683" },
+    { "path": "structured-documents.md", "sourcePath": "references/structured-documents.md", "sha256": "4455cfa0d6b6e401095cc718ee1196dc166ba118437644b47ad5772bad09e12b" },
+    { "path": "technical-content.md", "sourcePath": "references/technical-content.md", "sha256": "1520eb4b5356d2d397573d37db30e61ef98c8e52f176f795f50c624bd5f56902" },
+    { "path": "complex-reports.md", "sourcePath": "references/complex-reports.md", "sha256": "4567296aee373cac9fc73f94bc4064573150956fbe4d8a703b25f0ce91f5a198" }
+  ],
+  "aggregateSha256": "936edd4f13568dc586d51704971d7ba4a148d8c801c0e0c427c822d4ba7459d6"
+}

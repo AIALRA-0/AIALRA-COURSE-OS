@@ -384,6 +384,9 @@ export interface ImportRecord {
   license: string;
   qualityMode?: "economy" | "balanced" | "quality";
   language?: string;
+  autoGenerate?: boolean;
+  generationJobId?: Identifier;
+  generationState?: JobState | "not_requested";
   sensitivity: "private" | "restricted" | "public";
   state: "quarantined" | "accepted" | "processing" | "syncing" | "ready" | "rejected" | "failed";
   issues: string[];
@@ -439,6 +442,10 @@ export interface GenerationJob {
   id: Identifier;
   workspaceId: Identifier;
   materialVersionId: Identifier;
+  sourceImportId?: Identifier;
+  qualityMode?: "economy" | "balanced" | "quality";
+  language?: string;
+  writingPolicySnapshotId?: Identifier;
   state: JobState;
   budgetUsd: number;
   spentUsd: number;
@@ -449,6 +456,23 @@ export interface GenerationJob {
   cancelRequested: boolean;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+}
+
+export interface WritingPolicyCurrent {
+  schemaVersion: string;
+  policySnapshotId: Identifier;
+  sourceCommit: string;
+  status: "candidate" | "approved";
+  summary: string;
+  taskContract: "GENERATE + TEACHING";
+  promptTemplate: string;
+  files: Array<{ path: string; sha256: string }>;
+  aggregateSha256: string;
+  validator: {
+    status: "passed" | "failed";
+    sourceVerification: "manifest_only" | "source_and_manifest";
+    issues: string[];
+  };
 }
 
 export interface LearningSession {

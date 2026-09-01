@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, GenerationJob, LessonDraft, PageLesson, QualityValidationResult, QuestionBankItem, ReadWeaveSyncStatus } from "@course-os/contracts";
+import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, GenerationJob, LessonDraft, PageLesson, QualityValidationResult, QuestionBankItem, ReadWeaveSyncStatus, WritingPolicyCurrent } from "@course-os/contracts";
 import { api } from "./api.js";
 import { Icon } from "./Icon.js";
 import { Markdown } from "./Markdown.js";
@@ -214,7 +214,7 @@ export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleR
           </div>
           {inspector === "quality" && <QualityInspector page={workingPage} validation={validation} coverage={coverage} />}
           {inspector === "source" && <SourceInspector page={workingPage} draft={draft} sync={sync} />}
-          {inspector === "model" && <ModelInspector release={release} />}
+          {inspector === "model" && <ModelInspector release={release} page={workingPage} job={generationJob} />}
           {inspector === "cost" && <CostInspector release={release} page={workingPage} job={generationJob} />}
         </aside>}
       </div>
@@ -293,20 +293,38 @@ function SourceInspector({ page, draft, sync }: { page: PageLesson; draft?: Less
   </div>;
 }
 
-function ModelInspector({ release }: { release: CourseRelease }) {
+function ModelInspector({ release, page, job }: { release: CourseRelease; page: PageLesson; job?: GenerationJob }) {
+  const [policy, setPolicy] = useState<WritingPolicyCurrent>();
+  const [entries, setEntries] = useState<GenerationCostEntry[]>([]);
+  const [error, setError] = useState("");
+  const load = () => Promise.all([api.writingPolicy(), api.costs({ pageId: page.id })]).then(([nextPolicy, costs]) => { setPolicy(nextPolicy); setEntries(costs.entries); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取策略与模型记录"));
+  useEffect(() => { void load(); }, [page.id, job?.state]);
+  const latest = entries.at(-1);
   return <div className="inspector-body">
-    <div className="route-summary"><span className="route-icon"><Icon name="sparkles" /></span><div><strong>平衡模式</strong><span>按教学难度自动升级模型</span></div></div>
-    <InspectorSection title="阶段路由">
-      <RouteRow model="Luna" task="结构拆解与格式检查" tone="luna" />
-      <RouteRow model="Terra" task="完整教授讲解与评审" tone="terra" />
-      <RouteRow model="Sol" task="困难公式与来源冲突" tone="sol" />
+    <div className="route-summary"><span className="route-icon"><Icon name="sparkles" /></span><div><strong>{latest ? `${latest.provider} / ${latest.model}` : "等待模型调用"}</strong><span>{latest ? `${latest.durationMs} ms · ${latest.qualityPassed ? "质量检查通过" : "等待质量修复"}` : "这里显示实际调用，不展示预设模型"}</span></div></div>
+    <InspectorSection title="当前任务实证">
+      <Definition label="供应商" value={latest?.provider || "尚无调用"} />
+      <Definition label="模型" value={latest?.model || "尚无调用"} />
+      <Definition label="实际成本" value={latest ? formatMicrousd(latest.actualMicrousd) : "$0.0000"} />
+      <Definition label="耗时" value={latest ? `${latest.durationMs} ms` : "—"} />
+      <Definition label="质量结果" value={latest ? latest.qualityPassed ? "通过" : "未通过" : "等待生成"} />
+    </InspectorSection>
+    <InspectorSection title="写作策略快照">
+      <Definition label="状态" value={policy ? policy.status === "candidate" ? "候选版本" : "已批准" : "读取中"} />
+      <Definition label="策略 ID" value={policy?.policySnapshotId || release.writingPolicySnapshotId} />
+      <Definition label="来源提交" value={policy?.sourceCommit || "—"} />
+      <Definition label="任务契约" value={policy?.taskContract || "—"} />
+      <Definition label="验证器" value={policy ? `${policy.validator.status} · ${policy.validator.sourceVerification}` : "读取中"} />
+      {policy && <p className="policy-summary">{policy.summary}</p>}
+      {policy && <details className="prompt-inspector"><summary>查看本轮实际提示词模板</summary><pre>{policy.promptTemplate}</pre></details>}
     </InspectorSection>
     <InspectorSection title="当前发布证据">
       <Definition label="使用路线" value={release.modelRoute} />
       <Definition label="质量版本" value={release.qualityHarnessVersion} />
       <Definition label="累计成本" value={`$${release.costUsd.toFixed(4)}`} />
     </InspectorSection>
-    <div className="budget-card"><div><span>课程软预算</span><strong>$4.00</strong></div><div className="budget-track"><span style={{ width: `${Math.min(100, release.costUsd / 4 * 100)}%` }} /></div><small>达到 80% 后停止非必要媒体阶段</small></div>
+    {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
+    <button className="quiet-button" onClick={load}>刷新策略与模型记录</button>
   </div>;
 }
 
@@ -349,4 +367,3 @@ function InspectorSection({ title, children }: { title: string; children: ReactN
 function Metric({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className="metric-row"><span>{label}</span><strong className={`metric-${tone}`}>{value}</strong></div>; }
 function CheckRow({ ok, label }: { ok: boolean; label: string }) { return <div className="check-row"><span className={ok ? "ok" : "fail"}><Icon name={ok ? "check" : "warning"} /></span><span>{label}</span></div>; }
 function Definition({ label, value }: { label: string; value: string }) { return <div className="definition-row"><span>{label}</span><code title={value}>{value}</code></div>; }
-function RouteRow({ model, task, tone }: { model: string; task: string; tone: string }) { return <div className="route-row"><span className={`model-chip ${tone}`}>{model}</span><span>{task}</span></div>; }

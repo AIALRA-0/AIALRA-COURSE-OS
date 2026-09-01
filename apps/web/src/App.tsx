@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { CourseConflict, CourseRelease, CourseTreeNode, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
+import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
@@ -532,28 +532,45 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
   const [record, setRecord] = useState<ImportRecord>();
   const [qualityMode, setQualityMode] = useState(localStorage.getItem("course-os-budget") || "balanced");
   const [language, setLanguage] = useState(localStorage.getItem("course-os-language") || "zh-CN");
+  const [autoGenerate, setAutoGenerate] = useState(true);
+  const [generationJob, setGenerationJob] = useState<GenerationJob>();
+  const [generationCosts, setGenerationCosts] = useState<GenerationCostEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const completedNotified = useRef(false);
   useEffect(() => {
-    if (!record || ["ready", "failed", "rejected"].includes(record.state)) {
-      if (record?.state === "ready" && !completedNotified.current) {
-        completedNotified.current = true;
-        onImported(record);
+    if (!record || ["failed", "rejected"].includes(record.state)) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const updated = await api.importRecord(record.id);
+        if (cancelled) return;
+        setRecord(updated);
+        if (updated.state === "ready" && !completedNotified.current) {
+          completedNotified.current = true;
+          onImported(updated);
+        }
+        if (updated.generationJobId) {
+          const [job, costs] = await Promise.all([api.generationJob(updated.generationJobId), api.costs({ jobId: updated.generationJobId })]);
+          if (!cancelled) {
+            setGenerationJob(job);
+            setGenerationCosts(costs.entries);
+          }
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取导入与生成进度");
       }
-      return;
-    }
-    const timer = window.setInterval(() => {
-      api.importRecord(record.id).then((updated) => setRecord(updated)).catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取转换进度"));
-    }, 750);
-    return () => window.clearInterval(timer);
-  }, [record?.id, record?.state]);
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [record?.id]);
   const upload = async () => {
     if (!file) return;
     setBusy(true);
     setError("");
     try {
-      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId });
+      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate });
       setRecord(imported);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "材料导入失败"); }
     finally { setBusy(false); }
@@ -570,11 +587,28 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
           <span className="file-types">PPTX · PDF · MD · TXT</span>
         </label>
         <div className="import-options"><label><span>目标课程</span><select value={courseId} onChange={(event) => setCourseId(event.target.value)}><option value="">暂不归类</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label><label><span>生成质量</span><select value={qualityMode} onChange={(event) => setQualityMode(event.target.value)}><option value="economy">经济</option><option value="balanced">平衡</option><option value="quality">质量</option></select></label><label><span>内容语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
+        <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
         <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!file || busy} onClick={upload}><Icon name="sparkles" />{busy ? "正在安全检查" : "导入并开始解析"}</button></footer>
-      </> : <div className={`import-success import-state-${record.state}`}><span>{record.state === "failed" || record.state === "rejected" ? <Icon name="warning" /> : record.state === "ready" ? <Icon name="check" /> : <span className="loader" />}</span><h3>{importStatus(record.state).title}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入进度"><i style={{ width: `${importStatus(record.state).progress}%` }} /></div><p className="import-status-copy">{importStatus(record.state).detail}</p><dl><div><dt>文件指纹</dt><dd>{record.sha256.slice(0, 20)}…</dd></div><div><dt>识别类型</dt><dd>{record.kind.toUpperCase()}</dd></div><div><dt>页面数量</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>ReadWeave 草稿</dt><dd>{record.draftIds?.length ?? "—"}</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!['ready', 'failed', 'rejected'].includes(record.state)} onClick={onClose}>{record.state === "ready" ? "打开课程工作区" : record.state === "failed" || record.state === "rejected" ? "关闭" : "正在处理"}</button></div>}
+      </> : <ImportProgress record={record} job={generationJob} costs={generationCosts} onClose={onClose} />}
     </section>
   </div>;
+}
+
+function ImportProgress({ record, job, costs, onClose }: { record: ImportRecord; job?: GenerationJob; costs: GenerationCostEntry[]; onClose: () => void }) {
+  const importInfo = importStatus(record.state);
+  const auto = record.autoGenerate !== false;
+  const terminalJob = !auto || Boolean(job && ["completed", "failed", "cancelled"].includes(job.state));
+  const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && terminalJob);
+  const generated = job?.completedPageIds.length ?? 0;
+  const total = job?.pageIds.length ?? record.pageIds?.length ?? 0;
+  const generationProgress = total ? generated / total : 0;
+  const progress = record.state === "ready" && auto ? 65 + generationProgress * 35 : importInfo.progress;
+  const failed = job?.failedPageIds.length ?? 0;
+  const latestCost = costs.at(-1);
+  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料草稿已经就绪" : !job ? "正在建立整套生成任务" : job.state === "completed" ? "候选讲解已经生成" : job.state === "failed" ? "生成任务已停止" : job.state === "cancelled" ? "生成任务已取消" : "正在逐页生成候选讲解";
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : job ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : "转换结果已保存，正在建立唯一的幂等生成任务";
+  return <div className={`import-success import-state-${record.state}`}><span>{record.state === "failed" || record.state === "rejected" || job?.state === "failed" ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "等待首次调用"}</dd></div><div><dt>累计成本</dt><dd>${(job?.spentUsd ?? 0).toFixed(4)}</dd></div><div><dt>发布状态</dt><dd>候选草稿，未发布</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
 }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {

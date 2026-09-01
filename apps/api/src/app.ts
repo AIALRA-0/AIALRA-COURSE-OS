@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import cors from "cors";
@@ -16,6 +16,7 @@ import type {
   GenerationCostEntry,
   GenerationJob,
   IdempotentWriteContext,
+  ImportRecord,
   LessonSection,
   LessonDraft,
   LearningSession,
@@ -33,6 +34,7 @@ import type {
   ReviewAttemptResult,
   TreeNodeProperties,
   WorkspaceSettings,
+  WritingPolicyCurrent,
   CourseTreeNodeKind,
   TrashRecord
 } from "@course-os/contracts";
@@ -44,7 +46,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, modelRouterFromEnvironment, probeProviderConnection, providerRouterFromSettings, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
+import { ModelRouterGenerationError, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 
@@ -81,6 +83,12 @@ export function createApp(dependencies: AppDependencies): Express {
       apiVersion: COURSE_API_VERSION,
       publishedReleases: releases.filter((release) => release.lifecycle !== "draft_source").length,
     });
+  });
+
+  app.get("/api/v1/writing-policy/current", async (_request, response, next) => {
+    try {
+      response.json(await currentWritingPolicy());
+    } catch (error) { next(error); }
   });
 
   app.get("/api/v1/workspaces/:id/tree", async (request, response, next) => {
@@ -592,6 +600,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const cas = await dependencies.cas.put(request.file.buffer);
       const record = await dependencies.operations.mutate((state) => {
         const now = new Date().toISOString();
+        const autoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
         const item = {
           id: randomUUID(),
           workspaceId: request.header("X-Workspace-Id") || "personal",
@@ -607,6 +616,8 @@ export function createApp(dependencies: AppDependencies): Express {
           license: String(request.body.license || "private_course_material"),
           qualityMode: normalizeQualityMode(request.body.qualityMode),
           language: String(request.body.language || "zh-CN"),
+          autoGenerate,
+          generationState: autoGenerate ? "queued" as const : "not_requested" as const,
           sensitivity: "private" as const,
           state: inspection.accepted ? "accepted" as const : "rejected" as const,
           issues: inspection.issues,
@@ -624,9 +635,11 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/imports/:id", async (request, response, next) => {
     try {
-      const record = (await dependencies.operations.read()).imports.find((item) => item.id === request.params.id);
+      const snapshot = await dependencies.operations.read();
+      const record = snapshot.imports.find((item) => item.id === request.params.id);
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
-      response.json(record);
+      const job = snapshot.jobs.find((item) => item.id === record.generationJobId || item.sourceImportId === record.id);
+      response.json(job ? { ...record, generationJobId: job.id, generationState: job.state } : record);
     } catch (error) { next(error); }
   });
 
@@ -673,18 +686,18 @@ export function createApp(dependencies: AppDependencies): Express {
       if (pageIds.length === 0) return sendError(request, response, 422, "PAGE_IDS_REQUIRED", "生成任务至少要包含 1 个页面", false);
       const unknownPageIds = pageIds.filter((pageId) => !release.pageIds.includes(pageId));
       if (unknownPageIds.length > 0) return sendError(request, response, 422, "PAGE_IDS_INVALID", "生成任务包含不属于材料版本的页面", false, { pageIds: unknownPageIds });
-      const now = new Date().toISOString();
-      const job: GenerationJob = {
-        id: randomUUID(), workspaceId, materialVersionId,
-        state: "queued", budgetUsd, spentUsd: 0, pageIds, completedPageIds: [], failedPageIds: [], attempt: 0, cancelRequested: false, createdAt: now, updatedAt: now
-      };
-      await dependencies.operations.mutate((state) => {
-        state.jobs.push(job);
-        state.idempotency[idempotencyKey] = { kind: "job", objectId: job.id };
-        dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: pageIds.length, budgetUsd });
-      });
-      if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => runLocalJob(job.id, dependencies).catch(() => undefined));
-      response.status(202).json(job);
+      const result = await persistGenerationJob({
+        idempotencyKey,
+        workspaceId,
+        materialVersionId,
+        pageIds,
+        budgetUsd,
+        qualityMode: request.body.qualityMode === "economy" || request.body.qualityMode === "balanced" || request.body.qualityMode === "quality" ? request.body.qualityMode : generationQualityMode(budgetUsd),
+        language: String(request.body.language || "zh-CN"),
+        writingPolicySnapshotId: release.writingPolicySnapshotId
+      }, dependencies);
+      if (result.created) startGenerationJob(result.job.id, dependencies);
+      response.status(result.created ? 202 : 200).json(result.job);
     } catch (error) { next(error); }
   });
 
@@ -1890,6 +1903,56 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
   }
 }
 
+interface PersistGenerationJobInput {
+  idempotencyKey: string;
+  workspaceId: string;
+  materialVersionId: string;
+  pageIds: string[];
+  budgetUsd: number;
+  sourceImportId?: string;
+  qualityMode: "economy" | "balanced" | "quality";
+  language: string;
+  writingPolicySnapshotId: string;
+}
+
+async function persistGenerationJob(input: PersistGenerationJobInput, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean }> {
+  return dependencies.operations.mutate((state) => {
+    const replay = state.idempotency[input.idempotencyKey];
+    if (replay) {
+      const existing = state.jobs.find((item) => item.id === replay.objectId);
+      if (existing) return { job: structuredClone(existing), created: false };
+    }
+    const now = new Date().toISOString();
+    const job: GenerationJob = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      materialVersionId: input.materialVersionId,
+      sourceImportId: input.sourceImportId,
+      qualityMode: input.qualityMode,
+      language: input.language,
+      writingPolicySnapshotId: input.writingPolicySnapshotId,
+      state: "queued",
+      budgetUsd: input.budgetUsd,
+      spentUsd: 0,
+      pageIds: [...input.pageIds],
+      completedPageIds: [],
+      failedPageIds: [],
+      attempt: 0,
+      cancelRequested: false,
+      createdAt: now,
+      updatedAt: now
+    };
+    state.jobs.push(job);
+    state.idempotency[input.idempotencyKey] = { kind: "job", objectId: job.id };
+    dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: job.pageIds.length, budgetUsd: job.budgetUsd, sourceImportId: job.sourceImportId, writingPolicySnapshotId: job.writingPolicySnapshotId });
+    return { job: structuredClone(job), created: true };
+  });
+}
+
+function startGenerationJob(jobId: string, dependencies: AppDependencies): void {
+  if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => runLocalJob(jobId, dependencies).catch(() => undefined));
+}
+
 async function runLocalJob(jobId: string, dependencies: AppDependencies): Promise<void> {
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
@@ -1902,6 +1965,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
   const release = await dependencies.readweave.getRelease(initial.materialVersionId);
   if (!release) {
     await failGenerationJob(jobId, "MATERIAL_VERSION_NOT_FOUND", dependencies);
+    return;
+  }
+  if (initial.writingPolicySnapshotId && initial.writingPolicySnapshotId !== release.writingPolicySnapshotId) {
+    await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies);
     return;
   }
   const runtimeModelRouter = await resolveRuntimeModelRouter(dependencies);
@@ -1930,7 +1997,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, writingPolicySnapshotId: release.writingPolicySnapshotId, language: "zh-CN", qualityMode: generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v3`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v3`, stage: "teach" })
         : deterministicTeachingPackage(page);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
@@ -2310,6 +2377,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     const materialVersionId = `material-version:${record.id}`;
     const moduleId = parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`;
     const createdAt = new Date().toISOString();
+    const writingPolicy = await currentWritingPolicy();
+    if (writingPolicy.validator.status !== "passed") throw new Error("WRITING_POLICY_VALIDATION_FAILED");
     const sourceRelease: CourseRelease = {
       id: materialVersionId,
       courseId: course.id,
@@ -2322,7 +2391,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       pages: convertedPages.map((item) => item.page),
       assessments: [],
       manifestHash: record.sha256,
-      writingPolicySnapshotId: "writing-policy:unassigned",
+      writingPolicySnapshotId: writingPolicy.policySnapshotId,
       modelRoute: "deterministic-offline-import-v1",
       qualityHarnessVersion: "source-draft-gate-v1",
       costUsd: 0,
@@ -2366,6 +2435,17 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         dependencies.operations.appendEvent(state, importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
     }
+    const generation = record.autoGenerate === true ? await persistGenerationJob({
+      idempotencyKey: `import:${importId}:generation`,
+      workspaceId: record.workspaceId,
+      materialVersionId,
+      pageIds: convertedPages.map((entry) => entry.page.id),
+      budgetUsd: generationBudget(record.qualityMode),
+      sourceImportId: importId,
+      qualityMode: record.qualityMode || "balanced",
+      language: record.language || "zh-CN",
+      writingPolicySnapshotId: writingPolicy.policySnapshotId
+    }, dependencies) : undefined;
     await dependencies.operations.mutate((state) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item) return;
@@ -2375,8 +2455,11 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.draftIds = savedDrafts.map((draft) => draft.id);
       item.convertedAt = conversion.completedAt;
       item.state = "ready";
-      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds });
+      item.generationJobId = generation?.job.id;
+      item.generationState = generation?.job.state || "not_requested";
+      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
+    if (generation?.created) startGenerationJob(generation.job.id, dependencies);
   } catch (error) {
     const issue = safeImportIssue(error);
     await dependencies.operations.mutate((state) => {
@@ -2390,6 +2473,10 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     running.delete(importId);
     await removeConversionOutput(outputDir).catch(() => undefined);
   }
+}
+
+function generationBudget(mode: ImportRecord["qualityMode"]): number {
+  return mode === "quality" ? 8 : mode === "economy" ? 2 : 4;
 }
 
 function resolveParentCourseId(parentNode: CourseTreeNode | undefined, nodes: CourseTreeNode[], fallback: string | undefined): string | undefined {
@@ -2461,6 +2548,55 @@ function createImportedPage(sourceHash: string, pageNumber: number, title: strin
     coverageRequirements: [{ id: `${pageId}:requirement:${atomId}`, atomId, requiredFields: ["label", "observation", "inference"], risk: "general" }],
     coverageClaims: [{ requirementId: `${pageId}:requirement:${atomId}`, explanationBlockId: coreId, coveredFields: ["label", "observation"], status: "partial" }],
     quality: { highRiskCoverage: 1, generalCoverage: 2 / 3, mathValid: true, publishable: false, issues: ["TEACHING_GENERATION_REQUIRED", "ELEMENT_ANALYSIS_REQUIRED"] }
+  };
+}
+
+interface WritingPolicyManifestFile {
+  path: string;
+  sourcePath: string;
+  sha256: string;
+}
+
+interface WritingPolicyManifestFileState {
+  schemaVersion: string;
+  policySnapshotId: string;
+  status: "candidate" | "approved";
+  sourceCommit: string;
+  summary: string;
+  files: WritingPolicyManifestFile[];
+  aggregateSha256: string;
+}
+
+async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
+  const manifest = JSON.parse(await readFile(join(process.cwd(), "config", "writing-policy-manifest.json"), "utf8")) as WritingPolicyManifestFileState;
+  const issues: string[] = [];
+  const aggregate = sha256Text(stableStringify(manifest.files.map(({ path, sha256 }) => ({ path, sha256 }))));
+  if (aggregate !== manifest.aggregateSha256 || manifest.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) issues.push("WRITING_POLICY_MANIFEST_HASH_MISMATCH");
+  if (manifest.files.some((file) => !file.path || !/^[a-f0-9]{64}$/.test(file.sha256) || file.sourcePath.includes("..") || /^[A-Za-z]:|^[\\/]/.test(file.sourcePath))) issues.push("WRITING_POLICY_FILE_ENTRY_INVALID");
+
+  const configuredSkillRoot = process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
+  if (configuredSkillRoot) {
+    for (const file of manifest.files) {
+      try {
+        const actual = createHash("sha256").update(await readFile(join(configuredSkillRoot, file.sourcePath))).digest("hex");
+        if (actual !== file.sha256) issues.push(`WRITING_POLICY_SOURCE_HASH_MISMATCH:${file.path}`);
+      } catch {
+        issues.push(`WRITING_POLICY_SOURCE_FILE_MISSING:${file.path}`);
+      }
+    }
+  }
+
+  return {
+    schemaVersion: manifest.schemaVersion,
+    policySnapshotId: manifest.policySnapshotId,
+    sourceCommit: manifest.sourceCommit,
+    status: manifest.status,
+    summary: manifest.summary,
+    taskContract: "GENERATE + TEACHING",
+    promptTemplate: professorInstructions("zh-CN"),
+    files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })),
+    aggregateSha256: manifest.aggregateSha256,
+    validator: { status: issues.length ? "failed" : "passed", sourceVerification: configuredSkillRoot ? "source_and_manifest" : "manifest_only", issues }
   };
 }
 
