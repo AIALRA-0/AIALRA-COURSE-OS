@@ -468,6 +468,7 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
   const normalized = stripJsonFences(value);
   try { return JSON.parse(normalized) as TeachingPackage; }
   catch {
+    let firstParsed: TeachingPackage | undefined;
     for (let start = normalized.indexOf("{"); start >= 0; start = normalized.indexOf("{", start + 1)) {
       let depth = 0;
       let inString = false;
@@ -483,11 +484,24 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
         if (character === '"') { inString = true; continue; }
         if (character === "{") depth += 1;
         else if (character === "}" && --depth === 0) {
-          try { return JSON.parse(normalized.slice(start, index + 1)) as TeachingPackage; }
-          catch { break; }
+          try {
+            const candidate = JSON.parse(normalized.slice(start, index + 1)) as TeachingPackage;
+            firstParsed ??= candidate;
+            try {
+              validateTeachingPackage(candidate);
+              return candidate;
+            } catch {
+              // A provider may include a parseable metadata object before the
+              // actual teaching package. Keep scanning for the valid object.
+            }
+          } catch {
+            // This brace pair was not a complete JSON object; keep scanning.
+          }
+          break;
         }
       }
     }
+    if (firstParsed) return firstParsed;
     throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
   }
 }
