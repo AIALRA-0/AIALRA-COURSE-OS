@@ -47,7 +47,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 
@@ -95,7 +95,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-harness/current", async (_request, response, next) => {
     try {
       const snapshot = currentGenerationHarness();
-      response.json({ ...snapshot, systemPrompt: professorInstructions("zh-CN"), userPrompt: teachingUserPromptTemplate, schema: teachingPackageSchema });
+      response.json({ ...snapshot, systemPrompt: professorInstructions("zh-CN"), userPrompt: teachingUserPromptTemplate, blueprint: teachingBlueprint, schema: teachingPackageSchema });
     } catch (error) { next(error); }
   });
 

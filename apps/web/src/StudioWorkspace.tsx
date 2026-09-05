@@ -325,7 +325,7 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
     <InspectorSection title="生成 Harness">
       <Definition label="Harness" value={harness ? `${harness.id} · v${harness.version}` : "读取中"} />
       <Definition label="聚合哈希" value={harness?.aggregateSha256.slice(0, 16) || "—"} />
-      {harness && <details className="prompt-inspector"><summary>查看系统提示词、用户模板与 Schema</summary><pre>{`SYSTEM\n${harness.systemPrompt}\n\nUSER TEMPLATE\n${harness.userPrompt}\n\nSCHEMA\n${JSON.stringify(harness.schema, null, 2)}`}</pre></details>}
+      {harness && <details className="prompt-inspector"><summary>查看教学蓝图、系统提示词、用户模板与 Schema</summary><pre>{`TEACHING BLUEPRINT\n${harness.blueprint}\n\nSYSTEM\n${harness.systemPrompt}\n\nUSER TEMPLATE\n${harness.userPrompt}\n\nSCHEMA\n${JSON.stringify(harness.schema, null, 2)}`}</pre></details>}
     </InspectorSection>
     <InspectorSection title="当前发布证据">
       <Definition label="使用路线" value={release.modelRoute} />

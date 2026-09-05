@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth } from "@course-os/contracts";
 import { modelInput, professorInstructions, teachingPackageSchema } from "./generation-harness.js";
-export { currentGenerationHarness, modelInput, professorInstructions, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
+export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
   learningObjectives: string[];

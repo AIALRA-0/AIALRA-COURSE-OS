@@ -717,6 +717,7 @@ export interface GenerationHarnessCurrent {
   aggregateSha256: string;
   systemPrompt: string;
   userPrompt: string;
+  blueprint: string;
   schema: unknown;
 }
 
