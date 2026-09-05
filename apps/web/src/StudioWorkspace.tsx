@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, GenerationJob, LessonDraft, PageLesson, QualityValidationResult, QuestionBankItem, ReadWeaveSyncStatus, WritingPolicyCurrent } from "@course-os/contracts";
+import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, GenerationHarnessCurrent, GenerationJob, LessonDraft, PageLesson, QualityValidationResult, QuestionBankItem, ReadWeaveSyncStatus, WritingPolicyCurrent } from "@course-os/contracts";
 import { api } from "./api.js";
 import { Icon } from "./Icon.js";
 import { Markdown } from "./Markdown.js";
@@ -298,9 +298,10 @@ function SourceInspector({ page, draft, sync }: { page: PageLesson; draft?: Less
 
 function ModelInspector({ release, page, job }: { release: CourseRelease; page: PageLesson; job?: GenerationJob }) {
   const [policy, setPolicy] = useState<WritingPolicyCurrent>();
+  const [harness, setHarness] = useState<GenerationHarnessCurrent>();
   const [entries, setEntries] = useState<GenerationCostEntry[]>([]);
   const [error, setError] = useState("");
-  const load = () => Promise.all([api.writingPolicy(), api.costs({ pageId: page.id })]).then(([nextPolicy, costs]) => { setPolicy(nextPolicy); setEntries(costs.entries); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取策略与模型记录"));
+  const load = () => Promise.all([api.writingPolicy(), api.generationHarness(), api.costs({ pageId: page.id })]).then(([nextPolicy, nextHarness, costs]) => { setPolicy(nextPolicy); setHarness(nextHarness); setEntries(costs.entries); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取策略与模型记录"));
   useEffect(() => { void load(); }, [page.id, job?.state]);
   const latest = entries.at(-1);
   return <div className="inspector-body">
@@ -320,6 +321,11 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
       <Definition label="验证器" value={policy ? `${policy.validator.status} · ${policy.validator.sourceVerification}` : "读取中"} />
       {policy && <p className="policy-summary">{policy.summary}</p>}
       {policy && <details className="prompt-inspector"><summary>查看本轮实际提示词模板</summary><pre>{policy.promptTemplate}</pre></details>}
+    </InspectorSection>
+    <InspectorSection title="生成 Harness">
+      <Definition label="Harness" value={harness ? `${harness.id} · v${harness.version}` : "读取中"} />
+      <Definition label="聚合哈希" value={harness?.aggregateSha256.slice(0, 16) || "—"} />
+      {harness && <details className="prompt-inspector"><summary>查看系统提示词、用户模板与 Schema</summary><pre>{`SYSTEM\n${harness.systemPrompt}\n\nUSER TEMPLATE\n${harness.userPrompt}\n\nSCHEMA\n${JSON.stringify(harness.schema, null, 2)}`}</pre></details>}
     </InspectorSection>
     <InspectorSection title="当前发布证据">
       <Definition label="使用路线" value={release.modelRoute} />

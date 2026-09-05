@@ -27,7 +27,8 @@ import type {
   ReviewPlan,
   ReviewSession,
   ReviewAttemptResult,
-  WritingPolicyCurrent
+  WritingPolicyCurrent,
+  GenerationHarnessCurrent
 } from "@course-os/contracts";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -203,6 +204,7 @@ export const api = {
   }),
   generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
   writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
+  generationHarness: () => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current"),
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {
     const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }>(`/api/v1/costs${query.size ? `?${query}` : ""}`);

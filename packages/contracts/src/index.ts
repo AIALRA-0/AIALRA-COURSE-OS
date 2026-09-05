@@ -703,8 +703,21 @@ export interface ModelRouteRule {
 export interface ModelRoutePolicy {
   workspaceId: Identifier;
   rules: ModelRouteRule[];
+  /** Provider fallback is opt-in so a failed primary route is never hidden. */
+  allowProviderFallback?: boolean;
   allowAialraEmergencyFallback: boolean;
   updatedAt: ISODateTime;
+}
+
+export interface GenerationHarnessCurrent {
+  id: Identifier;
+  version: string;
+  taskContract: "GENERATE + TEACHING";
+  files: Array<{ path: string; sha256: string }>;
+  aggregateSha256: string;
+  systemPrompt: string;
+  userPrompt: string;
+  schema: unknown;
 }
 
 export interface CostRollup {

@@ -47,7 +47,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 
@@ -89,6 +89,13 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/writing-policy/current", async (_request, response, next) => {
     try {
       response.json(await currentWritingPolicy());
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/generation-harness/current", async (_request, response, next) => {
+    try {
+      const snapshot = currentGenerationHarness();
+      response.json({ ...snapshot, systemPrompt: professorInstructions("zh-CN"), userPrompt: teachingUserPromptTemplate, schema: teachingPackageSchema });
     } catch (error) { next(error); }
   });
 
@@ -394,7 +401,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.put("/api/v1/model-route-policy", async (request, response, next) => {
     try {
       const policy = request.body as ModelRoutePolicy;
-      if (!policy || !Array.isArray(policy.rules) || typeof policy.allowAialraEmergencyFallback !== "boolean") return sendError(request, response, 422, "MODEL_ROUTE_POLICY_INVALID", "模型路由规则结构无效", false);
+      if (!policy || !Array.isArray(policy.rules) || typeof policy.allowAialraEmergencyFallback !== "boolean" || (policy.allowProviderFallback !== undefined && typeof policy.allowProviderFallback !== "boolean")) return sendError(request, response, 422, "MODEL_ROUTE_POLICY_INVALID", "模型路由规则结构无效", false);
       response.json(await dependencies.readweave.saveModelRoutePolicy(policy, writeContext(request, requireIdempotencyKey(request))));
     } catch (error) { next(error); }
   });

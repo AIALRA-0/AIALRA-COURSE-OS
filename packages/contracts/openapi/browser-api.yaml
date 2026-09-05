@@ -489,6 +489,11 @@ paths:
       operationId: getCurrentWritingPolicy
       responses:
         '200': { description: Safe current policy snapshot, prompt template and validator state without private paths or credentials }
+  /generation-harness/current:
+    get:
+      operationId: getCurrentGenerationHarness
+      responses:
+        '200': { description: Versioned generation prompt templates, output schema and hashes without credentials or private source data }
   /generation-plans:
     post:
       operationId: createGenerationPlan

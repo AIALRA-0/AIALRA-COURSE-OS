@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, probeProviderConnection, RoutedProviderTeachingClient } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness } from "./model-router.js";
+
+describe("generation harness", () => {
+  it("loads editable prompt and schema files as one hashed snapshot", () => {
+    const snapshot = currentGenerationHarness();
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.0.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-package.schema.json"]);
+    expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
 
 describe("AIALRA Model Router teaching client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -144,6 +153,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const firstError = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: secret, model: "deepseek-v4-pro", protocol: "responses" }).generateTeachingPackage(providerInput("secret-error-test")).catch((error: unknown) => error);
     expect(firstError).toBeInstanceOf(ModelRouterGenerationError);
     expect(String(firstError)).not.toContain(secret);
+  });
+
+  it("keeps the primary provider error when fallback is disabled", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "rate_limited" } }, { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true, credential: { configured: true }, models: [{ id: "deepseek-v4-pro", displayName: "DeepSeek", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] },
+        { id: "opencode-go", displayName: "OpenCode", baseUrl: "https://opencode.test", enabled: true, credential: { configured: true }, models: [{ id: "fallback", displayName: "Fallback", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }] }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: false, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(), rules: [{ stage: "teach", providerId: "deepseek", modelId: "deepseek-v4-pro", fallbackProviderId: "opencode-go", fallbackModelId: "fallback", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const failure = await client.generateTeachingPackage(providerInput("no-fallback-test")).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_FAILED:rate_limited" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("checks provider connectivity without returning the credential", async () => {

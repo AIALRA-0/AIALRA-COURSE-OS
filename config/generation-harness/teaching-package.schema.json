@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "learningObjectives": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 8 } },
+    "mainContentMarkdown": { "type": "string", "minLength": 30 },
+    "priorKnowledge": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 6 } },
+    "fullExplanationMarkdown": { "type": "string", "minLength": 300 },
+    "misconceptions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 8 } },
+    "coverageEvidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "atomId": { "type": "string", "minLength": 1 },
+          "coveredFields": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "explanation": { "type": "string", "minLength": 20 }
+        },
+        "required": ["atomId", "coveredFields", "explanation"],
+        "additionalProperties": false
+      }
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string", "enum": ["comprehension", "multiple_choice"] },
+          "prompt": { "type": "string", "minLength": 8 },
+          "options": { "type": "array", "minItems": 0, "maxItems": 4, "items": { "type": "string", "minLength": 1 } },
+          "expectedAnswer": { "type": "string", "minLength": 1 },
+          "explanation": { "type": "string", "minLength": 8 }
+        },
+        "required": ["kind", "prompt", "options", "expectedAnswer", "explanation"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["learningObjectives", "mainContentMarkdown", "priorKnowledge", "fullExplanationMarkdown", "misconceptions", "coverageEvidence", "questions"],
+  "additionalProperties": false
+}

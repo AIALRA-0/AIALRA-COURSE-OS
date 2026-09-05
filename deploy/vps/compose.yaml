@@ -50,6 +50,7 @@ services:
       READWEAVE_API_TOKEN_FILE: /run/secrets/readweave_api_token
       MODEL_ROUTER_URL: ${MODEL_ROUTER_URL:-}
       MODEL_ROUTER_API_KEY_FILE: /run/secrets/model_router_api_key
+      COURSE_OS_ALLOW_AIALRA_EMERGENCY: ${COURSE_OS_ALLOW_AIALRA_EMERGENCY:-false}
     command:
       - sh
       - -c
@@ -63,7 +64,7 @@ services:
       - ${COURSE_OS_API_BIND:-127.0.0.1:14100}:4100
     depends_on:
       postgres: { condition: service_healthy }
-    networks: [course-private, model-router]
+    networks: [course-private, model-router, readweave]
     logging: *course-os-logging
     restart: unless-stopped
 
@@ -141,3 +142,6 @@ networks:
   model-router:
     external: true
     name: ${MODEL_ROUTER_NETWORK:?Set MODEL_ROUTER_NETWORK on the VPS}
+  readweave:
+    external: true
+    name: ${READWEAVE_NETWORK:-readweave_default}

@@ -1,0 +1,8 @@
+{
+  "id": "course-os-teaching",
+  "version": "1.0.0",
+  "taskContract": "GENERATE + TEACHING",
+  "promptFiles": ["teaching-system-prompt.md", "teaching-user-prompt.md"],
+  "schemaFile": "teaching-package.schema.json",
+  "writingPolicySnapshotRequired": true
+}

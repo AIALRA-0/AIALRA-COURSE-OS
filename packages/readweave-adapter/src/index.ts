@@ -157,6 +157,7 @@ export function defaultModelProviders(): ModelProviderConfig[] {
 export function defaultModelRoutePolicy(workspaceId: string): ModelRoutePolicy {
   return {
     workspaceId,
+    allowProviderFallback: false,
     allowAialraEmergencyFallback: false,
     updatedAt: new Date(0).toISOString(),
     rules: [
