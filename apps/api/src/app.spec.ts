@@ -150,7 +150,7 @@ describe("Course OS API", () => {
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-anchor-candidate", pageNumbers: [1, 2, 3, 4, 5, 6], holdForReview: true, budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
     const completed = await waitForPlan(app, created.body.generationPlan.id);
-    expect(completed).toMatchObject({ state: "awaiting_review", pageIds: [
+    expect(completed).toMatchObject({ state: "completed", pageIds: [
       "test-release-v2-anchor-candidate:page:1",
       "test-release-v2-anchor-candidate:page:2",
       "test-release-v2-anchor-candidate:page:3",
@@ -623,7 +623,14 @@ function testTeachingResult(apiEquivalentUsd: number) {
       learningObjectives: ["能够说明输入、处理规则和输出之间的关系"],
       mainContentMarkdown: "先识别输入，再按照规则处理，最后检查输出是否满足目标",
       priorKnowledge: ["先知道输入和输出分别表示什么"],
-      fullExplanationMarkdown: "输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果。每一步都要对照目标与约束检查，不能只看最后数字。".repeat(8),
+      fullExplanationMarkdown: [
+        "## 先说这页要解决什么\n这页要把输入、处理规则和输出连成一条可以检查的流程，读者最后要能说明每一步为什么发生",
+        "## 先读原对象\n输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果",
+        "## 解释核心关系\n先确认输入，再按规则处理对象，处理过程会把状态推进到新的结果，最后必须把输出和目标重新比较",
+        "## 做一个例子或计算\n假设输入已经满足前提，先记录初始状态，再执行规则并写出中间状态，最后检查结果是否满足目标",
+        "## 边界与易错点\n如果输入条件缺失，规则就不能直接套用，输出看起来合理也不能替代前提检查；只看最后数字会漏掉过程中的错误",
+        "## 最后回收\n记住对象、规则、状态变化和检查动作之间的关系，下一步应回到具体输入验证这条流程"
+      ].join("\n\n"),
       misconceptions: ["不要跳过输入条件直接套用最后结论"],
       coverageEvidence: [],
       questions: [

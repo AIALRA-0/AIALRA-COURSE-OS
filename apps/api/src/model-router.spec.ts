@@ -4,8 +4,8 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.0.0", taskContract: "GENERATE + TEACHING" });
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-package.schema.json"]);
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.1.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 });
@@ -24,7 +24,7 @@ describe("AIALRA Model Router teaching client", () => {
       expect(request.text.format.schema.properties.questions.items.required).toContain("options");
       expect(request.text.format.schema.required).toContain("coverageEvidence");
       expect(request.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
-      expect(request.instructions).toContain("人类可读写作硬约束");
+      expect(request.instructions).toContain("人类可读技术写作");
       expect(request.metadata.writing_policy_snapshot_id).toBe("writing-policy:test");
       return Response.json({
         status: "succeeded",

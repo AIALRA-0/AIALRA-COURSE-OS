@@ -42,7 +42,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, hashManifest, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, normalizeLegacyMathDelimiters, validatePageForPublication, validateTex } from "@course-os/quality";
+import { calculateCoverage, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
@@ -2272,7 +2272,6 @@ async function settleGenerationPlan(planId: string, dependencies: AppDependencie
     const remaining = plan.pageIds.filter((pageId) => !plan.completedPageIds.includes(pageId) && !plan.failedPageIds.includes(pageId));
     if (remaining.length > 0) plan.state = "queued";
     else if (plan.failedPageIds.length > 0) plan.state = "failed";
-    else if (plan.holdForReview) plan.state = "awaiting_review";
     else plan.state = "completed";
     syncImportGenerationPlan(state, plan);
     dependencies.operations.appendEvent(state, plan.id, `plan.${plan.state}`, { completedPageIds: plan.completedPageIds, failedPageIds: plan.failedPageIds, spentUsd: plan.spentUsd, remainingPages: remaining.length });
@@ -2404,6 +2403,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       assertTeachingCoverageEvidence(page, generation.content);
+      if (runtimeModelRouter) {
+        const narrativeIssues = validateTeachingNarrative(generation.content);
+        if (narrativeIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${narrativeIssues[0]}`, generation.model, generation.usage, generation.provider);
+      }
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
       const issues = validatePageForPublication(generatedPage);
@@ -2551,8 +2554,9 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
   const anchorIds = page.anchors.map((item) => item.id);
   const atomIds = page.atoms.map((item) => item.id);
   const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: oneSentence(text), sourceAnchorIds: anchorIds }));
-  const evidenceMarkdown = normalizedContent.coverageEvidence.length > 0 ? `\n\n### 页面元素核对\n\n${normalizedContent.coverageEvidence.map((item) => `- \`${item.atomId}\`：${item.explanation}`).join("\n")}` : "";
-  const fullExplanationMarkdown = `${normalizedContent.fullExplanationMarkdown}${evidenceMarkdown}`;
+  // Coverage evidence is operational metadata. Appending it to the lesson
+  // made the learner-facing explanation read like an internal audit log.
+  const fullExplanationMarkdown = normalizedContent.fullExplanationMarkdown;
   const lessonSections: LessonSection[] = [
     { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: sentenceItems("objective", normalizedContent.learningObjectives), sourceAnchorIds: anchorIds, atomIds },
     { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: normalizedContent.mainContentMarkdown, sourceAnchorIds: anchorIds, atomIds },
@@ -2577,6 +2581,13 @@ function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], co
   const atomIds = new Set(page.atoms.map((atom) => atom.id));
   const unknown = [...new Set(content.coverageEvidence.map((item) => item.atomId).filter((atomId) => !atomIds.has(atomId)))];
   if (unknown.length > 0) throw new Error("TEACHING_COVERAGE_ATOM_UNKNOWN");
+  const evidenceByAtom = new Map(content.coverageEvidence.map((item) => [item.atomId, item]));
+  for (const requirement of page.coverageRequirements) {
+    const evidence = evidenceByAtom.get(requirement.atomId);
+    if (!evidence) throw new Error("TEACHING_COVERAGE_REQUIREMENT_MISSING");
+    if (requirement.requiredFields.some((field) => !evidence.coveredFields.includes(field))) throw new Error("TEACHING_COVERAGE_FIELD_MISSING");
+    if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) throw new Error("TEACHING_COVERAGE_EXPLANATION_VAGUE");
+  }
 }
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {

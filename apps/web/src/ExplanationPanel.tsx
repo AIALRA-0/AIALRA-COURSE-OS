@@ -13,7 +13,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio }: { 
     return () => { active = false; };
   }, [page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
-    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${page.quality.publishable ? "pass" : "hold"}`}>{page.quality.publishable ? "讲解已验证" : "等待审核"}</span></header>
+    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${page.quality.publishable ? "pass" : "hold"}`}>{page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
     <LessonSectionView section={sections[0]} />
     <LessonSectionView section={sections[1]} />
     <LessonSectionView section={sections[2]} />

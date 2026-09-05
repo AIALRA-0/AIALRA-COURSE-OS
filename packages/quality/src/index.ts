@@ -8,6 +8,75 @@ export interface CoverageResult {
   publishable: boolean;
 }
 
+export interface TeachingNarrativeInput {
+  learningObjectives: string[];
+  mainContentMarkdown: string;
+  priorKnowledge: string[];
+  fullExplanationMarkdown: string;
+  misconceptions: string[];
+  questions: Array<{ prompt: string; explanation: string }>;
+}
+
+/**
+ * Checks the learner-facing narrative, not the provenance metadata.  A page
+ * can have perfect atom bookkeeping and still read like an internal audit
+ * log, so these checks deliberately run before a generated draft is saved.
+ */
+export function validateTeachingNarrative(input: TeachingNarrativeInput): string[] {
+  const issues: string[] = [];
+  const explanation = input.fullExplanationMarkdown.trim();
+  const requiredHeadings = [
+    "先说这页要解决什么",
+    "先读原对象",
+    "解释核心关系",
+    "做一个例子或计算",
+    "边界与易错点",
+    "最后回收"
+  ];
+  let previous = -1;
+  for (const heading of requiredHeadings) {
+    const position = explanation.indexOf(`## ${heading}`);
+    if (position < 0) issues.push(`TEACHING_STRUCTURE_MISSING:${heading}`);
+    else if (position < previous) issues.push(`TEACHING_STRUCTURE_ORDER:${heading}`);
+    else previous = position;
+  }
+
+  const learnerText = [
+    input.learningObjectives.join("\n"),
+    input.mainContentMarkdown,
+    input.priorKnowledge.join("\n"),
+    input.fullExplanationMarkdown,
+    input.misconceptions.join("\n"),
+    input.questions.map((question) => `${question.prompt}\n${question.explanation}`).join("\n")
+  ].join("\n");
+  const forbidden = [
+    "页面元素核对",
+    "来源状态",
+    "等待审核",
+    "等待验证",
+    "模型推断",
+    "已覆盖",
+    "需要结合左侧原图",
+    "来源冲突必须进入人工审核"
+  ];
+  for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
+
+  const paragraphs = explanation.split(/\n\s*\n/)
+    .map((paragraph) => paragraph.replace(/^#+\s*/, "").replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim())
+    .filter((paragraph) => paragraph.length >= 24);
+  const counts = new Map<string, number>();
+  for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) ?? 0) + 1);
+  if ([...counts.values()].some((count) => count > 1)) issues.push("TEACHING_REPEATED_PARAGRAPH");
+
+  const contentSentences = input.fullExplanationMarkdown
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s+/, "").trim())
+    .filter((line) => line.length >= 18 && !line.startsWith("## "));
+  const uniqueSentences = new Set(contentSentences.map((line) => line.replace(/\s+/g, "")));
+  if (contentSentences.length >= 8 && uniqueSentences.size / contentSentences.length < 0.78) issues.push("TEACHING_REPETITION_RATIO_LOW");
+  return [...new Set(issues)];
+}
+
 export function validateTex(sourceTex: string): { valid: true; normalizedTex: string } | { valid: false; error: string } {
   const normalizedTex = sourceTex.trim();
   if (!normalizedTex) return { valid: false, error: "MATH_EMPTY" };

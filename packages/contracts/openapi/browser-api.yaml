@@ -444,7 +444,7 @@ paths:
                 language: { type: string, default: zh-CN }
                 budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 8, default: 8 }
                 pageNumbers: { type: array, minItems: 1, uniqueItems: true, items: { type: integer, minimum: 1 }, description: Optional page-number selection for an isolated candidate anchor batch }
-                holdForReview: { type: boolean, default: true, description: Pause a selected candidate batch in awaiting_review instead of generating unselected pages }
+                holdForReview: { type: boolean, default: false, deprecated: true, description: Retained for compatibility; generated pages complete directly and are not blocked by a review state }
       responses:
         '202': { description: Candidate draft created and generation queued }
         '409': { description: Candidate identifier already belongs to another release }

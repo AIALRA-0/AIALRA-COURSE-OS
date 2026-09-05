@@ -7,6 +7,7 @@ const harnessDir = resolve(fileURLToPath(new URL("../../../config/generation-har
 const readHarnessFile = (name: string): string => readFileSync(resolve(harnessDir, name), "utf8");
 export const teachingSystemPromptTemplate = readHarnessFile("teaching-system-prompt.md");
 export const teachingUserPromptTemplate = readHarnessFile("teaching-user-prompt.md");
+export const teachingBlueprint = readHarnessFile("teaching-blueprint.md");
 export const teachingPackageSchema = JSON.parse(readHarnessFile("teaching-package.schema.json")) as Record<string, unknown>;
 
 export interface PromptInput {
@@ -48,7 +49,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
-  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-package.schema.json"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
+  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
   const aggregateSha256 = createHash("sha256").update(JSON.stringify(files)).digest("hex");
-  return { id: "course-os-teaching", version: "1.0.0", taskContract: "GENERATE + TEACHING", files, aggregateSha256 };
+  return { id: "course-os-teaching", version: "1.1.0", taskContract: "GENERATE + TEACHING", files, aggregateSha256 };
 }
