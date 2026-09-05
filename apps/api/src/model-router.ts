@@ -433,8 +433,12 @@ function extractProviderOutput(body: ProviderResponseBody): unknown {
   if (Array.isArray(body.output)) {
     const text = body.output.flatMap((item) => {
       if (!item || typeof item !== "object") return [];
-      const candidate = item as { content?: Array<{ text?: unknown }> };
-      return candidate.content?.flatMap((part) => typeof part.text === "string" ? [part.text] : []) ?? [];
+      const candidate = item as { type?: unknown; content?: Array<{ type?: unknown; text?: unknown }> };
+      if (candidate.type && candidate.type !== "message") return [];
+      return candidate.content?.flatMap((part) => {
+        if (part.type && part.type !== "output_text") return [];
+        return typeof part.text === "string" ? [part.text] : [];
+      }) ?? [];
     }).join("");
     if (text) return text;
   }

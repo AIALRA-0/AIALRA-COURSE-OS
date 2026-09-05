@@ -138,6 +138,18 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
   });
 
+  it("reads only the final message and ignores Responses reasoning items", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      model: "deepseek-v4-flash-vision-exp",
+      output: [
+        { type: "reasoning", content: [{ type: "reasoning_text", text: '{"learningObjectives":"思考片段"}' }] },
+        { type: "message", content: [{ type: "output_text", text: JSON.stringify(providerTeachingContent()) }] }
+      ]
+    }, { status: 200 })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("responses-reasoning-test", true));
+    expect(result.content.learningObjectives).toHaveLength(1);
+  });
+
   it("extracts a JSON object when a provider wraps it in explanatory text", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: `元数据：${JSON.stringify({ note: "不是教学包" })}，正式结果如下：\n${JSON.stringify(providerTeachingContent())}\n以上` }, { status: 200 })));
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("wrapped-json-test"));
