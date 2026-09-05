@@ -236,8 +236,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     if (!response.ok) throw new ModelRouterGenerationError(`MODEL_PROVIDER_FAILED:${body.error?.code || response.status}`, body.model || this.connection.model, usage, this.connection.providerId);
     const output = extractProviderOutput(body);
+    if (output === undefined || output === null) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", body.model || this.connection.model, usage, this.connection.providerId);
+    let content: TeachingPackage;
+    if (typeof output === "string") {
+      try { content = JSON.parse(stripJsonFences(output)) as TeachingPackage; }
+      catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
+    } else {
+      content = output as TeachingPackage;
+    }
     try {
-      const content = typeof output === "string" ? JSON.parse(stripJsonFences(output)) as TeachingPackage : output as TeachingPackage;
       validateTeachingPackage(content);
       return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
     } catch (error) {
