@@ -239,7 +239,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (output === undefined || output === null) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", body.model || this.connection.model, usage, this.connection.providerId);
     let content: TeachingPackage;
     if (typeof output === "string") {
-      try { content = JSON.parse(stripJsonFences(output)) as TeachingPackage; }
+      try { content = parseTeachingPackageJson(output); }
       catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
     } else {
       content = output as TeachingPackage;
@@ -462,6 +462,17 @@ function openCodeProtocol(model: string): ProviderConnection["protocol"] {
 
 function stripJsonFences(value: string): string {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+}
+
+function parseTeachingPackageJson(value: string): TeachingPackage {
+  const normalized = stripJsonFences(value);
+  try { return JSON.parse(normalized) as TeachingPackage; }
+  catch {
+    const start = normalized.indexOf("{");
+    const end = normalized.lastIndexOf("}");
+    if (start < 0 || end <= start) throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
+    return JSON.parse(normalized.slice(start, end + 1)) as TeachingPackage;
+  }
 }
 
 function validateTeachingPackage(value: unknown): asserts value is TeachingPackage {

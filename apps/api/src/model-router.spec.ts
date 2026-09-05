@@ -138,6 +138,13 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
   });
 
+  it("extracts a JSON object when a provider wraps it in explanatory text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: `结果如下：\n${JSON.stringify(providerTeachingContent())}\n以上` }, { status: 200 })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("wrapped-json-test"));
+    expect(result.provider).toBe("deepseek");
+    expect(result.content.questions).toHaveLength(4);
+  });
+
   it("falls back once and never exposes a provider secret in errors", async () => {
     const secret = "synthetic-example-secret-not-for-logging";
     const fetchMock = vi.fn()
