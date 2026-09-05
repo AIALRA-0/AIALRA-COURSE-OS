@@ -36,6 +36,7 @@ export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleR
   const [generationJob, setGenerationJob] = useState<GenerationJob>();
   const [notice, setNotice] = useState("");
   const [view, setView] = useState({ zoom: 1, panX: 0, panY: 0 });
+  const visibleBlocks = useMemo(() => workingPage.blocks.filter((block) => block.kind !== "source_status"), [workingPage.blocks]);
 
   useEffect(() => {
     let active = true;
@@ -139,7 +140,7 @@ export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleR
       setWorkingPage(structuredClone(result.draft.page));
       setChangedBlocks(new Set());
       setValidation(undefined);
-      setNotice(result.added.length ? `已补充 ${result.added.length} 道待审核题目，请逐题检查后保存` : "题库已经有足够的正式题目或待审核题目");
+      setNotice(result.added.length ? `已补充 ${result.added.length} 道题目，保存后即可用于练习` : "题库已经有足够的可用题目");
       onChanged();
     } catch (error) { setNotice(error instanceof Error ? error.message : "题库补充失败"); }
     finally { setBusy(""); }
@@ -188,7 +189,7 @@ export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleR
           <section className="lesson-editor">
             <div className="section-heading"><div><span className="section-kicker">TEACHING DRAFT</span><h2>教授级讲解</h2></div><div className="segmented"><button className={editorMode === "edit" ? "active" : ""} onClick={() => setEditorMode("edit")}>编辑</button><button className={editorMode === "preview" ? "active" : ""} onClick={() => setEditorMode("preview")}>学习预览</button></div></div>
             <div className="editor-block-list">
-              {workingPage.blocks.map((block, index) => (
+              {visibleBlocks.map((block, index) => (
                 <article key={block.id} className={`editor-block ${changedBlocks.has(block.id) ? "changed" : ""}`}>
                   <header><span className="block-index">{String(index + 1).padStart(2, "0")}</span><div><span>{BLOCK_LABELS[block.kind]}</span><input value={block.title} onChange={(event) => updateBlock(block.id, { title: event.target.value })} aria-label={`${BLOCK_LABELS[block.kind]}标题`} /></div><span className="block-state">{changedBlocks.has(block.id) ? "已修改" : "已同步"}</span></header>
                   {editorMode === "edit"
@@ -232,16 +233,16 @@ function QuestionBankEditor({ page, dirty, busy, onRefill, onChange }: {
   const questions = page.questionBank ?? [];
   const approved = questions.filter((item) => item.status === "approved").length;
   return <section className="question-bank-editor">
-    <header className="question-bank-editor-heading"><div><span className="section-kicker">QUESTION BANK</span><h3>随机问题题库</h3><p>每页至少保留 4 道通过审核的题目；补充题先进入草稿状态，不会直接进入正式学习</p></div><button className="quiet-button" disabled={busy || dirty || approved >= 4} title={dirty ? "请先保存当前修改" : approved >= 4 ? "正式题目已经达到 4 道" : "建立待审核题目"} onClick={onRefill}>{busy ? "补充中" : "补齐题库"}</button></header>
-    <div className="question-bank-summary"><strong>{approved} / 4</strong><span>正式题目</span><em>{questions.filter((item) => item.status === "draft").length} 道待审核</em></div>
-    {questions.length === 0 && <p className="empty-inline">当前页面还没有题目，可以点击补齐题库建立审核草稿</p>}
+    <header className="question-bank-editor-heading"><div><span className="section-kicker">QUESTION BANK</span><h3>随机问题题库</h3><p>每页至少保留 4 道可用题目；新题保存后即可用于正式学习</p></div><button className="quiet-button" disabled={busy || dirty || approved >= 4} title={dirty ? "请先保存当前修改" : approved >= 4 ? "可用题目已经达到 4 道" : "补齐题目"} onClick={onRefill}>{busy ? "补充中" : "补齐题库"}</button></header>
+    <div className="question-bank-summary"><strong>{approved} / 4</strong><span>可用题目</span><em>{questions.filter((item) => item.status === "draft").length} 道草稿</em></div>
+    {questions.length === 0 && <p className="empty-inline">当前页面还没有题目，可以点击补齐题库</p>}
     <div className="question-bank-list">{questions.map((question, index) => <QuestionBankRow key={question.id} index={index} question={question} onChange={onChange} />)}</div>
   </section>;
 }
 
 function QuestionBankRow({ index, question, onChange }: { index: number; question: QuestionBankItem; onChange: (questionId: string, patch: Partial<QuestionBankItem>) => void }) {
   return <article className="question-bank-row">
-    <header><span>{String(index + 1).padStart(2, "0")}</span><select value={question.kind} onChange={(event) => onChange(question.id, { kind: event.target.value as QuestionBankItem["kind"], options: event.target.value === "multiple_choice" ? question.options ?? [question.expectedAnswer] : undefined })}><option value="comprehension">理解题</option><option value="multiple_choice">选择题</option></select><select value={question.status} onChange={(event) => onChange(question.id, { status: event.target.value as QuestionBankItem["status"] })}><option value="draft">待审核</option><option value="approved">已通过</option><option value="retired">已停用</option></select></header>
+    <header><span>{String(index + 1).padStart(2, "0")}</span><select value={question.kind} onChange={(event) => onChange(question.id, { kind: event.target.value as QuestionBankItem["kind"], options: event.target.value === "multiple_choice" ? question.options ?? [question.expectedAnswer] : undefined })}><option value="comprehension">理解题</option><option value="multiple_choice">选择题</option></select><select value={question.status} onChange={(event) => onChange(question.id, { status: event.target.value as QuestionBankItem["status"] })}><option value="draft">草稿</option><option value="approved">可用</option><option value="retired">已停用</option></select></header>
     <label><span>题目</span><textarea value={question.prompt} onChange={(event) => onChange(question.id, { prompt: event.target.value })} /></label>
     {question.kind === "multiple_choice" && <label><span>选项</span><textarea value={(question.options ?? []).join("\n")} onChange={(event) => onChange(question.id, { options: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) })} placeholder="每行一个选项" /></label>}
     <div className="question-bank-fields"><label><span>标准答案</span><input value={question.expectedAnswer} onChange={(event) => onChange(question.id, { expectedAnswer: event.target.value })} /></label><label><span>答案说明</span><textarea value={question.explanation} onChange={(event) => onChange(question.id, { explanation: event.target.value })} /></label></div>
@@ -254,9 +255,9 @@ function QualityInspector({ page, validation, coverage }: { page: PageLesson; va
   const pass = validation?.publishable ?? page.quality.publishable;
   const approvedQuestions = (page.questionBank ?? []).filter((item) => item.status === "approved");
   const hasActiveUnderstandingCheck = page.blocks.some((block) => block.kind === "check" && block.markdown.trim())
-    || approvedQuestions.some((item) => item.kind === "comprehension" || item.kind === "multiple_choice");
+    || approvedQuestions.length > 0;
   return <div className="inspector-body">
-    <div className={`quality-hero ${pass ? "pass" : "hold"}`}><Icon name={pass ? "check" : "warning"} /><div><strong>{pass ? "满足发布要求" : "需要继续审核"}</strong><span>{pass ? "全部确定性质量门已通过" : "正式版本不会被草稿直接覆盖"}</span></div></div>
+    <div className={`quality-hero ${pass ? "pass" : "hold"}`}><Icon name={pass ? "check" : "warning"} /><div><strong>{pass ? "满足发布要求" : "还需要补齐内容"}</strong><span>{pass ? "全部确定性质量检查已通过" : "补齐缺失内容后即可保存或发布"}</span></div></div>
     <InspectorSection title="覆盖率">
       <Metric label="高风险元素" value={`${Math.round(high * 100)}%`} tone={high === 1 ? "good" : "bad"} />
       <Metric label="一般必需元素" value={`${Math.round(general * 100)}%`} tone={general >= .98 ? "good" : "bad"} />
@@ -266,7 +267,7 @@ function QualityInspector({ page, validation, coverage }: { page: PageLesson; va
       <CheckRow ok={validation?.mathValid ?? page.quality.mathValid} label="数学公式严格解析" />
       <CheckRow ok={(validation?.pseudocodeLines ?? 0) === (validation?.explainedPseudocodeLines ?? 0)} label="伪代码逐行状态说明" />
       <CheckRow ok={page.anchors.length > 0} label="来源锚点可追溯" />
-      <CheckRow ok={hasActiveUnderstandingCheck} label="包含主动理解检查" title={approvedQuestions.length > 0 ? `当前页已有 ${approvedQuestions.length} 道已审核理解题；发布质量门要求题库，不要求额外建立 check 块` : undefined} />
+      <CheckRow ok={hasActiveUnderstandingCheck} label="包含主动理解练习" title={approvedQuestions.length > 0 ? `当前页已有 ${approvedQuestions.length} 道可用题目，已满足主动理解检查` : undefined} />
     </InspectorSection>
     {validation?.issues.length ? <InspectorSection title={`阻断项 · ${validation.issues.length}`}><ul className="issue-list">{validation.issues.slice(0, 8).map((issue) => <li key={issue}>{issue}</li>)}</ul></InspectorSection> : null}
   </div>;

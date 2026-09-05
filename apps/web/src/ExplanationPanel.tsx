@@ -3,15 +3,34 @@ import type { CourseRelease, LessonSection, PageLesson, PageQuestion, PseudoCode
 import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
 
-export function ExplanationPanel({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
+export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null } }) {
   const sections = useMemo(() => normalizeSections(page), [page]);
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
   const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
+  const [interactiveReady, setInteractiveReady] = useState(false);
+  const interactiveMarkerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    setInteractiveReady(false);
+    const marker = interactiveMarkerRef.current;
+    if (!marker || typeof IntersectionObserver === "undefined") {
+      setInteractiveReady(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setInteractiveReady(true);
+        observer.disconnect();
+      }
+    }, { root: loadRootRef?.current ?? null, rootMargin: "600px 0px" });
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [page.id, loadRootRef]);
+  useEffect(() => {
+    if (!interactiveReady) return;
     let active = true;
     api.lesson(page.id).then((lesson) => active && setQaRecords(lesson.qaRecords)).catch(() => active && setQaRecords([]));
     return () => { active = false; };
-  }, [page.id]);
+  }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
     <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${page.quality.publishable ? "pass" : "hold"}`}>{page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
     <LessonSectionView section={sections[0]} />
@@ -19,8 +38,11 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio }: { 
     <LessonSectionView section={sections[2]} />
     <LessonSectionView section={sections[3]}>{pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>
     <LessonSectionView section={sections[4]} />
-    <article className="lesson-block random-questions"><SectionTitle number="06" english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
-    <article className="lesson-block qa-records"><SectionTitle number="07" english="QUESTION AND ANSWER" title="QA记录" /><QuestionBox page={page} sessionId={sessionId} onSaved={(question) => setQaRecords((current) => [...current, question])} /><QARecordList records={qaRecords} onChanged={(updated) => setQaRecords((current) => current.map((item) => item.id === updated.id ? updated : item))} /></article>
+    <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
+    {interactiveReady && <>
+      <article className="lesson-block random-questions"><SectionTitle number="06" english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
+      <article className="lesson-block qa-records"><SectionTitle number="07" english="QUESTION AND ANSWER" title="QA记录" /><QuestionBox page={page} sessionId={sessionId} onSaved={(question) => setQaRecords((current) => [...current, question])} /><QARecordList records={qaRecords} onChanged={(updated) => setQaRecords((current) => current.map((item) => item.id === updated.id ? updated : item))} /></article>
+    </>}
   </section>;
 }
 
@@ -48,7 +70,7 @@ function LessonSectionView({ section, children }: { section?: LessonSection; chi
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {
-  return <section className="pseudocode-walkthrough"><h4>伪代码逐行讲解</h4><p>先看每一行直接做了什么，再展开查看它读取和修改了哪些状态</p><div className="line-list">{lines.map((line) => <details key={line.id} className="code-line" open={line.lineNumber <= 3}><summary data-action="pseudocode-toggle"><span className="line-number">{line.lineNumber}</span><div className="code-line-heading"><code>{line.code}</code><span className="code-line-label">这一行做什么</span><strong>{teacherSummaryFor(line)}</strong></div></summary><div className="code-line-body"><div className="code-line-state"><div><span>执行前</span><p>{line.preState}</p></div><span className="code-line-arrow" aria-hidden="true">→</span><div><span>执行后</span><p>{line.postState}</p></div></div><dl><div><dt>读取对象</dt><dd>{line.reads.length ? line.reads.join("、") : "不读取运行变量"}</dd></div><div><dt>修改对象</dt><dd>{line.writes.length ? line.writes.join("、") : "不修改运行变量"}</dd></div><div><dt>副作用</dt><dd>{line.sideEffects.length ? line.sideEffects.join("；") : "没有额外副作用"}</dd></div><div><dt>复杂度</dt><dd>{line.complexityRelation}</dd></div></dl><p className="code-line-source">来源：当前页面中的伪代码区域，详细内容以左侧原始课件为准</p></div></details>)}</div></section>;
+  return <section className="pseudocode-walkthrough"><h4>伪代码逐行讲解</h4><p>先看每一行直接做了什么，再展开查看它读取和修改了哪些状态</p><div className="line-list">{lines.map((line) => <details key={line.id} className="code-line" open={line.lineNumber <= 3}><summary data-action="pseudocode-toggle"><span className="line-number">{line.lineNumber}</span><div className="code-line-heading"><code>{line.code}</code><span className="code-line-label">这一行做什么</span><strong>{teacherSummaryFor(line)}</strong></div></summary><div className="code-line-body"><div className="code-line-state"><div><span>执行前</span><p>{line.preState}</p></div><span className="code-line-arrow" aria-hidden="true">→</span><div><span>执行后</span><p>{line.postState}</p></div></div><dl><div><dt>读取对象</dt><dd>{line.reads.length ? line.reads.join("、") : "不读取运行变量"}</dd></div><div><dt>修改对象</dt><dd>{line.writes.length ? line.writes.join("、") : "不修改运行变量"}</dd></div><div><dt>副作用</dt><dd>{line.sideEffects.length ? line.sideEffects.join("；") : "没有额外副作用"}</dd></div><div><dt>复杂度</dt><dd>{line.complexityRelation}</dd></div></dl></div></details>)}</div></section>;
 }
 
 function teacherSummaryFor(line: PseudoCodeLine): string {
@@ -138,7 +160,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
 
 function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
   if (available >= 4 && draftCount === 0) return null;
-  return <div className="question-bank-status"><div><strong>题库还需要审核</strong><span>当前有 {available} 道正式题目，另有 {draftCount} 道待审核题目；正式学习至少需要 4 道通过审核的题目</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>去制作模式补齐</button>}</div>;
+  return <div className="question-bank-status"><div><strong>题库尚未就绪</strong><span>当前有 {available} 道可用题目，另有 {draftCount} 道草稿题；补齐 4 道可用题目后即可练习</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>去制作模式补齐</button>}</div>;
 }
 
 function normalizeSections(page: PageLesson): LessonSection[] {

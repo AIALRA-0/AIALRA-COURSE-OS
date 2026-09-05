@@ -34,11 +34,23 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     "最后回收"
   ];
   let previous = -1;
+  const positions: number[] = [];
   for (const heading of requiredHeadings) {
     const position = explanation.indexOf(`## ${heading}`);
+    positions.push(position);
     if (position < 0) issues.push(`TEACHING_STRUCTURE_MISSING:${heading}`);
     else if (position < previous) issues.push(`TEACHING_STRUCTURE_ORDER:${heading}`);
     else previous = position;
+  }
+  for (let index = 0; index < requiredHeadings.length; index += 1) {
+    const position = positions[index]!;
+    if (position < 0) continue;
+    const nextPosition = positions.slice(index + 1).find((candidate) => candidate >= 0) ?? explanation.length;
+    const body = explanation.slice(position + (`## ${requiredHeadings[index]}`).length, nextPosition)
+      .replace(/[`*_>#-]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+    if (body.length < 18) issues.push(`TEACHING_SECTION_TOO_SHORT:${requiredHeadings[index]}`);
   }
 
   const learnerText = [

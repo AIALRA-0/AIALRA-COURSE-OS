@@ -86,6 +86,21 @@ describe("learner-facing teaching narrative", () => {
       "TEACHING_REPEATED_PARAGRAPH"
     ]));
   });
+
+  it("rejects empty teaching stages even when all headings are present", () => {
+    const thin = { ...valid, fullExplanationMarkdown: [
+      "## 先说这页要解决什么\n目标",
+      "## 先读原对象\n对象",
+      "## 解释核心关系\n关系",
+      "## 做一个例子或计算\n例子",
+      "## 边界与易错点\n边界",
+      "## 最后回收\n结论"
+    ].join("\n\n") };
+    expect(validateTeachingNarrative(thin)).toEqual(expect.arrayContaining([
+      "TEACHING_SECTION_TOO_SHORT:先说这页要解决什么",
+      "TEACHING_SECTION_TOO_SHORT:边界与易错点"
+    ]));
+  });
 });
 
 describe("pseudocode", () => {

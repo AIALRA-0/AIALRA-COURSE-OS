@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
-import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, MasteryRecord, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
+import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
@@ -16,6 +16,7 @@ type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_DEFAULT_WIDTH = 276;
+const OFFLINE_SYNC: ReadWeaveSyncStatus = { state: "offline", authority: "readweave", mode: "http", pendingWrites: 0, conflicts: 0, message: "ReadWeave 暂时不可访问" };
 
 function clampSidebarWidth(value: number): number {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(value)));
@@ -32,7 +33,6 @@ export function App() {
   const [tree, setTree] = useState<WorkspaceTree>();
   const [sync, setSync] = useState<ReadWeaveSyncStatus>();
   const [conflicts, setConflicts] = useState<CourseConflict[]>([]);
-  const [reviewQueue, setReviewQueue] = useState<MasteryRecord[]>([]);
   const [reviewMap, setReviewMap] = useState<ReviewMap>();
   const [releaseId, setReleaseId] = useState(initialNavigation.current.releaseId);
   const [pageIndex, setPageIndex] = useState(initialNavigation.current.pageIndex);
@@ -56,26 +56,70 @@ export function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const sessionRef = useRef<LearningSession | undefined>(undefined);
+  const pendingSessionPatchRef = useRef<Partial<LearningSession>>({});
+  const sessionWriteTimerRef = useRef<number | undefined>(undefined);
+  const sessionWriteInFlightRef = useRef(false);
 
-  const refreshMetadata = async () => {
-    const [workspaceTree, syncStatus, openConflicts, queue, workspaceSettings, map] = await Promise.all([
+  useEffect(() => { sessionRef.current = session; }, [session]);
+
+  const flushSessionWrites = useCallback(() => {
+    if (sessionWriteInFlightRef.current) return;
+    const activeSession = sessionRef.current;
+    const patch = pendingSessionPatchRef.current;
+    if (!activeSession || Object.keys(patch).length === 0) return;
+    pendingSessionPatchRef.current = {};
+    sessionWriteInFlightRef.current = true;
+    void api.updateSession(activeSession.id, patch).then((updated) => {
+      sessionRef.current = updated;
+      setSession(updated);
+    }).catch(() => undefined).finally(() => {
+      sessionWriteInFlightRef.current = false;
+      if (Object.keys(pendingSessionPatchRef.current).length > 0 && sessionWriteTimerRef.current === undefined) {
+        sessionWriteTimerRef.current = window.setTimeout(() => {
+          sessionWriteTimerRef.current = undefined;
+          flushSessionWrites();
+        }, 240);
+      }
+    });
+  }, []);
+
+  const scheduleSessionPatch = useCallback((patch: Partial<LearningSession>) => {
+    Object.assign(pendingSessionPatchRef.current, patch);
+    if (sessionWriteTimerRef.current !== undefined) return;
+    sessionWriteTimerRef.current = window.setTimeout(() => {
+      sessionWriteTimerRef.current = undefined;
+      flushSessionWrites();
+    }, 240);
+  }, [flushSessionWrites]);
+
+  useEffect(() => () => {
+    if (sessionWriteTimerRef.current !== undefined) window.clearTimeout(sessionWriteTimerRef.current);
+  }, []);
+
+  const refreshSyncStatus = useCallback(async ({ includeConflicts = true }: { includeConflicts?: boolean } = {}) => {
+    const [syncStatus, openConflicts] = await Promise.all([
+      api.syncStatus(),
+      includeConflicts ? api.conflicts() : Promise.resolve<CourseConflict[] | undefined>(undefined)
+    ]);
+    setSync(syncStatus);
+    if (openConflicts) setConflicts(openConflicts.filter((item) => item.status === "open"));
+    return syncStatus;
+  }, []);
+
+  const refreshMetadata = useCallback(async ({ includeReview = false }: { includeReview?: boolean } = {}) => {
+    const [workspaceTree, workspaceSettings] = await Promise.all([
       api.workspaceTree(),
-      api.syncStatus().catch((): ReadWeaveSyncStatus => ({ state: "offline", authority: "readweave", mode: "http", pendingWrites: 0, conflicts: 0, message: "ReadWeave 暂时不可访问" })),
-      api.conflicts().catch(() => []),
-      api.reviewQueue().catch(() => []),
-      api.settings().catch(() => undefined),
-      api.reviewMap().catch(() => undefined)
+      api.settings().catch(() => undefined)
     ]);
     setTree(workspaceTree);
-    setSync(syncStatus);
-    setConflicts(openConflicts.filter((item) => item.status === "open"));
-    setReviewQueue(queue);
-    setReviewMap(map);
+    await refreshSyncStatus({ includeConflicts: false }).catch(() => setSync(OFFLINE_SYNC));
+    if (includeReview) await api.reviewMap().then(setReviewMap).catch(() => setReviewMap(undefined));
     if (workspaceSettings) {
       document.documentElement.style.setProperty("--course-font-scale", String(workspaceSettings.baseFontScale));
       if (workspaceSettings.theme === "light" || workspaceSettings.theme === "dark") setTheme(workspaceSettings.theme);
     }
-  };
+  }, [refreshSyncStatus]);
 
   useEffect(() => {
     Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
@@ -83,7 +127,7 @@ export function App() {
       if (!items.some((item) => item.id === initialNavigation.current.releaseId)) setReleaseId(defaultRelease(items)?.id || "");
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法载入课程空间"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [refreshMetadata]);
 
   useEffect(() => {
     const followHashNavigation = () => {
@@ -97,6 +141,11 @@ export function App() {
     return () => window.removeEventListener("hashchange", followHashNavigation);
   }, []);
 
+  useEffect(() => {
+    if (mode !== "review") return;
+    void api.reviewMap().then(setReviewMap).catch(() => setReviewMap(undefined));
+  }, [mode]);
+
   const release = useMemo(() => releases.find((item) => item.id === releaseId), [releaseId, releases]);
   const page = release?.pages[pageIndex];
 
@@ -106,6 +155,7 @@ export function App() {
     const savedSession = localStorage.getItem(`course-os-session:${release.id}`) || undefined;
     api.createSession(release.id, savedSession).then((created) => {
       setSession(created);
+      sessionRef.current = created;
       localStorage.setItem(`course-os-session:${release.id}`, created.id);
       const restoredIndex = release.pages.findIndex((candidate) => candidate.id === created.currentPageId);
       if (!initialNavigation.current.hasExplicitPage && restoredIndex >= 0) setPageIndex(restoredIndex);
@@ -158,15 +208,15 @@ export function App() {
       navigation.delete("reviewSession");
     }
     location.hash = navigation.toString();
-    const activeSession = session?.courseReleaseId === release.id ? session : undefined;
-    if (activeSession) api.updateSession(activeSession.id, { currentPageId: page.id }).then(setSession).catch(() => undefined);
-  }, [mode, pageIndex, page?.id, release?.id]);
+    const activeSession = sessionRef.current?.courseReleaseId === release.id ? sessionRef.current : undefined;
+    if (activeSession) scheduleSessionPatch({ currentPageId: page.id });
+  }, [mode, pageIndex, page?.id, release?.id, scheduleSessionPatch]);
 
-  const updateView = (next: ViewState) => {
+  const updateView = useCallback((next: ViewState) => {
     setView(next);
-    const activeSession = session?.courseReleaseId === release?.id ? session : undefined;
-    if (activeSession) api.updateSession(activeSession.id, next).then(setSession).catch(() => undefined);
-  };
+    const activeSession = sessionRef.current?.courseReleaseId === release?.id ? sessionRef.current : undefined;
+    if (activeSession) scheduleSessionPatch(next);
+  }, [release?.id, scheduleSessionPatch]);
 
   const selectPage = (nextReleaseId: string, pageId: string) => {
     const nextRelease = releases.find((item) => item.id === nextReleaseId);
@@ -296,7 +346,7 @@ export function App() {
      <MobileTreeDrawer tree={tree} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
      {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onImported={handleImported} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-    {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
     {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
     {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -329,7 +379,7 @@ export function App() {
           <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
             {mode === "learn" && <LearningWorkspace release={release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
-             {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={refreshMetadata} />}
+             {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>
         </section>
       </div>
@@ -337,7 +387,7 @@ export function App() {
       <MobileTreeDrawer tree={tree} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
        {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onImported={handleImported} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-      {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
       {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
       {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -415,7 +465,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
       <div className="visual-column"><SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} /></div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div><Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} /></Suspense></div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div><Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} /></Suspense></div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
@@ -429,7 +479,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
   </div>;
 }
 
-function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onOpenTrash, onClose }: {
+function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onRefreshSync, onOpenTrash, onClose }: {
   panel: Exclude<UtilityPanel, null>;
   releases: CourseRelease[];
   sync?: ReadWeaveSyncStatus;
@@ -438,22 +488,33 @@ function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSel
   onTheme: (theme: "light" | "dark") => void;
   onSelectPage: (releaseId: string, pageId: string) => void;
   onRefresh: () => Promise<void>;
+  onRefreshSync: () => Promise<ReadWeaveSyncStatus>;
   onOpenTrash: () => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [syncFeedback, setSyncFeedback] = useState<{ kind: "success" | "error" | "pending"; text: string }>();
   const latestReleases = releases.filter((release) => !releases.some((candidate) => candidate.moduleId === release.moduleId && candidate.version > release.version));
   const results = latestReleases.flatMap((release) => release.pages.map((page) => ({ release, page }))).filter(({ release, page }) => {
     const needle = query.trim().toLocaleLowerCase();
     return !needle || `${release.courseTitle} ${release.moduleTitle} ${page.title} ${page.pageNumber}`.toLocaleLowerCase().includes(needle);
   }).slice(0, 40);
-  const refresh = async () => { setRefreshing(true); try { await onRefresh(); } finally { setRefreshing(false); } };
+  const refreshSync = async () => {
+    setRefreshing(true);
+    setSyncFeedback({ kind: "pending", text: "正在检查 ReadWeave 连接…" });
+    try {
+      const next = await onRefreshSync();
+      setSyncFeedback({ kind: "success", text: `同步状态已更新 · ${next.state === "connected" ? "连接正常" : next.message || "暂时无法确认连接"}` });
+    } catch (reason) {
+      setSyncFeedback({ kind: "error", text: reason instanceof Error ? reason.message : "同步状态读取失败" });
+    } finally { setRefreshing(false); }
+  };
   return <div className="modal-backdrop utility-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="utility-dialog" role="dialog" aria-modal="true" aria-label={panelTitle(panel)}>
       <header><div><span className="section-kicker">COURSE OS</span><h2>{panelTitle(panel)}</h2></div><button className="icon-button" data-action="close-utility-panel" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
       {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input data-action="search-pages" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程、材料、页面或页码" /></label><div className="search-results">{results.map(({ release, page }) => <button key={`${release.id}:${page.id}`} data-action="search-open-page" onClick={() => { onSelectPage(release.id, page.id); onClose(); }}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline">没有找到匹配页面</p>}</div></div>}
-      {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={refresh}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
+      {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}{syncFeedback && <p className={`sync-feedback ${syncFeedback.kind}`} role={syncFeedback.kind === "error" ? "alert" : "status"} aria-live="polite"><Icon name={syncFeedback.kind === "error" ? "warning" : syncFeedback.kind === "success" ? "check" : "sparkles"} />{syncFeedback.text}</p>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={() => void refreshSync()}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
       {panel === "settings" && <SettingsPanel theme={theme} onTheme={onTheme} sync={sync} onOpenTrash={onOpenTrash} />}
       {panel === "trash" && <TrashPanel onRefresh={onRefresh} />}
       {panel === "account" && <div className="utility-content account-panel"><span className="account-avatar">A</span><h3>Personal workspace</h3><p>当前课程内容由 ReadWeave 统一保存，身份验证由 Authentik 管理</p><a className="primary-button" href="/_aialra_auth/logout">退出登录</a></div>}
@@ -672,9 +733,9 @@ function ImportProgress({ record, plan, job, costs, onClose }: { record: ImportR
   const latestCost = costs.at(-1);
   const spentUsd = plan?.spentUsd ?? job?.spentUsd ?? 0;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || job?.state === "failed";
-  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料草稿已经就绪" : !plan && !job ? "正在建立整套生成任务" : planState === "awaiting_review" ? "候选讲解已经生成" : planState === "completed" || job?.state === "completed" ? "候选讲解已经生成" : planState === "failed" || job?.state === "failed" ? "生成任务已停止" : planState === "cancelled" || job?.state === "cancelled" ? "生成任务已取消" : "正在逐页生成候选讲解";
+  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan && !job ? "正在建立整套生成任务" : planState === "awaiting_review" || planState === "completed" || job?.state === "completed" ? "讲解已经生成" : planState === "failed" || job?.state === "failed" ? "生成任务已停止" : planState === "cancelled" || job?.state === "cancelled" ? "生成任务已取消" : "正在逐页生成讲解";
   const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : plan ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : job ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : "转换结果已保存，正在建立唯一的幂等生成计划";
-  return <div className={`import-success import-state-${record.state}`}><span>{failedState ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "等待首次调用"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div><div><dt>发布状态</dt><dd>候选草稿，未发布</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
+  return <div className={`import-success import-state-${record.state}`}><span>{failedState ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "尚未调用模型"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div><div><dt>课程切换</dt><dd>生成结果已保存，未切换正式课程</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
 }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {

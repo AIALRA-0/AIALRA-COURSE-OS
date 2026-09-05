@@ -9,10 +9,12 @@ export interface ViewState {
 export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: string; title: string; value: ViewState; onChange: (value: ViewState) => void }) {
   const shellRef = useRef<HTMLElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
+  const valueRef = useRef(value);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | undefined>(undefined);
   const [dragging, setDragging] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState("");
+  valueRef.current = value;
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -20,12 +22,13 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
     const wheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
-      const nextZoom = clamp(value.zoom * (event.deltaY < 0 ? 1.12 : 0.89), 0.5, 5);
-      onChange({ ...value, zoom: nextZoom });
+      const current = valueRef.current;
+      const nextZoom = clamp(current.zoom * (event.deltaY < 0 ? 1.12 : 0.89), 0.5, 5);
+      onChange({ ...current, zoom: nextZoom });
     };
     frame.addEventListener("wheel", wheel, { passive: false });
     return () => frame.removeEventListener("wheel", wheel);
-  }, [onChange, value]);
+  }, [onChange]);
 
   useEffect(() => {
     const update = () => {
@@ -38,14 +41,14 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
   }, []);
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (value.zoom <= 1) return;
+    if (valueRef.current.zoom <= 1) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { x: event.clientX, y: event.clientY, panX: value.panX, panY: value.panY };
+    dragRef.current = { x: event.clientX, y: event.clientY, panX: valueRef.current.panX, panY: valueRef.current.panY };
     setDragging(true);
   };
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current) return;
-    onChange({ ...value, panX: dragRef.current.panX + event.clientX - dragRef.current.x, panY: dragRef.current.panY + event.clientY - dragRef.current.y });
+    onChange({ ...valueRef.current, panX: dragRef.current.panX + event.clientX - dragRef.current.x, panY: dragRef.current.panY + event.clientY - dragRef.current.y });
   };
   const pointerUp = () => { dragRef.current = undefined; setDragging(false); };
   const toggleFullscreen = () => {

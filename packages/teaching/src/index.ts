@@ -174,7 +174,6 @@ export function buildGoldenPage(input: {
     block(`${blockPrefix}:check`, "现在检查是否真的理解", "check", profile.check, anchorId, profile.atoms),
     block(`${blockPrefix}:deep`, "逐元素与边界细节", "deep_dive", renderAtomDetails(profile.atoms), anchorId, profile.atoms),
     block(`${blockPrefix}:qa`, "课堂问答", "qa", qa || "本页原始讲义没有单独问答，使用上方主动检查完成理解验证", anchorId, profile.atoms),
-    block(`${blockPrefix}:source`, "来源状态", "source_status", "本页核心事实来自左侧原始课件和已归档逐页讲解；外部补充必须单独标记，来源冲突必须进入人工审核", anchorId, profile.atoms)
   ];
   const coverageRequirements = requirementsFor(profile.atoms);
   const coverageClaims = fullClaims(coverageRequirements, `${blockPrefix}:deep`);
@@ -232,7 +231,6 @@ export function buildFullCoursePage(input: {
     block(`${pageId}:block:deep`, "完整讲解", "deep_dive", explanation, anchorId, atoms),
     block(`${pageId}:block:misconception`, "易错点", "misconception", misconception.join("\n"), anchorId, atoms),
     block(`${pageId}:block:qa`, "QA记录", "qa", qa || "本页暂时没有保存的课堂问答", anchorId, atoms),
-    block(`${pageId}:block:source`, "来源状态", "source_status", "本页讲解来自左侧原始课件和课程逐页讲解，外部补充必须单独标记来源", anchorId, atoms)
   ];
   const requirements = requirementsFor(atoms);
   const claims = fullClaims(requirements, `${pageId}:block:deep`);

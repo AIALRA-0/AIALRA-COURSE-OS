@@ -830,6 +830,10 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .settings-notice { background: color-mix(in srgb, var(--green) 9%, var(--panel)); color: var(--green); }
 .settings-error { background: color-mix(in srgb, var(--red) 9%, var(--panel)); color: var(--red); }
 .settings-notice svg, .settings-error svg { width: 14px; height: 14px; }
+.sync-feedback { display: flex; align-items: flex-start; gap: 7px; margin: 14px 0 0; padding: 10px 11px; border-radius: 7px; background: color-mix(in srgb, var(--blue) 9%, var(--panel)); color: var(--blue); font-size: 12px; line-height: 1.5; }
+.sync-feedback.success { background: color-mix(in srgb, var(--green) 9%, var(--panel)); color: var(--green); }
+.sync-feedback.error { background: color-mix(in srgb, var(--red) 9%, var(--panel)); color: var(--red); }
+.sync-feedback svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 2px; }
 .history-list { display: grid; gap: 8px; padding: 16px 18px 0; }
 .history-list article { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-strong); }
 .history-list article > div { display: grid; gap: 4px; min-width: 0; }
@@ -1098,6 +1102,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 }
 
 .lesson-column { background: var(--panel-strong); }
+.lesson-interactive-marker { height: 1px; margin-top: 1px; pointer-events: none; }
 .explanation-panel {
   max-width: 920px;
   padding: 30px clamp(26px, 3.5vw, 52px) 96px;
