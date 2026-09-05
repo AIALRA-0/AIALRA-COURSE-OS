@@ -2556,7 +2556,7 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
   const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: oneSentence(text), sourceAnchorIds: anchorIds }));
   // Coverage evidence is operational metadata. Appending it to the lesson
   // made the learner-facing explanation read like an internal audit log.
-  const fullExplanationMarkdown = normalizedContent.fullExplanationMarkdown;
+  const fullExplanationMarkdown = removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
   const lessonSections: LessonSection[] = [
     { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: sentenceItems("objective", normalizedContent.learningObjectives), sourceAnchorIds: anchorIds, atomIds },
     { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: normalizedContent.mainContentMarkdown, sourceAnchorIds: anchorIds, atomIds },
@@ -2638,6 +2638,14 @@ function normalizeMathSpan(match: string, source: string, delimiter: "$" | "$$")
 
 function oneSentence(value: string): string {
   return value.replace(/^[-*]\s*/, "").replace(/[\r\n]+/g, " ").trim();
+}
+
+function removeRepeatedTeachingOpening(main: string, full: string): string {
+  const mainText = main.trim();
+  const fullText = full.trim();
+  if (mainText.length < 24 || !fullText.startsWith(mainText)) return fullText;
+  const remainder = fullText.slice(mainText.length).trim();
+  return remainder || fullText;
 }
 
 async function originalPageDataUrl(page: CourseRelease["pages"][number], dependencies: AppDependencies): Promise<string | undefined> {

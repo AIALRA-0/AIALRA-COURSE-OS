@@ -168,12 +168,32 @@ function normalizeSections(page: PageLesson): LessonSection[] {
   const sectionTitles: Array<[LessonSection["kind"], string]> = [["learning_objectives", "学习目标"], ["main_content", "主要内容"], ["prior_knowledge", "先验知识列表"], ["full_explanation", "完整讲解"], ["misconceptions", "易错点列表"]];
   if (page.lessonSections?.length) {
     const byKind = new Map(page.lessonSections.map((section) => [section.kind, section]));
-    return sectionTitles.map(([kind, title]) => byKind.get(kind) ?? { id: `${page.id}:section:${kind}`, kind, title, markdown: "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds });
+    const main = byKind.get("main_content")?.markdown;
+    return sectionTitles.map(([kind, title]) => {
+      const section = byKind.get(kind);
+      if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
+      if (kind !== "full_explanation" || !section.markdown || !main) return section;
+      const distinctExplanation = removeRepeatedOpening(main, section.markdown);
+      return distinctExplanation ? { ...section, markdown: distinctExplanation } : section;
+    });
   }
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
   return [{ id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: main || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识列表", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: find("core", "example", "deep_dive", "check") || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点列表", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+}
+
+/**
+ * Older releases stored the short main-content list again at the beginning
+ * of the full explanation. Keep the persisted data intact, but do not make a
+ * learner read the same opening twice.
+ */
+function removeRepeatedOpening(main: string, full: string): string {
+  const mainText = main.trim();
+  const fullText = full.trim();
+  if (mainText.length < 24 || !fullText.startsWith(mainText)) return fullText;
+  const remainder = fullText.slice(mainText.length).trim();
+  return remainder || fullText;
 }
 
 function splitOutsideMath(source: string): string[] {

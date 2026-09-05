@@ -406,7 +406,7 @@ function lessonSectionsFromBlocks(blocks: ExplanationBlock[], anchorId: string, 
     { id: `${blocks[0]?.id ?? anchorId}:section:objective`, kind: "learning_objectives", title: "学习目标", items: sentenceItems("learning_objectives", objective), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) },
     { id: `${blocks[0]?.id ?? anchorId}:section:main`, kind: "main_content", title: "主要内容", markdown: markdown("core"), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) },
     { id: `${blocks[0]?.id ?? anchorId}:section:prior`, kind: "prior_knowledge", title: "先验知识列表", items: sentenceItems("prior_knowledge", prior), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) },
-    { id: `${blocks[0]?.id ?? anchorId}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: markdown("core", "example", "deep_dive", "check"), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) },
+    { id: `${blocks[0]?.id ?? anchorId}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: markdown("example", "deep_dive", "check"), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) },
     { id: `${blocks[0]?.id ?? anchorId}:section:misconceptions`, kind: "misconceptions", title: "易错点列表", items: sentenceItems("misconceptions", misconceptions), sourceAnchorIds: [anchorId], atomIds: atoms.map((item) => item.id) }
   ];
 }
