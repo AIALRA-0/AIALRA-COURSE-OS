@@ -2468,7 +2468,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           }
         });
       }
-      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies);
+      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs } : {});
     }
   }
   await dependencies.operations.mutate((state) => {
@@ -2503,12 +2503,12 @@ async function failGenerationJob(jobId: string, issue: string, dependencies: App
   });
 }
 
-async function markGenerationPageFailed(jobId: string, pageId: string, issue: string, dependencies: AppDependencies): Promise<void> {
+async function markGenerationPageFailed(jobId: string, pageId: string, issue: string, dependencies: AppDependencies, details: Record<string, unknown> = {}): Promise<void> {
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "running") return;
     if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
-    dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId, issue });
+    dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId, issue, ...details });
     if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
   });
 }
@@ -2543,7 +2543,7 @@ function deterministicTeachingPackage(page: CourseRelease["pages"][number]): Tea
   const questions = existing.slice(0, 4).map((item) => ({ kind: item.kind, prompt: item.prompt, options: item.options, expectedAnswer: item.expectedAnswer, explanation: item.explanation }));
   const coverageEvidence = page.coverageRequirements.map((requirement) => ({ atomId: requirement.atomId, coveredFields: [...requirement.requiredFields], explanation: `本地回退只保留来源字段 ${requirement.requiredFields.join("、")}，仍需模型或人工核验` }));
   const content: TeachingPackage = { learningObjectives: objective, mainContentMarkdown: page.blocks.find((item) => item.kind === "core")?.markdown || full, priorKnowledge: prior, fullExplanationMarkdown: full, misconceptions, coverageEvidence, questions };
-  return { content, provider: "aialra-model-router", model: "deterministic-local-fallback", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 0 } };
+  return { content, provider: "local-deterministic", model: "deterministic-local-fallback", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 0 } };
 }
 
 function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only"): CourseRelease["pages"][number] {

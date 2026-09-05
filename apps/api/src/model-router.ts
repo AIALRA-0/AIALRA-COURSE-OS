@@ -218,11 +218,16 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
     const started = Date.now();
     const request = this.buildRequest(input);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
     let response: Response;
     try {
-      response = await fetch(request.url, { method: "POST", headers: request.headers, body: JSON.stringify(request.body) });
-    } catch {
+      response = await fetch(request.url, { method: "POST", headers: request.headers, body: JSON.stringify(request.body), signal: controller.signal });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
       throw new ModelRouterGenerationError("MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
+    } finally {
+      clearTimeout(timeout);
     }
     let body: ProviderResponseBody = {};
     try { body = await response.json() as ProviderResponseBody; } catch {
@@ -421,8 +426,8 @@ function extractProviderOutput(body: ProviderResponseBody): unknown {
   if (Array.isArray(body.output)) {
     const text = body.output.flatMap((item) => {
       if (!item || typeof item !== "object") return [];
-      const candidate = item as { content?: Array<{ text?: string }> };
-      return candidate.content?.flatMap((part) => part.text ? [part.text] : []) ?? [];
+      const candidate = item as { content?: Array<{ text?: unknown }> };
+      return candidate.content?.flatMap((part) => typeof part.text === "string" ? [part.text] : []) ?? [];
     }).join("");
     if (text) return text;
   }
@@ -452,10 +457,23 @@ function stripJsonFences(value: string): string {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
-function validateTeachingPackage(value: TeachingPackage): void {
-  if (!value || !Array.isArray(value.learningObjectives) || !Array.isArray(value.questions) || value.questions.length !== 4 || value.fullExplanationMarkdown.length < 300) throw new Error("MODEL_ROUTER_INVALID_TEACHING_PACKAGE");
-  const comprehension = value.questions.filter((item) => item.kind === "comprehension").length;
-  const choices = value.questions.filter((item) => item.kind === "multiple_choice").length;
+function validateTeachingPackage(value: unknown): asserts value is TeachingPackage {
+  if (!value || typeof value !== "object") throw new Error("MODEL_ROUTER_INVALID_TEACHING_PACKAGE");
+  const candidate = value as Partial<TeachingPackage>;
+  if (!Array.isArray(candidate.learningObjectives) || !candidate.learningObjectives.every((item) => typeof item === "string")) throw new Error("MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID");
+  if (typeof candidate.mainContentMarkdown !== "string") throw new Error("MODEL_ROUTER_MAIN_CONTENT_INVALID");
+  if (!Array.isArray(candidate.priorKnowledge) || !candidate.priorKnowledge.every((item) => typeof item === "string")) throw new Error("MODEL_ROUTER_PRIOR_KNOWLEDGE_INVALID");
+  if (typeof candidate.fullExplanationMarkdown !== "string" || candidate.fullExplanationMarkdown.length < 300) throw new Error("MODEL_ROUTER_FULL_EXPLANATION_INVALID");
+  if (!Array.isArray(candidate.misconceptions) || !candidate.misconceptions.every((item) => typeof item === "string")) throw new Error("MODEL_ROUTER_MISCONCEPTIONS_INVALID");
+  if (!Array.isArray(candidate.coverageEvidence) || candidate.coverageEvidence.some((item) => !item || typeof item !== "object" || typeof item.atomId !== "string" || !Array.isArray(item.coveredFields) || typeof item.explanation !== "string")) throw new Error("MODEL_ROUTER_COVERAGE_EVIDENCE_INVALID");
+  if (!Array.isArray(candidate.questions) || candidate.questions.length !== 4 || candidate.questions.some((item) => !item || typeof item !== "object" || (item.kind !== "comprehension" && item.kind !== "multiple_choice") || typeof item.prompt !== "string" || !Array.isArray(item.options) || typeof item.expectedAnswer !== "string" || !item.expectedAnswer || typeof item.explanation !== "string")) throw new Error("MODEL_ROUTER_QUESTIONS_INVALID");
+  const questions = candidate.questions;
+  const comprehension = questions.filter((item) => item.kind === "comprehension").length;
+  const choices = questions.filter((item) => item.kind === "multiple_choice").length;
   if (comprehension !== 2 || choices !== 2) throw new Error("MODEL_ROUTER_QUESTION_MIX_INVALID");
-  for (const item of value.questions.filter((candidate) => candidate.kind === "multiple_choice")) if (!item.options || item.options.length !== 4 || !item.options.includes(item.expectedAnswer)) throw new Error("MODEL_ROUTER_CHOICE_INVALID");
+  for (const item of questions.filter((question) => question.kind === "comprehension")) if ((item.options ?? []).length !== 0) throw new Error("MODEL_ROUTER_COMPREHENSION_OPTIONS_INVALID");
+  for (const item of questions.filter((question) => question.kind === "multiple_choice")) {
+    const options = item.options ?? [];
+    if (options.length !== 4 || !options.includes(item.expectedAnswer)) throw new Error("MODEL_ROUTER_CHOICE_INVALID");
+  }
 }
