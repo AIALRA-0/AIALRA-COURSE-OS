@@ -468,10 +468,27 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
   const normalized = stripJsonFences(value);
   try { return JSON.parse(normalized) as TeachingPackage; }
   catch {
-    const start = normalized.indexOf("{");
-    const end = normalized.lastIndexOf("}");
-    if (start < 0 || end <= start) throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
-    return JSON.parse(normalized.slice(start, end + 1)) as TeachingPackage;
+    for (let start = normalized.indexOf("{"); start >= 0; start = normalized.indexOf("{", start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < normalized.length; index += 1) {
+        const character = normalized[index]!;
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+          continue;
+        }
+        if (character === '"') { inString = true; continue; }
+        if (character === "{") depth += 1;
+        else if (character === "}" && --depth === 0) {
+          try { return JSON.parse(normalized.slice(start, index + 1)) as TeachingPackage; }
+          catch { break; }
+        }
+      }
+    }
+    throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
   }
 }
 

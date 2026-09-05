@@ -139,7 +139,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   });
 
   it("extracts a JSON object when a provider wraps it in explanatory text", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: `结果如下：\n${JSON.stringify(providerTeachingContent())}\n以上` }, { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: `示例 {不是教学包}，正式结果如下：\n${JSON.stringify(providerTeachingContent())}\n以上` }, { status: 200 })));
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("wrapped-json-test"));
     expect(result.provider).toBe("deepseek");
     expect(result.content.questions).toHaveLength(4);
