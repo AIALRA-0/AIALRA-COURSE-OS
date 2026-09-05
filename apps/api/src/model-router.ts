@@ -83,7 +83,7 @@ export class HttpModelRouterClient implements ModelRouterClient {
         body: JSON.stringify({
           model: requestedModel,
           reasoning: { effort: input.qualityMode === "quality" ? "high" : "medium" },
-          max_output_tokens: input.qualityMode === "economy" ? 5000 : 9000,
+          max_output_tokens: input.qualityMode === "economy" ? 5000 : 16000,
           instructions: professorInstructions(input.language),
           input: modelInput(input),
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
@@ -266,7 +266,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           model: this.connection.model,
           instructions: instruction,
           input: text,
-          max_output_tokens: input.qualityMode === "economy" ? 5000 : 9000,
+          max_output_tokens: input.qualityMode === "economy" ? 5000 : 16000,
           temperature: 0.2,
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
           metadata: { product: "course-os", stage: "professor_draft", writing_policy_snapshot_id: input.writingPolicySnapshotId }
@@ -283,7 +283,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         body: {
           model: this.connection.model,
           system: `${instruction}\n\n只输出符合要求的 JSON 对象，不要使用 Markdown 代码围栏或额外说明`,
-          max_tokens: input.qualityMode === "economy" ? 5000 : 9000,
+          max_tokens: input.qualityMode === "economy" ? 5000 : 16000,
           temperature: 0.2,
           messages: [{ role: "user", content }]
         }
@@ -293,7 +293,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       { role: "system", content: instruction },
       { role: "user", content: Array.isArray(text) ? text[0]?.content.map((part) => part.type === "input_text" ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: part.image_url } }) : text }
     ];
-    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: input.qualityMode === "economy" ? 5000 : 9000, temperature: 0.2, messages, response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } } } };
+    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: input.qualityMode === "economy" ? 5000 : 16000, temperature: 0.2, messages, response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } } } };
   }
 }
 
