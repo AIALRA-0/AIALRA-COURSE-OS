@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssessmentAttempt, GenerationJob } from "@course-os/contracts";
-import { applyAttempt, budgetState, registerCost, transitionJob } from "./index.js";
+import { applyAttempt, budgetState, claimGenerationLease, isGenerationLeaseCurrent, registerCost, transitionJob } from "./index.js";
 
 const job: GenerationJob = {
   id: "job-1",
@@ -28,6 +28,14 @@ describe("generation job", () => {
     const warning = registerCost(running, 6.4);
     expect(budgetState(warning)).toBe("warning");
     expect(() => registerCost(warning, 1.61)).toThrow("JOB_BUDGET_EXCEEDED");
+  });
+
+  it("fences stale workers after a new lease is claimed", () => {
+    const running = transitionJob(job, "running");
+    const first = claimGenerationLease(running, "worker-a", new Date("2026-08-28T00:00:00.000Z"));
+    const second = claimGenerationLease({ ...first, state: "running" }, "worker-b", new Date("2026-08-28T00:01:00.000Z"));
+    expect(isGenerationLeaseCurrent(second, "worker-a", first.lease!.fenceToken, new Date("2026-08-28T00:02:00.000Z"))).toBe(false);
+    expect(isGenerationLeaseCurrent(second, "worker-b", second.lease!.fenceToken, new Date("2026-08-28T00:02:00.000Z"))).toBe(true);
   });
 });
 

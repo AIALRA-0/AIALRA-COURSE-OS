@@ -41,8 +41,9 @@ import type {
 } from "@course-os/contracts";
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
-import { applyAttempt, hashManifest, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
+import { calculateCoverage, evaluateReleaseClosure, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
@@ -541,8 +542,8 @@ export function createApp(dependencies: AppDependencies): Express {
       }
       const drafts = await dependencies.readweave.listDrafts();
       const pages = base.pages.map((page) => drafts.find((draft) => draft.pageId === page.id)?.page ?? page);
-      const issues = pages.flatMap((page) => validatePageForPublication(page).map((issue) => `${page.id}:${issue}`));
-      if (issues.length > 0) return sendError(request, response, 422, "PUBLISH_GATE_FAILED", "课程仍有未通过的质量问题", false, { issues });
+        const closure = evaluateReleaseClosure({ ...base, pages, pageIds: base.pageIds });
+        if (!closure.ready) return sendError(request, response, 422, "PUBLISH_GATE_FAILED", "课程仍有未通过的质量问题", false, { issues: closure.issues });
       const allReleases = await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", base.courseId);
       const version = Math.max(0, ...allReleases.filter((item) => item.moduleId === base.moduleId).map((item) => item.version)) + 1;
       const now = new Date().toISOString();
@@ -2139,6 +2140,7 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       completedPageIds: [],
       failedPageIds: [],
       attempt: 0,
+      semanticKey: `${input.materialVersionId}:${input.pageIds.join(",")}:${input.writingPolicySnapshotId}`,
       cancelRequested: false,
       createdAt: now,
       updatedAt: now
@@ -2338,10 +2340,11 @@ async function executeGenerationJob(jobId: string, dependencies: AppDependencies
 }
 
 async function runLocalJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const leaseOwner = `course-os-worker:${process.pid}`;
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "queued" || job.cancelRequested) return;
-    Object.assign(job, transitionJob(job, "running"), { attempt: job.attempt + 1 });
+    Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, leaseOwner));
     if (job.planId) {
       const plan = state.generationPlans.find((item) => item.id === job.planId);
       if (plan) {
@@ -2356,6 +2359,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
   });
   const initial = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
   if (!initial || initial.state !== "running") return;
+  const fenceToken = initial.lease?.fenceToken ?? 0;
   const release = await dependencies.readweave.getRelease(initial.materialVersionId);
   if (!release) {
     await failGenerationJob(jobId, "MATERIAL_VERSION_NOT_FOUND", dependencies);
@@ -2386,6 +2390,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       continue;
     }
     try {
+      await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       const sourceText = [
         `## 页面原子\n${JSON.stringify(page.atoms)}`,
@@ -2420,6 +2425,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable });
       await appendGenerationStageEvent(jobId, page.id, "repair", generatedPage.quality.issues.length ? "skipped" : "completed", dependencies, { reason: generatedPage.quality.issues.length ? "需要人工审核或局部修复" : "没有发现需要修复的质量问题" });
       const existing = await dependencies.readweave.getDraftByPage(page.id);
+      await assertGenerationFence(jobId, fenceToken, dependencies);
       const now = new Date().toISOString();
       const contentHash = sha256Text(stableStringify(generatedPage));
       const draft: LessonDraft = {
@@ -2444,7 +2450,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await dependencies.readweave.appendCostEntry(cost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
       await dependencies.operations.mutate((state) => {
         const job = state.jobs.find((item) => item.id === jobId);
-        if (!job || job.state !== "running") return;
+        if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
         applyActualCost(job, cost, state, dependencies);
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
         dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
@@ -2487,6 +2493,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       dependencies.operations.appendEvent(state, job.id, "job.completed", { completedPageIds: job.completedPageIds, failedPageIds: job.failedPageIds, spentUsd: job.spentUsd });
     }
   });
+}
+
+async function assertGenerationFence(jobId: string, fenceToken: number, dependencies: AppDependencies): Promise<void> {
+  const job = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
+  if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
 }
 
 async function appendGenerationStageEvent(jobId: string, pageId: string, stage: GenerationCostEntry["stage"], status: "started" | "completed" | "skipped", dependencies: AppDependencies, details: Record<string, unknown> = {}): Promise<void> {
@@ -2732,9 +2743,8 @@ function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: O
 }
 
 function safeGenerationIssue(error: unknown): string {
-  if (error instanceof ModelRouterGenerationError) return error.code.slice(0, 240);
-  const message = error instanceof Error ? error.message : "GENERATION_UNKNOWN_FAILURE";
-  return /^[A-Z0-9_:-]+$/i.test(message) ? message.slice(0, 240) : "GENERATION_INTERNAL_FAILURE";
+  if (error instanceof ModelRouterGenerationError) return describeGenerationError(new Error(error.code)).code;
+  return describeGenerationError(error).code;
 }
 
 function isAllowedProviderBaseUrl(value: string): boolean {

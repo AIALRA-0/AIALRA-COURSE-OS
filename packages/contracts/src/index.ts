@@ -42,6 +42,12 @@ export type JobState =
   | "failed";
 
 export type GenerationPlanState = "queued" | "running" | "awaiting_review" | "completed" | "cancelled" | "failed";
+export type GenerationErrorCode =
+  | "SOURCE_UNREADABLE" | "EXTRACTION_FAILED" | "PROVIDER_AUTH" | "PROVIDER_RATE_LIMIT"
+  | "PROVIDER_TIMEOUT" | "PROVIDER_NETWORK_FAILURE" | "MODEL_INVALID_OUTPUT" | "SCHEMA_INVALID"
+  | "SEMANTIC_INVALID" | "FORMULA_INVALID" | "COVERAGE_GAP" | "REPAIR_EXHAUSTED"
+  | "READWEAVE_UNAVAILABLE" | "READWEAVE_WRITE_FAILED" | "READWEAVE_HASH_MISMATCH"
+  | "LEASE_LOST" | "CANCELLED" | "INTERNAL_FAILURE";
 
 export interface Provenance {
   sourceMaterialVersionId: Identifier;
@@ -446,6 +452,12 @@ export interface OrderedEvent<T = unknown> {
   payload: T;
 }
 
+export interface GenerationTaskLease {
+  owner: Identifier;
+  fenceToken: number;
+  expiresAt: ISODateTime;
+}
+
 export interface GenerationJob {
   id: Identifier;
   workspaceId: Identifier;
@@ -464,6 +476,9 @@ export interface GenerationJob {
   completedPageIds: Identifier[];
   failedPageIds: Identifier[];
   attempt: number;
+  semanticKey?: string;
+  lease?: GenerationTaskLease;
+  lastErrorCode?: GenerationErrorCode | string;
   cancelRequested: boolean;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;

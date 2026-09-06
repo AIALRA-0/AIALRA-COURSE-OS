@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { GenerationJob, JobState, MasteryRecord, AssessmentAttempt, ReleaseManifest } from "@course-os/contracts";
+import type { GenerationJob, JobState, MasteryRecord, AssessmentAttempt, ReleaseManifest, GenerationTaskLease } from "@course-os/contracts";
 
 const JOB_TRANSITIONS: Record<JobState, JobState[]> = {
   queued: ["running", "cancelled"],
@@ -33,6 +33,16 @@ export function budgetState(job: GenerationJob): "ok" | "warning" | "exhausted" 
   if (job.budgetUsd <= 0 || job.spentUsd >= job.budgetUsd) return "exhausted";
   if (job.spentUsd / job.budgetUsd >= 0.8) return "warning";
   return "ok";
+}
+
+export function claimGenerationLease(job: GenerationJob, owner: string, now = new Date(), ttlMs = 15 * 60_000): GenerationJob {
+  if (job.state !== "running") throw new Error("GENERATION_LEASE_REQUIRES_RUNNING");
+  const lease: GenerationTaskLease = { owner, fenceToken: (job.lease?.fenceToken ?? 0) + 1, expiresAt: new Date(now.getTime() + ttlMs).toISOString() };
+  return { ...job, lease, updatedAt: now.toISOString() };
+}
+
+export function isGenerationLeaseCurrent(job: GenerationJob | undefined, owner: string, fenceToken: number, now = new Date()): boolean {
+  return Boolean(job?.state === "running" && !job.cancelRequested && job.lease?.owner === owner && job.lease.fenceToken === fenceToken && Date.parse(job.lease.expiresAt) > now.getTime());
 }
 
 const REVIEW_INTERVALS_DAYS = [1, 3, 7, 14, 30] as const;

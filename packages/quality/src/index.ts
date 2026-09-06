@@ -8,6 +8,46 @@ export interface CoverageResult {
   publishable: boolean;
 }
 
+export interface ReleaseClosureResult {
+  ready: boolean;
+  issues: string[];
+  pageCount: number;
+}
+
+export interface TeachingEvalResult {
+  score: number;
+  issues: string[];
+  explanationCharacters: number;
+  repeatedParagraphRatio: number;
+}
+
+/** Deterministic regression rubric for compiled learner pages. */
+export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
+  const sections = page.lessonSections ?? [];
+  const explanation = sections.find((section) => section.kind === "full_explanation")?.markdown?.trim() ?? "";
+  const required = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"];
+  const issues = required.filter((kind) => !sections.some((section) => section.kind === kind)).map((kind) => `TEACHING_SECTION_MISSING:${kind}`);
+  if (explanation.length < 300) issues.push("TEACHING_EXPLANATION_TOO_SHORT");
+  const paragraphs = explanation.split(/\n\s*\n/).map((value) => value.replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim()).filter((value) => value.length >= 24);
+  const counts = new Map<string, number>();
+  for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) ?? 0) + 1);
+  const repeatedParagraphRatio = paragraphs.length ? paragraphs.filter((paragraph) => (counts.get(paragraph) ?? 0) > 1).length / paragraphs.length : 1;
+  if (repeatedParagraphRatio > 0.15) issues.push("TEACHING_REPETITION_TOO_HIGH");
+  const forbidden = ["页面元素核对", "来源状态", "等待审核", "等待验证", "模型推断", "已覆盖"];
+  for (const phrase of forbidden) if (explanation.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
+  const questions = page.questionBank?.filter((question) => question.status === "approved") ?? [];
+  if (questions.length !== 4) issues.push("TEACHING_QUESTION_COUNT_INVALID");
+  const score = Math.max(0, Math.round((1 - Math.min(1, issues.length / 8)) * 100));
+  return { score, issues: [...new Set(issues)], explanationCharacters: explanation.length, repeatedParagraphRatio };
+}
+
+/** A release is usable only when every persisted page is independently publishable. */
+export function evaluateReleaseClosure(release: { pages: PageLesson[]; pageIds: string[] }): ReleaseClosureResult {
+  const issues = [...(release.pageIds.length === release.pages.length ? [] : ["RELEASE_PAGE_SET_MISMATCH"]),
+    ...release.pages.flatMap((page) => validatePageForPublication(page).map((issue) => `${page.id}:${issue}`))];
+  return { ready: issues.length === 0 && release.pages.length > 0, issues, pageCount: release.pages.length };
+}
+
 export interface TeachingNarrativeInput {
   learningObjectives: string[];
   mainContentMarkdown: string;
