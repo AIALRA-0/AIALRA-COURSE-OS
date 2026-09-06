@@ -204,6 +204,51 @@ export interface PageLesson {
   };
 }
 
+export interface TeachingResourcePackage {
+  version: "1.0.0";
+  pageId: Identifier;
+  pageTitle: string;
+  sourceText: string;
+  sourceAnchorIds: Identifier[];
+  atomIds: Identifier[];
+  imageAvailable: boolean;
+}
+
+export interface TeachingRequirementPackage {
+  version: "1.0.0";
+  requirements: CoverageRequirement[];
+  objective: string;
+  requiredSections: LessonSectionKind[];
+}
+
+export interface TeachingRulePackage {
+  version: "1.0.0";
+  language: string;
+  qualityMode: string;
+  rules: string[];
+  questionRule: { comprehension: number; multipleChoice: number; optionsPerMultipleChoice: number };
+}
+
+export interface TeachingBlueprintStep {
+  id: Identifier;
+  kind: "purpose" | "object_reading" | "relationship" | "example" | "boundary" | "recap";
+  objective: string;
+  atomIds: Identifier[];
+  requirementIds: Identifier[];
+  output: string;
+}
+
+export interface TeachingBlueprint {
+  version: "1.0.0";
+  pageId: Identifier;
+  pageNumber: number;
+  resourcePackage: TeachingResourcePackage;
+  requirementPackage: TeachingRequirementPackage;
+  rulePackage: TeachingRulePackage;
+  steps: TeachingBlueprintStep[];
+  sha256: string;
+}
+
 export interface Claim {
   id: Identifier;
   kind: ClaimKind;

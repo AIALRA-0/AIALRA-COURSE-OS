@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth } from "@course-os/contracts";
+import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, teachingPackageSchema } from "./generation-harness.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
@@ -48,6 +48,7 @@ export interface ModelRouterInput {
   qualityMode: string;
   idempotencyKey: string;
   stage?: GenerationStage | "qa";
+  blueprint?: TeachingBlueprint;
 }
 
 export interface ModelRouterClient {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { TeachingBlueprint } from "@course-os/contracts";
 
 const harnessDir = resolve(fileURLToPath(new URL("../../../config/generation-harness/", import.meta.url)));
 const readHarnessFile = (name: string): string => readFileSync(resolve(harnessDir, name), "utf8");
@@ -18,6 +19,7 @@ export interface PromptInput {
   writingPolicySnapshotId: string;
   language?: string;
   qualityMode?: string;
+  blueprint?: TeachingBlueprint;
 }
 
 export interface GenerationHarnessSnapshot {
@@ -44,12 +46,14 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     PAGE_TITLE: input.pageTitle,
     SOURCE_TEXT: input.sourceText.slice(0, 45_000)
   }).trim();
-  if (!input.sourceImageDataUrl) return text;
-  return [{ role: "user", content: [{ type: "input_text", text }, { type: "input_image", image_url: input.sourceImageDataUrl, detail: "high" }] }];
+  const blueprintText = input.blueprint ? `\n\n## 教学蓝图（必须遵循）\n${JSON.stringify(input.blueprint)}` : "";
+  const finalText = `${text}${blueprintText}`;
+  if (!input.sourceImageDataUrl) return finalText;
+  return [{ role: "user", content: [{ type: "input_text", text: finalText }, { type: "input_image", image_url: input.sourceImageDataUrl, detail: "high" }] }];
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
   const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
   const aggregateSha256 = createHash("sha256").update(JSON.stringify(files)).digest("hex");
-  return { id: "course-os-teaching", version: "1.1.1", taskContract: "GENERATE + TEACHING", files, aggregateSha256 };
+  return { id: "course-os-teaching", version: "1.2.0", taskContract: "GENERATE + TEACHING", files, aggregateSha256 };
 }
