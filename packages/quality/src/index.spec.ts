@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, normalizeLegacyMathDelimiters, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, normalizeLegacyMathDelimiters, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -118,5 +118,20 @@ describe("pseudocode", () => {
       sideEffects: [],
       complexityRelation: "常数时间"
     }])).toContain("line-1:preState_MISSING");
+  });
+});
+
+describe("lesson structure punctuation", () => {
+  it("does not treat factorial notation as multiple sentences", () => {
+    const page = {
+      lessonSections: [
+        { kind: "learning_objectives" },
+        { kind: "main_content" },
+        { kind: "prior_knowledge", items: [{ id: "prior", text: "理解阶乘的定义" }] },
+        { kind: "full_explanation", markdown: "完整讲解" },
+        { kind: "misconceptions", items: [{ id: "misconception", text: "不要把 16! 读成 16×15" }] }
+      ]
+    };
+    expect(validateLessonStructure(page as never)).toEqual([]);
   });
 });

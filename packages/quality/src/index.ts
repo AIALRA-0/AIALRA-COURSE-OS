@@ -386,7 +386,10 @@ export function validateLessonStructure(page: PageLesson): string[] {
 function hasSentenceBoundaryOutsideMath(value: string): boolean {
   const normalized = normalizeLegacyMathDelimiters(value)
     .replace(/\$\$[\s\S]*?\$\$/g, "")
-    .replace(/(?<!\\)\$[^$\n]*?(?<!\\)\$/g, "");
+    .replace(/(?<!\\)\$[^$\n]*?(?<!\\)\$/g, "")
+    // A factorial such as 16! is mathematical notation, not the end of a
+    // sentence. Keep genuine punctuation checks for the surrounding prose.
+    .replace(/(?<=[A-Za-z0-9)])!(?=\s|$)/g, "");
   return /[。！？!?].+/.test(normalized);
 }
 
