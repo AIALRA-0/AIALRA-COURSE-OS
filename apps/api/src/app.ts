@@ -1585,6 +1585,7 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
     const raw = error instanceof Error ? error.message : "UNKNOWN_ERROR";
+    console.error(JSON.stringify({ event: "api.error", requestId: responseRequestId(request), method: request.method, path: request.path, error: raw.slice(0, 2000) }));
     const mapped = mapApiError(raw);
     const details = raw.includes("REVISION_CONFLICT") ? { conflictId: raw.slice(raw.indexOf(":") + 1) } : undefined;
     sendError(request, response, mapped.status, mapped.code, mapped.message, mapped.retryable, details);
