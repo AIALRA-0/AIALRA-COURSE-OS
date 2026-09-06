@@ -1640,7 +1640,7 @@ function buildCourseTree(courses: CourseProject[], releases: CourseRelease[], dr
       id: materialId,
       kind: "material" as const,
       title: persisted?.title || current?.moduleTitle || "未命名材料",
-      subtitle: `${current?.pages.length ?? 0} 页 · ${current?.lifecycle === "draft_source" ? "待审核" : draftCount ? `${draftCount} 页有草稿` : "已就绪"}`,
+      subtitle: `${current?.pages.length ?? 0} 页 · ${current?.lifecycle === "draft_source" ? "待审核" : current?.pages.every((page) => page.quality.publishable) ? "已就绪" : draftCount ? `${draftCount} 页有草稿` : "已就绪"}`,
       parentId,
       releaseId: current?.id,
       currentReleaseId: latestPublished?.id ?? current?.id,
