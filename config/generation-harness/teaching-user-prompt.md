@@ -8,6 +8,8 @@
 
 请先在内部完成“对象—字段—条件—关系—例子—边界”的覆盖表，再输出教学包。每个来源 atom 只指定一个主要讲解位置，后续只引用不重复整段内容
 
+输出前逐字段自检：`learningObjectives`、`priorKnowledge`、`misconceptions` 是字符串数组，不是字符串；`coverageEvidence` 是对象数组；`questions` 恰好四项，前两项的 `kind` 为 `comprehension` 且 `options: []`，后两项的 `kind` 为 `multiple_choice` 且 `options` 恰好四项。所有字段名、枚举值和数组形状必须与 JSON Schema 完全一致
+
 fullExplanationMarkdown 必须严格包含以下六个小标题，并按顺序输出：
 
 ## 先说这页要解决什么

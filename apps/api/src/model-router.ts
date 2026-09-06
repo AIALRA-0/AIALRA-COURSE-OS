@@ -248,6 +248,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     } else {
       content = output as TeachingPackage;
     }
+    content = normalizeTeachingPackageShape(content);
     try {
       validateTeachingPackage(content);
       return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
@@ -512,6 +513,50 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
     if (firstParsed) return firstParsed;
     throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
   }
+}
+
+/**
+ * Providers occasionally return a semantically usable list as one string or
+ * label a question inconsistently with its option shape. These are lossless
+ * boundary repairs, not content generation: strict validation still runs
+ * immediately afterwards and rejects anything that cannot be inferred safely
+ * from the returned JSON.
+ */
+function normalizeTeachingPackageShape(value: TeachingPackage): TeachingPackage {
+  if (!value || typeof value !== "object") return value;
+  const candidate = value as TeachingPackage & Record<string, unknown>;
+  for (const field of ["learningObjectives", "priorKnowledge", "misconceptions"] as const) {
+    const normalized = normalizeStringList(candidate[field]);
+    if (normalized !== undefined) candidate[field] = normalized as never;
+  }
+  if (Array.isArray(candidate.questions)) {
+    candidate.questions = candidate.questions.map((question) => {
+      if (!question || typeof question !== "object" || !Array.isArray(question.options)) return question;
+      const options = question.options;
+      if (options.length === 0 && question.kind === "multiple_choice") return { ...question, kind: "comprehension" };
+      if (options.length === 4 && question.kind === "comprehension") return { ...question, kind: "multiple_choice" };
+      return question;
+    });
+  }
+  return candidate;
+}
+
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  if (typeof value === "string" && value.trim()) {
+    const items = value.split(/\r?\n|[；;]/)
+      .map((item) => item.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+      .filter(Boolean);
+    return items.length > 0 ? items : [value.trim()];
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["items", "values", "objectives", "knowledge", "points"]) {
+      const items = record[key];
+      if (Array.isArray(items) && items.every((item) => typeof item === "string")) return items;
+    }
+  }
+  return undefined;
 }
 
 function validateTeachingPackage(value: unknown): asserts value is TeachingPackage {

@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.1.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.1.1", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
   });
@@ -136,6 +136,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("responses-test", true));
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
+  });
+
+  it("repairs only inferable provider shape drift before strict validation", async () => {
+    const content = providerTeachingContent() as Record<string, unknown>;
+    content.learningObjectives = "能够识别对象\n能够解释关系";
+    content.priorKnowledge = "先知道输入和输出";
+    content.misconceptions = "不要跳过条件";
+    content.questions = (content.questions as Array<Record<string, unknown>>).map((question) => ({
+      ...question,
+      kind: question.kind === "comprehension" ? "multiple_choice" : "comprehension"
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content) }, { status: 200 })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("shape-repair-test"));
+    expect(result.content.learningObjectives).toHaveLength(2);
+    expect(result.content.questions.filter((question) => question.kind === "comprehension")).toHaveLength(2);
+    expect(result.content.questions.filter((question) => question.kind === "multiple_choice")).toHaveLength(2);
   });
 
   it("reads only the final message and ignores Responses reasoning items", async () => {
