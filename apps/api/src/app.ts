@@ -2581,8 +2581,10 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
     { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点列表", items: sentenceItems("misconception", normalizedContent.misconceptions), sourceAnchorIds: anchorIds, atomIds }
   ];
   const objectiveId = lessonSections[0]!.id;
-  const questionBank: QuestionBankItem[] = normalizedContent.questions.map((item, index) => ({ id: `${page.id}:question:${item.kind}:${index + 1}`, pageId: page.id, objectiveId, kind: item.kind, prompt: item.prompt, options: item.options, expectedAnswer: item.expectedAnswer, explanation: item.explanation, sourceAnchorIds: anchorIds, status: modelBacked ? "approved" : "draft", version: 1, generatedBy: modelBacked ? `aialra-model-router-${inputMode}-v3` : "deterministic-local-fallback-v1" }));
-  const blocks = page.blocks.map((block) => block.kind === "objective" ? { ...block, markdown: normalizedContent.learningObjectives.join("\n") } : block.kind === "prerequisite" ? { ...block, markdown: normalizedContent.priorKnowledge.join("\n") } : block.kind === "core" ? { ...block, markdown: normalizedContent.mainContentMarkdown } : block.kind === "deep_dive" ? { ...block, markdown: fullExplanationMarkdown } : block.kind === "misconception" ? { ...block, markdown: normalizedContent.misconceptions.join("\n") } : block);
+  const questionBank: QuestionBankItem[] = normalizedContent.questions.map((item, index) => ({ id: `${page.id}:question:${item.kind}:${index + 1}`, pageId: page.id, objectiveId, kind: item.kind, prompt: item.prompt, options: item.options, expectedAnswer: item.expectedAnswer, explanation: item.explanation, sourceAnchorIds: anchorIds, status: modelBacked ? "approved" : "draft", version: 1, generatedBy: modelBacked ? `model-generated-${inputMode}-v3` : "deterministic-local-fallback-v1" }));
+  const blocks = page.blocks
+    .filter((block) => !isPlaceholderTeachingBlock(block.markdown))
+    .map((block) => block.kind === "objective" ? { ...block, markdown: normalizedContent.learningObjectives.join("\n") } : block.kind === "prerequisite" ? { ...block, markdown: normalizedContent.priorKnowledge.join("\n") } : block.kind === "core" ? { ...block, markdown: normalizedContent.mainContentMarkdown } : block.kind === "deep_dive" ? { ...block, markdown: fullExplanationMarkdown } : block.kind === "misconception" ? { ...block, markdown: normalizedContent.misconceptions.join("\n") } : block);
   const explanationBlockId = blocks.find((item) => item.kind === "deep_dive")?.id || blocks.find((item) => item.kind === "core")!.id;
   const coverageClaims = page.coverageRequirements.map((requirement) => {
     const evidence = normalizedContent.coverageEvidence.find((item) => item.atomId === requirement.atomId);
@@ -2591,6 +2593,10 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
   return { ...page, blocks, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+}
+
+function isPlaceholderTeachingBlock(markdown: string): boolean {
+  return /待生成|待补充|待核验|待确认/.test(markdown.trim());
 }
 
 function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): void {
