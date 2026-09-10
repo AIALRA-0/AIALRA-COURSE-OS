@@ -2421,17 +2421,19 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       if (runtimeModelRouter) {
-        assertTeachingCoverageEvidence(page, generation.content);
-        const validatedCoverageEvidence = structuredClone(generation.content.coverageEvidence);
+        let coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
+        let validatedCoverageEvidence = coverageIssues.length === 0 ? structuredClone(generation.content.coverageEvidence) : undefined;
         let narrativeIssues = validateTeachingNarrative({
           ...generation.content,
           pageKind: blueprint.resourcePackage.pageKind,
           sourceDensity: blueprint.resourcePackage.sourceDensity
         });
-        if (narrativeIssues.length > 0) {
+        let repairIssues = [...new Set([...coverageIssues, ...narrativeIssues])];
+        const requiredRepair = repairIssues.length > 0;
+        for (let repairAttempt = 1; repairAttempt <= 2 && repairIssues.length > 0; repairAttempt += 1) {
           const previousGeneration = generation;
           const maximumExplanationCharacters = maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity });
-          await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { issues: narrativeIssues, maximumExplanationCharacters });
+          await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { repairAttempt, issues: repairIssues, maximumExplanationCharacters });
           const repaired = await runtimeModelRouter.generateTeachingPackage({
             pageTitle: page.title,
             pageNumber: page.pageNumber,
@@ -2441,24 +2443,28 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
             language: currentJob.language || "zh-CN",
             qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
-            idempotencyKey: `course-os:${jobId}:${page.id}:repair:v1`,
+            idempotencyKey: `course-os:${jobId}:${page.id}:repair:${repairAttempt}:v2`,
             stage: "repair",
-            repair: { issues: narrativeIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
+            repair: { issues: repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
           });
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
-          repaired.content.coverageEvidence = validatedCoverageEvidence;
+          if (validatedCoverageEvidence) repaired.content.coverageEvidence = validatedCoverageEvidence;
           generation = combineTeachingGenerations(previousGeneration, repaired);
+          coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
+          if (coverageIssues.length === 0 && !validatedCoverageEvidence) validatedCoverageEvidence = structuredClone(generation.content.coverageEvidence);
           narrativeIssues = validateTeachingNarrative({
             ...generation.content,
             pageKind: blueprint.resourcePackage.pageKind,
             sourceDensity: blueprint.resourcePackage.sourceDensity
           });
-          await appendGenerationStageEvent(jobId, page.id, "repair", "completed", dependencies, { provider: repaired.provider, model: repaired.model, inputTokens: repaired.usage.inputTokens, outputTokens: repaired.usage.outputTokens, remainingIssueCount: narrativeIssues.length });
-        } else {
+          repairIssues = [...new Set([...coverageIssues, ...narrativeIssues])];
+          await appendGenerationStageEvent(jobId, page.id, "repair", "completed", dependencies, { repairAttempt, provider: repaired.provider, model: repaired.model, inputTokens: repaired.usage.inputTokens, outputTokens: repaired.usage.outputTokens, remainingIssueCount: repairIssues.length, remainingIssues: repairIssues });
+        }
+        if (!requiredRepair) {
           await appendGenerationStageEvent(jobId, page.id, "repair", "skipped", dependencies, { reason: "没有发现需要修复的质量问题" });
         }
-        if (narrativeIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${narrativeIssues[0]}`, generation.model, generation.usage, generation.provider);
+        if (repairIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       assertTeachingCoverageEvidence(page, generation.content);
@@ -2660,16 +2666,26 @@ function isPlaceholderTeachingBlock(markdown: string): boolean {
 }
 
 function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): void {
+  const issues = validateTeachingCoverageEvidence(page, content);
+  if (issues.length > 0) throw new Error(issues[0]);
+}
+
+function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): string[] {
+  const issues: string[] = [];
   const atomIds = new Set(page.atoms.map((atom) => atom.id));
   const unknown = [...new Set(content.coverageEvidence.map((item) => item.atomId).filter((atomId) => !atomIds.has(atomId)))];
-  if (unknown.length > 0) throw new Error("TEACHING_COVERAGE_ATOM_UNKNOWN");
+  if (unknown.length > 0) issues.push("TEACHING_COVERAGE_ATOM_UNKNOWN");
   const evidenceByAtom = new Map(content.coverageEvidence.map((item) => [item.atomId, item]));
   for (const requirement of page.coverageRequirements) {
     const evidence = evidenceByAtom.get(requirement.atomId);
-    if (!evidence) throw new Error("TEACHING_COVERAGE_REQUIREMENT_MISSING");
-    if (requirement.requiredFields.some((field) => !evidence.coveredFields.includes(field))) throw new Error("TEACHING_COVERAGE_FIELD_MISSING");
-    if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) throw new Error("TEACHING_COVERAGE_EXPLANATION_VAGUE");
+    if (!evidence) {
+      issues.push("TEACHING_COVERAGE_REQUIREMENT_MISSING");
+      continue;
+    }
+    if (requirement.requiredFields.some((field) => !evidence.coveredFields.includes(field))) issues.push("TEACHING_COVERAGE_FIELD_MISSING");
+    if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) issues.push("TEACHING_COVERAGE_EXPLANATION_VAGUE");
   }
+  return [...new Set(issues)];
 }
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {

@@ -350,6 +350,29 @@ describe("Course OS API", () => {
     expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string; remainingIssueCount?: number }).stage === "repair" && (event.payload as { remainingIssueCount?: number }).remainingIssueCount === 0)).toBe(true);
   }, 60_000);
 
+  it("repairs missing atom coverage and validates the repaired evidence", async () => {
+    const calls: Array<{ stage?: string; issues?: string[] }> = [];
+    const coveredRelease = testRelease();
+    coveredRelease.pages[0]!.atoms = [{ kind: "image_region", id: "atom-coverage", label: "输入与输出关系", observation: "输入经过规则得到输出" }];
+    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-coverage", atomId: "atom-coverage", requiredFields: ["observation"], risk: "high" }];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        calls.push({ stage: input.stage, issues: input.repair?.issues });
+        const result = testTeachingResult(0.001);
+        if (input.stage === "repair") result.content.coverageEvidence = [{ atomId: "atom-coverage", coveredFields: ["observation"], explanation: "正文解释了输入经过规则得到输出的可见关系" }];
+        return result;
+      }
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, coveredRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-missing-coverage").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(calls).toEqual([
+      { stage: "teach", issues: undefined },
+      { stage: "repair", issues: ["TEACHING_COVERAGE_REQUIREMENT_MISSING"] }
+    ]);
+    expect((await readweave.getDraftByPage("page-1"))?.page.coverageClaims).toEqual([expect.objectContaining({ requirementId: "requirement-coverage", status: "covered" })]);
+  }, 60_000);
+
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.02)
