@@ -192,7 +192,9 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
       return `\u0000${protectedValues.length - 1}\u0000`;
     });
     const repaired = protectedLine.replace(/。(?=\s*$)/g, "").replace(/。/g, "；").replace(/；(?=\s*$)/g, "");
-    return repaired.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedValues[Number(index)]!);
+    const pseudoHeading = repaired.match(/^(\s*)(?:[-*+]\s*)?([\p{Script=Han}A-Za-z0-9 _-]{1,18})[：:]\s*$/u);
+    const structured = pseudoHeading ? `${pseudoHeading[1]}## ${pseudoHeading[2]!.trim()}` : repaired;
+    return structured.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedValues[Number(index)]!);
   }).join("");
 }
 
