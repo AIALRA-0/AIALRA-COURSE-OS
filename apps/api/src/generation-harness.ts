@@ -9,7 +9,10 @@ const readHarnessFile = (name: string): string => readFileSync(resolve(harnessDi
 export const teachingSystemPromptTemplate = readHarnessFile("teaching-system-prompt.md");
 export const teachingUserPromptTemplate = readHarnessFile("teaching-user-prompt.md");
 export const teachingBlueprint = readHarnessFile("teaching-blueprint.md");
+export const policyFormatRules = readHarnessFile("policy-format-rules.md");
+export const policyExplanationFramework = readHarnessFile("policy-explanation-framework.md");
 export const teachingPackageSchema = JSON.parse(readHarnessFile("teaching-package.schema.json")) as Record<string, unknown>;
+const harnessManifest = JSON.parse(readHarnessFile("harness-manifest.json")) as { id: string; version: string; taskContract: "GENERATE + TEACHING" };
 
 export interface PromptInput {
   pageTitle: string;
@@ -34,7 +37,9 @@ const targetLanguage = (language: string): string => language === "en" ? "Englis
 const render = (template: string, values: Record<string, string>): string => Object.entries(values).reduce((result, [key, value]) => result.replaceAll(`{{${key}}}`, value), template);
 
 export function professorInstructions(language: string): string {
-  return render(teachingSystemPromptTemplate, { LANGUAGE: targetLanguage(language) }).trim();
+  const systemPrompt = render(teachingSystemPromptTemplate, { LANGUAGE: targetLanguage(language) }).trim();
+  if (language === "en") return systemPrompt;
+  return `${systemPrompt}\n\n---\n\n${policyFormatRules.trim()}\n\n---\n\n${policyExplanationFramework.trim()}`;
 }
 
 export function modelInput(input: PromptInput): string | Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "high" }> }> {
@@ -53,7 +58,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
-  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
+  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
   const aggregateSha256 = createHash("sha256").update(JSON.stringify(files)).digest("hex");
-  return { id: "course-os-teaching", version: "1.2.0", taskContract: "GENERATE + TEACHING", files, aggregateSha256 };
+  return { id: harnessManifest.id, version: harnessManifest.version, taskContract: harnessManifest.taskContract, files, aggregateSha256 };
 }

@@ -4,9 +4,11 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "1.2.0", taskContract: "GENERATE + TEACHING" });
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json"]);
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.0.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("8a11e4f8128366378e2225c2e335e420a35e5bc70649f5dfc6cbdfb132cdaef5");
+    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("c1d501d1065085a02d387c513b16ee0ca17228ce47d137408fafe75460b8ec91");
   });
 });
 

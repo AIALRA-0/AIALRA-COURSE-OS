@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, normalizeLegacyMathDelimiters, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -63,42 +63,45 @@ describe("learner-facing teaching narrative", () => {
     mainContentMarkdown: "- 先确认对象\n- 再解释关系\n- 最后检查结果",
     priorKnowledge: ["先知道对象的定义"],
     fullExplanationMarkdown: [
-      "## 先说这页要解决什么\n这页要让读者能够根据条件解释问题和目标",
-      "## 先读原对象\n页面给出了输入对象、处理规则和输出对象，三者按顺序出现",
-      "## 解释核心关系\n规则读取输入并改变状态，状态变化决定最后得到的输出",
-      "## 做一个例子或计算\n给定输入 2，执行加 3 的规则，先得到中间值 5，再检查结果是否满足目标",
-      "## 边界与易错点\n输入缺失时不能执行规则，结果看似合理也不能替代前提检查",
-      "## 最后回收\n把对象、关系、结果和下一步检查连起来，就能复现这页的核心过程"
+      "## 输入怎样变成结果\n页面给出了输入对象、处理规则和输出对象，三者按顺序出现\n规则读取输入并改变状态，状态变化决定最后得到的输出",
+      "## 跟着算一次\n给定输入 2，执行加 3 的规则，先得到中间值 5，再检查结果是否满足目标",
+      "## 哪些情况不能照用\n输入缺失时不能执行规则，结果看似合理也不能替代前提检查"
     ].join("\n\n"),
     misconceptions: ["不要跳过输入条件"],
     questions: [{ prompt: "对象是什么", explanation: "对象提供计算的起点" }]
   };
 
-  it("accepts the six-step structure without learner-facing audit labels", () => {
+  it("accepts adaptive structure without learner-facing audit labels", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
   });
 
-  it("rejects missing structure, audit noise and repeated paragraphs", () => {
+  it("rejects audit noise and repeated paragraphs", () => {
     const bad = { ...valid, fullExplanationMarkdown: "来源状态\n\n重复的说明内容需要被删除，因为它没有增加新的理解。\n\n重复的说明内容需要被删除，因为它没有增加新的理解。" };
     expect(validateTeachingNarrative(bad)).toEqual(expect.arrayContaining([
-      "TEACHING_STRUCTURE_MISSING:先说这页要解决什么",
       "TEACHING_METADATA_NOISE:来源状态",
-      "TEACHING_REPEATED_PARAGRAPH"
+      "TEACHING_REPEATED_PARAGRAPH",
+      "WRITING_CHINESE_FULL_STOP_FORBIDDEN"
     ]));
   });
 
-  it("rejects empty teaching stages even when all headings are present", () => {
-    const thin = { ...valid, fullExplanationMarkdown: [
-      "## 先说这页要解决什么\n目标",
-      "## 先读原对象\n对象",
-      "## 解释核心关系\n关系",
-      "## 做一个例子或计算\n例子",
-      "## 边界与易错点\n边界",
-      "## 最后回收\n结论"
-    ].join("\n\n") };
-    expect(validateTeachingNarrative(thin)).toEqual(expect.arrayContaining([
-      "TEACHING_SECTION_TOO_SHORT:先说这页要解决什么",
-      "TEACHING_SECTION_TOO_SHORT:边界与易错点"
+  it("rejects the old fixed six-heading template", () => {
+    const templated = { ...valid, fullExplanationMarkdown: "## 先说这页要解决什么\n目标\n\n## 先读原对象\n对象" };
+    expect(validateTeachingNarrative(templated)).toEqual(expect.arrayContaining([
+      "TEACHING_FIXED_TEMPLATE_HEADING:先说这页要解决什么",
+      "TEACHING_FIXED_TEMPLATE_HEADING:先读原对象"
+    ]));
+  });
+
+  it("normalizes only authored Chinese punctuation and protects source objects", () => {
+    const source = "正文第一句。正文第二句；\n> 原文句号。\n`原样。` 和 $x_{。}=1$\n```text\n日志。\n```";
+    expect(normalizeHumanReadableChineseMarkdown(source)).toBe("正文第一句；正文第二句\n> 原文句号。\n`原样。` 和 $x_{。}=1$\n```text\n日志。\n```");
+    expect(validateHumanReadableChinese(normalizeHumanReadableChineseMarkdown(source))).toEqual([]);
+  });
+
+  it("rejects colon pseudo-headings and line-ending semicolons", () => {
+    expect(validateHumanReadableChinese("操作：\n执行检查；")).toEqual(expect.arrayContaining([
+      "WRITING_COLON_PSEUDO_HEADING",
+      "WRITING_LINE_END_SEMICOLON_FORBIDDEN"
     ]));
   });
 });

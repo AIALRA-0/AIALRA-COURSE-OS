@@ -29,6 +29,23 @@ try {
 if (manifest) {
   validateManifest(manifest, "CURRENT");
   knownPolicyIds.add(manifest.policySnapshotId);
+  const bundledPolicyFiles = new Map([
+    ["references/format-rules.md", resolve("config/generation-harness/policy-format-rules.md")],
+    ["references/explanation-framework.md", resolve("config/generation-harness/policy-explanation-framework.md")]
+  ]);
+  for (const [sourcePath, bundledPath] of bundledPolicyFiles) {
+    const expected = manifest.files.find((file) => file.sourcePath === sourcePath)?.sha256;
+    if (!expected) {
+      policyIssues.push(`WRITING_POLICY_BUNDLE_NOT_DECLARED:${sourcePath}`);
+      continue;
+    }
+    try {
+      const actual = createHash("sha256").update(await readFile(bundledPath)).digest("hex");
+      if (actual !== expected) policyIssues.push(`WRITING_POLICY_BUNDLE_HASH_MISMATCH:${sourcePath}`);
+    } catch {
+      policyIssues.push(`WRITING_POLICY_BUNDLE_MISSING:${sourcePath}`);
+    }
+  }
 }
 
 try {

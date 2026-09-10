@@ -87,7 +87,7 @@ describe("Course OS API", () => {
     expect(["queued", "running", "completed"]).toContain(ready.generationState);
     expect(ready.generationJobId).toBeTruthy();
     const job = await waitForJob(app, ready.generationJobId);
-    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:2b5c992fa06643bd", budgetUsd: 2 });
+    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:80a3b40aaf1b7d73", budgetUsd: 2 });
     const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(200);
     expect(replay.body.id).toBe(ready.id);
     expect((await dependencies.operations.read()).jobs).toHaveLength(1);
@@ -96,7 +96,7 @@ describe("Course OS API", () => {
 
   it("returns a safe candidate writing policy without private paths", async () => {
     const policy = await request(await testApp()).get("/api/v1/writing-policy/current").expect(200);
-    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:2b5c992fa06643bd", sourceCommit: "da8c8be24ba4a5f3dca6ccba696413aa78668aa2", status: "candidate", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
+    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:80a3b40aaf1b7d73", sourceCommit: "789f90c2ac3dae6ab8b89c7751751c1d7687ff65", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
     expect(policy.body.promptTemplate).toContain("SOURCE");
     expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
@@ -107,7 +107,7 @@ describe("Course OS API", () => {
       .set("Idempotency-Key", "candidate-release-1")
       .send({ baseReleaseId: "test-release-v1", releaseId: "test-release-v2-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
-    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:2b5c992fa06643bd" });
+    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:80a3b40aaf1b7d73" });
     expect(created.body.candidate.pages[0].id).not.toBe("page-1");
     expect(created.body.candidate.pages[0].blocks[0].id).toContain("test-release-v2-candidate:page:1");
     expect((await readweave.listReleases()).filter((item) => item.lifecycle !== "draft_source")).toHaveLength(1);
@@ -624,12 +624,9 @@ function testTeachingResult(apiEquivalentUsd: number) {
       mainContentMarkdown: "先识别输入，再按照规则处理，最后检查输出是否满足目标",
       priorKnowledge: ["先知道输入和输出分别表示什么"],
       fullExplanationMarkdown: [
-        "## 先说这页要解决什么\n这页要把输入、处理规则和输出连成一条可以检查的流程，读者最后要能说明每一步为什么发生",
-        "## 先读原对象\n输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果",
-        "## 解释核心关系\n先确认输入，再按规则处理对象，处理过程会把状态推进到新的结果，最后必须把输出和目标重新比较",
-        "## 做一个例子或计算\n假设输入已经满足前提，先记录初始状态，再执行规则并写出中间状态，最后检查结果是否满足目标",
-        "## 边界与易错点\n如果输入条件缺失，规则就不能直接套用，输出看起来合理也不能替代前提检查；只看最后数字会漏掉过程中的错误",
-        "## 最后回收\n记住对象、规则、状态变化和检查动作之间的关系，下一步应回到具体输入验证这条流程"
+        "## 输入、规则和输出\n这页要把输入、处理规则和输出连成一条可以检查的流程，读者最后要能说明每一步为什么发生\n输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果",
+        "## 状态怎样向前推进\n先确认输入，再按规则处理对象，处理过程会把状态推进到新的结果，最后必须把输出和目标重新比较\n假设输入已经满足前提，先记录初始状态，再执行规则并写出中间状态，最后检查结果是否满足目标",
+        "## 不能跳过的检查\n如果输入条件缺失，规则就不能直接套用，输出看起来合理也不能替代前提检查；只看最后数字会漏掉过程中的错误\n下一步应回到具体输入，逐项核对对象、规则、状态变化和结果"
       ].join("\n\n"),
       misconceptions: ["不要跳过输入条件直接套用最后结论"],
       coverageEvidence: [],

@@ -42,7 +42,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2114,6 +2114,7 @@ interface PersistGenerationJobInput {
   qualityMode: "economy" | "balanced" | "quality";
   language: string;
   writingPolicySnapshotId: string;
+  harnessSnapshotId?: string;
 }
 
 async function persistGenerationJob(input: PersistGenerationJobInput, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean }> {
@@ -2124,6 +2125,7 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       if (existing) return { job: structuredClone(existing), created: false };
     }
     const now = new Date().toISOString();
+    const harnessSnapshotId = input.harnessSnapshotId || currentGenerationHarness().aggregateSha256;
     const job: GenerationJob = {
       id: randomUUID(),
       workspaceId: input.workspaceId,
@@ -2135,6 +2137,7 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       qualityMode: input.qualityMode,
       language: input.language,
       writingPolicySnapshotId: input.writingPolicySnapshotId,
+      harnessSnapshotId,
       state: "queued",
       budgetUsd: input.budgetUsd,
       spentUsd: 0,
@@ -2142,14 +2145,14 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       completedPageIds: [],
       failedPageIds: [],
       attempt: 0,
-      semanticKey: `${input.materialVersionId}:${input.pageIds.join(",")}:${input.writingPolicySnapshotId}`,
+      semanticKey: `${input.materialVersionId}:${input.pageIds.join(",")}:${input.writingPolicySnapshotId}:${harnessSnapshotId}`,
       cancelRequested: false,
       createdAt: now,
       updatedAt: now
     };
     state.jobs.push(job);
     state.idempotency[input.idempotencyKey] = { kind: "job", objectId: job.id };
-    dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: job.pageIds.length, budgetUsd: job.budgetUsd, sourceImportId: job.sourceImportId, writingPolicySnapshotId: job.writingPolicySnapshotId });
+    dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: job.pageIds.length, budgetUsd: job.budgetUsd, sourceImportId: job.sourceImportId, writingPolicySnapshotId: job.writingPolicySnapshotId, harnessSnapshotId: job.harnessSnapshotId });
     return { job: structuredClone(job), created: true };
   });
 }
@@ -2184,6 +2187,7 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
       return { plan: structuredClone(existing), created: false };
     }
     const now = new Date().toISOString();
+    const harnessSnapshotId = currentGenerationHarness().aggregateSha256;
     const plan: GenerationPlan = {
       id: randomUUID(),
       workspaceId: input.workspaceId,
@@ -2192,6 +2196,7 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
       qualityMode: input.qualityMode,
       language: input.language,
       writingPolicySnapshotId: input.writingPolicySnapshotId,
+      harnessSnapshotId,
       modelRoutes: [],
       pageIds: [...input.pageIds],
       completedPageIds: [],
@@ -2206,7 +2211,7 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
     };
     state.generationPlans.push(plan);
     state.idempotency[input.idempotencyKey] = { kind: "generation_plan", objectId: plan.id };
-    dependencies.operations.appendEvent(state, plan.id, "plan.queued", { pages: plan.pageIds.length, budgetUsd: plan.budgetUsd, holdForReview: plan.holdForReview, sourceImportId: plan.sourceImportId, writingPolicySnapshotId: plan.writingPolicySnapshotId });
+    dependencies.operations.appendEvent(state, plan.id, "plan.queued", { pages: plan.pageIds.length, budgetUsd: plan.budgetUsd, holdForReview: plan.holdForReview, sourceImportId: plan.sourceImportId, writingPolicySnapshotId: plan.writingPolicySnapshotId, harnessSnapshotId: plan.harnessSnapshotId });
     return { plan: structuredClone(plan), created: true };
   });
   const next = await queueNextGenerationPlanJob(persisted.plan.id, dependencies);
@@ -2245,7 +2250,8 @@ async function queueNextGenerationPlanJob(planId: string, dependencies: AppDepen
     batchCount: plan.pageIds.length,
     qualityMode: plan.qualityMode,
     language: plan.language,
-    writingPolicySnapshotId: plan.writingPolicySnapshotId
+    writingPolicySnapshotId: plan.writingPolicySnapshotId,
+    harnessSnapshotId: plan.harnessSnapshotId
   }, dependencies);
   const linked = await dependencies.operations.mutate((state) => {
     const current = state.generationPlans.find((item) => item.id === plan.id);
@@ -2379,6 +2385,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       return;
     }
   }
+  if (initial.harnessSnapshotId && currentGenerationHarness().aggregateSha256 !== initial.harnessSnapshotId) {
+    await failGenerationJob(jobId, "GENERATION_HARNESS_SNAPSHOT_CHANGED", dependencies);
+    return;
+  }
   for (const pageId of initial.pageIds) {
     const currentJob = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
@@ -2408,8 +2418,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v4`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v5`, stage: "teach" })
         : deterministicTeachingPackage(page);
+      generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       assertTeachingCoverageEvidence(page, generation.content);
@@ -2613,7 +2624,7 @@ function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], co
 }
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {
-  const normalize = normalizeGeneratedMathPunctuation;
+  const normalize = (value: string) => normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(value));
   return {
     ...content,
     learningObjectives: content.learningObjectives.map(normalize),

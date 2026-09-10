@@ -4,7 +4,7 @@
     "learningObjectives": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 8 } },
     "mainContentMarkdown": { "type": "string", "minLength": 30 },
     "priorKnowledge": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 6 } },
-    "fullExplanationMarkdown": { "type": "string", "minLength": 300 },
+    "fullExplanationMarkdown": { "type": "string", "minLength": 120 },
     "misconceptions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 8 } },
     "coverageEvidence": {
       "type": "array",

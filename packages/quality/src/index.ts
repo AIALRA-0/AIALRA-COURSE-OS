@@ -27,7 +27,7 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   const explanation = sections.find((section) => section.kind === "full_explanation")?.markdown?.trim() ?? "";
   const required = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"];
   const issues = required.filter((kind) => !sections.some((section) => section.kind === kind)).map((kind) => `TEACHING_SECTION_MISSING:${kind}`);
-  if (explanation.length < 300) issues.push("TEACHING_EXPLANATION_TOO_SHORT");
+  if (explanation.length < minimumExplanationCharacters(page)) issues.push("TEACHING_EXPLANATION_TOO_SHORT");
   const paragraphs = explanation.split(/\n\s*\n/).map((value) => value.replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim()).filter((value) => value.length >= 24);
   const counts = new Map<string, number>();
   for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) ?? 0) + 1);
@@ -37,6 +37,16 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   for (const phrase of forbidden) if (explanation.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   const questions = page.questionBank?.filter((question) => question.status === "approved") ?? [];
   if (questions.length !== 4) issues.push("TEACHING_QUESTION_COUNT_INVALID");
+  if (sections.length >= 5 && questions.length) {
+    issues.push(...validateTeachingNarrative({
+      learningObjectives: sections.find((section) => section.kind === "learning_objectives")?.items?.map((item) => item.text) ?? [],
+      mainContentMarkdown: sections.find((section) => section.kind === "main_content")?.markdown ?? "",
+      priorKnowledge: sections.find((section) => section.kind === "prior_knowledge")?.items?.map((item) => item.text) ?? [],
+      fullExplanationMarkdown: explanation,
+      misconceptions: sections.find((section) => section.kind === "misconceptions")?.items?.map((item) => item.text) ?? [],
+      questions: questions.map((question) => ({ prompt: question.prompt, explanation: question.explanation }))
+    }));
+  }
   const score = Math.max(0, Math.round((1 - Math.min(1, issues.length / 8)) * 100));
   return { score, issues: [...new Set(issues)], explanationCharacters: explanation.length, repeatedParagraphRatio };
 }
@@ -65,7 +75,7 @@ export interface TeachingNarrativeInput {
 export function validateTeachingNarrative(input: TeachingNarrativeInput): string[] {
   const issues: string[] = [];
   const explanation = input.fullExplanationMarkdown.trim();
-  const requiredHeadings = [
+  const legacyTemplateHeadings = [
     "先说这页要解决什么",
     "先读原对象",
     "解释核心关系",
@@ -73,25 +83,11 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     "边界与易错点",
     "最后回收"
   ];
-  let previous = -1;
-  const positions: number[] = [];
-  for (const heading of requiredHeadings) {
-    const position = explanation.indexOf(`## ${heading}`);
-    positions.push(position);
-    if (position < 0) issues.push(`TEACHING_STRUCTURE_MISSING:${heading}`);
-    else if (position < previous) issues.push(`TEACHING_STRUCTURE_ORDER:${heading}`);
-    else previous = position;
-  }
-  for (let index = 0; index < requiredHeadings.length; index += 1) {
-    const position = positions[index]!;
-    if (position < 0) continue;
-    const nextPosition = positions.slice(index + 1).find((candidate) => candidate >= 0) ?? explanation.length;
-    const body = explanation.slice(position + (`## ${requiredHeadings[index]}`).length, nextPosition)
-      .replace(/[`*_>#-]/g, "")
-      .replace(/\s+/g, "")
-      .trim();
-    if (body.length < 18) issues.push(`TEACHING_SECTION_TOO_SHORT:${requiredHeadings[index]}`);
-  }
+  for (const heading of legacyTemplateHeadings) if (explanation.includes(`## ${heading}`)) issues.push(`TEACHING_FIXED_TEMPLATE_HEADING:${heading}`);
+
+  const headings = [...explanation.matchAll(/^#{2,4}\s+(.+)$/gm)].map((match) => match[1]!.trim());
+  if (explanation.length >= 500 && headings.length < 2) issues.push("TEACHING_COMPLEX_CONTENT_UNSTRUCTURED");
+  if (new Set(headings).size !== headings.length) issues.push("TEACHING_HEADING_DUPLICATE");
 
   const learnerText = [
     input.learningObjectives.join("\n"),
@@ -112,6 +108,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     "来源冲突必须进入人工审核"
   ];
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
+  issues.push(...validateHumanReadableChinese(learnerText));
 
   const paragraphs = explanation.split(/\n\s*\n/)
     .map((paragraph) => paragraph.replace(/^#+\s*/, "").replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim())
@@ -126,7 +123,76 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     .filter((line) => line.length >= 18 && !line.startsWith("## "));
   const uniqueSentences = new Set(contentSentences.map((line) => line.replace(/\s+/g, "")));
   if (contentSentences.length >= 8 && uniqueSentences.size / contentSentences.length < 0.78) issues.push("TEACHING_REPETITION_RATIO_LOW");
+
+  const mainLines = new Set(normalizedContentLines(input.mainContentMarkdown));
+  const repeatedAcrossSections = normalizedContentLines(input.fullExplanationMarkdown).filter((line) => mainLines.has(line));
+  if (repeatedAcrossSections.length > 0) issues.push("TEACHING_MAIN_EXPLANATION_DUPLICATION");
+
+  const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
+  if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+/** Hard, deterministic subset of the approved human-readable Chinese policy. */
+export function validateHumanReadableChinese(markdown: string): string[] {
+  const issues: string[] = [];
+  const visible = stripProtectedMarkdown(markdown);
+  if (visible.includes("。")) issues.push("WRITING_CHINESE_FULL_STOP_FORBIDDEN");
+  if (visible.split(/\r?\n/).some((line) => /；\s*$/.test(line))) issues.push("WRITING_LINE_END_SEMICOLON_FORBIDDEN");
+  if (visible.split(/\r?\n/).some((line) => /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
+  return issues;
+}
+
+/** Apply only lossless punctuation repairs outside code, quotes, URLs and math. */
+export function normalizeHumanReadableChineseMarkdown(markdown: string): string {
+  let inFence = false;
+  let fenceMarker = "";
+  let inDisplayMath = false;
+  return markdown.split(/(\r?\n)/).map((part) => {
+    if (/^\r?\n$/.test(part)) return part;
+    const fence = part.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      if (!inFence) { inFence = true; fenceMarker = fence[1]!; }
+      else if (part.trimStart().startsWith(fenceMarker)) { inFence = false; fenceMarker = ""; }
+      return part;
+    }
+    if (inFence || /^\s*>/.test(part)) return part;
+    const displayCount = part.match(/(?<!\\)\$\$/g)?.length ?? 0;
+    if (inDisplayMath || displayCount > 0) {
+      if (displayCount % 2 === 1) inDisplayMath = !inDisplayMath;
+      return part;
+    }
+    const protectedValues: string[] = [];
+    const protectedLine = part.replace(/`[^`\r\n]+`|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
+      protectedValues.push(value);
+      return `\u0000${protectedValues.length - 1}\u0000`;
+    });
+    const repaired = protectedLine.replace(/。(?=\s*$)/g, "").replace(/。/g, "；").replace(/；(?=\s*$)/g, "");
+    return repaired.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedValues[Number(index)]!);
+  }).join("");
+}
+
+function stripProtectedMarkdown(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "")
+    .replace(/^\s*>.*$/gm, "")
+    .replace(/`[^`\r\n]+`/g, "")
+    .replace(/\$\$[\s\S]*?\$\$/g, "")
+    .replace(/(?<!\$)\$[^$\r\n]+\$(?!\$)/g, "")
+    .replace(/https?:\/\/\S+/g, "");
+}
+
+function normalizedContentLines(markdown: string): string[] {
+  return stripProtectedMarkdown(markdown).split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:#{1,6}|[-*+]\s+|\d+[.)]\s+)/, "").replace(/\s+/g, "").trim())
+    .filter((line) => line.length >= 24);
+}
+
+function minimumExplanationCharacters(page: PageLesson): number {
+  const titleLike = page.pageNumber === 1 && page.atoms.every((atom) => atom.kind === "image_region");
+  if (titleLike) return 120;
+  if (/(目录|大纲|outline|agenda|contents)/i.test(page.title)) return 200;
+  return 300;
 }
 
 export function validateTex(sourceTex: string): { valid: true; normalizedTex: string } | { valid: false; error: string } {

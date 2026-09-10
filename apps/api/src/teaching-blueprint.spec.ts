@@ -12,8 +12,10 @@ const page = {
 describe("teaching blueprint", () => {
   it("builds a stable package that assigns every requirement", () => {
     const result = buildTeachingBlueprint(page, "来源文本", "zh-CN", "quality", "writing-policy:test", true);
-    expect(result.version).toBe("1.0.0");
+    expect(result.version).toBe("2.0.0");
     expect(result.steps).toHaveLength(6);
+    expect(result.resourcePackage).toMatchObject({ pageKind: "diagram", sourceDensity: "sparse" });
+    expect(result.steps.find((step) => step.kind === "example")?.required).toBe(true);
     expect(result.steps.find((step) => step.kind === "relationship")?.requirementIds).toEqual(["req:1"]);
     expect(validateTeachingBlueprint(page, result)).toEqual([]);
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/);

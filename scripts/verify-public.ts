@@ -46,7 +46,7 @@ for (const [path, text] of [["README.md", readme], ["README.en.md", englishReadm
   if (!text.includes("2.4.0")) issues.push({ path, code: "README_VERSION_MISSING" });
   if (!text.includes("72")) issues.push({ path, code: "README_PRIVATE_ACCEPTANCE_SCOPE_MISSING" });
 }
-for (const required of ["LICENSE", "SECURITY.md", "deploy/vps/compose.yaml", "deploy/vps/nginx.conf.template", "config/writing-policy-manifest.json"]) {
+for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "SECURITY.md", "deploy/vps/compose.yaml", "deploy/vps/nginx.conf.template", "config/writing-policy-manifest.json"]) {
   if (!files.includes(required)) issues.push({ path: required, code: "REQUIRED_PUBLIC_FILE_MISSING" });
 }
 

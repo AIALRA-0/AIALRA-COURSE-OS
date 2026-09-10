@@ -205,24 +205,26 @@ export interface PageLesson {
 }
 
 export interface TeachingResourcePackage {
-  version: "1.0.0";
+  version: "2.0.0";
   pageId: Identifier;
   pageTitle: string;
   sourceText: string;
   sourceAnchorIds: Identifier[];
   atomIds: Identifier[];
   imageAvailable: boolean;
+  pageKind: "cover" | "agenda" | "concept" | "formula" | "diagram" | "table" | "code" | "mixed";
+  sourceDensity: "sparse" | "normal" | "dense";
 }
 
 export interface TeachingRequirementPackage {
-  version: "1.0.0";
+  version: "2.0.0";
   requirements: CoverageRequirement[];
   objective: string;
   requiredSections: LessonSectionKind[];
 }
 
 export interface TeachingRulePackage {
-  version: "1.0.0";
+  version: "2.0.0";
   language: string;
   qualityMode: string;
   rules: string[];
@@ -236,10 +238,11 @@ export interface TeachingBlueprintStep {
   atomIds: Identifier[];
   requirementIds: Identifier[];
   output: string;
+  required: boolean;
 }
 
 export interface TeachingBlueprint {
-  version: "1.0.0";
+  version: "2.0.0";
   pageId: Identifier;
   pageNumber: number;
   resourcePackage: TeachingResourcePackage;
@@ -514,6 +517,7 @@ export interface GenerationJob {
   qualityMode?: "economy" | "balanced" | "quality";
   language?: string;
   writingPolicySnapshotId?: Identifier;
+  harnessSnapshotId?: Identifier;
   state: JobState;
   budgetUsd: number;
   spentUsd: number;
@@ -537,6 +541,7 @@ export interface GenerationPlan {
   qualityMode: "economy" | "balanced" | "quality";
   language: string;
   writingPolicySnapshotId: Identifier;
+  harnessSnapshotId?: Identifier;
   modelRoutes?: Array<{ provider: string; model: string }>;
   pageIds: Identifier[];
   completedPageIds: Identifier[];
