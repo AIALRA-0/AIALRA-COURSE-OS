@@ -55,8 +55,8 @@ export interface ModelRouterClient {
   generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult>;
 }
 
-function teachingOutputTokenLimit(qualityMode: string): number {
-  return qualityMode === "economy" ? 5_000 : qualityMode === "quality" ? 24_000 : 18_000;
+export function teachingOutputTokenLimit(qualityMode: string): number {
+  return qualityMode === "economy" ? 3_000 : qualityMode === "quality" ? 7_000 : 5_000;
 }
 
 export class ModelRouterGenerationError extends Error {

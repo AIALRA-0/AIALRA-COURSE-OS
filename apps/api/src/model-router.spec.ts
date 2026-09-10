@@ -1,14 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.0.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.1.0", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("8a11e4f8128366378e2225c2e335e420a35e5bc70649f5dfc6cbdfb132cdaef5");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("c1d501d1065085a02d387c513b16ee0ca17228ce47d137408fafe75460b8ec91");
+  });
+
+  it("bounds model output so one slide cannot consume an unbounded response", () => {
+    expect(teachingOutputTokenLimit("economy")).toBe(3_000);
+    expect(teachingOutputTokenLimit("balanced")).toBe(5_000);
+    expect(teachingOutputTokenLimit("quality")).toBe(7_000);
   });
 });
 

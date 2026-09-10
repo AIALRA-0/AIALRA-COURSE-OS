@@ -92,6 +92,11 @@ describe("learner-facing teaching narrative", () => {
     ]));
   });
 
+  it("rejects an agenda that expands beyond its teaching-density budget", () => {
+    const oversized = { ...valid, pageKind: "agenda" as const, fullExplanationMarkdown: "议程只需要说明主题层级与学习顺序\n".repeat(150) };
+    expect(validateTeachingNarrative(oversized)).toContain("TEACHING_EXPLANATION_TOO_LONG");
+  });
+
   it("normalizes only authored Chinese punctuation and protects source objects", () => {
     const source = "正文第一句。正文第二句；\n> 原文句号。\n`原样。` 和 $x_{。}=1$\n```text\n日志。\n```";
     expect(normalizeHumanReadableChineseMarkdown(source)).toBe("正文第一句；正文第二句\n> 原文句号。\n`原样。` 和 $x_{。}=1$\n```text\n日志。\n```");

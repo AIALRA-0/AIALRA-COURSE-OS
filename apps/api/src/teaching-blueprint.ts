@@ -4,6 +4,29 @@ import { stableStringify } from "@course-os/domain";
 
 const requiredSections = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"] as const;
 
+export function preparePageForGeneration(page: PageLesson): PageLesson {
+  const atoms = new Map(page.atoms.map((atom) => [atom.id, atom]));
+  const coverageRequirements = page.coverageRequirements.map((requirement) => {
+    const atom = atoms.get(requirement.atomId) as unknown as Record<string, unknown> | undefined;
+    if (!atom) return structuredClone(requirement);
+    const requiredFields = requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
+    return { ...structuredClone(requirement), requiredFields };
+  });
+  return { ...structuredClone(page), coverageRequirements };
+}
+
+export function buildGenerationSourceText(page: PageLesson): string {
+  const extractedText = page.anchors
+    .filter((anchor) => typeof anchor.text === "string" && anchor.text.trim().length > 0)
+    .map((anchor) => `### ${anchor.label}\n${anchor.text!.trim()}`)
+    .join("\n\n");
+  return [
+    extractedText ? `## 离线提取来源文本\n${extractedText}` : "## 离线提取来源文本\n当前页面没有可用的离线文字，请以原始页面图像为准",
+    `## 页面原子\n${JSON.stringify(page.atoms)}`,
+    `## 覆盖要求\n${JSON.stringify(page.coverageRequirements)}`
+  ].join("\n\n");
+}
+
 export function buildTeachingBlueprint(page: PageLesson, sourceText: string, language: string, qualityMode: string, writingPolicySnapshotId: string, imageAvailable: boolean): TeachingBlueprint {
   const atomIds = page.atoms.map((atom) => atom.id);
   const requirementIds = page.coverageRequirements.map((requirement) => requirement.id);
@@ -67,4 +90,11 @@ function classifySourceDensity(sourceText: string): TeachingBlueprint["resourceP
   if (visibleCharacters < 500) return "sparse";
   if (visibleCharacters > 2_000) return "dense";
   return "normal";
+}
+
+function hasSourceValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }

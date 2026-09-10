@@ -51,7 +51,7 @@ import { OperationalStore, PostgresOperationalStore, type OperationalState } fro
 import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
-import { buildTeachingBlueprint, validateTeachingBlueprint } from "./teaching-blueprint.js";
+import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
 
 export interface AppDependencies {
   dataDir: string;
@@ -2396,19 +2396,16 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies);
       return;
     }
-    const page = release.pages.find((item) => item.id === pageId);
-    if (!page) {
+    const sourcePage = release.pages.find((item) => item.id === pageId);
+    if (!sourcePage) {
       await markGenerationPageFailed(jobId, pageId, "PAGE_NOT_FOUND", dependencies);
       continue;
     }
+    const page = preparePageForGeneration(sourcePage);
     try {
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
-      const sourceText = [
-        `## 页面原子\n${JSON.stringify(page.atoms)}`,
-        `## 覆盖要求\n${JSON.stringify(page.coverageRequirements)}`,
-        ...page.blocks.map((block) => `## ${block.title}\n${block.markdown}`)
-      ].join("\n\n");
+      const sourceText = buildGenerationSourceText(page);
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       await appendGenerationStageEvent(jobId, page.id, "atomize", "started", dependencies);
@@ -2418,14 +2415,18 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v5`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v6`, stage: "teach" })
         : deterministicTeachingPackage(page);
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       assertTeachingCoverageEvidence(page, generation.content);
       if (runtimeModelRouter) {
-        const narrativeIssues = validateTeachingNarrative(generation.content);
+        const narrativeIssues = validateTeachingNarrative({
+          ...generation.content,
+          pageKind: blueprint.resourcePackage.pageKind,
+          sourceDensity: blueprint.resourcePackage.sourceDensity
+        });
         if (narrativeIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${narrativeIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");

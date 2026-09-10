@@ -65,6 +65,8 @@ export interface TeachingNarrativeInput {
   fullExplanationMarkdown: string;
   misconceptions: string[];
   questions: Array<{ prompt: string; explanation: string }>;
+  pageKind?: "cover" | "agenda" | "concept" | "formula" | "diagram" | "table" | "code" | "mixed";
+  sourceDensity?: "sparse" | "normal" | "dense";
 }
 
 /**
@@ -75,6 +77,12 @@ export interface TeachingNarrativeInput {
 export function validateTeachingNarrative(input: TeachingNarrativeInput): string[] {
   const issues: string[] = [];
   const explanation = input.fullExplanationMarkdown.trim();
+  const maximumCharacters = input.pageKind === "cover" ? 900
+    : input.pageKind === "agenda" ? 1_800
+      : input.sourceDensity === "sparse" ? 2_000
+        : input.sourceDensity === "dense" ? 5_000
+          : 3_500;
+  if (explanation.length > maximumCharacters) issues.push("TEACHING_EXPLANATION_TOO_LONG");
   const legacyTemplateHeadings = [
     "先说这页要解决什么",
     "先读原对象",

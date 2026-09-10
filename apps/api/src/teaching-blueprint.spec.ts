@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PageLesson } from "@course-os/contracts";
-import { buildTeachingBlueprint, validateTeachingBlueprint } from "./teaching-blueprint.js";
+import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
 
 const page = {
   id: "page:1", pageNumber: 1, title: "示例", imageUrl: "", anchors: [{ id: "a1", pageId: "page:1", kind: "text", label: "标题" }],
@@ -25,5 +25,19 @@ describe("teaching blueprint", () => {
     const result = buildTeachingBlueprint(page, "来源文本", "zh-CN", "balanced", "writing-policy:test", false);
     result.steps[1]!.atomIds.push("atom:missing");
     expect(validateTeachingBlueprint(page, result)).toContain("BLUEPRINT_UNKNOWN_ATOM:atom:missing");
+  });
+
+  it("uses only first-party extracted text and removes impossible coverage fields", () => {
+    const inherited = {
+      ...page,
+      anchors: [{ ...page.anchors[0]!, text: "原始幻灯片文字" }],
+      coverageRequirements: [{ ...page.coverageRequirements[0]!, requiredFields: ["label", "observation", "inference"] }],
+      blocks: [{ id: "old", title: "旧模型讲解", kind: "deep_dive", markdown: "这段旧讲解绝不能再次成为来源", sourceAnchorIds: [], atomIds: [] }]
+    } as PageLesson;
+    const prepared = preparePageForGeneration(inherited);
+    expect(prepared.coverageRequirements[0]?.requiredFields).toEqual(["label", "observation"]);
+    const source = buildGenerationSourceText(prepared);
+    expect(source).toContain("原始幻灯片文字");
+    expect(source).not.toContain("这段旧讲解绝不能再次成为来源");
   });
 });
