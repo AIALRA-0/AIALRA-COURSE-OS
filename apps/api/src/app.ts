@@ -42,7 +42,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2417,6 +2417,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       const generation = runtimeModelRouter
         ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v7`, stage: "teach" })
         : deterministicTeachingPackage(page);
+      generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);

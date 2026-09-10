@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -95,6 +95,13 @@ describe("learner-facing teaching narrative", () => {
   it("rejects an agenda that expands beyond its teaching-density budget", () => {
     const oversized = { ...valid, pageKind: "agenda" as const, fullExplanationMarkdown: "议程只需要说明主题层级与学习顺序\n".repeat(150) };
     expect(validateTeachingNarrative(oversized)).toContain("TEACHING_EXPLANATION_TOO_LONG");
+  });
+
+  it("removes only exact lines duplicated from compact main content", () => {
+    const repeated = "材料说明怎样建立平面规划问题，并给出后续章节的完整阅读入口";
+    const unique = "这里解释对象之间的关系，并保留正文没有重复提供的内容\n读者将从材料主题进入后续章节，再逐步识别问题、输入和结果\n这些说明没有照抄核心内容，也没有引入页面未提供的结论\n完整讲解保留理解顺序，让删除重复行以后仍满足最低内容量";
+    const explanation = `## 这份材料讲什么\n${repeated}\n${unique}`;
+    expect(removeMainExplanationDuplicateLines(`- ${repeated}`, explanation)).toBe(`## 这份材料讲什么\n${unique}`);
   });
 
   it("normalizes only authored Chinese punctuation and protects source objects", () => {

@@ -141,6 +141,22 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   return [...new Set(issues)];
 }
 
+/**
+ * Remove only learner-facing lines that are already present verbatim in the
+ * compact main-content section. The fact remains available in main content;
+ * no paraphrase, inference, or source-bearing line is rewritten.
+ */
+export function removeMainExplanationDuplicateLines(mainContentMarkdown: string, fullExplanationMarkdown: string): string {
+  const mainLines = new Set(normalizedContentLines(mainContentMarkdown));
+  if (mainLines.size === 0) return fullExplanationMarkdown;
+  const repaired = fullExplanationMarkdown.split(/\r?\n/).filter((line) => {
+    if (!line.trim() || /^\s*#{1,6}\s/.test(line)) return true;
+    const normalized = normalizedContentLines(line);
+    return normalized.length !== 1 || !mainLines.has(normalized[0]!);
+  }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return repaired.length >= 120 ? repaired : fullExplanationMarkdown;
+}
+
 /** Hard, deterministic subset of the approved human-readable Chinese policy. */
 export function validateHumanReadableChinese(markdown: string): string[] {
   const issues: string[] = [];
