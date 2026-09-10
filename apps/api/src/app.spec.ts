@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { createApp, createDefaultDependencies, normalizeGeneratedMathPunctuation } from "./app.js";
-import { ModelRouterGenerationError, type ModelRouterClient } from "./model-router.js";
+import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -322,21 +322,29 @@ describe("Course OS API", () => {
 
   it("repairs a structurally valid but overlong model draft once before saving", async () => {
     const calls: Array<{ stage?: string; repair?: { issues: string[]; maximumExplanationCharacters: number } }> = [];
+    const coveredRelease = testRelease();
+    coveredRelease.pages[0]!.atoms = [{ kind: "image_region", id: "atom-1", label: "输入与输出关系", observation: "输入经过规则得到输出" }];
+    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-1", atomId: "atom-1", requiredFields: ["observation"], risk: "high" }];
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
         calls.push({ stage: input.stage, repair: input.repair });
         const result = testTeachingResult(0.001);
-        if (input.stage === "teach") result.content.fullExplanationMarkdown = `${result.content.fullExplanationMarkdown}\n\n${"这段内容故意超过页面允许的长度，用来触发一次受约束的模型修复\n".repeat(160)}`;
+        if (input.stage === "teach") {
+          result.content.fullExplanationMarkdown = `${result.content.fullExplanationMarkdown}\n\n${"这段内容故意超过页面允许的长度，用来触发一次受约束的模型修复\n".repeat(160)}`;
+          result.content.coverageEvidence = [{ atomId: "atom-1", coveredFields: ["observation"], explanation: "正文解释了输入经过规则得到输出的可见关系" }];
+        }
         return result;
       }
     };
-    const { app, operations, readweave, release } = await seededApp(modelRouter);
+    const { app, operations, readweave, release } = await seededApp(modelRouter, coveredRelease);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-overlong-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.002 });
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({ stage: "teach" });
     expect(calls[1]).toMatchObject({ stage: "repair", repair: { issues: expect.arrayContaining(["TEACHING_EXPLANATION_TOO_LONG"]), maximumExplanationCharacters: 900 } });
-    expect((await readweave.getDraftByPage("page-1"))?.status).toBe("ready");
+    const savedDraft = await readweave.getDraftByPage("page-1");
+    expect(savedDraft?.status).toBe("ready");
+    expect(savedDraft?.page.coverageClaims).toEqual([expect.objectContaining({ requirementId: "requirement-1", coveredFields: ["observation"], status: "covered" })]);
     const events = (await operations.read()).events.filter((event) => event.streamId === created.body.id);
     expect(events.some((event) => event.type === "generation.stage.started" && (event.payload as { stage?: string }).stage === "repair")).toBe(true);
     expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string; remainingIssueCount?: number }).stage === "repair" && (event.payload as { remainingIssueCount?: number }).remainingIssueCount === 0)).toBe(true);
@@ -636,7 +644,7 @@ function testManifest(releaseId: string): ReleaseManifest {
   };
 }
 
-function testTeachingResult(apiEquivalentUsd: number) {
+function testTeachingResult(apiEquivalentUsd: number): TeachingGenerationResult {
   return {
     provider: "aialra-model-router" as const,
     model: "gpt-5.6-terra",

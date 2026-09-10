@@ -2421,6 +2421,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
       if (runtimeModelRouter) {
+        assertTeachingCoverageEvidence(page, generation.content);
+        const validatedCoverageEvidence = structuredClone(generation.content.coverageEvidence);
         let narrativeIssues = validateTeachingNarrative({
           ...generation.content,
           pageKind: blueprint.resourcePackage.pageKind,
@@ -2445,6 +2447,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           });
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
+          repaired.content.coverageEvidence = validatedCoverageEvidence;
           generation = combineTeachingGenerations(previousGeneration, repaired);
           narrativeIssues = validateTeachingNarrative({
             ...generation.content,
