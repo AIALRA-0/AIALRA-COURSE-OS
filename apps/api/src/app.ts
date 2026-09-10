@@ -2415,7 +2415,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v6`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v7`, stage: "teach" })
         : deterministicTeachingPackage(page);
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
@@ -2494,7 +2494,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           }
         });
       }
-      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs } : {});
+      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120) } : {});
     }
   }
   await dependencies.operations.mutate((state) => {

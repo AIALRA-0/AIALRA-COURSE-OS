@@ -12,9 +12,9 @@ describe("generation harness", () => {
   });
 
   it("bounds model output so one slide cannot consume an unbounded response", () => {
-    expect(teachingOutputTokenLimit("economy")).toBe(3_000);
-    expect(teachingOutputTokenLimit("balanced")).toBe(5_000);
-    expect(teachingOutputTokenLimit("quality")).toBe(7_000);
+    expect(teachingOutputTokenLimit("economy")).toBe(8_000);
+    expect(teachingOutputTokenLimit("balanced")).toBe(12_000);
+    expect(teachingOutputTokenLimit("quality")).toBe(18_000);
   });
 });
 
