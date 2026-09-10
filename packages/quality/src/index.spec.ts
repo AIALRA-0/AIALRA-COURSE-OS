@@ -113,6 +113,7 @@ describe("learner-facing teaching narrative", () => {
   it("turns a standalone colon label into a real Markdown heading", () => {
     expect(normalizeHumanReadableChineseMarkdown("操作：\n执行检查")).toBe("## 操作\n执行检查");
     expect(normalizeHumanReadableChineseMarkdown("- 注意事项：\n不要跳过条件")).toBe("## 注意事项\n不要跳过条件");
+    expect(normalizeHumanReadableChineseMarkdown("`PPO` 训练：\n读取一批经验")).toBe("## `PPO` 训练\n读取一批经验");
   });
 
   it("rejects colon pseudo-headings and line-ending semicolons", () => {
