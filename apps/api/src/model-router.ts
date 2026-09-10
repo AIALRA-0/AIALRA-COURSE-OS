@@ -546,7 +546,10 @@ function normalizeTeachingPackageShape(value: TeachingPackage): TeachingPackage 
 }
 
 function normalizeStringList(value: unknown): string[] | undefined {
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  if (Array.isArray(value)) {
+    const normalized = value.map((item) => normalizeStringListItem(item));
+    if (normalized.every((item): item is string => typeof item === "string")) return normalized;
+  }
   if (typeof value === "string" && value.trim()) {
     const items = value.split(/\r?\n|[；;]/)
       .map((item) => item.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
@@ -556,9 +559,20 @@ function normalizeStringList(value: unknown): string[] | undefined {
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     for (const key of ["items", "values", "objectives", "knowledge", "points"]) {
-      const items = record[key];
-      if (Array.isArray(items) && items.every((item) => typeof item === "string")) return items;
+      const items = normalizeStringList(record[key]);
+      if (items) return items;
     }
+  }
+  return undefined;
+}
+
+function normalizeStringListItem(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["text", "value", "objective", "knowledge", "point", "description", "content", "label"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
   return undefined;
 }

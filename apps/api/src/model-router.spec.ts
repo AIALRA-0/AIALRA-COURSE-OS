@@ -148,8 +148,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
   it("repairs only inferable provider shape drift before strict validation", async () => {
     const content = providerTeachingContent() as Record<string, unknown>;
-    content.learningObjectives = "能够识别对象\n能够解释关系";
-    content.priorKnowledge = "先知道输入和输出";
+    content.learningObjectives = [{ objective: "能够识别对象" }, { text: "能够解释关系" }];
+    content.priorKnowledge = { items: [{ knowledge: "先知道输入和输出" }] };
     content.misconceptions = "不要跳过条件";
     content.questions = (content.questions as Array<Record<string, unknown>>).map((question) => ({
       ...question,
