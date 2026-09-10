@@ -59,7 +59,7 @@ export function teachingOutputTokenLimit(qualityMode: string): number {
   // Reasoning providers count hidden reasoning and the final structured JSON
   // against the same output budget. Keep enough headroom to finish the JSON;
   // page-kind validators separately enforce learner-visible length limits.
-  return qualityMode === "economy" ? 8_000 : qualityMode === "quality" ? 18_000 : 12_000;
+  return qualityMode === "economy" ? 12_000 : qualityMode === "quality" ? 32_000 : 20_000;
 }
 
 export class ModelRouterGenerationError extends Error {
