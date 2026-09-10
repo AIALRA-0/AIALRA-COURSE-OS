@@ -49,6 +49,11 @@ export interface ModelRouterInput {
   idempotencyKey: string;
   stage?: GenerationStage | "qa";
   blueprint?: TeachingBlueprint;
+  repair?: {
+    issues: string[];
+    maximumExplanationCharacters: number;
+    previousTeachingPackage: TeachingPackage;
+  };
 }
 
 export interface ModelRouterClient {
@@ -278,7 +283,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           max_output_tokens: teachingOutputTokenLimit(input.qualityMode),
           temperature: 0.2,
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
-          metadata: { product: "course-os", stage: "professor_draft", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+          metadata: { product: "course-os", stage: input.stage || "teach", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         }
       };
     }

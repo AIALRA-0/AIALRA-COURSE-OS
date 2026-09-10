@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -95,6 +95,14 @@ describe("learner-facing teaching narrative", () => {
   it("rejects an agenda that expands beyond its teaching-density budget", () => {
     const oversized = { ...valid, pageKind: "agenda" as const, fullExplanationMarkdown: "议程只需要说明主题层级与学习顺序\n".repeat(150) };
     expect(validateTeachingNarrative(oversized)).toContain("TEACHING_EXPLANATION_TOO_LONG");
+  });
+
+  it("exposes the same page-specific explanation limits used by repair", () => {
+    expect(maximumTeachingExplanationCharacters({ pageKind: "cover", sourceDensity: "dense" })).toBe(900);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "agenda", sourceDensity: "dense" })).toBe(1_800);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "concept", sourceDensity: "sparse" })).toBe(2_000);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "formula", sourceDensity: "normal" })).toBe(3_500);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "diagram", sourceDensity: "dense" })).toBe(5_000);
   });
 
   it("removes only exact lines duplicated from compact main content", () => {

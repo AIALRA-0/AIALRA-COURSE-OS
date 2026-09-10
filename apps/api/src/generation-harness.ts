@@ -23,6 +23,19 @@ export interface PromptInput {
   language?: string;
   qualityMode?: string;
   blueprint?: TeachingBlueprint;
+  repair?: {
+    issues: string[];
+    maximumExplanationCharacters: number;
+    previousTeachingPackage: {
+      learningObjectives: string[];
+      mainContentMarkdown: string;
+      priorKnowledge: string[];
+      fullExplanationMarkdown: string;
+      misconceptions: string[];
+      coverageEvidence: Array<{ atomId: string; coveredFields: string[]; explanation: string }>;
+      questions: Array<{ kind: "comprehension" | "multiple_choice"; prompt: string; options?: string[]; expectedAnswer: string; explanation: string }>;
+    };
+  };
 }
 
 export interface GenerationHarnessSnapshot {
@@ -52,7 +65,18 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     SOURCE_TEXT: input.sourceText.slice(0, 45_000)
   }).trim();
   const blueprintText = input.blueprint ? `\n\n## 教学蓝图（必须遵循）\n${JSON.stringify(input.blueprint)}` : "";
-  const finalText = `${text}${blueprintText}`;
+  const repairText = input.repair ? [
+    "\n\n## 局部修复任务",
+    "下面的对象是上一轮模型草稿，不是 SOURCE，不能用它替代原始课件",
+    `只修复这些已验证问题：${input.repair.issues.join("、")}`,
+    `fullExplanationMarkdown 最多 ${input.repair.maximumExplanationCharacters} 个字符，必须在完整表达来源事实的前提下压缩到此范围内`,
+    "返回完整 TeachingPackage JSON，不得只返回补丁",
+    "保留原始课件中的主体、条件、否定、数字、变量、范围和因果关系",
+    "保留所有有效 atomId 覆盖声明，并保持恰好 2 道理解题和 2 道选择题",
+    "不要新增来源没有提供的事实，不要删掉为理解公式、图形、表格或流程所必需的内容",
+    JSON.stringify(input.repair.previousTeachingPackage)
+  ].join("\n") : "";
+  const finalText = `${text}${blueprintText}${repairText}`;
   if (!input.sourceImageDataUrl) return finalText;
   return [{ role: "user", content: [{ type: "input_text", text: finalText }, { type: "input_image", image_url: input.sourceImageDataUrl, detail: "high" }] }];
 }

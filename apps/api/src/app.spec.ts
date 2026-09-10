@@ -320,6 +320,28 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
+  it("repairs a structurally valid but overlong model draft once before saving", async () => {
+    const calls: Array<{ stage?: string; repair?: { issues: string[]; maximumExplanationCharacters: number } }> = [];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        calls.push({ stage: input.stage, repair: input.repair });
+        const result = testTeachingResult(0.001);
+        if (input.stage === "teach") result.content.fullExplanationMarkdown = `${result.content.fullExplanationMarkdown}\n\n${"这段内容故意超过页面允许的长度，用来触发一次受约束的模型修复\n".repeat(160)}`;
+        return result;
+      }
+    };
+    const { app, operations, readweave, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-overlong-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.002 });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ stage: "teach" });
+    expect(calls[1]).toMatchObject({ stage: "repair", repair: { issues: expect.arrayContaining(["TEACHING_EXPLANATION_TOO_LONG"]), maximumExplanationCharacters: 900 } });
+    expect((await readweave.getDraftByPage("page-1"))?.status).toBe("ready");
+    const events = (await operations.read()).events.filter((event) => event.streamId === created.body.id);
+    expect(events.some((event) => event.type === "generation.stage.started" && (event.payload as { stage?: string }).stage === "repair")).toBe(true);
+    expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string; remainingIssueCount?: number }).stage === "repair" && (event.payload as { remainingIssueCount?: number }).remainingIssueCount === 0)).toBe(true);
+  }, 60_000);
+
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.02)

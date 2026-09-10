@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
@@ -15,6 +15,19 @@ describe("generation harness", () => {
     expect(teachingOutputTokenLimit("economy")).toBe(12_000);
     expect(teachingOutputTokenLimit("balanced")).toBe(20_000);
     expect(teachingOutputTokenLimit("quality")).toBe(32_000);
+  });
+
+  it("labels a previous model draft and gives repair an exact learner-visible limit", () => {
+    const previousTeachingPackage = providerTeachingContent() as TeachingPackage;
+    const input = modelInput({
+      ...providerInput("repair-prompt-test"),
+      repair: { issues: ["TEACHING_EXPLANATION_TOO_LONG"], maximumExplanationCharacters: 3_500, previousTeachingPackage }
+    });
+    const text = typeof input === "string" ? input : input[0]!.content.find((part) => part.type === "input_text")!.text;
+    expect(text).toContain("上一轮模型草稿，不是 SOURCE");
+    expect(text).toContain("TEACHING_EXPLANATION_TOO_LONG");
+    expect(text).toContain("最多 3500 个字符");
+    expect(text).toContain(JSON.stringify(previousTeachingPackage));
   });
 });
 

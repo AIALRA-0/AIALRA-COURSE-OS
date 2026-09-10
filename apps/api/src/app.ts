@@ -42,7 +42,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2414,22 +2414,51 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       if (blueprintIssues.length > 0) throw new Error(`BLUEPRINT_INVALID:${blueprintIssues.join(",")}`);
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
-      const generation = runtimeModelRouter
+      let generation = runtimeModelRouter
         ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v8`, stage: "teach" })
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
-      await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
-      assertTeachingCoverageEvidence(page, generation.content);
       if (runtimeModelRouter) {
-        const narrativeIssues = validateTeachingNarrative({
+        let narrativeIssues = validateTeachingNarrative({
           ...generation.content,
           pageKind: blueprint.resourcePackage.pageKind,
           sourceDensity: blueprint.resourcePackage.sourceDensity
         });
+        if (narrativeIssues.length > 0) {
+          const previousGeneration = generation;
+          const maximumExplanationCharacters = maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity });
+          await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { issues: narrativeIssues, maximumExplanationCharacters });
+          const repaired = await runtimeModelRouter.generateTeachingPackage({
+            pageTitle: page.title,
+            pageNumber: page.pageNumber,
+            sourceText,
+            sourceImageDataUrl,
+            blueprint,
+            writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+            language: currentJob.language || "zh-CN",
+            qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+            idempotencyKey: `course-os:${jobId}:${page.id}:repair:v1`,
+            stage: "repair",
+            repair: { issues: narrativeIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
+          });
+          repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
+          repaired.content = normalizeTeachingPackageMath(repaired.content);
+          generation = combineTeachingGenerations(previousGeneration, repaired);
+          narrativeIssues = validateTeachingNarrative({
+            ...generation.content,
+            pageKind: blueprint.resourcePackage.pageKind,
+            sourceDensity: blueprint.resourcePackage.sourceDensity
+          });
+          await appendGenerationStageEvent(jobId, page.id, "repair", "completed", dependencies, { provider: repaired.provider, model: repaired.model, inputTokens: repaired.usage.inputTokens, outputTokens: repaired.usage.outputTokens, remainingIssueCount: narrativeIssues.length });
+        } else {
+          await appendGenerationStageEvent(jobId, page.id, "repair", "skipped", dependencies, { reason: "没有发现需要修复的质量问题" });
+        }
         if (narrativeIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${narrativeIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
+      await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
+      assertTeachingCoverageEvidence(page, generation.content);
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
       const issues = validatePageForPublication(generatedPage);
@@ -2441,7 +2470,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable });
-      await appendGenerationStageEvent(jobId, page.id, "repair", generatedPage.quality.issues.length ? "skipped" : "completed", dependencies, { reason: generatedPage.quality.issues.length ? "需要人工审核或局部修复" : "没有发现需要修复的质量问题" });
       const existing = await dependencies.readweave.getDraftByPage(page.id);
       await assertGenerationFence(jobId, fenceToken, dependencies);
       const now = new Date().toISOString();
@@ -2560,6 +2588,22 @@ function finalizeGenerationJob(job: GenerationJob, state: OperationalState, depe
 
 function generationQualityMode(budgetUsd: number): "economy" | "balanced" | "quality" {
   return budgetUsd >= 7 ? "quality" : budgetUsd <= 2 ? "economy" : "balanced";
+}
+
+function combineTeachingGenerations(initial: TeachingGenerationResult, repaired: TeachingGenerationResult): TeachingGenerationResult {
+  const apiEquivalentUsd = initial.usage.apiEquivalentUsd === null && repaired.usage.apiEquivalentUsd === null
+    ? null
+    : (initial.usage.apiEquivalentUsd ?? 0) + (repaired.usage.apiEquivalentUsd ?? 0);
+  return {
+    ...repaired,
+    usage: {
+      inputTokens: initial.usage.inputTokens + repaired.usage.inputTokens,
+      cachedInputTokens: initial.usage.cachedInputTokens + repaired.usage.cachedInputTokens,
+      outputTokens: initial.usage.outputTokens + repaired.usage.outputTokens,
+      apiEquivalentUsd,
+      durationMs: initial.usage.durationMs + repaired.usage.durationMs
+    }
+  };
 }
 
 function deterministicTeachingPackage(page: CourseRelease["pages"][number]): TeachingGenerationResult {
