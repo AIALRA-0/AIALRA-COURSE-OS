@@ -240,6 +240,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("classifies insufficient provider balance without retaining the provider message", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      error: { code: "invalid_request_error", message: "Insufficient Balance" }
+    }, { status: 402 })));
+    const failure = await new HttpProviderTeachingClient({
+      providerId: "deepseek",
+      baseUrl: "https://deepseek.test",
+      apiKey: "synthetic-example-deepseek-token",
+      model: "deepseek-v4-flash-vision-exp",
+      protocol: "responses",
+      supportsVision: true,
+      billingMode: "metered"
+    }).generateTeachingPackage(providerInput("balance-test", true)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_INSUFFICIENT_BALANCE" });
+    expect(String(failure)).not.toContain("Insufficient Balance");
+  });
+
   it("checks provider connectivity without returning the credential", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/models");

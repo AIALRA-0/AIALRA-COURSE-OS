@@ -247,7 +247,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId);
     }
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
-    if (!response.ok) throw new ModelRouterGenerationError(`MODEL_PROVIDER_FAILED:${body.error?.code || response.status}`, body.model || this.connection.model, usage, this.connection.providerId);
+    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
     const output = extractProviderOutput(body);
     if (output === undefined || output === null) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", body.model || this.connection.model, usage, this.connection.providerId);
     let content: TeachingPackage;
@@ -309,6 +309,14 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     ];
     return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: teachingOutputTokenLimit(input.qualityMode), temperature: 0.2, messages, response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } } } };
   }
+}
+
+function providerFailureCode(status: number, error: ProviderResponseBody["error"]): string {
+  const message = error?.message || "";
+  if (status === 402 || /insufficient\s+(?:balance|credit)|quota\s+exhausted|billing\s+(?:limit|required)/i.test(message)) {
+    return "MODEL_PROVIDER_INSUFFICIENT_BALANCE";
+  }
+  return `MODEL_PROVIDER_FAILED:${error?.code || status}`;
 }
 
 function anthropicImagePart(imageUrl: string): { type: "image"; source: { type: "base64"; media_type: string; data: string } } {
