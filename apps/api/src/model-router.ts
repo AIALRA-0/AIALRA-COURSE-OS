@@ -550,35 +550,46 @@ function normalizeTeachingPackageShape(value: TeachingPackage): TeachingPackage 
   return candidate;
 }
 
-function normalizeStringList(value: unknown): string[] | undefined {
-  if (Array.isArray(value)) {
-    const normalized = value.map((item) => normalizeStringListItem(item));
-    if (normalized.every((item): item is string => typeof item === "string")) return normalized;
-  }
+function normalizeStringList(value: unknown, depth = 0): string[] | undefined {
   if (typeof value === "string" && value.trim()) {
     const items = value.split(/\r?\n|[；;]/)
       .map((item) => item.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
       .filter(Boolean);
     return items.length > 0 ? items : [value.trim()];
   }
+  if (depth > 4) return undefined;
+  if (Array.isArray(value)) {
+    const normalized = value.map((item) => normalizeStringListItem(item, depth + 1));
+    if (normalized.every((item): item is string => typeof item === "string")) return normalized;
+  }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     for (const key of ["items", "values", "objectives", "knowledge", "points"]) {
-      const items = normalizeStringList(record[key]);
+      const items = normalizeStringList(record[key], depth + 1);
       if (items) return items;
     }
+    const nestedLists = Object.values(record)
+      .map((item) => normalizeStringList(item, depth + 1))
+      .filter((item): item is string[] => Boolean(item));
+    if (nestedLists.length === 1) return nestedLists[0];
   }
   return undefined;
 }
 
-function normalizeStringListItem(value: unknown): string | undefined {
+function normalizeStringListItem(value: unknown, depth = 0): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
+  if (depth > 4) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   for (const key of ["text", "value", "objective", "knowledge", "point", "description", "content", "label"]) {
     const candidate = record[key];
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
+  const nestedStrings = Object.values(record)
+    .map((item) => normalizeStringListItem(item, depth + 1))
+    .filter((item): item is string => Boolean(item));
+  const unique = [...new Set(nestedStrings)];
+  if (unique.length === 1) return unique[0];
   return undefined;
 }
 

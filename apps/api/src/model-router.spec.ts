@@ -175,6 +175,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.content.questions.filter((question) => question.kind === "multiple_choice")).toHaveLength(2);
   });
 
+  it("unwraps a uniquely identifiable nested objective without guessing between alternatives", async () => {
+    const content = providerTeachingContent() as Record<string, unknown>;
+    content.learningObjectives = [{ generated: { goal: { summary: "能够识别唯一的学习目标" } } }];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content) }, { status: 200 })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("nested-shape-repair-test"));
+    expect(result.content.learningObjectives).toEqual(["能够识别唯一的学习目标"]);
+
+    content.learningObjectives = [{ first: "目标甲", second: "目标乙" }];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content) }, { status: 200 })));
+    const failure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("ambiguous-shape-repair-test")).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID" });
+  });
+
   it("reads only the final message and ignores Responses reasoning items", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
       model: "deepseek-v4-flash-vision-exp",
