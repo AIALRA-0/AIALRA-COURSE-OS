@@ -301,6 +301,19 @@ describe("Course OS API", () => {
     expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string }).stage === "atomize")).toBe(true);
   }, 15_000);
 
+  it("records the persisted ReadWeave draft hash in the completed-page event", async () => {
+    const { app, operations, readweave, release } = await seededApp();
+    const originalSave = readweave.saveDraft.bind(readweave);
+    vi.spyOn(readweave, "saveDraft").mockImplementation((draft, revision, context, asset) =>
+      originalSave({ ...draft, contentHash: `remote:${draft.contentHash}` }, revision, context, asset));
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "persisted-hash-job").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed" });
+    const saved = await readweave.getDraftByPage("page-1");
+    const event = (await operations.read()).events.find((item) => item.streamId === created.body.id && item.type === "generation.page.completed");
+    expect(saved?.contentHash).toMatch(/^remote:/);
+    expect(event?.payload).toMatchObject({ contentHash: saved?.contentHash, draftRevision: saved?.revision });
+  }, 15_000);
+
   it("adds refill questions as drafts and keeps the refill idempotent", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-api-refill-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));

@@ -2533,7 +2533,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
         applyActualCost(job, cost, state, dependencies);
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
-        dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
+        dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
         if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {
           Object.assign(job, transitionJob(job, "failed"));
           dependencies.operations.appendEvent(state, job.id, "job.failed", { issue: "JOB_BUDGET_EXHAUSTED", spentUsd: job.spentUsd, budgetUsd: job.budgetUsd });
