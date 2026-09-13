@@ -32,6 +32,8 @@ describe("strict math", () => {
   it("does not treat a currency amount as an unfinished inline formula", () => {
     expect(validateMarkdownMath("价格是 $5 美元")).toEqual([]);
     expect(normalizeLegacyMathDelimiters("价格是 $5 美元")).toBe("价格是 $5 美元");
+    expect(normalizeLegacyMathDelimiters("令 W_e$v_i;v_j$ 表示边权，`W_e` 是代码，https://example.com/W_e 保持原样"))
+      .toBe("令 $W_e$ $v_i;v_j$ 表示边权，`W_e` 是代码，https://example.com/W_e 保持原样");
   });
 
   it("wraps high-confidence bare TeX while preserving code, URLs and ordinary backslashes", () => {

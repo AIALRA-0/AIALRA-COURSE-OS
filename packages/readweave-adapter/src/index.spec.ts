@@ -94,6 +94,33 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("reads native page questions without writing or importing another page's links", async () => {
+    const remote = new FakeEtapi();
+    let pageNoteId = "";
+    const nativeRequests: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/, "");
+      if (path.startsWith("/notes/_readweaveLinks") || path.startsWith("/notes/link-") || path.startsWith("/notes/object-")) {
+        nativeRequests.push(`${init?.method ?? "GET"} ${path}`);
+        if (path === "/notes/_readweaveLinks") return Response.json({ noteId: "_readweaveLinks", childNoteIds: ["link-1", "link-duplicate", "link-other"] });
+        if (path === "/notes/link-1/content" || path === "/notes/link-duplicate/content") return Response.json({ linkId: path.includes("duplicate") ? "link-duplicate" : "link-1", articleId: pageNoteId, objectId: "object-1", contentType: "problem" });
+        if (path === "/notes/link-other/content") return Response.json({ linkId: "link-other", articleId: "another-page", objectId: "object-other", contentType: "problem" });
+        if (path === "/notes/object-1/content") return Response.json({ objectId: "object-1", kind: "question", contentType: "problem", title: "为什么要保留状态？", body: "<p>因为下一步需要它</p>" });
+        return new Response("not found", { status: 404 });
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", publicUrl: "https://readweave.example.com", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    pageNoteId = (await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "native-qa-draft" })).readweaveNoteId!;
+    const writesBefore = remote.requests.filter((item) => item.method !== "GET").length;
+    const result = await api.listNativePageQuestions("page-1");
+    expect(result.questions).toEqual([{ objectId: "object-1", title: "为什么要保留状态？", excerpt: "因为下一步需要它", updatedAt: undefined }]);
+    expect(result.noteUrl).toContain(pageNoteId);
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
+    expect(nativeRequests.every((item) => item.startsWith("GET "))).toBe(true);
+  });
   it("creates the course tree and imports direct block edits as a new revision", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({
@@ -107,12 +134,31 @@ describe("ReadWeave ETAPI adapter", () => {
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
     const saved = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "etapi-draft-1" });
     expect(saved.readweaveNoteId).toBeTruthy();
-    expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "04 完整讲解", "核心解释"]));
+    expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
     remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
     const reconciled = await api.getDraftByPage("page-1");
     expect(reconciled?.revision).toBe(2);
     expect(reconciled?.page.blocks[0]?.markdown).toBe("ReadWeave 中直接完成的逐块修改");
     expect((await api.getSyncStatus()).mode).toBe("etapi");
+  });
+
+  it("shows the original image and teaching on the ReadWeave page while preserving remote overview edits", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const draft = draftFor(pageRelease);
+    draft.page.lessonFlowVersion = 2;
+    draft.page.lessonSections = [{ id: "lesson-full", kind: "full_explanation", title: "完整讲解", markdown: "## 为什么需要它\n先看原图，再理解输入和输出", sourceAnchorIds: [], atomIds: [] }];
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const saved = await api.saveDraft(draft, 0, { ...context, idempotencyKey: "native-image-draft" }, { sha256: "image-hash", fileName: "page-001.png", mediaType: "image/png", bytes: image });
+    const title = "第 001 页 · 测试页面";
+    expect(remote.contentByTitle(title)).toContain("<img src=\"api/images/");
+    expect(remote.contentByTitle(title)).toContain("<h3>完整讲解</h3>");
+    expect(remote.contentByTitle(title)).not.toContain("<pre>");
+    remote.editByTitle(title, "<p>ReadWeave 中直接修改的页面</p>");
+    await expect(api.saveDraft({ ...saved, revision: 1 }, 1, { ...context, idempotencyKey: "native-image-conflict" })).rejects.toThrow("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+    expect(remote.contentByTitle(title)).toBe("<p>ReadWeave 中直接修改的页面</p>");
   });
 
   it("projects tree changes to ReadWeave branches and validates exact links", async () => {
@@ -450,5 +496,11 @@ class FakeEtapi {
     const note = [...this.notes.values()].find((item) => item.title === title);
     if (!note) throw new Error(`missing note ${title}`);
     note.content = content;
+  }
+
+  contentByTitle(title: string): string {
+    const note = [...this.notes.values()].find((item) => item.title === title);
+    if (!note) throw new Error(`missing note ${title}`);
+    return note.content;
   }
 }

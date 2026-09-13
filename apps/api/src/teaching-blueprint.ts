@@ -2,17 +2,38 @@ import { createHash } from "node:crypto";
 import type { PageLesson, TeachingBlueprint, TeachingBlueprintStep } from "@course-os/contracts";
 import { stableStringify } from "@course-os/domain";
 
-const requiredSections = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"] as const;
+const requiredSections = ["prior_knowledge", "learning_objectives", "full_explanation", "main_content", "misconceptions"] as const;
 
 export function preparePageForGeneration(page: PageLesson): PageLesson {
-  const atoms = new Map(page.atoms.map((atom) => [atom.id, atom]));
-  const coverageRequirements = page.coverageRequirements.map((requirement) => {
+  const sourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => anchor.text!).join("\n");
+  const importedWholePage = page.atoms.length === 1 && page.atoms[0]?.kind === "image_region";
+  const textRegions = importedWholePage ? sourceTextRegions(page.id, sourceText) : [];
+  const expandedAtoms: PageLesson["atoms"] = [...page.atoms, ...textRegions];
+  const atoms = new Map(expandedAtoms.map((atom) => [atom.id, atom]));
+  const coverageRequirements = [...page.coverageRequirements, ...textRegions.map((region) => ({
+    id: `${page.id}:requirement:${region.id}`,
+    atomId: region.id,
+    requiredFields: ["label", "observation"],
+    risk: /(?:\d|[=<>≤≥]|\\(?:frac|sum)|∈|ℝ|不能|除非|必须)/u.test(region.observation) ? "high" as const : "general" as const
+  }))].map((requirement) => {
     const atom = atoms.get(requirement.atomId) as unknown as Record<string, unknown> | undefined;
     if (!atom) return structuredClone(requirement);
     const requiredFields = requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
     return { ...structuredClone(requirement), requiredFields };
   });
-  return { ...structuredClone(page), coverageRequirements };
+  return { ...structuredClone(page), atoms: expandedAtoms, coverageRequirements };
+}
+
+function sourceTextRegions(pageId: string, text: string): Extract<PageLesson["atoms"][number], { kind: "text_region" }>[] {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^\d+\s*\/\s*\d+$/.test(line));
+  if (!lines.length) return [];
+  const groupSize = Math.max(1, Math.ceil(lines.length / 12));
+  const regions: Extract<PageLesson["atoms"][number], { kind: "text_region" }>[] = [];
+  for (let index = 0; index < lines.length; index += groupSize) {
+    const observation = lines.slice(index, index + groupSize).join("\n");
+    regions.push({ kind: "text_region", id: `${pageId}:source-text-region:${regions.length + 1}`, label: `原文片段 ${String(regions.length + 1).padStart(2, "0")}`, observation });
+  }
+  return regions;
 }
 
 export function buildGenerationSourceText(page: PageLesson): string {

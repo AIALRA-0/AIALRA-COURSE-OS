@@ -48,6 +48,7 @@ export interface ReadWeaveCourseApi {
   saveQuestion(question: PageQuestion, context: IdempotentWriteContext): Promise<PageQuestion>;
   updateQuestion(question: PageQuestion, expectedRevision: number, context: IdempotentWriteContext): Promise<PageQuestion>;
   listQuestions(pageId?: string): Promise<PageQuestion[]>;
+  listNativePageQuestions?(pageId: string): Promise<import("@course-os/contracts").ReadWeavePageQuestions>;
   listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]>;
   saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection>;
   saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt>;

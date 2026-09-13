@@ -4,11 +4,12 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.1.0", taskContract: "GENERATE + TEACHING" });
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md"]);
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.2.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("8a11e4f8128366378e2225c2e335e420a35e5bc70649f5dfc6cbdfb132cdaef5");
-    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("c1d501d1065085a02d387c513b16ee0ca17228ce47d137408fafe75460b8ec91");
+    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240");
+    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
+    expect(snapshot.files.find((file) => file.path === "policy-formula-explanation.md")?.sha256).toBe("65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e");
   });
 
   it("bounds model output so one slide cannot consume an unbounded response", () => {

@@ -11,7 +11,7 @@ export type ISODateTime = string;
 export type ClaimKind = "source_claim" | "supplement_claim" | "conflict_claim";
 export type MasteryState = "unseen" | "introduced" | "practicing" | "mastered" | "needs_review";
 export type WorkspaceMode = "studio" | "learn" | "review";
-export type LessonSectionKind = "learning_objectives" | "main_content" | "prior_knowledge" | "full_explanation" | "misconceptions";
+export type LessonSectionKind = "chapter_bridge" | "learning_objectives" | "main_content" | "prior_knowledge" | "full_explanation" | "misconceptions";
 export type QuestionKind = "comprehension" | "multiple_choice";
 export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "question_refill";
 export type CourseTreeNodeKind = "workspace" | "course" | "module" | "material" | "section" | "release" | "page" | "trash";
@@ -118,7 +118,14 @@ export interface DiagramElement {
   inference?: string;
 }
 
-export type TeachingAtom = MathExpression | PseudoCodeLine | CodeBlock | ChartElement | DiagramElement;
+export interface TextElement {
+  kind: "text_region";
+  id: Identifier;
+  label: string;
+  observation: string;
+}
+
+export type TeachingAtom = MathExpression | PseudoCodeLine | CodeBlock | ChartElement | DiagramElement | TextElement;
 
 export interface CoverageRequirement {
   id: Identifier;
@@ -191,6 +198,8 @@ export interface PageLesson {
   anchors: SourceAnchor[];
   atoms: TeachingAtom[];
   blocks: ExplanationBlock[];
+  /** New lessons use the reader-first section order; omitted for immutable older lessons */
+  lessonFlowVersion?: 2;
   lessonSections?: LessonSection[];
   questionBank?: QuestionBankItem[];
   coverageRequirements: CoverageRequirement[];
@@ -604,6 +613,19 @@ export interface PageQuestion {
   readweaveNoteId?: Identifier;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+}
+
+export interface ReadWeaveNativeQuestion {
+  objectId: Identifier;
+  title: string;
+  excerpt: string;
+  updatedAt?: ISODateTime;
+}
+
+export interface ReadWeavePageQuestions {
+  pageId: Identifier;
+  noteUrl?: string;
+  questions: ReadWeaveNativeQuestion[];
 }
 
 export interface QuestionSelection {

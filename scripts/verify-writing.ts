@@ -31,7 +31,8 @@ if (manifest) {
   knownPolicyIds.add(manifest.policySnapshotId);
   const bundledPolicyFiles = new Map([
     ["references/format-rules.md", resolve("config/generation-harness/policy-format-rules.md")],
-    ["references/explanation-framework.md", resolve("config/generation-harness/policy-explanation-framework.md")]
+    ["references/explanation-framework.md", resolve("config/generation-harness/policy-explanation-framework.md")],
+    ["references/formula-explanation.md", resolve("config/generation-harness/policy-formula-explanation.md")]
   ]);
   for (const [sourcePath, bundledPath] of bundledPolicyFiles) {
     const expected = manifest.files.find((file) => file.sourcePath === sourcePath)?.sha256;

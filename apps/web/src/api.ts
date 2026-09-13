@@ -159,6 +159,7 @@ export const api = {
   }),
   releases: () => request<CourseRelease[]>("/api/v1/releases"),
   lesson: (pageId: string) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`),
+  readweaveQuestions: (pageId: string) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`),
   draft: (pageId: string) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`),
   saveDraft: (draft: LessonDraft, page: LessonDraft["page"], changedBlockIds: string[]) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(draft.pageId)}/draft`, {
     method: "PATCH",

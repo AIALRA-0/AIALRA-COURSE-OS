@@ -39,6 +39,8 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   if (questions.length !== 4) issues.push("TEACHING_QUESTION_COUNT_INVALID");
   if (sections.length >= 5 && questions.length) {
     issues.push(...validateTeachingNarrative({
+      lessonFlowVersion: page.lessonFlowVersion,
+      chapterBridgeMarkdown: sections.find((section) => section.kind === "chapter_bridge")?.markdown,
       learningObjectives: sections.find((section) => section.kind === "learning_objectives")?.items?.map((item) => item.text) ?? [],
       mainContentMarkdown: sections.find((section) => section.kind === "main_content")?.markdown ?? "",
       priorKnowledge: sections.find((section) => section.kind === "prior_knowledge")?.items?.map((item) => item.text) ?? [],
@@ -59,6 +61,8 @@ export function evaluateReleaseClosure(release: { pages: PageLesson[]; pageIds: 
 }
 
 export interface TeachingNarrativeInput {
+  lessonFlowVersion?: 2;
+  chapterBridgeMarkdown?: string;
   learningObjectives: string[];
   mainContentMarkdown: string;
   priorKnowledge: string[];
@@ -102,6 +106,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   if (new Set(headings).size !== headings.length) issues.push("TEACHING_HEADING_DUPLICATE");
 
   const learnerText = [
+    input.chapterBridgeMarkdown || "",
     input.learningObjectives.join("\n"),
     input.mainContentMarkdown,
     input.priorKnowledge.join("\n"),
@@ -121,6 +126,16 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   ];
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   issues.push(...validateHumanReadableChinese(learnerText));
+  if (input.lessonFlowVersion === 2) {
+    for (const prior of input.priorKnowledge) {
+      if (!/^[^：\n]{2,40}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
+    }
+    for (const misconception of input.misconceptions) {
+      if (!/(因为|原因|导致|所以|错误在于|不成立|混淆)/u.test(misconception) || !/(正确|应当|应该|检查|核对|判断)/u.test(misconception)) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
+    }
+    const outsideMath = stripProtectedMarkdown(learnerText);
+    if (/(?<![\p{L}\p{N}])(?:[A-Za-z]{1,3}_[A-Za-z0-9{}]+|[A-Za-z]{1,3}\^[A-Za-z0-9{}]+)/u.test(outsideMath)) issues.push("TEACHING_BARE_MATH_SYMBOL");
+  }
 
   const paragraphs = explanation.split(/\n\s*\n/)
     .map((paragraph) => paragraph.replace(/^#+\s*/, "").replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim())
@@ -264,7 +279,28 @@ export function validateMarkdownMath(markdown: string): string[] {
  * `\\(`, so ordinary Chinese square brackets remain ordinary text
  */
 export function normalizeLegacyMathDelimiters(markdown: string): string {
-  return normalizeBareTexFragments(scanMarkdownMath(markdown).normalized);
+  return normalizeBareVariableMath(normalizeBareTexFragments(scanMarkdownMath(markdown).normalized));
+}
+
+function normalizeBareVariableMath(markdown: string): string {
+  let fence = false;
+  let displayMath = false;
+  return markdown.split(/(\r?\n)/).map((line) => {
+    if (/^\s*(`{3,}|~{3,})/.test(line)) { fence = !fence; return line; }
+    if (fence || /^\s*>/.test(line)) return line;
+    const displayDelimiterCount = line.match(/(?<!\\)\$\$/g)?.length ?? 0;
+    if (displayMath || displayDelimiterCount > 0) {
+      if (displayDelimiterCount % 2 === 1) displayMath = !displayMath;
+      return line;
+    }
+    const protectedPieces: string[] = [];
+    const protectedLine = line.replace(/`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
+      protectedPieces.push(value);
+      return `\u0000${protectedPieces.length - 1}\u0000`;
+    });
+    const repaired = protectedLine.replace(/(?<![\p{L}\p{N}_\\])([A-Za-z]_(?:\{[A-Za-z0-9]+\}|[A-Za-z0-9]{1,3}))(?![\p{L}\p{N}_])/gu, (_match, value: string) => `$${value}$`);
+    return repaired.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedPieces[Number(index)]!);
+  }).join("").replace(/(?<=[A-Za-z0-9}])\$(?=\$[A-Za-z\\])/g, "$ ");
 }
 
 interface MathScanResult {
@@ -519,12 +555,14 @@ export function validatePageForPublication(page: PageLesson): string[] {
 
 export function validateLessonStructure(page: PageLesson): string[] {
   if (!page.lessonSections) return [];
-  const expected = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"];
   const actual = page.lessonSections.map((item) => item.kind);
+  const expected = page.lessonFlowVersion === 2
+    ? [...(actual[0] === "chapter_bridge" ? ["chapter_bridge"] : []), "prior_knowledge", "learning_objectives", "full_explanation", "main_content", "misconceptions"]
+    : ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"];
   const issues = expected.flatMap((kind, index) => actual[index] === kind ? [] : [`LESSON_SECTION_ORDER:${kind}`]);
   for (const section of page.lessonSections.filter((item) => item.kind === "prior_knowledge" || item.kind === "misconceptions")) {
     if (!section.items?.length) issues.push(`${section.kind}:ITEMS_REQUIRED`);
-    for (const item of section.items ?? []) if (hasSentenceBoundaryOutsideMath(item.text)) issues.push(`${item.id}:MULTIPLE_SENTENCES`);
+    if (page.lessonFlowVersion !== 2) for (const item of section.items ?? []) if (hasSentenceBoundaryOutsideMath(item.text)) issues.push(`${item.id}:MULTIPLE_SENTENCES`);
   }
   const full = page.lessonSections.find((item) => item.kind === "full_explanation");
   if (!full?.markdown?.trim()) issues.push("FULL_EXPLANATION_REQUIRED");

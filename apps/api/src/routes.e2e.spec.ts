@@ -60,6 +60,8 @@ describe("Course OS API route journey", () => {
     await request(app).get(`/api/v1/readweave/links/${encodeURIComponent(material.readweaveNoteId)}`).expect(200);
     await request(app).get("/api/v1/pages/route-page-1/draft").expect(200);
     await request(app).get("/api/v1/pages/route-page-1/lesson").expect(200);
+    await request(app).get("/api/v1/pages/route-page-1/readweave-questions").expect(200);
+    await request(app).get("/api/v1/pages/route-page-1/readweave-questions").set("X-Workspace-Id", "other").expect(404);
     await request(app).post("/api/v1/pages/route-page-1:validate").expect(200);
     await request(app).get(`/api/v1/releases/${encodeURIComponent(release.id)}`).expect(200);
     await request(app).get(`/api/v1/releases/${encodeURIComponent(release.id)}/manifest`).expect(200);

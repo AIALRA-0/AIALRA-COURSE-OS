@@ -13,6 +13,7 @@ import type {
   ConversionRequest,
   ConversionResult,
   CostRollup,
+  DraftSourceAsset,
   GenerationCostEntry,
   GenerationJob,
   GenerationPlan,
@@ -463,6 +464,19 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.get("/api/v1/pages/:id/readweave-questions", async (request, response) => {
+    const workspaceId = request.header("X-Workspace-Id") || "personal";
+    try {
+      const source = findPageSource(await listWorkspaceReleases(dependencies.readweave, workspaceId), request.params.id);
+      if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
+      const reader = dependencies.readweave.listNativePageQuestions;
+      if (!reader) return response.json({ pageId: request.params.id, questions: [] });
+      response.json(await reader.call(dependencies.readweave, request.params.id));
+    } catch {
+      sendError(request, response, 503, "READWEAVE_NATIVE_QA_UNAVAILABLE", "ReadWeave 问答记录暂时无法读取，请稍后重试", true);
+    }
+  });
+
   app.patch("/api/v1/pages/:id/draft", async (request, response, next) => {
     try {
       const idempotencyKey = requireIdempotencyKey(request);
@@ -728,7 +742,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const existing = await dependencies.readweave.getRelease(candidateId);
       if (existing) {
         if (existing.lifecycle !== "draft_source" || existing.candidateBaseReleaseId !== base.id || existing.courseId !== base.courseId || existing.moduleId !== base.moduleId) return sendError(request, response, 409, "CANDIDATE_RELEASE_EXISTS", "候选版本编号已经被其他内容占用，请换一个编号", false);
-        const savedDrafts = await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request);
+        const savedDrafts = await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request, pageNumbers);
         const policy = await currentWritingPolicy();
         const snapshot = await dependencies.operations.read();
         const selectedPageIds = pageNumbers ? pageNumbers.map((number) => existing.pages.find((page) => page.pageNumber === number)!.id) : existing.pageIds;
@@ -768,7 +782,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const now = new Date().toISOString();
       const candidate = createReleaseCandidate(base, candidateId, policy, now);
       await dependencies.readweave.registerDraftSource(candidate, writeContext(request, `${idempotencyKey}:source`));
-      const savedDrafts = await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request);
+      const savedDrafts = await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request, pageNumbers);
       const selectedPageIds = pageNumbers ? pageNumbers.map((number) => candidate.pages.find((page) => page.pageNumber === number)!.id) : candidate.pageIds;
       const generation = await createGenerationPlan({
         idempotencyKey: `${idempotencyKey}:generation-plan`,
@@ -2406,6 +2420,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       const sourceText = buildGenerationSourceText(page);
+      const previousPage = release.pages.find((candidate) => candidate.pageNumber === page.pageNumber - 1);
+      const previousPageContext = previousPage ? [previousPage.title, ...previousPage.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => anchor.text!.trim())].join("\n").slice(0, 2_000) : undefined;
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       await appendGenerationStageEvent(jobId, page.id, "atomize", "started", dependencies);
@@ -2415,7 +2431,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       let generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v8`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v9`, stage: "teach" })
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
@@ -2425,6 +2441,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         let validatedCoverageEvidence = coverageIssues.length === 0 ? structuredClone(generation.content.coverageEvidence) : undefined;
         let narrativeIssues = validateTeachingNarrative({
           ...generation.content,
+          lessonFlowVersion: 2,
           pageKind: blueprint.resourcePackage.pageKind,
           sourceDensity: blueprint.resourcePackage.sourceDensity
         });
@@ -2438,6 +2455,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             pageTitle: page.title,
             pageNumber: page.pageNumber,
             sourceText,
+            previousPageContext,
             sourceImageDataUrl,
             blueprint,
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
@@ -2455,6 +2473,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           if (coverageIssues.length === 0 && !validatedCoverageEvidence) validatedCoverageEvidence = structuredClone(generation.content.coverageEvidence);
           narrativeIssues = validateTeachingNarrative({
             ...generation.content,
+            lessonFlowVersion: 2,
             pageKind: blueprint.resourcePackage.pageKind,
             sourceDensity: blueprint.resourcePackage.sourceDensity
           });
@@ -2640,13 +2659,14 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
   // made the learner-facing explanation read like an internal audit log.
   const fullExplanationMarkdown = removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
   const lessonSections: LessonSection[] = [
+    ...(normalizedContent.chapterBridgeMarkdown?.trim() ? [{ id: `${page.id}:section:bridge`, kind: "chapter_bridge" as const, title: "承上启下", markdown: normalizedContent.chapterBridgeMarkdown.trim(), sourceAnchorIds: anchorIds, atomIds }] : []),
+    { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: sentenceItems("prior", normalizedContent.priorKnowledge), sourceAnchorIds: anchorIds, atomIds },
     { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: sentenceItems("objective", normalizedContent.learningObjectives), sourceAnchorIds: anchorIds, atomIds },
-    { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: normalizedContent.mainContentMarkdown, sourceAnchorIds: anchorIds, atomIds },
-    { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识列表", items: sentenceItems("prior", normalizedContent.priorKnowledge), sourceAnchorIds: anchorIds, atomIds },
     { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanationMarkdown, sourceAnchorIds: anchorIds, atomIds },
-    { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点列表", items: sentenceItems("misconception", normalizedContent.misconceptions), sourceAnchorIds: anchorIds, atomIds }
+    { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: normalizedContent.mainContentMarkdown, sourceAnchorIds: anchorIds, atomIds },
+    { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: sentenceItems("misconception", normalizedContent.misconceptions), sourceAnchorIds: anchorIds, atomIds }
   ];
-  const objectiveId = lessonSections[0]!.id;
+  const objectiveId = lessonSections.find((section) => section.kind === "learning_objectives")!.id;
   const questionBank: QuestionBankItem[] = normalizedContent.questions.map((item, index) => ({ id: `${page.id}:question:${item.kind}:${index + 1}`, pageId: page.id, objectiveId, kind: item.kind, prompt: item.prompt, options: item.options, expectedAnswer: item.expectedAnswer, explanation: item.explanation, sourceAnchorIds: anchorIds, status: modelBacked ? "approved" : "draft", version: 1, generatedBy: modelBacked ? `model-generated-${inputMode}-v3` : "deterministic-local-fallback-v1" }));
   const blocks = page.blocks
     .filter((block) => !isPlaceholderTeachingBlock(block.markdown))
@@ -2658,7 +2678,7 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
     const status = coveredFields.length === 0 ? "missing" as const : requirement.requiredFields.every((field) => coveredFields.includes(field)) ? "covered" as const : "partial" as const;
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
-  return { ...page, blocks, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+  return { ...page, blocks, lessonFlowVersion: 2, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
 }
 
 function isPlaceholderTeachingBlock(markdown: string): boolean {
@@ -2673,6 +2693,8 @@ function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], co
 function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): string[] {
   const issues: string[] = [];
   const atomIds = new Set(page.atoms.map((atom) => atom.id));
+  const textRegionIds = new Set(page.atoms.filter((atom) => atom.kind === "text_region").map((atom) => atom.id));
+  const compactExplanation = content.fullExplanationMarkdown.replace(/[`*_#\s]/g, "");
   const unknown = [...new Set(content.coverageEvidence.map((item) => item.atomId).filter((atomId) => !atomIds.has(atomId)))];
   if (unknown.length > 0) issues.push("TEACHING_COVERAGE_ATOM_UNKNOWN");
   const evidenceByAtom = new Map(content.coverageEvidence.map((item) => [item.atomId, item]));
@@ -2684,6 +2706,10 @@ function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], 
     }
     if (requirement.requiredFields.some((field) => !evidence.coveredFields.includes(field))) issues.push("TEACHING_COVERAGE_FIELD_MISSING");
     if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) issues.push("TEACHING_COVERAGE_EXPLANATION_VAGUE");
+    if (textRegionIds.has(requirement.atomId)) {
+      const quote = evidence.explanation.replace(/[`*_#\s]/g, "");
+      if (quote.length < 12 || !compactExplanation.includes(quote)) issues.push("TEACHING_COVERAGE_QUOTE_NOT_FOUND");
+    }
   }
   return [...new Set(issues)];
 }
@@ -2692,6 +2718,7 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
   const normalize = (value: string) => normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(value));
   return {
     ...content,
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
     learningObjectives: content.learningObjectives.map(normalize),
     mainContentMarkdown: normalize(content.mainContentMarkdown),
     priorKnowledge: content.priorKnowledge.map(normalize),
@@ -3157,9 +3184,9 @@ function createReleaseCandidate(base: CourseRelease, candidateId: string, policy
   };
 }
 
-async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: string, idempotencyKey: string, updatedAt: string, dependencies: AppDependencies, request: Request): Promise<LessonDraft[]> {
+async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: string, idempotencyKey: string, updatedAt: string, dependencies: AppDependencies, request: Request, pageNumbers?: number[]): Promise<LessonDraft[]> {
   const savedDrafts: LessonDraft[] = [];
-  for (const page of candidate.pages) {
+  for (const page of candidate.pages.filter((item) => !pageNumbers || pageNumbers.includes(item.pageNumber))) {
     const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
     if (existingDraft) {
       if (existingDraft.sourceReleaseId !== candidate.id || existingDraft.courseId !== candidate.courseId) throw new Error("CANDIDATE_PAGE_ID_COLLISION");
@@ -3179,9 +3206,20 @@ async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: stri
       changedBlockIds: page.blocks.map((block) => block.id),
       contentHash: sha256Text(stableStringify(page)),
       updatedAt
-    }, 0, writeContext(request, `${idempotencyKey}:draft:${page.pageNumber}`)));
+    }, 0, writeContext(request, `${idempotencyKey}:draft:${page.pageNumber}`), await candidateSourceAsset(page, dependencies)));
   }
   return savedDrafts;
+}
+
+async function candidateSourceAsset(page: CourseRelease["pages"][number], dependencies: AppDependencies): Promise<DraftSourceAsset | undefined> {
+  const match = /^\/api\/v1\/media\/([a-f0-9]{64})$/.exec(page.imageUrl);
+  if (!match) return undefined;
+  const bytes = await dependencies.cas.get(match[1]!);
+  const head = Buffer.from(bytes.subarray(0, 256));
+  const mediaType = head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? "image/png"
+    : head.toString("utf8").includes("<svg") ? "image/svg+xml" : undefined;
+  if (!mediaType) throw new Error("CANDIDATE_SOURCE_IMAGE_INVALID");
+  return { sha256: match[1]!, fileName: `page-${String(page.pageNumber).padStart(3, "0")}.${mediaType === "image/png" ? "png" : "svg"}`, mediaType, bytes };
 }
 
 function registerCandidateId(replacements: Map<string, string>, owners: Map<string, string>, sourceId: string, targetId: string, owner: string): void {

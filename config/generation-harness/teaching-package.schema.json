@@ -1,11 +1,12 @@
 {
   "type": "object",
   "properties": {
+    "chapterBridgeMarkdown": { "type": "string", "maxLength": 600 },
     "learningObjectives": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string", "minLength": 8, "maxLength": 180 } },
     "mainContentMarkdown": { "type": "string", "minLength": 30, "maxLength": 1800 },
-    "priorKnowledge": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 6, "maxLength": 180 } },
+    "priorKnowledge": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 40, "maxLength": 600 } },
     "fullExplanationMarkdown": { "type": "string", "minLength": 120, "maxLength": 5000 },
-    "misconceptions": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "minLength": 8, "maxLength": 240 } },
+    "misconceptions": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "minLength": 35, "maxLength": 500 } },
     "coverageEvidence": {
       "type": "array",
       "items": {

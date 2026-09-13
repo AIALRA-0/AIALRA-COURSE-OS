@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { CourseRelease, LessonSection, PageLesson, PageQuestion, PseudoCodeLine, QuestionBankItem, QuestionSelection } from "@course-os/contracts";
+import type { CourseRelease, LessonSection, PageLesson, PageQuestion, PseudoCodeLine, QuestionBankItem, QuestionSelection, ReadWeavePageQuestions } from "@course-os/contracts";
 import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
 
@@ -7,6 +7,8 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
   const sections = useMemo(() => normalizeSections(page), [page]);
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
   const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
+  const [nativeQuestions, setNativeQuestions] = useState<ReadWeavePageQuestions>({ pageId: page.id, questions: [] });
+  const [nativeQuestionsError, setNativeQuestionsError] = useState("");
   const [interactiveReady, setInteractiveReady] = useState(false);
   const interactiveMarkerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -31,17 +33,28 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     api.lesson(page.id).then((lesson) => active && setQaRecords(lesson.qaRecords)).catch(() => active && setQaRecords([]));
     return () => { active = false; };
   }, [interactiveReady, page.id]);
+  useEffect(() => {
+    if (!interactiveReady) return;
+    let active = true;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      api.readweaveQuestions(page.id).then((result) => {
+        if (active) { setNativeQuestions(result); setNativeQuestionsError(""); }
+      }).catch(() => { if (active) setNativeQuestionsError("ReadWeave 问答记录暂时无法读取"); });
+    };
+    setNativeQuestions({ pageId: page.id, questions: [] });
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
     <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${page.quality.publishable ? "pass" : "hold"}`}>{page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
-    <LessonSectionView section={sections[0]} />
-    <LessonSectionView section={sections[1]} />
-    <LessonSectionView section={sections[2]} />
-    <LessonSectionView section={sections[3]}>{pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>
-    <LessonSectionView section={sections[4]} />
+    {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>
-      <article className="lesson-block random-questions"><SectionTitle number="06" english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
-      <article className="lesson-block qa-records"><SectionTitle number="07" english="QUESTION AND ANSWER" title="QA记录" /><QuestionBox page={page} sessionId={sessionId} onSaved={(question) => setQaRecords((current) => [...current, question])} /><QARecordList records={qaRecords} onChanged={(updated) => setQaRecords((current) => current.map((item) => item.id === updated.id ? updated : item))} /></article>
+      <article className="lesson-block random-questions"><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
+      <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>
     </>}
   </section>;
 }
@@ -53,8 +66,9 @@ function SectionTitle({ number, english, title }: { number: string; english: str
 function sectionDescriptor(value: string): string {
   const normalized = value.toLocaleLowerCase().replaceAll("_", " ").trim();
   return ({
+    "chapter bridge": "上一页如何接到这里",
     "learning objectives": "本页要学会",
-    "main content": "先抓住这页在讲什么",
+    "main content": "读完后回收关键关系",
     "prior knowledge": "读懂本页前需要知道",
     "full explanation": "把原理讲透",
     misconceptions: "最容易混淆的地方",
@@ -63,10 +77,9 @@ function sectionDescriptor(value: string): string {
   } as Record<string, string>)[normalized] || "本节说明";
 }
 
-function LessonSectionView({ section, children }: { section?: LessonSection; children?: ReactNode }) {
+function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
   if (!section) return null;
-  const number = ({ learning_objectives: "01", main_content: "02", prior_knowledge: "03", full_explanation: "04", misconceptions: "05" } as Record<string, string>)[section.kind] ?? "00";
-  return <article className={`lesson-block section-${section.kind}`}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}>{item.text}</li>)}</ul> : null}{section.markdown ? <Markdown>{section.markdown}</Markdown> : null}{children}</article>;
+  return <article className={`lesson-block section-${section.kind}`}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown>{section.markdown}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {
@@ -101,32 +114,16 @@ function teacherSummaryFor(line: PseudoCodeLine): string {
   return legacy[line.code] || `这一行执行“${line.semantic}”，并把得到的状态交给后续步骤继续处理`;
 }
 
-function QuestionBox({ page, sessionId, onSaved }: { page: PageLesson; sessionId?: string; onSaved: (question: PageQuestion) => void }) {
-  const [question, setQuestion] = useState(""); const [attempt, setAttempt] = useState(""); const [hintLevel, setHintLevel] = useState(1); const [answer, setAnswer] = useState(""); const [busy, setBusy] = useState(false);
-  const ask = async () => { if (!sessionId || !question.trim()) return; setBusy(true); try { const result = await api.ask(sessionId, { pageId: page.id, question, learnerAttempt: attempt, hintLevel, anchorIds: page.anchors.map((anchor) => anchor.id) }); setAnswer(result.response); setHintLevel((value) => Math.min(6, value + 1)); onSaved(result); } catch (error) { setAnswer(error instanceof Error ? error.message : "提问失败，记录尚未写入 ReadWeave"); } finally { setBusy(false); } };
-  return <div className="interactive-card qa-composer"><span className="eyebrow">提示阶梯 {hintLevel}/6</span><h4>卡在哪里，直接问老师</h4><label>你已经尝试到哪一步<textarea value={attempt} onChange={(event) => setAttempt(event.target.value)} placeholder="先写下自己的思路，哪怕只有半步" /></label><label>你的问题<textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：为什么这里要除以 2" /></label><button className="primary" data-action="qa-save" aria-describedby="qa-save-reason" title={!sessionId ? "学习会话尚未建立" : !question.trim() ? "请先填写问题" : undefined} disabled={!sessionId || !question.trim() || busy} onClick={ask}>{busy ? "正在保存到 ReadWeave" : "提问并自动保存"}</button><span id="qa-save-reason" className="sr-only">{!sessionId ? "学习会话尚未建立" : !question.trim() ? "请先填写问题" : "提交后会写入 ReadWeave"}</span>{answer && <div className="answer"><Markdown>{answer}</Markdown></div>}</div>;
+function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePageQuestions; legacy: PageQuestion[]; error: string }) {
+  const historical = legacy.filter((item) => item.status === "active");
+  return <div className="qa-history">
+    <p className="empty-inline">在 ReadWeave 打开本页原图并直接提问，保存后的问题会自动出现在这里</p>
+    {records.noteUrl && <p><a href={records.noteUrl} target="_blank" rel="noopener noreferrer">在 ReadWeave 打开本页与原图 ↗</a></p>}
+    {error && <p className="qa-action-error" role="alert">{error}</p>}
+    {records.questions.length ? records.questions.map((item) => <article key={item.objectId}><header><strong>{item.title}</strong></header>{item.excerpt && <p>{item.excerpt}</p>}</article>) : <p className="empty-inline">本页尚无已保存的 ReadWeave 问答</p>}
+    {historical.length > 0 && <details><summary>查看此前在 Course OS 保存的 {historical.length} 条问答</summary>{historical.map((item) => <article key={item.id}><header><strong>{item.question}</strong></header><Markdown>{item.response}</Markdown></article>)}</details>}
+  </div>;
 }
-
-function QARecordList({ records, onChanged }: { records: PageQuestion[]; onChanged: (record: PageQuestion) => void }) {
-  const [busyId, setBusyId] = useState("");
-  const [error, setError] = useState("");
-  const active = records.filter((item) => item.status === "active");
-  const updatePolicy = async (record: PageQuestion) => {
-    setBusyId(`policy:${record.id}`); setError("");
-    try { onChanged(await api.setQuestionReviewPolicy(record, record.reviewPolicy === "include" ? "exclude" : "include")); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "复习策略保存失败"); }
-    finally { setBusyId(""); }
-  };
-  const retract = async (record: PageQuestion) => {
-    setBusyId(`retract:${record.id}`); setError("");
-    try { onChanged(await api.retractQuestion(record)); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "问答撤回失败"); }
-    finally { setBusyId(""); }
-  };
-  if (!active.length) return <>{error && <p className="qa-action-error">{error}</p>}<p className="empty-inline">本页还没有保存的实时问答</p></>;
-  return <div className="qa-history">{active.map((record) => <article key={record.id}><header><strong>{record.question}</strong><span>提示 {record.hintLevel}/6</span></header><Markdown>{record.response}</Markdown><footer><button data-action="qa-toggle-review" disabled={Boolean(busyId)} title={busyId ? "正在保存上一项问答操作" : undefined} onClick={() => void updatePolicy(record)}>{busyId === `policy:${record.id}` ? "保存中" : record.reviewPolicy === "include" ? "从复习中排除" : "加入复习"}</button><button className="danger-text" data-action="qa-retract" disabled={Boolean(busyId)} title={busyId ? "正在保存上一项问答操作" : undefined} onClick={() => void retract(record)}>{busyId === `retract:${record.id}` ? "撤回中" : "撤回记录"}</button></footer></article>)}{error && <p className="qa-action-error">{error}</p>}</div>;
-}
-
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
   const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(false); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
   const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>());
@@ -165,22 +162,23 @@ function QuestionBankStatus({ available, draftCount, onEnterStudio }: { availabl
 
 function normalizeSections(page: PageLesson): LessonSection[] {
   const anchorIds = page.anchors.map((item) => item.id); const atomIds = page.atoms.map((item) => item.id);
-  const sectionTitles: Array<[LessonSection["kind"], string]> = [["learning_objectives", "学习目标"], ["main_content", "主要内容"], ["prior_knowledge", "先验知识列表"], ["full_explanation", "完整讲解"], ["misconceptions", "易错点列表"]];
+  const sectionTitles: Array<[LessonSection["kind"], string]> = [["chapter_bridge", "承上启下"], ["prior_knowledge", "先验知识"], ["learning_objectives", "学完能做什么"], ["full_explanation", "完整讲解"], ["main_content", "主要内容"], ["misconceptions", "易错点"]];
   if (page.lessonSections?.length) {
     const byKind = new Map(page.lessonSections.map((section) => [section.kind, section]));
     const main = byKind.get("main_content")?.markdown;
     return sectionTitles.map(([kind, title]) => {
       const section = byKind.get(kind);
+      if (kind === "chapter_bridge" && !section) return undefined;
       if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
-      if (kind !== "full_explanation" || !section.markdown || !main) return section;
+      if (page.lessonFlowVersion === 2 || kind !== "full_explanation" || !section.markdown || !main) return section;
       const distinctExplanation = removeRepeatedOpening(main, section.markdown);
       return distinctExplanation ? { ...section, markdown: distinctExplanation } : section;
-    });
+    }).filter((section): section is LessonSection => Boolean(section));
   }
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
-  return [{ id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: main || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识列表", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: find("core", "example", "deep_dive", "check") || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点列表", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: removeRepeatedOpening(main, find("core", "example", "deep_dive", "check")) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: main || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
 }
 
 /**

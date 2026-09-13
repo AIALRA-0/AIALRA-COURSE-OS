@@ -4,6 +4,7 @@ import { modelInput, professorInstructions, teachingPackageSchema } from "./gene
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
+  chapterBridgeMarkdown?: string;
   learningObjectives: string[];
   mainContentMarkdown: string;
   priorKnowledge: string[];
@@ -42,6 +43,7 @@ export interface ModelRouterInput {
   pageTitle: string;
   pageNumber: number;
   sourceText: string;
+  previousPageContext?: string;
   sourceImageDataUrl?: string;
   writingPolicySnapshotId: string;
   language: string;
@@ -604,6 +606,7 @@ function normalizeStringListItem(value: unknown, depth = 0): string | undefined 
 function validateTeachingPackage(value: unknown): asserts value is TeachingPackage {
   if (!value || typeof value !== "object") throw new Error("MODEL_ROUTER_INVALID_TEACHING_PACKAGE");
   const candidate = value as Partial<TeachingPackage>;
+  if (candidate.chapterBridgeMarkdown !== undefined && typeof candidate.chapterBridgeMarkdown !== "string") throw new Error("MODEL_ROUTER_CHAPTER_BRIDGE_INVALID");
   if (!Array.isArray(candidate.learningObjectives) || !candidate.learningObjectives.every((item) => typeof item === "string")) throw new Error("MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID");
   if (typeof candidate.mainContentMarkdown !== "string") throw new Error("MODEL_ROUTER_MAIN_CONTENT_INVALID");
   if (!Array.isArray(candidate.priorKnowledge) || !candidate.priorKnowledge.every((item) => typeof item === "string")) throw new Error("MODEL_ROUTER_PRIOR_KNOWLEDGE_INVALID");

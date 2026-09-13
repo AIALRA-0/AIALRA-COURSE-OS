@@ -6,7 +6,7 @@
 
 1. 先读取 Resource Package，确认页面类型、信息密度、原始对象和证据限制
 2. 再读取 Requirement Package，建立“来源对象—必须解释的字段—正文位置”覆盖关系
-3. 再执行 Teaching Blueprint 的内部步骤，先形成骨架，最后一次性写正文和题目
+3. 再执行 Teaching Blueprint 的内部步骤，先确定读者的起点、对象依赖和讲解逻辑，再写正文和题目
 4. 最后按 Rule Package、本提示末尾的完整写作策略和 JSON Schema 逐项复核
 
 这些步骤只用于生成，不得作为“来源状态、审核状态、模型推断、页面元素核对、已覆盖”等流水线标签写进学习正文
@@ -40,17 +40,21 @@ fullExplanationMarkdown 可以为短单主题使用少量自然段；包含两�
 
 ## 内容分工
 
-learningObjectives 只描述读完后能够解释、计算、判断或执行的结果
+chapterBridgeMarkdown 仅在提供可信前页来源且确实有关联时，简短说明前页学过什么、本页接着解决什么；没有前页来源时返回空字符串，不得凭当前标题编造上一章
 
-mainContentMarkdown 只保留来源中的核心事实和关系，不复制完整讲解
+priorKnowledge 每项严格写成“知识点名称：知识点解释”，解释对象、作用、成立原因及本页用法，不能只给结论或用另一陌生术语循环定义
 
-priorKnowledge 只列出理解本页确实需要的前提，不写“先知道标题含义”等占位句
+learningObjectives 在先验知识之后展示，只描述读完后能够解释、计算、判断或执行的具体结果；不要在首次见到概念时堆放尚未解释的符号
 
-fullExplanationMarkdown 负责完整教学，不重复 mainContentMarkdown 的原句
+fullExplanationMarkdown 是唯一的完整讲解，按读者理解所需的顺序分段：先说明要解决的问题，再解释原对象和关系，给出必要推导或演算，最后说明结果与边界；每个主要公式解释首次符号、尺寸或单位、运算路径和可复算例子
 
-misconceptions 只记录由本页真实条件、否定、范围或常见混淆产生的错误，不制造空泛警告
+mainContentMarkdown 放在完整讲解之后，作为高层总结，只回收已经讲过的核心关系，不引入新术语，不复制完整讲解的原句
 
-coverageEvidence 是内部证据，只能引用真实 atomId 和正文确实解释过的字段，不得出现在学习正文
+misconceptions 每项写清错误理解、错误原因、正确判断和检查办法，不能只说“不要忽略条件”
+
+若原图、文字或公式之间有可核算的矛盾，保留原对象，写出核算关系与结果，并明确无法从当前材料确定哪个原始字段有误；不得选一个看似合理的式子暗中替换
+
+coverageEvidence 是内部证据，只能引用真实 atomId 和正文确实解释过的字段，不得出现在学习正文；对每个 text_region，explanation 必须逐字摘录 fullExplanationMarkdown 中连续的至少 12 个字符，不能只写“已覆盖”或摘录来源而不讲解
 
 ## 来源与事实
 

@@ -1143,6 +1143,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .lesson-section-title small { color: var(--muted); font-size: 12px; font-weight: 600; }
 .sentence-list { margin: 0; padding-left: 1.55em; }
 .sentence-list li { padding-left: .18em; line-height: 1.72; }
+.sentence-list li p { margin: 0; }
 .lesson-block p { margin: 12px 0; }
 .lesson-block pre { font-size: .9em; }
 .katex-display { margin: 18px 0; padding: 10px 0; }

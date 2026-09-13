@@ -49,6 +49,7 @@ interface EtapiNote {
   mime: string;
   blobId?: string;
   parentBranchIds?: string[];
+  childNoteIds?: string[];
   utcDateModified?: string;
 }
 
@@ -87,12 +88,14 @@ type SectionKey = "source" | "objectives" | "main" | "prerequisites" | "explanat
 
 interface DraftProjection {
   pageNoteId: string;
+  pageOverviewHash?: string;
   sourceNoteId: string;
   atomsNoteId: string;
   blockNoteIds: Record<string, string>;
   blockHashes: Record<string, string>;
   sectionNoteIds: Record<SectionKey, string>;
   sourceImageNoteId?: string;
+  sourceImageFileName?: string;
 }
 
 interface ProjectionIndex {
@@ -111,10 +114,10 @@ interface EtapiState extends ReadWeaveFileState {
 
 const SECTION_DEFINITIONS = [
   ["source", "00 来源与原始截图"],
-  ["objectives", "01 学习目标"],
-  ["main", "02 主要内容"],
-  ["prerequisites", "03 先验知识"],
-  ["explanation", "04 完整讲解"],
+  ["prerequisites", "01 先验知识"],
+  ["objectives", "02 学习目标"],
+  ["explanation", "03 完整讲解"],
+  ["main", "04 主要内容"],
   ["misconceptions", "05 易错点"],
   ["assessment", "06 随机问题"],
   ["qa", "07 QA记录"],
@@ -129,6 +132,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private writeChain: Promise<void> = Promise.resolve();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
+  private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
+  private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
   private lastReadAt?: string;
   private lastWriteAt?: string;
   private activeWriteContext?: IdempotentWriteContext;
@@ -315,6 +320,56 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   async listQuestions(pageId?: string): Promise<PageQuestion[]> {
     const questions = (await this.readState()).questions;
     return pageId ? questions.filter((item) => item.pageId === pageId) : questions;
+  }
+
+  async listNativePageQuestions(pageId: string): Promise<import("@course-os/contracts").ReadWeavePageQuestions> {
+    const state = await this.readState();
+    const draft = state.drafts.find((item) => item.pageId === pageId && item.workspaceId === this.workspaceId);
+    const pageNoteId = draft && (state.projections.drafts[draft.id]?.pageNoteId ?? draft.readweaveNoteId);
+    if (!pageNoteId) return { pageId, questions: [] };
+    const pageNote = await this.getNote(pageNoteId);
+    const noteIds = new Set([pageNoteId, ...(pageNote.childNoteIds ?? [])]);
+    const directChildren = pageNote.childNoteIds ?? [];
+    const grandchildren = await Promise.all(directChildren.slice(0, 32).map(async (noteId) => {
+      try { return (await this.getNote(noteId)).childNoteIds ?? []; } catch { return []; }
+    }));
+    for (const noteId of grandchildren.flat().slice(0, 128)) noteIds.add(noteId);
+    const links = (await this.readNativeLinks()).filter((link) => noteIds.has(link.articleId));
+    const byObject = new Map<string, import("@course-os/contracts").ReadWeaveNativeQuestion>();
+    for (const link of links) {
+      if (!link.objectId || byObject.has(link.objectId)) continue;
+      let object: { objectId?: string; kind?: string; contentType?: string; title?: string; body?: string; updatedAt?: string };
+      try { object = JSON.parse(await this.getContent(link.objectId)); } catch { continue; }
+      if (object.objectId !== link.objectId || object.kind !== "question") continue;
+      if ((link.contentType ?? object.contentType ?? "problem") !== "problem") continue;
+      const title = (link.displayTitle ?? object.title ?? "").trim();
+      if (!title) continue;
+      byObject.set(link.objectId, { objectId: link.objectId, title, excerpt: plainReadWeaveText(link.displayBody ?? object.body ?? "").slice(0, 500), updatedAt: object.updatedAt });
+    }
+    return { pageId, noteUrl: (await this.getDeepLink(pageNoteId))?.url, questions: [...byObject.values()] };
+  }
+
+  private async readNativeLinks(): Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]> {
+    if (this.nativeLinksCache && this.nativeLinksCache.expiresAt > Date.now()) return this.nativeLinksCache.links;
+    if (this.nativeLinksInFlight) return this.nativeLinksInFlight;
+    this.nativeLinksInFlight = (async () => {
+      const root = await this.getNote("_readweaveLinks");
+      const ids = root.childNoteIds ?? [];
+      const links: NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"] = [];
+      for (let index = 0; index < ids.length; index += 8) {
+        const batch = await Promise.all(ids.slice(index, index + 8).map(async (id) => {
+          try {
+            const value = JSON.parse(await this.getContent(id)) as Record<string, unknown>;
+            if (value.linkId !== id || typeof value.articleId !== "string" || typeof value.objectId !== "string") return undefined;
+            return value as typeof links[number];
+          } catch { return undefined; }
+        }));
+        links.push(...batch.filter((item): item is typeof links[number] => !!item));
+      }
+      this.nativeLinksCache = { links, expiresAt: Date.now() + 15_000 };
+      return links;
+    })();
+    try { return await this.nativeLinksInFlight; } finally { this.nativeLinksInFlight = undefined; }
   }
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {
@@ -1258,7 +1313,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!release) throw new Error("READWEAVE_SOURCE_RELEASE_NOT_FOUND");
     const course = await this.ensureCourseProjection(state, release);
     const moduleNoteId = course.modules[release.moduleId] ?? await this.createModule(course, release);
-    const pageNote = await this.createNote(moduleNoteId, `第 ${String(draft.page.pageNumber).padStart(3, "0")} 页 · ${draft.page.title}`, this.renderPageOverview(draft), "text", undefined, {
+    const initialOverview = this.renderPageOverview(draft);
+    const pageNote = await this.createNote(moduleNoteId, `第 ${String(draft.page.pageNumber).padStart(3, "0")} 页 · ${draft.page.title}`, initialOverview, "text", undefined, {
       courseOsType: "page",
       courseOsObjectId: draft.pageId
     });
@@ -1292,20 +1348,23 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const projection: DraftProjection = {
       pageNoteId: pageNote.noteId,
+      pageOverviewHash: sha256(await this.getContent(pageNote.noteId)),
       sourceNoteId: sectionNoteIds.source,
       atomsNoteId: sectionNoteIds.quality,
       blockNoteIds,
       blockHashes,
       sectionNoteIds,
-      sourceImageNoteId
+      sourceImageNoteId,
+      sourceImageFileName: sourceAsset?.fileName
     };
     state.projections.drafts[draft.id] = projection;
     return projection;
   }
 
   private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset): Promise<void> {
-    await this.putContent(projection.pageNoteId, this.renderPageOverview(draft));
+    if (projection.pageOverviewHash && sha256(await this.getContent(projection.pageNoteId)) !== projection.pageOverviewHash) throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
     if (sourceAsset) {
+      projection.sourceImageFileName = sourceAsset.fileName;
       if (!projection.sourceImageNoteId) {
         const sourceImage = await this.createNote(projection.sectionNoteIds.source, sourceAsset.fileName, "", "image", sourceAsset.mediaType, {
           courseOsType: "source_page_image",
@@ -1316,7 +1375,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       }
       await this.putBinaryContent(projection.sourceImageNoteId, sourceAsset.bytes, sourceAsset.mediaType);
     }
-    await this.putContent(projection.sectionNoteIds.source, this.renderSource(draft, projection.sourceImageNoteId, sourceAsset?.fileName));
+    if (projection.pageOverviewHash) {
+      const overview = this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName);
+      await this.putContent(projection.pageNoteId, overview);
+      projection.pageOverviewHash = sha256(await this.getContent(projection.pageNoteId));
+    }
+    await this.putContent(projection.sectionNoteIds.source, this.renderSource(draft, projection.sourceImageNoteId, projection.sourceImageFileName));
     for (const [key] of SECTION_DEFINITIONS) {
       if (key === "source") continue;
       await this.putContent(projection.sectionNoteIds[key], this.renderSectionOverview(draft, key));
@@ -1425,11 +1489,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const lesson = draft.page.lessonSections?.find((item) => item.kind === kind);
     if (!lesson) return "<p>本节内容保存在下方结构化讲解子笔记中</p>";
     if (lesson.items?.length) return `<ul>${lesson.items.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
-    return lesson.markdown ? `<pre>${escapeHtml(lesson.markdown)}</pre>` : "<p>本节内容保存在下方结构化讲解子笔记中</p>";
+    return lesson.markdown ? renderReadableLessonText(lesson.markdown) : "<p>本节内容保存在下方结构化讲解子笔记中</p>";
   }
 
-  private renderPageOverview(draft: LessonDraft): string {
-    return `<h2>${escapeHtml(draft.page.title)}</h2><p>页面 ${draft.page.pageNumber} · 修订 ${draft.revision}</p><p>下方子笔记按学习目标、主要内容、先验知识、完整讲解、易错点、随机问题、QA记录和质量成本排列</p>`;
+  private renderPageOverview(draft: LessonDraft, imageNoteId?: string, fileName = "page.png"): string {
+    const image = imageNoteId ? `<p><img src="api/images/${encodeURIComponent(imageNoteId)}/${encodeURIComponent(fileName)}" alt="第 ${draft.page.pageNumber} 页原图"></p>` : "";
+    const sections = draft.page.lessonFlowVersion === 2 ? draft.page.lessonSections ?? [] : [];
+    const lesson = sections.map((section) => {
+      const content = section.markdown ? renderReadableLessonText(section.markdown)
+        : section.items?.length ? `<ul>${section.items.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>` : "";
+      return content ? `<h3>${escapeHtml(section.title)}</h3>${content}` : "";
+    }).join("");
+    return `<h2>${escapeHtml(draft.page.title)}</h2><p>第 ${draft.page.pageNumber} 页</p>${image}${lesson}`;
   }
 
   private renderSource(draft: LessonDraft, imageNoteId?: string, fileName = "page.png"): string {
@@ -1670,6 +1741,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 }
 
+function plainReadWeaveText(value: string): string {
+  return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim();
+}
+
 function normalizeState(input: Partial<EtapiState>, projection: ProjectionIndex): EtapiState {
   return {
     ...structuredClone(EMPTY_STATE),
@@ -1729,6 +1804,30 @@ function treePath(state: EtapiState, nodeId: string): string[] {
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function renderReadableLessonText(markdown: string): string {
+  const output: string[] = [];
+  let paragraph: string[] = [];
+  let list: string[] = [];
+  const flush = () => {
+    if (paragraph.length) output.push(`<p>${paragraph.map(escapeHtml).join("<br>")}</p>`);
+    if (list.length) output.push(`<ul>${list.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`);
+    paragraph = [];
+    list = [];
+  };
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { flush(); continue; }
+    const heading = /^#{1,6}\s+(.+)$/.exec(line);
+    if (heading) { flush(); output.push(`<h4>${escapeHtml(heading[1]!)}</h4>`); continue; }
+    const bullet = /^[-*]\s+(.+)$/.exec(line);
+    if (bullet) { if (paragraph.length) flush(); list.push(bullet[1]!); continue; }
+    if (list.length) flush();
+    paragraph.push(line);
+  }
+  flush();
+  return output.join("");
 }
 
 function replayQuestionAttemptTransaction(state: ReadWeaveFileState, attemptId: string): QuestionAttemptTransactionResult {

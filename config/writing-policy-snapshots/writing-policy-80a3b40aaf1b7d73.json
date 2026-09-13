@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "policySnapshotId": "writing-policy:80a3b40aaf1b7d73",
+  "status": "approved",
+  "sourceCommit": "789f90c2ac3dae6ab8b89c7751751c1d7687ff65",
+  "summary": "已批准写作策略：零基础中文讲解、动态结构、来源保真、专业术语完整定义和局部格式修复",
+  "files": [
+    { "path": "SKILL.md", "sourcePath": "SKILL.md", "sha256": "4f748ead6ef256cd41a03928d4c7b3f3e8f8a82c0911d013f42bdecd526e4d92" },
+    { "path": "references/format-rules.md", "sourcePath": "references/format-rules.md", "sha256": "8a11e4f8128366378e2225c2e335e420a35e5bc70649f5dfc6cbdfb132cdaef5" },
+    { "path": "references/explanation-framework.md", "sourcePath": "references/explanation-framework.md", "sha256": "c1d501d1065085a02d387c513b16ee0ca17228ce47d137408fafe75460b8ec91" }
+  ],
+  "aggregateSha256": "80a3b40aaf1b7d73b776479eee6be261ae2a92c8ecc39ac2e077a16dc3ad1425"
+}

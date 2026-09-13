@@ -11,6 +11,7 @@ export const teachingUserPromptTemplate = readHarnessFile("teaching-user-prompt.
 export const teachingBlueprint = readHarnessFile("teaching-blueprint.md");
 export const policyFormatRules = readHarnessFile("policy-format-rules.md");
 export const policyExplanationFramework = readHarnessFile("policy-explanation-framework.md");
+export const policyFormulaExplanation = readHarnessFile("policy-formula-explanation.md");
 export const teachingPackageSchema = JSON.parse(readHarnessFile("teaching-package.schema.json")) as Record<string, unknown>;
 const harnessManifest = JSON.parse(readHarnessFile("harness-manifest.json")) as { id: string; version: string; taskContract: "GENERATE + TEACHING" };
 
@@ -23,6 +24,7 @@ export interface PromptInput {
   language?: string;
   qualityMode?: string;
   blueprint?: TeachingBlueprint;
+  previousPageContext?: string;
   repair?: {
     issues: string[];
     maximumExplanationCharacters: number;
@@ -52,7 +54,7 @@ const render = (template: string, values: Record<string, string>): string => Obj
 export function professorInstructions(language: string): string {
   const systemPrompt = render(teachingSystemPromptTemplate, { LANGUAGE: targetLanguage(language) }).trim();
   if (language === "en") return systemPrompt;
-  return `${systemPrompt}\n\n---\n\n${policyFormatRules.trim()}\n\n---\n\n${policyExplanationFramework.trim()}`;
+  return `${systemPrompt}\n\n---\n\n${policyFormatRules.trim()}\n\n---\n\n${policyExplanationFramework.trim()}\n\n---\n\n${policyFormulaExplanation.trim()}`;
 }
 
 export function modelInput(input: PromptInput): string | Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "high" }> }> {
@@ -62,7 +64,8 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     QUALITY_MODE: input.qualityMode || "balanced",
     PAGE_NUMBER: String(input.pageNumber),
     PAGE_TITLE: input.pageTitle,
-    SOURCE_TEXT: input.sourceText.slice(0, 45_000)
+    SOURCE_TEXT: input.sourceText.slice(0, 45_000),
+    PREVIOUS_PAGE_CONTEXT: input.previousPageContext?.slice(0, 2_000) || "未提供可靠的前页来源；不要编写前页或上一章回顾"
   }).trim();
   const blueprintText = input.blueprint ? `\n\n## 教学蓝图（必须遵循）\n${JSON.stringify(input.blueprint)}` : "";
   const repairText = input.repair ? [
@@ -82,7 +85,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
-  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
+  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
   const aggregateSha256 = createHash("sha256").update(JSON.stringify(files)).digest("hex");
   return { id: harnessManifest.id, version: harnessManifest.version, taskContract: harnessManifest.taskContract, files, aggregateSha256 };
 }
