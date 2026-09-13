@@ -80,7 +80,8 @@ export class ModelRouterGenerationError extends Error {
     readonly model: string,
     readonly usage: ModelRouterUsage,
     provider = "aialra-model-router",
-    readonly responseShape?: string
+    readonly responseShape?: string,
+    readonly partialContent?: TeachingPackage
   ) {
     super(code);
     this.name = "ModelRouterGenerationError";
@@ -271,6 +272,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       if (spent === undefined || spent >= input.maxCostUsd) throw firstFailure;
       input = { ...input, maxCostUsd: input.maxCostUsd - spent };
     }
+    if (firstFailure.code === "MODEL_ROUTER_QUESTIONS_INVALID" && firstFailure.partialContent && this.connection.protocol === "responses") {
+      try {
+        const recovered = await this.generateMissingQuestions(input, firstFailure.partialContent);
+        return { ...recovered, usage: sumProviderUsage(firstFailure.usage, recovered.usage), schemaRetries: 1 };
+      } catch (error) {
+        if (!(error instanceof ModelRouterGenerationError)) throw error;
+        throw new ModelRouterGenerationError(error.code, error.model, sumProviderUsage(firstFailure.usage, error.usage), error.provider, error.responseShape);
+      }
+    }
     try {
       const recovered = await this.generateOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:schema-retry` }, firstFailure.code);
       return { ...recovered, usage: sumProviderUsage(firstFailure.usage, recovered.usage), schemaRetries: 1 };
@@ -320,8 +330,49 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
     } catch (error) {
       const code = error instanceof Error && /^[A-Z0-9_:-]+$/.test(error.message) ? error.message : "MODEL_PROVIDER_INVALID_TEACHING_PACKAGE";
-      throw new ModelRouterGenerationError(code, body.model || this.connection.model, usage, this.connection.providerId, describeTeachingResponseShape(content));
+      throw new ModelRouterGenerationError(code, body.model || this.connection.model, usage, this.connection.providerId, describeTeachingResponseShape(content), content);
     }
+  }
+
+  private async generateMissingQuestions(input: ModelRouterInput, partial: TeachingPackage): Promise<TeachingGenerationResult> {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180_000);
+    const questionSchema = { type: "object", properties: { questions: (teachingPackageSchema.properties as Record<string, unknown>).questions }, required: ["questions"], additionalProperties: false };
+    let response: Response;
+    try {
+      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:question-refill` },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.connection.model,
+          instructions: professorInstructions(input.language),
+          input: `只为下面已经写好的第 ${input.pageNumber} 页讲解补齐四道题，不重写讲解，不引入讲解没有解释的事实。恰好两道理解题、两道四选一选择题，问题与答案必须具体、可从讲解推出。只返回含 questions 字段的 JSON 对象。\n\n${JSON.stringify({ title: input.pageTitle, fullExplanationMarkdown: partial.fullExplanationMarkdown, mainContentMarkdown: partial.mainContentMarkdown, misconceptions: partial.misconceptions })}`,
+          max_output_tokens: 2_000,
+          reasoning: { effort: "none" },
+          text: { format: { type: "json_schema", name: "course_os_question_refill", schema: questionSchema, strict: true } },
+          metadata: { product: "course-os", stage: "question_refill", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+        })
+      });
+    } catch (error) {
+      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
+    } finally { clearTimeout(timeout); }
+    let body: ProviderResponseBody;
+    try { body = await response.json() as ProviderResponseBody; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+    const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
+    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
+    const spent = this.usageCostUsd(usage);
+    if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", body.model || this.connection.model, usage, this.connection.providerId);
+    const output = extractProviderOutput(body);
+    let parsed: { questions?: TeachingPackage["questions"] };
+    try { parsed = (typeof output === "string" ? JSON.parse(output) : output) as { questions?: TeachingPackage["questions"] }; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
+    const content = { ...partial, questions: parsed?.questions ?? [] };
+    try { validateTeachingPackage(content); }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_QUESTIONS_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
+    return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
   }
 
   private usageCostUsd(usage: ModelRouterUsage): number | undefined {

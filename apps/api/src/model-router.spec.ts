@@ -224,6 +224,25 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("refills missing questions without rewriting a usable teaching page", async () => {
+    const original = providerTeachingContent() as TeachingPackage;
+    const { questions, ...withoutQuestions } = original;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify(withoutQuestions), usage: { input_tokens: 300, output_tokens: 900 } }))
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ questions }), usage: { input_tokens: 200, output_tokens: 500 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", billingMode: "metered" });
+    const result = await client.generateTeachingPackage({ ...providerInput("missing-questions-test"), maxCostUsd: 0.06 });
+    expect(result.content.fullExplanationMarkdown).toBe(original.fullExplanationMarkdown);
+    expect(result.content.questions).toEqual(questions);
+    expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 500, outputTokens: 1400 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as { input: string; metadata: { stage: string }; text: { format: { name: string } } };
+    expect(secondBody.metadata.stage).toBe("question_refill");
+    expect(secondBody.text.format.name).toBe("course_os_question_refill");
+    expect(secondBody.input).not.toContain("离线提取来源文本");
+  });
+
   it("reads only the final message and ignores Responses reasoning items", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
       model: "deepseek-v4-flash-vision-exp",
