@@ -1054,8 +1054,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const session = (await dependencies.operations.read()).sessions.find((item) => item.id === sessionId && (item.workspaceId ?? workspaceId) === workspaceId);
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
       const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
-      const page = release?.pages.find((item) => item.id === pageId);
-      if (!release || !page) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
+      const page = release ? await learningPageForQuestions(dependencies.readweave, release, pageId, workspaceId) : undefined;
+      if (!release || !release.pageIds.includes(pageId)) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
+      if (!page) return sendError(request, response, 409, "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", false);
       const seed = String(request.body.seed || `${session.id}:${page.id}:${new Date().toISOString().slice(0, 10)}`);
       const count = Math.max(1, Math.min(4, Number(request.body.count || 2)));
       const bank = page.questionBank ?? legacyQuestionBank(release, page.id);
@@ -1139,7 +1140,8 @@ export function createApp(dependencies: AppDependencies): Express {
       const startedAt = performance.now();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const release = await getWorkspaceRelease(dependencies.readweave, String(request.body.courseReleaseId || ""), workspaceId);
-      const page = release?.pages.find((item) => item.id === request.body.pageId);
+      const page = release ? await learningPageForQuestions(dependencies.readweave, release, String(request.body.pageId || ""), workspaceId) : undefined;
+      if (release && release.pageIds.includes(String(request.body.pageId || "")) && !page) return sendError(request, response, 409, "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", false);
       const item = page?.questionBank?.find((candidate) => candidate.id === request.body.questionId);
       if (!release || !page || !item) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到这道随机问题", false);
       const answer = String(request.body.answer || "").trim();
@@ -2038,6 +2040,14 @@ async function getWorkspaceRelease(readweave: ReadWeaveCourseApi, releaseId: str
   const release = await readweave.getRelease(releaseId);
   if (!release) return undefined;
   return (await listWorkspaceReleases(readweave, workspaceId, release.courseId)).some((candidate) => candidate.id === release.id) ? release : undefined;
+}
+
+async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: CourseRelease, pageId: string, workspaceId: string): Promise<CourseRelease["pages"][number] | undefined> {
+  const sourcePage = release.pages.find((page) => page.id === pageId);
+  if (!sourcePage || release.lifecycle !== "draft_source") return sourcePage;
+  const draft = await readweave.getDraftByPage(pageId);
+  return draft?.sourceReleaseId === release.id && draft.workspaceId === workspaceId && draft.courseId === release.courseId
+    && draft.status === "ready" && draft.page.quality.publishable ? draft.page : undefined;
 }
 
 async function resolveWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string): Promise<CourseTreeNode | undefined> {

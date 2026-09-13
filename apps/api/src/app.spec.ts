@@ -376,6 +376,45 @@ describe("Course OS API", () => {
     expect(session.body.courseReleaseId).toBe(release.id);
   });
 
+  it("selects and grades only ready candidate draft questions, with idempotent replay", async () => {
+    const { app, readweave } = await seededApp();
+    const candidate = testRelease();
+    candidate.id = "candidate-questions-v2";
+    candidate.lifecycle = "draft_source";
+    candidate.pageIds = ["candidate-page-1"];
+    candidate.pages = replaceTestIds(candidate.pages, "page-1", "candidate-page-1");
+    candidate.pages[0]!.questionBank = [];
+    await readweave.registerDraftSource(candidate, {
+      idempotencyKey: "candidate-questions-source", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-source"
+    });
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: candidate.id }).expect(201);
+    const selectionUrl = "/api/v1/pages/candidate-page-1/questions:select";
+    await request(app).post(selectionUrl).set("Idempotency-Key", "candidate-not-ready").send({ sessionId: session.body.id, count: 2 }).expect(409);
+
+    const draftQuestions = testRelease().pages[0]!.questionBank!.map((question) => ({ ...question, id: `candidate-${question.id}`, pageId: "candidate-page-1" }));
+    await readweave.saveDraft({
+      id: "draft:candidate-page-1", workspaceId: "personal", courseId: candidate.courseId, moduleId: candidate.moduleId,
+      sourceReleaseId: candidate.id, pageId: "candidate-page-1", revision: 0, status: "ready",
+      page: { ...candidate.pages[0]!, questionBank: draftQuestions }, changedBlockIds: [], contentHash: "candidate-ready-hash",
+      updatedAt: new Date().toISOString()
+    }, 0, { idempotencyKey: "candidate-questions-ready", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-ready" });
+
+    const selected = await request(app).post(selectionUrl).set("Idempotency-Key", "candidate-select")
+      .send({ sessionId: session.body.id, seed: "candidate-seed", count: 2 }).expect(201);
+    expect(selected.body.available).toBe(4);
+    expect(selected.body.questions).toHaveLength(2);
+    expect(selected.body.questions.every((question: QuestionBankItem) => question.id.startsWith("candidate-"))).toBe(true);
+    const question = selected.body.questions[0] as QuestionBankItem;
+    const payload = { selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: candidate.id,
+      pageId: "candidate-page-1", questionId: question.id, answer: question.expectedAnswer, usedHintLevel: 0 };
+    const saved = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt").send(payload).expect(201);
+    expect(saved.body.attempt.correct).toBe(true);
+    const replayed = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt").send(payload).expect(201);
+    expect(replayed.body.attempt.id).toBe(saved.body.attempt.id);
+    expect(await readweave.listQuestionAttempts()).toHaveLength(1);
+    expect(await readweave.listAssessmentAttempts()).toHaveLength(1);
+  });
+
   it("records failed provider usage in the authoritative cost ledger", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
