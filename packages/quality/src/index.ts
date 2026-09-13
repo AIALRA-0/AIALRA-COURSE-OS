@@ -151,6 +151,18 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   }
 
   if (input.strictWritingStyle) {
+    const mathFields = {
+      chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
+      learningObjectives: input.learningObjectives.join("\n"),
+      priorKnowledge: input.priorKnowledge.join("\n"),
+      fullExplanationMarkdown: input.fullExplanationMarkdown,
+      mainContentMarkdown: input.mainContentMarkdown,
+      misconceptions: input.misconceptions.join("\n"),
+      questions: input.questions.map((question) => `${question.prompt}\n${question.explanation}`).join("\n")
+    };
+    for (const [field, markdown] of Object.entries(mathFields)) {
+      if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
+    }
     const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
     if (hasUnpairedEnglishPhrase(learnerText, sourceNames)) issues.push("TEACHING_UNPAIRED_ENGLISH");
     const summaryLines = input.mainContentMarkdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -164,6 +176,15 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       const definition = prior.trim().replace(/^[-*+]\s+/, "");
       const split = definition.indexOf("：");
       const label = split < 0 ? "" : definition.slice(0, split).trim();
+      const translatedLabel = /^([\p{Script=Han}]{2,20})（([A-Za-z][A-Za-z\s-]{1,80})）$/u.exec(label);
+      if (translatedLabel) {
+        const chinese = translatedLabel[1]!;
+        const expectedEnglish = translatedLabel[2]!.replace(/\s+/g, " ").trim().toLowerCase();
+        const repeated = new RegExp(`(?:^|[^\\p{Script=Han}]|的)${escapeRegExp(chinese)}（([A-Za-z][A-Za-z\\s-]{1,80})）`, "gu");
+        if ([...definition.matchAll(repeated)].some((match) => match[1]!.replace(/\s+/g, " ").trim().toLowerCase() !== expectedEnglish)) {
+          issues.push("TEACHING_PRIOR_TRANSLATION_CONFLICT");
+        }
+      }
       if (label.length >= 2 && new RegExp(`^\\s*(?:[-*+]\\s*)?${escapeRegExp(label)}：`, "mu").test(explanation)) {
         issues.push("TEACHING_PRIOR_DEFINITION_REPEATED");
       }

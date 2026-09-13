@@ -80,13 +80,10 @@ export function createApp(dependencies: AppDependencies): Express {
     next();
   });
 
-  app.get("/healthz", async (_request, response) => {
-    const releases = await dependencies.readweave.listReleases();
-    response.json({
-      status: "ok",
-      apiVersion: COURSE_API_VERSION,
-      publishedReleases: releases.filter((release) => release.lifecycle !== "draft_source").length,
-    });
+  // Liveness must stay independent of the remote course store. Its authority
+  // and pending/conflict state are reported by /api/v1/sync/status.
+  app.get("/healthz", (_request, response) => {
+    response.json({ status: "ok", apiVersion: COURSE_API_VERSION });
   });
 
   app.get("/api/v1/writing-policy/current", async (_request, response, next) => {
@@ -2376,22 +2373,11 @@ function startGenerationJob(jobId: string, dependencies: AppDependencies): void 
   if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => executeGenerationJob(jobId, dependencies).catch(() => undefined));
 }
 
-async function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
-  try {
-    await runLocalJob(jobId, dependencies);
-  } catch (error) {
-    await failGenerationJob(jobId, safeGenerationIssue(error), dependencies);
-  } finally {
-    await advanceGenerationPlanForJob(jobId, dependencies);
-  }
-}
-
-async function runLocalJob(jobId: string, dependencies: AppDependencies): Promise<void> {
-  const leaseOwner = `course-os-worker:${process.pid}`;
-  await dependencies.operations.mutate((state) => {
+export async function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const fenceToken = await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
-    if (!job || job.state !== "queued" || job.cancelRequested) return;
-    Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, leaseOwner));
+    if (!job || job.state !== "queued" || job.cancelRequested) return undefined;
+    Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, `course-os-worker:${process.pid}`));
     if (job.planId) {
       const plan = state.generationPlans.find((item) => item.id === job.planId);
       if (plan) {
@@ -2403,41 +2389,54 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       }
     }
     dependencies.operations.appendEvent(state, job.id, "job.running", { attempt: job.attempt });
+    return job.lease!.fenceToken;
   });
+  if (fenceToken === undefined) return;
+  try {
+    await runLocalJob(jobId, dependencies, fenceToken);
+  } catch (error) {
+    const issue = safeGenerationIssue(error);
+    if (issue !== "LEASE_LOST") await failGenerationJob(jobId, issue, dependencies, fenceToken);
+  } finally {
+    await advanceGenerationPlanForJob(jobId, dependencies);
+  }
+}
+
+async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceToken: number): Promise<void> {
+  const leaseOwner = `course-os-worker:${process.pid}`;
   const initial = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
-  if (!initial || initial.state !== "running") return;
-  const fenceToken = initial.lease?.fenceToken ?? 0;
+  if (!initial || initial.state !== "running" || initial.lease?.fenceToken !== fenceToken) return;
   const release = await dependencies.readweave.getRelease(initial.materialVersionId);
   if (!release) {
-    await failGenerationJob(jobId, "MATERIAL_VERSION_NOT_FOUND", dependencies);
+    await failGenerationJob(jobId, "MATERIAL_VERSION_NOT_FOUND", dependencies, fenceToken);
     return;
   }
   if (initial.writingPolicySnapshotId && initial.writingPolicySnapshotId !== release.writingPolicySnapshotId) {
-    await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies);
+    await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies, fenceToken);
     return;
   }
   const runtimeModelRouter = await resolveRuntimeModelRouter(dependencies);
   if (initial.writingPolicySnapshotId?.startsWith("writing-policy:")) {
     const currentPolicy = await currentWritingPolicy();
     if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== initial.writingPolicySnapshotId) {
-      await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies);
+      await failGenerationJob(jobId, "WRITING_POLICY_SNAPSHOT_CHANGED", dependencies, fenceToken);
       return;
     }
   }
   if (initial.harnessSnapshotId && currentGenerationHarness().aggregateSha256 !== initial.harnessSnapshotId) {
-    await failGenerationJob(jobId, "GENERATION_HARNESS_SNAPSHOT_CHANGED", dependencies);
+    await failGenerationJob(jobId, "GENERATION_HARNESS_SNAPSHOT_CHANGED", dependencies, fenceToken);
     return;
   }
   for (const pageId of initial.pageIds) {
     const currentJob = (await dependencies.operations.read()).jobs.find((item) => item.id === jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
     if (currentJob.spentUsd >= currentJob.budgetUsd) {
-      await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies);
+      await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
       return;
     }
     const sourcePage = release.pages.find((item) => item.id === pageId);
     if (!sourcePage) {
-      await markGenerationPageFailed(jobId, pageId, "PAGE_NOT_FOUND", dependencies);
+      await markGenerationPageFailed(jobId, pageId, "PAGE_NOT_FOUND", dependencies, {}, fenceToken);
       continue;
     }
     const page = preparePageForGeneration(sourcePage);
@@ -2597,9 +2596,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         const job = state.jobs.find((item) => item.id === jobId);
         if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
         applyActualCost(job, cost, state, dependencies);
-        if (rejectedNarrativeIssues.length > 0) {
+        if (!generatedPage.quality.publishable) {
           if (!job.failedPageIds.includes(page.id)) job.failedPageIds.push(page.id);
-          dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId: page.id, issue: rejectedNarrativeIssues[0], draftRevision: saved.revision, contentHash: saved.contentHash, draftStatus: "needs_review" });
+          dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId: page.id, issue: generatedPage.quality.issues[0] || "MODEL_REVIEW_REQUIRED", draftRevision: saved.revision, contentHash: saved.contentHash, draftStatus: "needs_review" });
           if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
           return;
         }
@@ -2618,7 +2617,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         await dependencies.readweave.appendCostEntry(failedCost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
         await dependencies.operations.mutate((state) => {
           const job = state.jobs.find((item) => item.id === jobId);
-          if (!job || job.state !== "running") return;
+          if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
           applyActualCost(job, failedCost, state, dependencies);
           if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
           dependencies.operations.appendEvent(state, job.id, "generation.page.cost_recorded", { pageId, status: "failed", actualMicrousd: failedCost.actualMicrousd });
@@ -2628,12 +2627,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           }
         });
       }
-      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {});
+      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}, fenceToken);
     }
   }
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
-    if (!job || job.state !== "running" || job.cancelRequested) return;
+    if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken) || job.cancelRequested) return;
     Object.assign(job, transitionJob(job, "pending_sync"));
     dependencies.operations.appendEvent(state, job.id, "job.pending_sync", { completedPageIds: job.completedPageIds, failedPageIds: job.failedPageIds });
     if (job.completedPageIds.length === 0 && job.failedPageIds.length > 0) {
@@ -2659,19 +2658,20 @@ async function appendGenerationStageEvent(jobId: string, pageId: string, stage: 
   });
 }
 
-async function failGenerationJob(jobId: string, issue: string, dependencies: AppDependencies): Promise<void> {
+async function failGenerationJob(jobId: string, issue: string, dependencies: AppDependencies, fenceToken?: number): Promise<void> {
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "running") return;
+    if (fenceToken !== undefined && job.lease?.fenceToken !== fenceToken) return;
     Object.assign(job, transitionJob(job, "failed"));
     dependencies.operations.appendEvent(state, job.id, "job.failed", { issue });
   });
 }
 
-async function markGenerationPageFailed(jobId: string, pageId: string, issue: string, dependencies: AppDependencies, details: Record<string, unknown> = {}): Promise<void> {
+async function markGenerationPageFailed(jobId: string, pageId: string, issue: string, dependencies: AppDependencies, details: Record<string, unknown> = {}, fenceToken?: number): Promise<void> {
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
-    if (!job || job.state !== "running") return;
+    if (!job || job.state !== "running" || (fenceToken !== undefined && job.lease?.fenceToken !== fenceToken)) return;
     if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
     dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId, issue, ...details });
     if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
@@ -2715,6 +2715,7 @@ export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: 
   const fields = new Set<keyof TeachingPackage>();
   for (const issue of issues) {
     if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
+    else if (issue.startsWith("TEACHING_MATH_INVALID:")) fields.add(issue.slice("TEACHING_MATH_INVALID:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));

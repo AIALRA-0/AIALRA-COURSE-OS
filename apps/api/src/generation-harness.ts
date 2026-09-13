@@ -85,6 +85,8 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     ...(input.repair.issues.some((issue) => issue.includes("UNPAIRED_ENGLISH")) ? ["逐字段检查承上启下、目标、定义、完整讲解、总结、易错点和四道题的题干与答案解释。普通英文名称或缩写在首次定义后改用已核实的中文名称；首次按策略写成中文全称（官方英文全称），缩写放在中文名称之前。原图中的整段代码原样放进 Markdown 行内代码或代码块，再用中文说明用途；无法核实全称的原图标签用中文引出，并用引号保留原样，说明当前页能确认什么，不得猜测英文全称；原文论文标题用书名号保留。尤其不能让题目解释重新裸用正文已经解释过的缩写"] : []),
     ...(input.repair.issues.includes("TEACHING_PRIOR_DEFINITION_INCOMPLETE") ? ["逐条重写 priorKnowledge：每项只占一个列表项，格式为‘中文全称（已核实的官方英文全称）：是什么；具体做什么；怎样工作；何时使用；如何区分’。按内容选择三至五个完整分句，用中文分号隔开；每句至少十二字，不要把五种关系挤成逗号串，也不要编造英文名称"] : []),
     ...(input.repair.issues.includes("TEACHING_PRIOR_MULTIPLE_DEFINITIONS") ? ["priorKnowledge 每一项只定义一个术语，只用一个中文冒号；需要解释另一个概念时另起一项，或在当前句子中直接说明其作用，不追加第二个‘名称：定义’"] : []),
+    ...(input.repair.issues.includes("TEACHING_PRIOR_TRANSLATION_CONFLICT") ? ["逐一核对先验知识中的中英术语配对：同一个中文名称不能在同一项中对应两个不同英文名称。回到原图和已核实术语确定准确译名；若无法核实英文，不写英文，不得只删除冲突提示却保留错误定义"] : []),
+    ...(input.repair.issues.some((issue) => issue.startsWith("TEACHING_MATH_INVALID:")) ? ["只修复错误字段中的数学定界符与公式语法：行内公式的开头和结尾各用一个 $，不得在两个 $ 之间换行；显示公式单独用成对 $$；返回前逐式核对 KaTeX 可解析，并保留原有数字、变量和推导关系"] : []),
     ...(input.repair.issues.some((issue) => issue.startsWith("TEACHING_COVERAGE_")) ? ["只修复 coverageEvidence 时，保留完整讲解和其他字段不变。每个 text_region 的 explanation 都须从现有 fullExplanationMarkdown 中连续摘录至少十二个字符，而且这段话必须真正回答原图对应对象；原图只有简短英文提问或栏目标题时，摘录正文中的回答，不复制短标题冒充覆盖证据"] : []),
     ...(input.repair.issues.includes("TEACHING_BRIDGE_NEEDS_BLOCKS") ? ["chapterBridgeMarkdown 中前页已知事实与本页要解决的问题必须用空行分成两个自然段；两个独立问题必须分行，不要用分号挤在一个长句里"] : []),
     ...(input.repair.issues.includes("TEACHING_ADJACENT_HEADINGS") ? ["fullExplanationMarkdown 中相邻两个标题之间必须补入实际讲解；若只是同一步的两个名称，合并为一个准确标题，把另一个改为正文，不增加空泛过渡句"] : []),

@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { createApp, createDefaultDependencies, evaluateQuestionAnswer, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -28,7 +28,7 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
     requestId: "seed-release"
   });
   const dependencies = createDefaultDependencies(root, readweave, modelRouter);
-  return { app: createApp(dependencies), operations: dependencies.operations, readweave, release };
+  return { app: createApp(dependencies), dependencies, operations: dependencies.operations, readweave, release };
 }
 
 describe("Course OS API", () => {
@@ -39,6 +39,8 @@ describe("Course OS API", () => {
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW"])).toEqual({ ...previous, priorKnowledge: repaired.priorKnowledge });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH", "TEACHING_PRIOR_UNPAIRED_ENGLISH"])).toBeUndefined();
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_MISCONCEPTIONS_PACKED", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:a1"])).toEqual({ ...previous, misconceptions: repaired.misconceptions, coverageEvidence: repaired.coverageEvidence });
+    expect(mergeFocusedTeachingRepair(previous, { ...repaired, learningObjectives: ["修好的公式"] }, ["TEACHING_MATH_INVALID:learningObjectives"]))
+      .toEqual({ ...previous, learningObjectives: ["修好的公式"] });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH"], ["fullExplanationMarkdown"])).toEqual({ ...previous, fullExplanationMarkdown: repaired.fullExplanationMarkdown, coverageEvidence: repaired.coverageEvidence });
   });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
@@ -83,9 +85,12 @@ describe("Course OS API", () => {
     expect(normalizeGeneratedMathPunctuation("$$\\frac12+\u000crac12=1。$$")).toBe("$$\\frac12+\\frac12=1$$。");
   });
 
-  it("reports health and API version", async () => {
-    const response = await request(await testApp()).get("/healthz").expect(200);
-    expect(response.body).toMatchObject({ status: "ok", apiVersion: "2.4.0" });
+  it("reports liveness without waiting for ReadWeave", async () => {
+    const { app, readweave } = await seededApp();
+    const listReleases = vi.spyOn(readweave, "listReleases").mockRejectedValue(new Error("READWEAVE_OFFLINE"));
+    const response = await request(app).get("/healthz").expect(200);
+    expect(response.body).toEqual({ status: "ok", apiVersion: "2.4.0" });
+    expect(listReleases).not.toHaveBeenCalled();
   });
 
   it("deduplicates an import by idempotency key", async () => {
@@ -112,7 +117,7 @@ describe("Course OS API", () => {
     const draft = await readweave.getDraftByPage(ready.pageIds[0]);
     expect(draft).toMatchObject({ status: "needs_review", revision: 1 });
     expect(draft?.page.imageUrl).toMatch(/^\/api\/v1\/media\/[a-f0-9]{64}$/);
-    expect((await request(app).get("/healthz").expect(200)).body.publishedReleases).toBe(0);
+    expect((await request(app).get("/healthz").expect(200)).body.status).toBe("ok");
   }, 45_000);
 
   it("creates one idempotent draft generation job after an import without publishing a release", async () => {
@@ -160,7 +165,7 @@ describe("Course OS API", () => {
   }, 45_000);
 
   it("runs a generation plan one single-page batch at a time", async () => {
-    const { app, operations, release } = await seededApp(undefined, testReleaseWithPages(3));
+    const { app, operations, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) }, testReleaseWithPages(3));
     const created = await request(app).post("/api/v1/release-candidates")
       .set("Idempotency-Key", "candidate-plan-serial")
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
@@ -184,7 +189,7 @@ describe("Course OS API", () => {
   }, 45_000);
 
   it("holds a selected candidate anchor plan for review without generating other pages", async () => {
-    const { app, readweave, release } = await seededApp(undefined, testReleaseWithPages(8));
+    const { app, readweave, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) }, testReleaseWithPages(8));
     const created = await request(app).post("/api/v1/release-candidates")
       .set("Idempotency-Key", "candidate-plan-anchors")
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-anchor-candidate", pageNumbers: [1, 2, 3, 4, 5, 6], holdForReview: true, budgetUsd: 2, qualityMode: "economy" })
@@ -299,7 +304,7 @@ describe("Course OS API", () => {
   });
 
   it("stores QA changes, reproducible mixed questions, attempts and generation costs in ReadWeave", async () => {
-    const { app, operations, readweave, release } = await seededApp();
+    const { app, operations, readweave, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) });
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
     const asked = await request(app).post(`/api/v1/sessions/${session.body.id}/questions`).set("Idempotency-Key", "qa-create").send({ pageId: "page-1", learnerAttempt: "先比较输入", question: "为什么要检查前提", hintLevel: 1, anchorIds: [] }).expect(201);
     expect(asked.body).toMatchObject({ reviewPolicy: "include", status: "active", revision: 1 });
@@ -337,7 +342,7 @@ describe("Course OS API", () => {
   }, 15_000);
 
   it("records the persisted ReadWeave draft hash in the completed-page event", async () => {
-    const { app, operations, readweave, release } = await seededApp();
+    const { app, operations, readweave, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) });
     const originalSave = readweave.saveDraft.bind(readweave);
     vi.spyOn(readweave, "saveDraft").mockImplementation((draft, revision, context, asset) =>
       originalSave({ ...draft, contentHash: `remote:${draft.contentHash}` }, revision, context, asset));
@@ -415,6 +420,29 @@ describe("Course OS API", () => {
     expect(replayed.body.attempt.id).toBe(saved.body.attempt.id);
     expect(await readweave.listQuestionAttempts()).toHaveLength(1);
     expect(await readweave.listAssessmentAttempts()).toHaveLength(1);
+  });
+
+  it("lets only one concurrent dispatcher claim and execute a queued page job", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: async () => testTeachingResult(0.005) };
+      const { app, dependencies, operations, release } = await seededApp(modelRouter);
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "concurrent-dispatch-job")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+      await Promise.all([
+        executeGenerationJob(created.body.id, dependencies),
+        executeGenerationJob(created.body.id, dependencies)
+      ]);
+      const state = await operations.read();
+      const events = state.events.filter((event) => event.streamId === created.body.id);
+      expect(events.filter((event) => event.type === "job.running")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "generation.stage.started" && (event.payload as Record<string, unknown>).pageId === "page-1" && (event.payload as Record<string, unknown>).stage === "extract")).toHaveLength(1);
+      expect(state.jobs.find((job) => job.id === created.body.id)?.attempt).toBe(1);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
   });
 
   it("records failed provider usage in the authoritative cost ledger", async () => {
@@ -554,6 +582,16 @@ describe("Course OS API", () => {
     expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:atom-source"]) } } });
     expect(draft?.page.lessonSections?.find((section) => section.kind === "prior_knowledge")?.items).toHaveLength(2);
     expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
+  }, 60_000);
+
+  it("does not count a draft that failed publication checks as a completed page", async () => {
+    const candidate = testRelease();
+    candidate.lifecycle = "draft_source";
+    const { app, readweave, release } = await seededApp(undefined, candidate);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unpublishable-candidate")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });
+    expect(await readweave.getDraftByPage("page-1")).toMatchObject({ status: "needs_review", page: { quality: { publishable: false } } });
   }, 60_000);
 
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {

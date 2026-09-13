@@ -128,6 +128,22 @@ describe("learner-facing teaching narrative", () => {
     expect(unpairedEnglishTeachingFields(input)).not.toContain("priorKnowledge");
   });
 
+  it("rejects two English names assigned to one Chinese term inside a definition", () => {
+    const conflicting = "布线（Placement）：决定电路元件的位置；通过选择坐标安排它们；需要满足连线约束；这和决定导线走向的布线（Routing）不同";
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, priorKnowledge: [conflicting] }))
+      .toContain("TEACHING_PRIOR_TRANSLATION_CONFLICT");
+    const consistent = conflicting.replace("布线（Placement）", "布局（Placement）");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, priorKnowledge: [consistent] }))
+      .not.toContain("TEACHING_PRIOR_TRANSLATION_CONFLICT");
+  });
+
+  it("identifies malformed inline math in the specific teaching field", () => {
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, learningObjectives: ["求出 $\\epsilon=0.2 时的允许区间"] }))
+      .toContain("TEACHING_MATH_INVALID:learningObjectives");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, learningObjectives: ["求出 $\\epsilon=0.2$ 时的允许区间"] }))
+      .not.toContain("TEACHING_MATH_INVALID:learningObjectives");
+  });
+
   it("accepts a verified long English term in one definition but rejects stacked definitions", () => {
     const prior = "近端策略优化（Proximal Policy Optimization, PPO）：通过比较新旧策略的概率限制每次更新幅度；先计算概率比，再在给定区间内裁剪；它用于更新策略时避免单步改动过大";
     expect(validateTeachingNarrative({ ...valid, lessonFlowVersion: 2, priorKnowledge: [prior] })).not.toContain("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
