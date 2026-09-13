@@ -79,6 +79,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     "\n\n## 局部修复任务",
     "下面的对象是上一轮模型草稿，不是 SOURCE，不能用它替代原始课件",
     `只修复这些已验证问题：${input.repair.issues.join("、")}`,
+    ...(input.repair.issues.includes("TEACHING_MISCONCEPTION_REASON_MISSING") ? ["每条易错点都要指出误解的具体内容、为什么错，以及正确判断与可执行的核对方法，不能只把结论换一种说法"] : []),
     `fullExplanationMarkdown 最多 ${input.repair.maximumExplanationCharacters} 个字符，必须在完整表达来源事实的前提下压缩到此范围内`,
     "返回完整 TeachingPackage JSON，不得只返回补丁",
     "保留原始课件中的主体、条件、否定、数字、变量、范围和因果关系",

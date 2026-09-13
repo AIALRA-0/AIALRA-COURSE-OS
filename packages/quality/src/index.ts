@@ -131,7 +131,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (!/^[^：\n]{2,40}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
     }
     for (const misconception of input.misconceptions) {
-      if (!/(因为|原因|导致|所以|错误在于|不成立|混淆)/u.test(misconception) || !/(正确|应当|应该|检查|核对|判断)/u.test(misconception)) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
+      const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆)/u.test(misconception);
+      const hasCorrection = /(正确|应当|应该|检查|核对|判断|验证|确认|应先|应以|可通过|可以通过)/u.test(misconception);
+      if (!hasReason || !hasCorrection) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
     }
     const outsideMath = stripProtectedMarkdown(learnerText);
     if (/(?<![\p{L}\p{N}])(?:[A-Za-z]{1,3}_[A-Za-z0-9{}]+|[A-Za-z]{1,3}\^[A-Za-z0-9{}]+)/u.test(outsideMath)) issues.push("TEACHING_BARE_MATH_SYMBOL");

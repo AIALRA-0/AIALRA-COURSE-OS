@@ -77,6 +77,12 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
   });
 
+  it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
+    const explained = { ...valid, lessonFlowVersion: 2 as const, priorKnowledge: ["输入条件：规则只对满足输入条件的对象执行，因此要先确认对象是否满足条件，再计算并核对结果是否符合目标"], misconceptions: ["把未满足条件的结果直接当作答案会出错，由于规则的前提不成立，应先核对输入条件再判断结果"] };
+    expect(validateTeachingNarrative(explained)).toEqual([]);
+    expect(validateTeachingNarrative({ ...explained, misconceptions: ["不要直接套用结果"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+  });
+
   it("rejects audit noise and repeated paragraphs", () => {
     const bad = { ...valid, fullExplanationMarkdown: "来源状态\n\n重复的说明内容需要被删除，因为它没有增加新的理解。\n\n重复的说明内容需要被删除，因为它没有增加新的理解。" };
     expect(validateTeachingNarrative(bad)).toEqual(expect.arrayContaining([
