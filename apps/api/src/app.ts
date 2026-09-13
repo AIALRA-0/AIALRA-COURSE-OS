@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2485,6 +2485,17 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           const spentOnPage = generationUsageCostUsd(generation);
           if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
           const maximumExplanationCharacters = maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity });
+          const englishExamples = repairIssues.some((issue) => issue.includes("UNPAIRED_ENGLISH"))
+            ? [...new Set([
+              generation.content.chapterBridgeMarkdown || "",
+              ...generation.content.learningObjectives,
+              ...generation.content.priorKnowledge,
+              generation.content.fullExplanationMarkdown,
+              generation.content.mainContentMarkdown,
+              ...generation.content.misconceptions,
+              ...generation.content.questions.flatMap((question) => [question.prompt, question.explanation])
+            ].flatMap((part) => unpairedEnglishPhrases(part)))].slice(0, 16)
+            : [];
           await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { repairAttempt, issues: repairIssues, maximumExplanationCharacters });
           const repaired = await runtimeModelRouter.generateTeachingPackage({
             pageTitle: page.title,
@@ -2499,7 +2510,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:repair:${repairAttempt}:v4`,
             maxCostUsd: pageCostLimitUsd - spentOnPage,
             stage: "repair",
-            repair: { issues: repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
+            repair: { issues: englishExamples.length > 0 ? [...repairIssues, `需要逐处核对的英文片段：${englishExamples.join("、")}`] : repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
           });
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);

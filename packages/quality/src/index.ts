@@ -77,7 +77,7 @@ export interface TeachingNarrativeInput {
 
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
   return input.pageKind === "cover" ? 900
-    : input.pageKind === "agenda" ? 1_800
+    : input.pageKind === "agenda" ? 1_000
       : input.sourceDensity === "sparse" ? 2_000
         : input.sourceDensity === "dense" ? 5_000
           : 3_500;
@@ -106,6 +106,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const headings = [...explanation.matchAll(/^#{2,4}\s+(.+)$/gm)].map((match) => match[1]!.trim());
   if (explanation.length >= 500 && headings.length < 2) issues.push("TEACHING_COMPLEX_CONTENT_UNSTRUCTURED");
   if (new Set(headings).size !== headings.length) issues.push("TEACHING_HEADING_DUPLICATE");
+  if (/^#{2,4}\s+[^\n]+\n(?:\s*\n)*#{2,4}\s+/m.test(explanation)) issues.push("TEACHING_ADJACENT_HEADINGS");
 
   const learnerText = [
     input.chapterBridgeMarkdown || "",
@@ -196,19 +197,24 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
 }
 
 export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[] = []): boolean {
+  return unpairedEnglishPhrases(markdown, sourceNames).length > 0;
+}
+
+export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] = []): string[] {
   const visible = stripProtectedMarkdown(markdown)
     .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, "")
     .replace(/\b[A-Z]{2,5}\s+\d{2,5}\b/gu, "")
     .replace(/\b[A-Z]{2,8}\s*即[\p{Script=Han}]{2,20}/gu, "")
     .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")
-    .replace(/“[A-Za-z][^”\n]{2,100}”/gu, "");
+    .replace(/“[A-Za-z][^”\n]{2,100}”/gu, "")
+    .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
   const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
-  return /(?:^|[^\p{L}])(?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+)(?=$|[^\p{L}])/u.test(withoutSourceNames);
+  return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
 }
 
 function definedSourceNames(title: string, learnerText: string): string[] {
   const names = [...title.matchAll(/\b(?:[A-Z][A-Za-z]+-[A-Z][A-Za-z]+|[A-Z]{2,8})\b/gu)].map((match) => match[0]);
-  const definedTitleNames = names.filter((name) => new RegExp(`${escapeRegExp(name)}[^\\n]{0,90}(?:是|指|作为|用于|表示|即)[^\\n]{0,70}[\\p{Script=Han}]{2}`, "iu").test(learnerText));
+  const definedTitleNames = names.filter((name) => new RegExp(`${escapeRegExp(name)}[^\\n]{0,90}(?:(?:是|指|作为|用于|表示|即)[^\\n]{0,70}[\\p{Script=Han}]{2}|(?:算法|模型|方法|规则|框架)（[^）]{3,80}）：[^\\n]{2,})`, "iu").test(learnerText));
   const explainedQuotes = [...learnerText.matchAll(/“([A-Z][A-Za-z ]{3,80})”[^\n]{0,80}(?:对应|表示|指|说明)[^\n]{0,60}[\p{Script=Han}]{2}/gu)].map((match) => match[1]!);
   return [...new Set([...definedTitleNames, ...explainedQuotes])];
 }

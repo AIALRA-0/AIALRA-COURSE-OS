@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.2", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.3", taskContract: "GENERATE + TEACHING" });
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
     expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts"]);
@@ -279,6 +279,24 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(secondBody.metadata.stage).toBe("question_refill");
     expect(secondBody.text.format.name).toBe("course_os_question_refill");
     expect(secondBody.input).not.toContain("离线提取来源文本");
+  });
+
+  it("refills a missing teaching tail without regenerating the existing explanation", async () => {
+    const original = providerTeachingContent() as TeachingPackage;
+    const { misconceptions, coverageEvidence, questions, ...front } = original;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify(front), usage: { input_tokens: 300, output_tokens: 900, total_cost: 0.003 } }))
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ misconceptions, coverageEvidence, questions }), usage: { input_tokens: 200, output_tokens: 500, total_cost: 0.002 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", billingMode: "metered" });
+    const result = await client.generateTeachingPackage({ ...providerInput("missing-tail-test"), maxCostUsd: 0.06 });
+    expect(result.content.fullExplanationMarkdown).toBe(original.fullExplanationMarkdown);
+    expect(result.content).toMatchObject({ misconceptions, coverageEvidence, questions });
+    expect(result.usage.apiEquivalentUsd).toBe(0.005);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const refill = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as { metadata: { stage: string }; text: { format: { schema: { required: string[] } } } };
+    expect(refill.metadata.stage).toBe("teaching_tail_refill");
+    expect(refill.text.format.schema.required).toEqual(["misconceptions", "coverageEvidence", "questions"]);
   });
 
   it("reads only the final message and ignores Responses reasoning items", async () => {

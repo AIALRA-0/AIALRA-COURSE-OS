@@ -77,11 +77,22 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
   });
 
+  it("rejects an empty heading transition and overexpanded agenda across page kinds", () => {
+    const adjacent = { ...valid, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 怎样使用\n\n## 两个步骤\n先检查输入，再执行转换` };
+    expect(validateTeachingNarrative(adjacent)).toContain("TEACHING_ADJACENT_HEADINGS");
+    expect(validateTeachingNarrative({ ...adjacent, fullExplanationMarkdown: adjacent.fullExplanationMarkdown.replace("## 怎样使用\n\n", "") })).not.toContain("TEACHING_ADJACENT_HEADINGS");
+    expect(validateTeachingNarrative({ ...valid, pageKind: "agenda", fullExplanationMarkdown: "目录说明本页展示的阅读层级，先看基础，再看方法，最后看结果\n\n".repeat(40) })).toContain("TEACHING_EXPLANATION_TOO_LONG");
+  });
+
   it("keeps source course codes and quoted slide labels while rejecting unexplained English", () => {
     expect(hasUnpairedEnglishPhrase("课程编号 EE 680，强化学习 RL 即强化学习，原页“Interconnections between partitions”对应连接目标")).toBe(false);
     expect(hasUnpairedEnglishPhrase("作者发表于 Bell System Technical Journal 的文章给出原始方法")).toBe(false);
     expect(hasUnpairedEnglishPhrase("上一页说 PDA 会处理输入，读者尚不知道这个缩写是什么")).toBe(true);
     expect(hasUnpairedEnglishPhrase("Graph Encoder 直接决定输出")).toBe(true);
+    expect(hasUnpairedEnglishPhrase("原图给出 `ENTITY test is port a: in bit; end ENTITY test`，它是硬件描述语言的端口声明")).toBe(false);
+    expect(hasUnpairedEnglishPhrase("参考文献发表于《Bell System Technical Journal》，本页没有给出该论文的实验数据")).toBe(false);
+    expect(hasUnpairedEnglishPhrase("Kernighan-Lin 算法按交换顶点改善划分", ["Kernighan-Lin"])).toBe(false);
+    expect(validateTeachingNarrative({ ...valid, sourceTitle: "Kernighan-Lin 算法规则", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\nKernighan-Lin 算法（Kernighan-Lin Algorithm）：通过交换顶点改善划分，原图页脚引用《Bell System Technical Journal》作为出处`, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
   });
 
   it("allows a source model name only after the page actually explains it", () => {
@@ -184,7 +195,7 @@ describe("learner-facing teaching narrative", () => {
 
   it("exposes the same page-specific explanation limits used by repair", () => {
     expect(maximumTeachingExplanationCharacters({ pageKind: "cover", sourceDensity: "dense" })).toBe(900);
-    expect(maximumTeachingExplanationCharacters({ pageKind: "agenda", sourceDensity: "dense" })).toBe(1_800);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "agenda", sourceDensity: "dense" })).toBe(1_000);
     expect(maximumTeachingExplanationCharacters({ pageKind: "concept", sourceDensity: "sparse" })).toBe(2_000);
     expect(maximumTeachingExplanationCharacters({ pageKind: "formula", sourceDensity: "normal" })).toBe(3_500);
     expect(maximumTeachingExplanationCharacters({ pageKind: "diagram", sourceDensity: "dense" })).toBe(5_000);

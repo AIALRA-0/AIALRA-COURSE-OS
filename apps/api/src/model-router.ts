@@ -272,9 +272,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       if (spent === undefined || spent >= input.maxCostUsd) throw firstFailure;
       input = { ...input, maxCostUsd: input.maxCostUsd - spent };
     }
-    if (firstFailure.code === "MODEL_ROUTER_QUESTIONS_INVALID" && firstFailure.partialContent && this.connection.protocol === "responses") {
+    const missingTail = this.connection.protocol === "responses" ? missingTeachingTailFields(firstFailure.partialContent) : [];
+    if (missingTail.length > 0 && firstFailure.partialContent) {
       try {
-        const recovered = await this.generateMissingQuestions(input, firstFailure.partialContent);
+        const recovered = await this.generateMissingTeachingTail(input, firstFailure.partialContent, missingTail);
         return { ...recovered, usage: sumProviderUsage(firstFailure.usage, recovered.usage), schemaRetries: 1 };
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
@@ -334,25 +335,37 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     }
   }
 
-  private async generateMissingQuestions(input: ModelRouterInput, partial: TeachingPackage): Promise<TeachingGenerationResult> {
+  private async generateMissingTeachingTail(input: ModelRouterInput, partial: TeachingPackage, missing: TeachingTailField[]): Promise<TeachingGenerationResult> {
     const started = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180_000);
-    const questionSchema = { type: "object", properties: { questions: (teachingPackageSchema.properties as Record<string, unknown>).questions }, required: ["questions"], additionalProperties: false };
+    const schemaProperties = teachingPackageSchema.properties as Record<string, unknown>;
+    const refillSchema = { type: "object", properties: Object.fromEntries(missing.map((field) => [field, schemaProperties[field]])), required: missing, additionalProperties: false };
+    const onlyQuestions = missing.length === 1 && missing[0] === "questions";
+    const stage = onlyQuestions ? "question_refill" : "teaching_tail_refill";
+    const refillContext = {
+      title: input.pageTitle,
+      sourceText: onlyQuestions ? undefined : input.sourceText.slice(0, 12_000),
+      explanation: partial.fullExplanationMarkdown,
+      summary: partial.mainContentMarkdown,
+      misconceptions: missing.includes("misconceptions") ? undefined : partial.misconceptions,
+      atomIds: input.blueprint?.resourcePackage.atomIds,
+      requirements: input.blueprint?.requirementPackage.requirements
+    };
     let response: Response;
     try {
       response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:question-refill` },
+        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:${stage}` },
         signal: controller.signal,
         body: JSON.stringify({
           model: this.connection.model,
           instructions: professorInstructions(input.language),
-          input: `只为下面已经写好的第 ${input.pageNumber} 页讲解补齐四道题，不重写讲解，不引入讲解没有解释的事实。恰好两道理解题、两道四选一选择题，问题与答案必须具体、可从讲解推出。只返回含 questions 字段的 JSON 对象。\n\n${JSON.stringify({ title: input.pageTitle, fullExplanationMarkdown: partial.fullExplanationMarkdown, mainContentMarkdown: partial.mainContentMarkdown, misconceptions: partial.misconceptions })}`,
-          max_output_tokens: 2_000,
+          input: `第 ${input.pageNumber} 页的讲解已经写好，只补齐缺失的 ${missing.join("、")} 字段，不重写已有字段，不引入讲解或来源没有解释的事实。题目须恰好两道理解题和两道四选一选择题；覆盖证据只能使用给定 atomId，且必须摘录已有讲解中的连续原文。只返回包含这些缺失字段的 JSON 对象。\n\n${JSON.stringify(refillContext)}`,
+          max_output_tokens: onlyQuestions ? 2_000 : 4_000,
           reasoning: { effort: "none" },
-          text: { format: { type: "json_schema", name: "course_os_question_refill", schema: questionSchema, strict: true } },
-          metadata: { product: "course-os", stage: "question_refill", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+          text: { format: { type: "json_schema", name: `course_os_${stage}`, schema: refillSchema, strict: true } },
+          metadata: { product: "course-os", stage, writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
       });
     } catch (error) {
@@ -366,12 +379,12 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const spent = this.usageCostUsd(usage);
     if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", body.model || this.connection.model, usage, this.connection.providerId);
     const output = extractProviderOutput(body);
-    let parsed: { questions?: TeachingPackage["questions"] };
-    try { parsed = (typeof output === "string" ? JSON.parse(output) : output) as { questions?: TeachingPackage["questions"] }; }
+    let parsed: Partial<TeachingPackage>;
+    try { parsed = (typeof output === "string" ? JSON.parse(output) : output) as Partial<TeachingPackage>; }
     catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
-    const content = { ...partial, questions: parsed?.questions ?? [] };
+    const content = normalizeTeachingPackageShape({ ...partial, ...Object.fromEntries(missing.map((field) => [field, parsed?.[field]])) } as TeachingPackage);
     try { validateTeachingPackage(content); }
-    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_QUESTIONS_INVALID", body.model || this.connection.model, usage, this.connection.providerId); }
+    catch { throw new ModelRouterGenerationError(onlyQuestions ? "MODEL_PROVIDER_QUESTIONS_INVALID" : "MODEL_PROVIDER_TEACHING_TAIL_INVALID", body.model || this.connection.model, usage, this.connection.providerId, describeTeachingResponseShape(content)); }
     return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
   }
 
@@ -673,6 +686,16 @@ function normalizeTeachingPackageShape(value: TeachingPackage): TeachingPackage 
     });
   }
   return candidate;
+}
+
+type TeachingTailField = "misconceptions" | "coverageEvidence" | "questions";
+
+function missingTeachingTailFields(value: TeachingPackage | undefined): TeachingTailField[] {
+  if (!value || !Array.isArray(value.learningObjectives) || !Array.isArray(value.priorKnowledge)
+    || typeof value.mainContentMarkdown !== "string" || typeof value.fullExplanationMarkdown !== "string"
+    || value.fullExplanationMarkdown.length < 120) return [];
+  const fields: TeachingTailField[] = ["misconceptions", "coverageEvidence", "questions"];
+  return fields.filter((field) => (value as unknown as Record<string, unknown>)[field] === undefined);
 }
 
 function normalizeStringList(value: unknown, depth = 0): string[] | undefined {
