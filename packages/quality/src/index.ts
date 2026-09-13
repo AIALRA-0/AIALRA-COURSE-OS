@@ -72,6 +72,7 @@ export interface TeachingNarrativeInput {
   questions: Array<{ prompt: string; explanation: string }>;
   pageKind?: "cover" | "agenda" | "concept" | "formula" | "diagram" | "table" | "code" | "mixed";
   sourceDensity?: "sparse" | "normal" | "dense";
+  sourceTitle?: string;
 }
 
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
@@ -135,31 +136,36 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆)/u.test(misconception);
       const clauses = misconception.split(/[；;]/).map((clause) => clause.trim()).filter(Boolean);
       const hasExplainedCorrection = /[：:][^；;。\n]{18,}[；;][^；;。\n]{12,}/u.test(misconception)
-        || (clauses.length >= 3 && clauses[0]!.length >= 12 && clauses[1]!.length >= 18 && clauses.slice(2).some((clause) => clause.length >= 12));
-      const hasCorrection = /(正确|应当|应该|检查|核对|判断|验证|确认|应先|应以|可通过|可以通过)/u.test(misconception);
-      if ((!hasReason && !hasExplainedCorrection) || !hasCorrection) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
+        || (clauses.length >= 3 && clauses[0]!.length >= 8 && clauses[1]!.length >= 15 && clauses.slice(2).some((clause) => clause.length >= 12))
+        || (clauses.length === 2 && clauses[0]!.length >= 8 && clauses[1]!.length >= 35 && /(?:\$[^$]+\$|因为|导致|取决于|必须|需要)/u.test(clauses[1]!));
+      const hasCorrection = /(正确|应当|应该|检查|核对|判断|验证|确认|应先|应以|可通过|可以通过|需要|必须|不能|不应|可用|重新|只对应|方向反转|只改变|不直接)/u.test(misconception);
+      const evidenceBasedCorrection = /[：:][^\n]{35,}/u.test(misconception)
+        && /(?:原图|页面|图中|箭头|虚线|公式|表格)[^\n]{0,80}(?:说明|表示|只|没有|缺少)/u.test(misconception)
+        && /(而不是|不能|需要|先后|否则|无法|仅|只|应|但|缺少|使)/u.test(misconception);
+      if ((!hasReason && !hasExplainedCorrection && !evidenceBasedCorrection) || (!hasCorrection && !evidenceBasedCorrection)) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
     }
     const outsideMath = stripProtectedMarkdown(learnerText);
     if (/(?<![\p{L}\p{N}])(?:[A-Za-z]{1,3}_[A-Za-z0-9{}]+|[A-Za-z]{1,3}\^[A-Za-z0-9{}]+)/u.test(outsideMath)) issues.push("TEACHING_BARE_MATH_SYMBOL");
   }
 
   if (input.strictWritingStyle) {
-    if (hasUnpairedEnglishPhrase(learnerText)) issues.push("TEACHING_UNPAIRED_ENGLISH");
+    const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
+    if (hasUnpairedEnglishPhrase(learnerText, sourceNames)) issues.push("TEACHING_UNPAIRED_ENGLISH");
     const summaryLines = input.mainContentMarkdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (summaryLines.length < 2 || summaryLines.length > 5 || summaryLines.some((line) => !/^[-*+]\s+\S/u.test(line))) {
       issues.push("TEACHING_SUMMARY_MUST_BE_BULLETS");
     }
     const bridge = input.chapterBridgeMarkdown?.trim() || "";
     if (bridge && bridge.length > 120 && !/\n\s*\n|\n\s*[-*+]\s/u.test(bridge)) issues.push("TEACHING_BRIDGE_NEEDS_BLOCKS");
-    if (bridge && hasUnpairedEnglishPhrase(bridge)) issues.push("TEACHING_BRIDGE_UNPAIRED_ENGLISH");
+    if (bridge && hasUnpairedEnglishPhrase(bridge, sourceNames)) issues.push("TEACHING_BRIDGE_UNPAIRED_ENGLISH");
     for (const prior of input.priorKnowledge) {
       const definition = prior.trim().replace(/^[-*+]\s+/, "");
       const split = definition.indexOf("：");
       const clauses = split < 0 ? [] : definition.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
-      if (split < 2 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 12)) {
+      if (split < 2 || definition.length < 70 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 8)) {
         issues.push("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
       }
-      if (hasUnpairedEnglishPhrase(definition)) issues.push("TEACHING_PRIOR_UNPAIRED_ENGLISH");
+      if (hasUnpairedEnglishPhrase(definition, sourceNames)) issues.push("TEACHING_PRIOR_UNPAIRED_ENGLISH");
     }
     for (const question of input.questions) {
       if (question.explanation.trim().length < 48) issues.push("TEACHING_QUESTION_EXPLANATION_TOO_SHORT");
@@ -189,10 +195,26 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   return [...new Set(issues)];
 }
 
-function hasUnpairedEnglishPhrase(markdown: string): boolean {
+export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[] = []): boolean {
   const visible = stripProtectedMarkdown(markdown)
-    .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, "");
-  return /(?:^|[^\p{L}])(?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+)(?=$|[^\p{L}])/u.test(visible);
+    .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, "")
+    .replace(/\b[A-Z]{2,5}\s+\d{2,5}\b/gu, "")
+    .replace(/\b[A-Z]{2,8}\s*即[\p{Script=Han}]{2,20}/gu, "")
+    .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")
+    .replace(/“[A-Za-z][^”\n]{2,100}”/gu, "");
+  const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
+  return /(?:^|[^\p{L}])(?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+)(?=$|[^\p{L}])/u.test(withoutSourceNames);
+}
+
+function definedSourceNames(title: string, learnerText: string): string[] {
+  const names = [...title.matchAll(/\b(?:[A-Z][A-Za-z]+-[A-Z][A-Za-z]+|[A-Z]{2,8})\b/gu)].map((match) => match[0]);
+  const definedTitleNames = names.filter((name) => new RegExp(`${escapeRegExp(name)}[^\\n]{0,90}(?:是|指|作为|用于|表示|即)[^\\n]{0,70}[\\p{Script=Han}]{2}`, "iu").test(learnerText));
+  const explainedQuotes = [...learnerText.matchAll(/“([A-Z][A-Za-z ]{3,80})”[^\n]{0,80}(?:对应|表示|指|说明)[^\n]{0,60}[\p{Script=Han}]{2}/gu)].map((match) => match[1]!);
+  return [...new Set([...definedTitleNames, ...explainedQuotes])];
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

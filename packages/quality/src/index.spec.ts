@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -75,6 +75,52 @@ describe("learner-facing teaching narrative", () => {
 
   it("accepts adaptive structure without learner-facing audit labels", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
+  });
+
+  it("keeps source course codes and quoted slide labels while rejecting unexplained English", () => {
+    expect(hasUnpairedEnglishPhrase("课程编号 EE 680，强化学习 RL 即强化学习，原页“Interconnections between partitions”对应连接目标")).toBe(false);
+    expect(hasUnpairedEnglishPhrase("作者发表于 Bell System Technical Journal 的文章给出原始方法")).toBe(false);
+    expect(hasUnpairedEnglishPhrase("上一页说 PDA 会处理输入，读者尚不知道这个缩写是什么")).toBe(true);
+    expect(hasUnpairedEnglishPhrase("Graph Encoder 直接决定输出")).toBe(true);
+  });
+
+  it("allows a source model name only after the page actually explains it", () => {
+    const developed = { ...valid, sourceTitle: "EDGE-GNN: WHY?", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\nEdge-GNN 是处理边关系的图编码器，负责把连接信息变成可复用的表示`, strictWritingStyle: false };
+    expect(validateTeachingNarrative(developed)).not.toContain("TEACHING_UNPAIRED_ENGLISH");
+    expect(validateTeachingNarrative({ ...developed, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
+    expect(validateTeachingNarrative({ ...developed, sourceTitle: "OTHER TOPIC", strictWritingStyle: true })).toContain("TEACHING_UNPAIRED_ENGLISH");
+  });
+
+  it("recognizes a source-backed correction without requiring fixed cue words", () => {
+    const input = {
+      ...valid,
+      lessonFlowVersion: 2 as const,
+      priorKnowledge: ["箭头：图中连接两个步骤的方向标记；它说明哪一步先发生；阅读时沿箭头检查输入怎样进入下一步；遇到流程图时用它判断先后；它与无方向的连线不同"],
+      misconceptions: ["把右侧六步当成可以任意交换顺序：虚线说明它们都属于内部流程，原图的箭头表示先后，顺序改变会使后续步骤缺少输入"]
+    };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+    expect(validateTeachingNarrative({ ...input, misconceptions: ["把流程理解错了：页面没有说明"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+  });
+
+  it("accepts a concrete two-clause numerical boundary and a three-clause correction", () => {
+    const input = {
+      ...valid,
+      lessonFlowVersion: 2 as const,
+      priorKnowledge: ["平方：把一个数与自己相乘；用于比较误差大小；先计算差，再与自身相乘；只有题目要求平方误差时才使用"],
+      misconceptions: ["把差值直接当成平方结果；结果还取决于是否执行平方，$-0.35$ 的平方是 $0.1225$，不能只看差的绝对值"]
+    };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+    expect(validateTeachingNarrative({ ...input, misconceptions: ["以为平方会改变差值；平方只改变用于比较的结果大小，不能跳过原始差值；最后应核对得到的结果是否满足目标条件"] })).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+  });
+
+  it("accepts a detailed prior definition with one concise but meaningful clause", () => {
+    const input = {
+      ...valid,
+      strictWritingStyle: true,
+      priorKnowledge: ["割集大小：落在两个不同子集之间的所有连接边各自代价相加得到的总量；它随顶点归属的变化而变化；本页用它衡量划分的好坏；它与子集内部的边数没有直接关系"],
+      questions: [{ prompt: "怎样判断割集大小", explanation: "先找到落在两个不同子集之间的边，逐条核对这些边的代价；再把代价相加得到割集大小；子集内部的边不计入这个结果" }]
+    };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
   });
 
   it("rejects a dense mixed-language bridge, shallow definitions and a second summary heading", () => {

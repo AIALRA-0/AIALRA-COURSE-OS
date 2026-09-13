@@ -2451,6 +2451,20 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
+      const bridgeIsUnsafe = (content: TeachingPackage): boolean => validateTeachingNarrative({
+        ...content,
+        lessonFlowVersion: 2,
+        strictWritingStyle: true,
+        sourceTitle: page.title,
+        pageKind: blueprint.resourcePackage.pageKind,
+        sourceDensity: blueprint.resourcePackage.sourceDensity
+      }).some((issue) => issue.startsWith("TEACHING_BRIDGE_"));
+      if (generation.content.chapterBridgeMarkdown && bridgeIsUnsafe(generation.content)) {
+        generation.content.chapterBridgeMarkdown = "";
+        await dependencies.operations.mutate((state) => {
+          dependencies.operations.appendEvent(state, jobId, "generation.bridge.omitted", { pageId: page.id, reason: "OPTIONAL_BRIDGE_STYLE_INVALID" });
+        });
+      }
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
       let rejectedNarrativeIssues: string[] = [];
       if (runtimeModelRouter) {
@@ -2460,6 +2474,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           ...generation.content,
           lessonFlowVersion: 2,
           strictWritingStyle: true,
+          sourceTitle: page.title,
           pageKind: blueprint.resourcePackage.pageKind,
           sourceDensity: blueprint.resourcePackage.sourceDensity
         });
@@ -2488,6 +2503,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           });
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
+          if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
           if (repairIssues.length === 1 && repairIssues[0] === "TEACHING_MISCONCEPTION_REASON_MISSING") {
             repaired.content = { ...previousGeneration.content, misconceptions: repaired.content.misconceptions };
           } else if (validatedCoverageEvidence) {
@@ -2501,6 +2517,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             ...generation.content,
             lessonFlowVersion: 2,
             strictWritingStyle: true,
+            sourceTitle: page.title,
             pageKind: blueprint.resourcePackage.pageKind,
             sourceDensity: blueprint.resourcePackage.sourceDensity
           });

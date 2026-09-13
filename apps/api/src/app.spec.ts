@@ -390,6 +390,23 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
+  it("omits an unsupported optional bridge while preserving the generated lesson", async () => {
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        const result = testTeachingResult(0.001);
+        result.content.chapterBridgeMarkdown = "上一页讨论了 PDA 的内部结构，但这里没有给出可靠的中文定义，因此不应让读者猜测这个缩写的含义";
+        return result;
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unsupported-bridge-test").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"] });
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.page.lessonSections?.some((section) => section.kind === "chapter_bridge")).toBe(false);
+    expect(draft?.page.lessonSections?.some((section) => section.kind === "full_explanation")).toBe(true);
+    expect((await operations.read()).events.some((event) => event.streamId === created.body.id && event.type === "generation.bridge.omitted")).toBe(true);
+  }, 60_000);
+
   it("repairs a structurally valid but overlong model draft once before saving", async () => {
     const calls: Array<{ stage?: string; repair?: { issues: string[]; maximumExplanationCharacters: number } }> = [];
     const coveredRelease = testRelease();
