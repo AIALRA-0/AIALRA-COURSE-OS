@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { createApp, createDefaultDependencies, evaluateQuestionAnswer, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { createApp, createDefaultDependencies, evaluateQuestionAnswer, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -32,6 +32,13 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("keeps verified teaching fields when repairing only coverage or a prior definition", () => {
+    const previous: TeachingPackage = { chapterBridgeMarkdown: "", learningObjectives: ["解释作用"], mainContentMarkdown: "- 已知关系", priorKnowledge: ["原定义"], fullExplanationMarkdown: "这里已经解释了原图中两个对象的关系，以及它们怎样共同产生结果".repeat(3), misconceptions: ["原易错点"], coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "旧引用" }], questions: [] };
+    const repaired: TeachingPackage = { ...previous, priorKnowledge: ["新定义"], fullExplanationMarkdown: "模型意外重写了讲解".repeat(6), coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "新的真实引用" }] };
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_COVERAGE_QUOTE_NOT_FOUND:a1"])).toEqual({ ...previous, coverageEvidence: repaired.coverageEvidence });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW"])).toEqual({ ...previous, priorKnowledge: repaired.priorKnowledge });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH", "TEACHING_PRIOR_UNPAIRED_ENGLISH"])).toBeUndefined();
+  });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
     const pageId = release.pages[0]!.id;

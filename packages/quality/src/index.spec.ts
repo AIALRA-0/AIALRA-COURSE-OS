@@ -113,6 +113,12 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...input, misconceptions: ["把流程理解错了：页面没有说明"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
   });
 
+  it("accepts a verified long English term in one definition but rejects stacked definitions", () => {
+    const prior = "近端策略优化（Proximal Policy Optimization, PPO）：通过比较新旧策略的概率限制每次更新幅度；先计算概率比，再在给定区间内裁剪；它用于更新策略时避免单步改动过大";
+    expect(validateTeachingNarrative({ ...valid, lessonFlowVersion: 2, priorKnowledge: [prior] })).not.toContain("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
+    expect(validateTeachingNarrative({ ...valid, lessonFlowVersion: 2, strictWritingStyle: true, priorKnowledge: [`${prior}：策略是动作概率分布`] })).toContain("TEACHING_PRIOR_MULTIPLE_DEFINITIONS");
+  });
+
   it("accepts a concrete two-clause numerical boundary and a three-clause correction", () => {
     const input = {
       ...valid,

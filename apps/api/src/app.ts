@@ -2515,8 +2515,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
           if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
-          if (repairIssues.length === 1 && repairIssues[0] === "TEACHING_MISCONCEPTION_REASON_MISSING") {
-            repaired.content = { ...previousGeneration.content, misconceptions: repaired.content.misconceptions };
+          const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues);
+          if (focused) {
+            repaired.content = focused;
           } else if (validatedCoverageEvidence) {
             const withPreservedEvidence = { ...repaired.content, coverageEvidence: validatedCoverageEvidence };
             if (validateTeachingCoverageEvidence(page, withPreservedEvidence).length === 0) repaired.content = withPreservedEvidence;
@@ -2698,6 +2699,15 @@ function combineTeachingGenerations(initial: TeachingGenerationResult, repaired:
   };
 }
 
+export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[]): TeachingPackage | undefined {
+  if (issues.length !== 1) return undefined;
+  const issue = issues[0]!;
+  if (issue.startsWith("TEACHING_COVERAGE_")) return { ...previous, coverageEvidence: repaired.coverageEvidence };
+  if (issue.startsWith("TEACHING_PRIOR_")) return { ...previous, priorKnowledge: repaired.priorKnowledge };
+  if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING") return { ...previous, misconceptions: repaired.misconceptions };
+  return undefined;
+}
+
 function deterministicTeachingPackage(page: CourseRelease["pages"][number]): TeachingGenerationResult {
   const full = page.lessonSections?.find((item) => item.kind === "full_explanation")?.markdown
     || page.blocks.filter((item) => ["core", "example", "deep_dive", "check"].includes(item.kind)).map((item) => item.markdown).join("\n\n");
@@ -2792,7 +2802,7 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
   const normalize = (value: string) => normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(value));
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,40}：\s*.{10,}$/u.test(line))) {
+    if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
       return lines.map((line) => line.replace(/^[-*]\s*/, ""));
     }
     return [normalize(value)];

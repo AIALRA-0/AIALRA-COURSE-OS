@@ -131,7 +131,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   issues.push(...validateHumanReadableChinese(learnerText));
   if (input.lessonFlowVersion === 2) {
     for (const prior of input.priorKnowledge) {
-      if (!/^[^：\n]{2,40}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
+      if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
     }
     for (const misconception of input.misconceptions) {
       const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆)/u.test(misconception);
@@ -162,6 +162,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     for (const prior of input.priorKnowledge) {
       const definition = prior.trim().replace(/^[-*+]\s+/, "");
       const split = definition.indexOf("：");
+      if (split >= 0 && definition.slice(split + 1).includes("：")) issues.push("TEACHING_PRIOR_MULTIPLE_DEFINITIONS");
       const clauses = split < 0 ? [] : definition.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
       if (split < 2 || definition.length < 70 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 8)) {
         issues.push("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
