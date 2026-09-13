@@ -2467,7 +2467,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           });
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
-          if (validatedCoverageEvidence) repaired.content.coverageEvidence = validatedCoverageEvidence;
+          if (repairIssues.length === 1 && repairIssues[0] === "TEACHING_MISCONCEPTION_REASON_MISSING") {
+            repaired.content = { ...previousGeneration.content, misconceptions: repaired.content.misconceptions };
+          } else if (validatedCoverageEvidence) {
+            const withPreservedEvidence = { ...repaired.content, coverageEvidence: validatedCoverageEvidence };
+            if (validateTeachingCoverageEvidence(page, withPreservedEvidence).length === 0) repaired.content = withPreservedEvidence;
+          }
           generation = combineTeachingGenerations(previousGeneration, repaired);
           coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
           if (coverageIssues.length === 0 && !validatedCoverageEvidence) validatedCoverageEvidence = structuredClone(generation.content.coverageEvidence);

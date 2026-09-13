@@ -389,6 +389,31 @@ describe("Course OS API", () => {
     expect((await readweave.getDraftByPage("page-1"))?.page.coverageClaims).toEqual([expect.objectContaining({ requirementId: "requirement-coverage", status: "covered" })]);
   }, 60_000);
 
+  it("repairs only a misconception without invalidating already valid source coverage", async () => {
+    const coveredRelease = testRelease();
+    coveredRelease.pages[0]!.atoms = [{ kind: "text_region", id: "atom-text", label: "原文片段", observation: "输入经过规则得到输出" }];
+    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-text", atomId: "atom-text", requiredFields: ["observation"], risk: "high" }];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (input.stage === "teach") {
+          result.content.misconceptions = ["不要跳过输入条件，应该先核对输出"];
+          result.content.coverageEvidence = [{ atomId: "atom-text", coveredFields: ["observation"], explanation: "输入是处理开始前已经知道的信息，规则限定允许执行的步骤" }];
+        } else {
+          result.content.fullExplanationMarkdown = result.content.fullExplanationMarkdown.replace("输入是处理开始前已经知道的信息", "输入在开始前已经确定");
+        }
+        return result;
+      }
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, coveredRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-misconception-only").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.002 });
+    const saved = await readweave.getDraftByPage("page-1");
+    expect(saved?.status).toBe("ready");
+    expect(saved?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("输入是处理开始前已经知道的信息");
+    expect(saved?.page.lessonSections?.find((section) => section.kind === "misconceptions")?.items?.[0]?.text).toContain("因为规则只对满足前提的对象有效");
+  }, 60_000);
+
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.02)
