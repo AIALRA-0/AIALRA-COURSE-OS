@@ -1,6 +1,6 @@
 {
   "id": "course-os-teaching",
-  "version": "2.4.9",
+  "version": "2.4.10",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"],
   "blueprintFile": "teaching-blueprint.md",

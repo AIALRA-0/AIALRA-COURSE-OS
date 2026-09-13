@@ -73,6 +73,8 @@ describe("Course OS API", () => {
     const paraphrasedPage = { ...page, atoms: [{ ...page.atoms[0]!, observation: "Remove the value prediction layer" }] };
     expect(validateTeachingCoverageEvidence(paraphrasedPage, { ...content, fullExplanationMarkdown: "先去掉价值预测层，再把编码器接入策略网络", coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "先移除价值预测层，然后连接策略网络" }] })).toEqual([]);
     expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "只声称已经覆盖这个片段，但正文没有对应的连续讲解。" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
+    expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [content.coverageEvidence[0]!, content.coverageEvidence[0]!] }))
+      .toContain("TEACHING_COVERAGE_DUPLICATE_ATOM");
   });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
     expect(normalizeGeneratedMathPunctuation("权重 $0.5、3、0.2$ 用于示例")).toBe("权重 $0.5$、$3$、$0.2$ 用于示例");

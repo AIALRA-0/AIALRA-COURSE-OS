@@ -53,6 +53,9 @@ describe("teaching blueprint", () => {
     expect(regions).toHaveLength(3);
     expect(regions.map((atom) => atom.observation).join("\n")).toContain("32×64");
     expect(regions.map((atom) => atom.observation).join("\n")).not.toContain("17/27");
+    expect(prepared.coverageRequirements.filter((item) => item.atomId.includes("source-text-region")).every((item) => item.requiredFields.join() === "observation")).toBe(true);
+    expect(buildGenerationSourceText(prepared)).not.toContain("17/27");
+    expect(prepared.anchors[0]?.text).toContain("17/27");
     expect(prepared.coverageRequirements.filter((item) => item.risk === "high")).toHaveLength(2);
     const blueprint = buildTeachingBlueprint(prepared, buildGenerationSourceText(prepared), "zh-CN", "quality", "writing-policy:test", true);
     expect(validateTeachingBlueprint(prepared, blueprint)).toEqual([]);

@@ -87,6 +87,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     ...(input.repair.issues.includes("TEACHING_PRIOR_MULTIPLE_DEFINITIONS") ? ["priorKnowledge 每一项只定义一个术语，只用一个中文冒号；需要解释另一个概念时另起一项，或在当前句子中直接说明其作用，不追加第二个‘名称：定义’"] : []),
     ...(input.repair.issues.includes("TEACHING_PRIOR_TRANSLATION_CONFLICT") ? ["逐一核对先验知识中的中英术语配对：同一个中文名称不能在同一项中对应两个不同英文名称。回到原图和已核实术语确定准确译名；若无法核实英文，不写英文，不得只删除冲突提示却保留错误定义"] : []),
     ...(input.repair.issues.some((issue) => issue.startsWith("TEACHING_MATH_INVALID:")) ? ["只修复错误字段中的数学定界符与公式语法：行内公式的开头和结尾各用一个 $，不得在两个 $ 之间换行；显示公式单独用成对 $$；返回前逐式核对 KaTeX 可解析，并保留原有数字、变量和推导关系"] : []),
+    ...(input.repair.issues.includes("TEACHING_LAYOUT_COMMENTARY") ? ["删除完整讲解中关于页码、页脚、版式和装饰位置的说明；只保留真正帮助理解目录层级、对象关系或技术内容的句子，不为了补足长度另写注释"] : []),
     ...(input.repair.issues.some((issue) => issue.startsWith("TEACHING_COVERAGE_")) ? ["只修复 coverageEvidence 时，保留完整讲解和其他字段不变。每个 text_region 的 explanation 都须从现有 fullExplanationMarkdown 中连续摘录至少十二个字符，而且这段话必须真正回答原图对应对象；原图只有简短英文提问或栏目标题时，摘录正文中的回答，不复制短标题冒充覆盖证据"] : []),
     ...(input.repair.issues.includes("TEACHING_BRIDGE_NEEDS_BLOCKS") ? ["chapterBridgeMarkdown 中前页已知事实与本页要解决的问题必须用空行分成两个自然段；两个独立问题必须分行，不要用分号挤在一个长句里"] : []),
     ...(input.repair.issues.includes("TEACHING_ADJACENT_HEADINGS") ? ["fullExplanationMarkdown 中相邻两个标题之间必须补入实际讲解；若只是同一步的两个名称，合并为一个准确标题，把另一个改为正文，不增加空泛过渡句"] : []),

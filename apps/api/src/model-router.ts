@@ -672,6 +672,11 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
 function normalizeTeachingPackageShape(value: TeachingPackage): TeachingPackage {
   if (!value || typeof value !== "object") return value;
   const candidate = value as TeachingPackage & Record<string, unknown>;
+  const summary = candidate.mainContentMarkdown;
+  if (Array.isArray(summary) && summary.length >= 2 && summary.length <= 5
+    && summary.every((item) => typeof item === "string" && item.trim() && !item.includes("\n"))) {
+    candidate.mainContentMarkdown = summary.map((item: string) => `- ${item.trim().replace(/^[-*+]\s+/, "")}`).join("\n");
+  }
   for (const field of ["learningObjectives", "priorKnowledge", "misconceptions"] as const) {
     const normalized = normalizeStringList(candidate[field]);
     if (normalized !== undefined) candidate[field] = normalized as never;

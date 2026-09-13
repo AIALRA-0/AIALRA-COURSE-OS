@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.9", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.10", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -180,6 +180,15 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("responses-test", true));
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
+  });
+
+  it("preserves a provider's summary list when it returns an array instead of Markdown", async () => {
+    const content = { ...providerTeachingContent(), mainContentMarkdown: ["识别输入与条件", "按规则计算结果", "核对输出含义"] };
+    const fetchMock = vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content), usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.004 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("summary-array"));
+    expect(result.content.mainContentMarkdown).toBe("- 识别输入与条件\n- 按规则计算结果\n- 核对输出含义");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("repairs only inferable provider shape drift before strict validation", async () => {

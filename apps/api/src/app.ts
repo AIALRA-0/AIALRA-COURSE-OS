@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2721,7 +2721,7 @@ export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: 
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
     else if (issue === "TEACHING_BRIDGE_UNPAIRED_ENGLISH" || issue === "TEACHING_BRIDGE_NEEDS_BLOCKS") fields.add("chapterBridgeMarkdown");
     else if (issue === "TEACHING_SUMMARY_MUST_BE_BULLETS") fields.add("mainContentMarkdown");
-    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION"].includes(issue)) fields.add("fullExplanationMarkdown");
+    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION", "TEACHING_LAYOUT_COMMENTARY"].includes(issue)) fields.add("fullExplanationMarkdown");
     else if (issue === "TEACHING_QUESTION_EXPLANATION_TOO_SHORT") fields.add("questions");
     else return undefined;
   }
@@ -2797,6 +2797,7 @@ export function validateTeachingCoverageEvidence(page: CourseRelease["pages"][nu
   const compactExplanation = content.fullExplanationMarkdown.replace(/[`*_#\s]/g, "");
   const unknown = [...new Set(content.coverageEvidence.map((item) => item.atomId).filter((atomId) => !atomIds.has(atomId)))];
   if (unknown.length > 0) issues.push("TEACHING_COVERAGE_ATOM_UNKNOWN");
+  if (new Set(content.coverageEvidence.map((item) => item.atomId)).size !== content.coverageEvidence.length) issues.push("TEACHING_COVERAGE_DUPLICATE_ATOM");
   const evidenceByAtom = new Map(content.coverageEvidence.map((item) => [item.atomId, item]));
   for (const requirement of page.coverageRequirements) {
     const evidence = evidenceByAtom.get(requirement.atomId);
@@ -2839,7 +2840,7 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
     learningObjectives: content.learningObjectives.map(normalize),
     mainContentMarkdown: normalize(content.mainContentMarkdown),
     priorKnowledge,
-    fullExplanationMarkdown: normalize(content.fullExplanationMarkdown),
+    fullExplanationMarkdown: normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)),
     misconceptions: content.misconceptions.map(normalize),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: normalize(item.prompt), options: item.options?.map(normalize), expectedAnswer: normalize(item.expectedAnswer), explanation: normalize(item.explanation) }))

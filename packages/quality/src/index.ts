@@ -151,6 +151,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   }
 
   if (input.strictWritingStyle) {
+    if (/(?:页码|页脚|版式信息)/u.test(explanation) || (input.pageKind === "agenda" && /\b\d+\s*\/\s*\d+\b/u.test(explanation))) {
+      issues.push("TEACHING_LAYOUT_COMMENTARY");
+    }
     const mathFields = {
       chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
       learningObjectives: input.learningObjectives.join("\n"),
@@ -221,6 +224,12 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
   if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+/** Keep every heading's words while turning an empty nested heading into prose. */
+export function normalizeAdjacentTeachingHeadings(markdown: string): string {
+  return markdown.replace(/(^#{2,4}[ \t]+[^\r\n]+\r?\n(?:[ \t]*\r?\n)*)(?:#{2,4})[ \t]+([^\r\n]+)/gm,
+    (_match, firstHeading: string, nextTitle: string) => `${firstHeading}${nextTitle}`);
 }
 
 export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[] = []): boolean {

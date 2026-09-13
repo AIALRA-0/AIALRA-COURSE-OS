@@ -5,7 +5,7 @@ import { stableStringify } from "@course-os/domain";
 const requiredSections = ["prior_knowledge", "learning_objectives", "full_explanation", "main_content", "misconceptions"] as const;
 
 export function preparePageForGeneration(page: PageLesson): PageLesson {
-  const sourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => anchor.text!).join("\n");
+  const sourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => learningSourceText(anchor.text!)).join("\n");
   const importedWholePage = page.atoms.length === 1 && page.atoms[0]?.kind === "image_region";
   const textRegions = importedWholePage ? sourceTextRegions(page.id, sourceText) : [];
   const expandedAtoms: PageLesson["atoms"] = [...page.atoms, ...textRegions];
@@ -13,7 +13,8 @@ export function preparePageForGeneration(page: PageLesson): PageLesson {
   const coverageRequirements = [...page.coverageRequirements, ...textRegions.map((region) => ({
     id: `${page.id}:requirement:${region.id}`,
     atomId: region.id,
-    requiredFields: ["label", "observation"],
+    // The region label is a generated bookkeeping number, not slide content.
+    requiredFields: ["observation"],
     risk: /(?:\d|[=<>≤≥]|\\(?:frac|sum)|∈|ℝ|不能|除非|必须)/u.test(region.observation) ? "high" as const : "general" as const
   }))].map((requirement) => {
     const atom = atoms.get(requirement.atomId) as unknown as Record<string, unknown> | undefined;
@@ -36,10 +37,14 @@ function sourceTextRegions(pageId: string, text: string): Extract<PageLesson["at
   return regions;
 }
 
+function learningSourceText(text: string): string {
+  return text.split(/\r?\n/).filter((line) => !/^\s*(?:\d+\s*\/\s*\d+|page\s+\d+\s+of\s+\d+)\s*$/iu.test(line)).join("\n").trim();
+}
+
 export function buildGenerationSourceText(page: PageLesson): string {
   const extractedText = page.anchors
     .filter((anchor) => typeof anchor.text === "string" && anchor.text.trim().length > 0)
-    .map((anchor) => `### ${anchor.label}\n${anchor.text!.trim()}`)
+    .map((anchor) => `### ${anchor.label.replace(/^第\s*\d+\s*页离线提取文本$/u, "提取文字")}\n${learningSourceText(anchor.text!)}`)
     .join("\n\n");
   return [
     extractedText ? `## 离线提取来源文本\n${extractedText}` : "## 离线提取来源文本\n当前页面没有可用的离线文字，请以原始页面图像为准",
@@ -54,7 +59,7 @@ export function buildTeachingBlueprint(page: PageLesson, _sourceText: string, la
   // The transport text also contains serialized atoms and requirements. Only
   // the slide's extracted words describe its kind and visible density.
   const visibleSourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text)
-    .map((anchor) => anchor.text!.trim()).join("\n");
+    .map((anchor) => learningSourceText(anchor.text!)).join("\n");
   const pageKind = classifyTeachingPage(page, visibleSourceText);
   const sourceDensity = classifySourceDensity(visibleSourceText);
   const technicalPage = ["formula", "diagram", "table", "code", "mixed"].includes(pageKind);

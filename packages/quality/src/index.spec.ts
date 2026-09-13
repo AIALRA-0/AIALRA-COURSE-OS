@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -142,6 +142,18 @@ describe("learner-facing teaching narrative", () => {
       .toContain("TEACHING_MATH_INVALID:learningObjectives");
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, learningObjectives: ["求出 $\\epsilon=0.2$ 时的允许区间"] }))
       .not.toContain("TEACHING_MATH_INVALID:learningObjectives");
+  });
+
+  it("rejects explaining pagination as learning content on an agenda slide", () => {
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, pageKind: "agenda", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n右下角 2/27 是页码` }))
+      .toContain("TEACHING_LAYOUT_COMMENTARY");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, pageKind: "agenda" }))
+      .not.toContain("TEACHING_LAYOUT_COMMENTARY");
+  });
+
+  it("turns only an empty adjacent heading into a lead sentence", () => {
+    const source = "### 第一步：算比率\n\n## 比率等于新概率除以旧概率\n\n代入两项概率后得到 1.5\n\n### 第二步：比较贡献";
+    expect(normalizeAdjacentTeachingHeadings(source)).toBe("### 第一步：算比率\n\n比率等于新概率除以旧概率\n\n代入两项概率后得到 1.5\n\n### 第二步：比较贡献");
   });
 
   it("accepts a verified long English term in one definition but rejects stacked definitions", () => {
