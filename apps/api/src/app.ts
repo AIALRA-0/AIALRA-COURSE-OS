@@ -2465,7 +2465,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         });
         let repairIssues = [...new Set([...coverageIssues, ...narrativeIssues])];
         const requiredRepair = repairIssues.length > 0;
-        for (let repairAttempt = 1; repairAttempt <= 1 && repairIssues.length > 0; repairAttempt += 1) {
+        for (let repairAttempt = 1; repairAttempt <= 2 && repairIssues.length > 0; repairAttempt += 1) {
           const previousGeneration = generation;
           const spentOnPage = generationUsageCostUsd(generation);
           if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);

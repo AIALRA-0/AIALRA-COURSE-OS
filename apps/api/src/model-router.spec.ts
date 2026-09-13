@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.1", taskContract: "GENERATE + TEACHING" });
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
     expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts"]);
@@ -32,6 +32,22 @@ describe("generation harness", () => {
     expect(text).toContain("最多 3500 个字符");
     expect(text).toContain(JSON.stringify(previousTeachingPackage));
     expect(text).not.toContain('"resourcePackage":{"version"');
+  });
+
+  it("gives field-specific repair instructions for failures seen across diagrams and algorithms", () => {
+    const input = modelInput({
+      ...providerInput("writing-repair-test"),
+      repair: {
+        issues: ["TEACHING_UNPAIRED_ENGLISH", "TEACHING_PRIOR_DEFINITION_INCOMPLETE", "TEACHING_BRIDGE_NEEDS_BLOCKS"],
+        maximumExplanationCharacters: 3_500,
+        previousTeachingPackage: providerTeachingContent() as TeachingPackage
+      }
+    });
+    const text = typeof input === "string" ? input : input[0]!.content.find((part) => part.type === "input_text")!.text;
+    expect(text).toContain("四道题的题干与答案解释");
+    expect(text).toContain("priorKnowledge");
+    expect(text).toContain("每句至少十二字");
+    expect(text).toContain("空行分成两个自然段");
   });
 });
 
@@ -209,6 +225,28 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("shape-retry-test"));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, cachedInputTokens: 20, outputTokens: 400 } });
+  });
+
+  it("requires the full explanation and summary when a provider omits them on a sparse page", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      attempts += 1;
+      const body = JSON.parse(String(init?.body)) as { instructions: string };
+      const content = providerTeachingContent() as Record<string, unknown>;
+      if (attempts === 1) {
+        delete content.mainContentMarkdown;
+        delete content.fullExplanationMarkdown;
+      } else {
+        expect(body.instructions).toContain("mainContentMarkdown");
+        expect(body.instructions).toContain("fullExplanationMarkdown");
+      }
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content), usage: { input_tokens: 100, output_tokens: 200 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("sparse-page-shape-retry"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.schemaRetries).toBe(1);
+    expect(result.content.fullExplanationMarkdown).toBeTruthy();
   });
 
   it("stops a billed page after the first call exceeds its remaining cost limit", async () => {

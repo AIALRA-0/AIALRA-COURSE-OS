@@ -204,11 +204,11 @@ function describeTeachingResponseShape(value: unknown): string {
     : item === null ? "null" : typeof item;
   if (!value || typeof value !== "object" || Array.isArray(value)) return `root=${shape(value)}`;
   const record = value as Record<string, unknown>;
-  const fields = ["learningObjectives", "priorKnowledge", "misconceptions", "coverageEvidence", "questions"]
+  const fields = ["chapterBridgeMarkdown", "learningObjectives", "priorKnowledge", "fullExplanationMarkdown", "mainContentMarkdown", "misconceptions", "coverageEvidence", "questions"]
     .map((key) => `${key}=${Object.hasOwn(record, key) ? shape(record[key]) : "missing"}`);
   const wrappers = ["teachingPackage", "package", "content", "result", "data"]
     .filter((key) => Object.hasOwn(record, key));
-  return `root=object;${fields.join(";")};wrappers=${wrappers.join(",") || "none"}`;
+  return `root=object;${fields.join(";")};keys=${Object.keys(record).join(",")};wrappers=${wrappers.join(",") || "none"}`;
 }
 
 export function modelRouterFromEnvironment(): ModelRouterClient | undefined {
@@ -386,7 +386,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const baseUrl = this.connection.baseUrl.replace(/\/$/, "");
     const text = modelInput(input);
     const instruction = professorInstructions(input.language) + (previousShapeError
-      ? `\n\n上一次输出未通过结构校验（${previousShapeError}）。请重新生成完整的单个 JSON 对象；learningObjectives、priorKnowledge 和 misconceptions 必须是字符串数组，不要包裹在外层对象中。`
+      ? `\n\n上一次输出未通过结构校验（${previousShapeError}）。请重新生成完整的单个 JSON 对象，不要包裹在外层对象中。必须逐项写出 chapterBridgeMarkdown、learningObjectives、priorKnowledge、fullExplanationMarkdown、mainContentMarkdown、misconceptions、coverageEvidence 和 questions；即使是封面或目录，也不能省略完整讲解和列表总结。learningObjectives、priorKnowledge 和 misconceptions 必须是字符串数组。`
       : "");
     const headers = { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey || randomUUID() };
     if (this.connection.protocol === "responses") {
