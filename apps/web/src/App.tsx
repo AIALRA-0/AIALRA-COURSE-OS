@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
-import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
+import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
@@ -20,6 +20,10 @@ const OFFLINE_SYNC: ReadWeaveSyncStatus = { state: "offline", authority: "readwe
 
 function clampSidebarWidth(value: number): number {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(value)));
+}
+
+function readablePageTitle(title: string): string {
+  return title.split(/\s{12,}/, 1)[0]?.trim() || title;
 }
 
 function readSidebarWidth(): number {
@@ -148,6 +152,29 @@ export function App() {
 
   const release = useMemo(() => releases.find((item) => item.id === releaseId), [releaseId, releases]);
   const page = release?.pages[pageIndex];
+  const [candidatePreview, setCandidatePreview] = useState<{ pageId: string; page?: PageLesson; error?: string }>();
+  const [candidatePreviewReload, setCandidatePreviewReload] = useState(0);
+  useEffect(() => {
+    if (mode !== "learn" || release?.lifecycle !== "draft_source" || !page) { setCandidatePreview(undefined); return; }
+    let active = true;
+    setCandidatePreview({ pageId: page.id });
+    api.draft(page.id).then((draft) => {
+      if (!active) return;
+      if (draft.sourceReleaseId === release.id && draft.page.id === page.id && draft.status === "ready") {
+        const title = readablePageTitle(draft.page.title);
+        setCandidatePreview({ pageId: page.id, page: title === draft.page.title ? draft.page : { ...draft.page, title } });
+      }
+      else setCandidatePreview({ pageId: page.id, error: "这页候选讲解尚未生成完成" });
+    }).catch(() => { if (active) setCandidatePreview({ pageId: page.id, error: "候选讲解暂时无法读取，请重试" }); });
+    return () => { active = false; };
+  }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
+  const previewRelease = useMemo(() => release?.lifecycle === "draft_source"
+    ? { ...release, pages: release.pages.map((item, index) => {
+      const source = page && candidatePreview?.pageId === page.id && candidatePreview.page && index === pageIndex ? candidatePreview.page : item;
+      const title = readablePageTitle(source.title);
+      return title === source.title ? source : { ...source, title };
+    }) }
+    : release, [release, page, pageIndex, candidatePreview]);
 
   useEffect(() => {
     if (!release) return;
@@ -378,7 +405,9 @@ export function App() {
         <section className="product-content">
           <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
-            {mode === "learn" && <LearningWorkspace release={release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
+            {mode === "learn" && release.lifecycle === "draft_source" && !(candidatePreview?.pageId === page.id && candidatePreview.page)
+              ? <div className="workspace-loader" role="status">{!candidatePreview?.error && <div className="loader" />}<span>{candidatePreview?.pageId === page.id && candidatePreview.error ? candidatePreview.error : "正在载入候选讲解"}</span>{candidatePreview?.pageId === page.id && candidatePreview.error && <button type="button" onClick={() => setCandidatePreviewReload((value) => value + 1)}>重试</button>}</div>
+              : mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>
         </section>
