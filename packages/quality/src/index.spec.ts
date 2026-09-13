@@ -82,6 +82,7 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(explained)).toEqual([]);
     expect(validateTeachingNarrative({ ...explained, misconceptions: ["以为可以直接接入完整模型：完整网络末端留着价值预测层，输出的是奖励数值而不是策略所需的表示；核对时检查末端是否仍包含价值预测输出"] })).toEqual([]);
     expect(validateTeachingNarrative({ ...explained, misconceptions: ["把一万个设计样本当成推理阶段的数据规模；它在材料中紧跟预训练步骤，描述的是学习编码器时使用的有标注样本数量；核对办法是回到原文训练步骤，确认数字所在位置"] })).toEqual([]);
+    expect(validateTeachingNarrative({ ...explained, misconceptions: ["把热力图当成可读出具体数值的结果：页面只给出了颜色分布，没有标明色标和单位；核对办法是先找图例，找不到就只描述颜色变化"] })).toEqual([]);
     expect(validateTeachingNarrative({ ...explained, misconceptions: ["不要直接套用结果"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
   });
 
