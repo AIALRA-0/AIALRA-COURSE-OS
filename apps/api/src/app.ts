@@ -2498,7 +2498,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         if (repairIssues.length > 0 && release.lifecycle !== "draft_source") throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
-      assertTeachingCoverageEvidence(page, generation.content);
+      // A rejected source candidate remains inspectable, but its unresolved
+      // coverage evidence is retained as an explicit blocking quality issue.
+      if (rejectedNarrativeIssues.length === 0) assertTeachingCoverageEvidence(page, generation.content);
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
       const issues = [...new Set([...validatePageForPublication(generatedPage), ...rejectedNarrativeIssues])];

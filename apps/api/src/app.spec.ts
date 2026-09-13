@@ -445,10 +445,13 @@ describe("Course OS API", () => {
   it("keeps a rejected candidate page readable while the generation job remains failed", async () => {
     const candidate = testRelease();
     candidate.lifecycle = "draft_source";
+    candidate.pages[0]!.atoms = [{ kind: "text_region", id: "atom-source", label: "来源片段", observation: "输入经过规则得到输出" }];
+    candidate.pages[0]!.coverageRequirements = [{ id: "requirement-source", atomId: "atom-source", requiredFields: ["observation"], risk: "high" }];
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
         result.content.misconceptions = ["不要跳过输入条件"];
+        result.content.coverageEvidence = [{ atomId: "atom-source", coveredFields: ["observation"], explanation: "这段解释并没有出现在完整讲解正文之中" }];
         return result;
       }
     };
@@ -456,7 +459,7 @@ describe("Course OS API", () => {
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "candidate-rejected-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 2 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], completedPageIds: [] });
     const draft = await readweave.getDraftByPage("page-1");
-    expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING"]) } } });
+    expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:atom-source"]) } } });
     expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
   }, 60_000);
 
