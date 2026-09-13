@@ -1,19 +1,19 @@
 {
   "schemaVersion": "1.0.0",
-  "policySnapshotId": "writing-policy:1596555b73a37e62",
+  "policySnapshotId": "writing-policy:56493c1af3d98aa0",
   "status": "approved",
-  "sourceCommit": "43133c20eabd0edde5ff8effa8d8a51c7ee8afa3",
-  "summary": "当前中文写作策略：零基础解释、来源保真、公式推导与局部复核",
+  "sourceCommit": "installed-skill-sha256:66daa0de90d708c439cd3013ebf65aaa84786998e989d62d33f7b9a1e3a9b989",
+  "summary": "2026-09-13 安装版中文写作策略：格式、零基础解释和公式规则完整快照",
   "files": [
     {
       "path": "SKILL.md",
       "sourcePath": "SKILL.md",
-      "sha256": "3c6f61480da62478ce462bcc50706b57a2469b1d79d6d51e003e4cf708280a65"
+      "sha256": "66daa0de90d708c439cd3013ebf65aaa84786998e989d62d33f7b9a1e3a9b989"
     },
     {
       "path": "references/format-rules.md",
       "sourcePath": "references/format-rules.md",
-      "sha256": "c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240"
+      "sha256": "b15dcd70817c1dc88a925a935355059c2dc6eb3ae280775dc09faae1f51a1a7b"
     },
     {
       "path": "references/explanation-framework.md",
@@ -23,8 +23,8 @@
     {
       "path": "references/formula-explanation.md",
       "sourcePath": "references/formula-explanation.md",
-      "sha256": "65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e"
+      "sha256": "73caaa9e14cd6f8f85e34f4cb807c5f37a234a95fddddae5177aa37f829486e6"
     }
   ],
-  "aggregateSha256": "1596555b73a37e62399c870a19244a285a7aaf4733f82cda97d2e0efb89d3d1f"
+  "aggregateSha256": "56493c1af3d98aa04a1d3bc78063e550f814cf7bdd36824db6f3cd8bc5729961"
 }

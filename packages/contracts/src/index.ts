@@ -647,7 +647,7 @@ export interface QuestionAttempt {
   questionId: Identifier;
   objectiveId: Identifier;
   answer: string;
-  correct: boolean;
+  correct: boolean | null;
   usedHintLevel: number;
   misconception?: string;
   attemptedAt: ISODateTime;

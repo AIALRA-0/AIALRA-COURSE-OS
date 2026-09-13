@@ -1140,6 +1140,14 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 }
 
 .lesson-section-title h3 { font-size: 21px; line-height: 1.4; font-weight: 700; }
+.lesson-block > h1, .lesson-block > h2, .lesson-block > h3 { color: var(--ink); font-size: clamp(17px, 1.45vw, 21px); line-height: 1.45; }
+.lesson-block > h4, .lesson-block > h5, .lesson-block > h6 { color: var(--ink); font-size: 16px; line-height: 1.5; }
+.answer { display: grid; gap: 12px; font-size: 14px; }
+.answer > strong { color: var(--ink); font-size: 14px; }
+.answer > div { padding-top: 11px; border-top: 1px solid var(--line); }
+.answer > div > strong { display: block; margin-bottom: 5px; color: var(--ink); }
+.answer > div p { margin: 0; }
+.answer-progress { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 .lesson-section-title small { color: var(--muted); font-size: 12px; font-weight: 600; }
 .sentence-list { margin: 0; padding-left: 1.55em; }
 .sentence-list li { padding-left: .18em; line-height: 1.72; }

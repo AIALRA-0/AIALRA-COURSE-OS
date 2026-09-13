@@ -177,7 +177,7 @@ export function ReviewWorkspace({ releases, reviewMap, onOpenPage, onReviewChang
       const result = await api.reviewSessionAttempt(session.id, { answer, usedHintLevel: hintLevel, questionId: sessionQuestion?.id });
       setSession(result.session);
       setFeedback(result.feedback || (result.attempt.correct ? "回答正确" : "需要回到课程页重新定位错误步骤"));
-      setPendingResult({ feedback: result.feedback || "", correct: result.attempt.correct, session: result.session });
+      setPendingResult({ feedback: result.feedback || "", correct: result.attempt.correct === true, session: result.session });
       await onReviewChanged?.();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "作答尚未保存，请重试"); }
     finally { setBusy(false); }

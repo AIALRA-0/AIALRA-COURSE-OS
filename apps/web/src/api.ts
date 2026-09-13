@@ -253,7 +253,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseRevision })
   }),
-  questionAttempt: (payload: { selectionId: string; sessionId: string; courseReleaseId: string; pageId: string; questionId: string; answer: string; usedHintLevel: number }, idempotencyKey: string = crypto.randomUUID()) => request<{ attempt: QuestionAttempt; mastery: MasteryRecord; feedback: string }>("/api/v1/question-attempts", {
+  questionAttempt: (payload: { selectionId: string; sessionId: string; courseReleaseId: string; pageId: string; questionId: string; answer: string; usedHintLevel: number }, idempotencyKey: string = crypto.randomUUID()) => request<{ attempt: QuestionAttempt; mastery: MasteryRecord | null; evaluationState: "correct" | "incorrect" | "unverified"; feedback: string }>("/api/v1/question-attempts", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(payload)

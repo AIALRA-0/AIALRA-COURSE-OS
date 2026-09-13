@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { createApp, createDefaultDependencies, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { createApp, createDefaultDependencies, evaluateQuestionAnswer, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -118,7 +118,7 @@ describe("Course OS API", () => {
     expect(["queued", "running", "completed"]).toContain(ready.generationState);
     expect(ready.generationJobId).toBeTruthy();
     const job = await waitForJob(app, ready.generationJobId);
-    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:1596555b73a37e62", budgetUsd: 2 });
+    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:56493c1af3d98aa0", budgetUsd: 2 });
     const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(200);
     expect(replay.body.id).toBe(ready.id);
     expect((await dependencies.operations.read()).jobs).toHaveLength(1);
@@ -127,7 +127,7 @@ describe("Course OS API", () => {
 
   it("returns a safe candidate writing policy without private paths", async () => {
     const policy = await request(await testApp()).get("/api/v1/writing-policy/current").expect(200);
-    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:1596555b73a37e62", sourceCommit: "43133c20eabd0edde5ff8effa8d8a51c7ee8afa3", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
+    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:56493c1af3d98aa0", sourceCommit: "installed-skill-sha256:66daa0de90d708c439cd3013ebf65aaa84786998e989d62d33f7b9a1e3a9b989", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
     expect(policy.body.promptTemplate).toContain("SOURCE");
     expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
@@ -138,7 +138,7 @@ describe("Course OS API", () => {
       .set("Idempotency-Key", "candidate-release-1")
       .send({ baseReleaseId: "test-release-v1", releaseId: "test-release-v2-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
-    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:1596555b73a37e62" });
+    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:56493c1af3d98aa0" });
     expect(created.body.candidate.pages[0].id).not.toBe("page-1");
     expect(created.body.candidate.pages[0].blocks[0].id).toContain("test-release-v2-candidate:page:1");
     expect((await readweave.listReleases()).filter((item) => item.lifecycle !== "draft_source")).toHaveLength(1);
@@ -263,6 +263,30 @@ describe("Course OS API", () => {
     const { app, release } = await seededApp();
     await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "job-no-pages").send({ materialVersionId: release.id, pageIds: [], budgetUsd: 4 }).expect(422);
     await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "job-wrong-page").send({ materialVersionId: release.id, pageIds: ["missing-page"], budgetUsd: 4 }).expect(422);
+  });
+
+  it("does not mark a paraphrased free-text answer wrong or change mastery", async () => {
+    const { app, readweave, release } = await seededApp();
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const selected = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "free-text-select").send({ sessionId: session.body.id, seed: "free-text-seed", count: 2 }).expect(201);
+    const question = selected.body.questions.find((item: QuestionBankItem) => item.kind === "comprehension") as QuestionBankItem;
+    const payload = { selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1", questionId: question.id, answer: "先确认起点，按步骤处理，再看结果", usedHintLevel: 0 };
+    const saved = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "free-text-attempt").send(payload).expect(201);
+    expect(saved.body).toMatchObject({ attempt: { correct: null }, mastery: null, evaluationState: "unverified" });
+    expect(saved.headers["server-timing"]).toMatch(/release;dur=.+save;dur=/);
+    await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "free-text-attempt").send(payload).expect(201);
+    expect(await readweave.listQuestionAttempts()).toHaveLength(1);
+    expect(await readweave.listAssessmentAttempts()).toHaveLength(0);
+    expect(await readweave.listMastery()).toHaveLength(0);
+  });
+
+  it("accepts equivalent numeric answers while keeping choice grading exact", () => {
+    const comprehension = { ...testRelease().pages[0]!.questionBank![0]!, expectedAnswer: "0.1225" };
+    expect(evaluateQuestionAnswer(comprehension, "0.1225000")).toBe(true);
+    expect(evaluateQuestionAnswer(comprehension, "0.35")).toBe(false);
+    expect(evaluateQuestionAnswer(comprehension, "差值平方后是 0.1225")).toBe(null);
+    const choice = testRelease().pages[0]!.questionBank![2]!;
+    expect(evaluateQuestionAnswer(choice, "忽略条件")).toBe(false);
   });
 
   it("stores QA changes, reproducible mixed questions, attempts and generation costs in ReadWeave", async () => {
@@ -770,8 +794,8 @@ function testTeachingResult(apiEquivalentUsd: number): TeachingGenerationResult 
     usage: { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEquivalentUsd, durationMs: 500 },
     content: {
       learningObjectives: ["能够说明输入、处理规则和输出之间的关系"],
-      mainContentMarkdown: "先识别输入，再按照规则处理，最后检查输出是否满足目标",
-      priorKnowledge: ["输入与输出：输入是规则处理之前已经确认的对象和条件，输出是执行规则后得到的结果；先把两者分开，才能判断处理过程有没有达到目标"],
+      mainContentMarkdown: "- 先识别输入并检查前提\n- 再按照规则处理对象\n- 最后检查输出是否满足目标",
+      priorKnowledge: ["输入与输出：输入是规则处理之前已经确认的对象和条件，输出是执行规则后得到的结果；先把两者分开，才能判断处理过程有没有达到目标；规则按照已经确认的输入改变对象的状态，不能拿结果代替处理过程；当需要核对处理结果时，先明确输入条件，再比较输出与目标是否一致"],
       fullExplanationMarkdown: [
         "## 输入、规则和输出\n这页要把输入、处理规则和输出连成一条可以检查的流程，读者最后要能说明每一步为什么发生\n输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果",
         "## 状态怎样向前推进\n先确认输入，再按规则处理对象，处理过程会把状态推进到新的结果，最后必须把输出和目标重新比较\n假设输入已经满足前提，先记录初始状态，再执行规则并写出中间状态，最后检查结果是否满足目标",
@@ -780,10 +804,10 @@ function testTeachingResult(apiEquivalentUsd: number): TeachingGenerationResult 
       misconceptions: ["错误地跳过输入条件直接套用结论，因为规则只对满足前提的对象有效；正确做法是先检查输入和条件，再核对输出是否达到目标"],
       coverageEvidence: [],
       questions: [
-        { kind: "comprehension" as const, prompt: "输入决定了什么", options: [], expectedAnswer: "输入决定处理对象", explanation: "规则只能作用于已经确认的输入" },
-        { kind: "comprehension" as const, prompt: "为什么检查输出", options: [], expectedAnswer: "确认结果满足目标", explanation: "执行完规则不代表结果一定正确" },
-        { kind: "multiple_choice" as const, prompt: "第一步应该做什么", options: ["识别输入", "忽略条件", "直接结论", "删除规则"], expectedAnswer: "识别输入", explanation: "输入决定后续处理对象" },
-        { kind: "multiple_choice" as const, prompt: "最后一步应该做什么", options: ["核对输出", "忽略目标", "删除结果", "改变题意"], expectedAnswer: "核对输出", explanation: "输出需要回到目标检查" }
+        { kind: "comprehension" as const, prompt: "输入决定了什么", options: [], expectedAnswer: "输入决定处理对象", explanation: "先确认输入对象及其满足的条件，再把规则作用于这个对象；如果输入没有确定，就无法判断规则是否适用，也无法核对处理后的输出是否对应目标" },
+        { kind: "comprehension" as const, prompt: "为什么检查输出", options: [], expectedAnswer: "确认结果满足目标", explanation: "执行完规则只表示处理过程结束，不能保证结果符合目标；需要把得到的输出与预先确定的目标逐项比较，发现差异时回到输入和处理步骤查原因" },
+        { kind: "multiple_choice" as const, prompt: "第一步应该做什么", options: ["识别输入", "忽略条件", "直接结论", "删除规则"], expectedAnswer: "识别输入", explanation: "正确选项是识别输入，因为规则必须有明确的处理对象；直接写结论会跳过输入条件，无法判断处理结果从哪里来，也不能检查规则是否适用" },
+        { kind: "multiple_choice" as const, prompt: "最后一步应该做什么", options: ["核对输出", "忽略目标", "删除结果", "改变题意"], expectedAnswer: "核对输出", explanation: "正确选项是核对输出，因为结果还要与目标和条件比较；忽略目标只看输出数值，无法判断处理是否成功，改变题意更不能替代结果检验" }
       ]
     }
   };

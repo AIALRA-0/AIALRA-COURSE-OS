@@ -1136,24 +1136,38 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.post("/api/v1/question-attempts", async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const release = await getWorkspaceRelease(dependencies.readweave, String(request.body.courseReleaseId || ""), workspaceId);
       const page = release?.pages.find((item) => item.id === request.body.pageId);
       const item = page?.questionBank?.find((candidate) => candidate.id === request.body.questionId);
       if (!release || !page || !item) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到这道随机问题", false);
       const answer = String(request.body.answer || "").trim();
-      const correct = normalizeAnswer(answer) === normalizeAnswer(item.expectedAnswer);
+      const correct = evaluateQuestionAnswer(item, answer);
+      const releaseLookupMs = performance.now() - startedAt;
       const attempt: QuestionAttempt = {
         id: randomUUID(), selectionId: String(request.body.selectionId || ""), sessionId: String(request.body.sessionId || ""),
         courseReleaseId: release.id, pageId: page.id, questionId: item.id, objectiveId: item.objectiveId,
         answer, correct, usedHintLevel: Math.max(0, Math.min(6, Number(request.body.usedHintLevel || 0))),
-        misconception: correct ? undefined : `答案没有满足当前学习目标，正确思路是：${item.explanation}`,
+        misconception: correct === false ? `答案没有满足当前学习目标，正确思路是：${item.explanation}` : undefined,
         attemptedAt: new Date().toISOString()
       };
       const context = writeContext(request, requireIdempotencyKey(request));
+      if (correct === null) {
+        const saved = await dependencies.readweave.saveQuestionAttempt(attempt, context);
+        if (saved.id !== attempt.id && saved.correct !== null) {
+          const replayedAssessment: AssessmentAttempt = { id: saved.id, itemId: saved.questionId, objectiveId: saved.objectiveId, answer: saved.answer, correct: saved.correct, usedHintLevel: saved.usedHintLevel, misconception: saved.misconception, attemptedAt: saved.attemptedAt };
+          const replayed = await dependencies.readweave.saveQuestionAttemptTransaction(saved, replayedAssessment, (previous) => applyAttempt(previous, replayedAssessment), context);
+          response.setHeader("Server-Timing", `release;dur=${releaseLookupMs.toFixed(1)}, save;dur=${(performance.now() - startedAt - releaseLookupMs).toFixed(1)}`);
+          return response.status(201).json({ attempt: replayed.attempt, mastery: replayed.mastery, evaluationState: replayed.attempt.correct ? "correct" : "incorrect", feedback: item.explanation });
+        }
+        response.setHeader("Server-Timing", `release;dur=${releaseLookupMs.toFixed(1)}, save;dur=${(performance.now() - startedAt - releaseLookupMs).toFixed(1)}`);
+        return response.status(201).json({ attempt: saved, mastery: null, evaluationState: "unverified", feedback: item.explanation });
+      }
       const masteryAttempt: AssessmentAttempt = { id: attempt.id, itemId: item.id, objectiveId: item.objectiveId, answer, correct, usedHintLevel: attempt.usedHintLevel, misconception: attempt.misconception, attemptedAt: attempt.attemptedAt };
       const saved = await dependencies.readweave.saveQuestionAttemptTransaction(attempt, masteryAttempt, (previous) => applyAttempt(previous, masteryAttempt), context);
-      response.status(201).json({ attempt: saved.attempt, mastery: saved.mastery, feedback: saved.attempt.correct ? item.explanation : saved.attempt.misconception });
+      response.setHeader("Server-Timing", `release;dur=${releaseLookupMs.toFixed(1)}, save;dur=${(performance.now() - startedAt - releaseLookupMs).toFixed(1)}`);
+      response.status(201).json({ attempt: saved.attempt, mastery: saved.mastery, evaluationState: saved.attempt.correct ? "correct" : "incorrect", feedback: item.explanation });
     } catch (error) { next(error); }
   });
 
@@ -2445,6 +2459,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         let narrativeIssues = validateTeachingNarrative({
           ...generation.content,
           lessonFlowVersion: 2,
+          strictWritingStyle: true,
           pageKind: blueprint.resourcePackage.pageKind,
           sourceDensity: blueprint.resourcePackage.sourceDensity
         });
@@ -2485,6 +2500,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           narrativeIssues = validateTeachingNarrative({
             ...generation.content,
             lessonFlowVersion: 2,
+            strictWritingStyle: true,
             pageKind: blueprint.resourcePackage.pageKind,
             sourceDensity: blueprint.resourcePackage.sourceDensity
           });
@@ -3436,6 +3452,19 @@ function buildHint(check: string, level: number): string {
 
 function normalizeAnswer(value: string): string {
   return value.toLowerCase().replace(/[\s，。,.；;：:]/g, "");
+}
+
+export function evaluateQuestionAnswer(item: QuestionBankItem, answer: string): boolean | null {
+  if (normalizeAnswer(answer) === normalizeAnswer(item.expectedAnswer)) return true;
+  if (item.kind === "multiple_choice") return false;
+  const numeric = (value: string): number | undefined => {
+    const normalized = value.trim().replace(/^\$|\$$/g, "").replace(/,/g, "");
+    return /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized) ? Number(normalized) : undefined;
+  };
+  const expected = numeric(item.expectedAnswer);
+  const supplied = numeric(answer);
+  if (expected !== undefined && supplied !== undefined) return Math.abs(expected - supplied) <= Math.max(1e-9, Math.abs(expected) * 1e-9);
+  return null;
 }
 
 function selectQuestionBank(bank: QuestionBankItem[], seed: string, count: number): QuestionBankItem[] {

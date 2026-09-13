@@ -9,4 +9,11 @@ describe("lesson math rendering", () => {
     expect(html.match(/class="katex"/g)).toHaveLength(2);
     expect(html).toContain("表示边的嵌入");
   });
+
+  it("keeps teaching subheadings below the page and section headings", () => {
+    const html = renderToStaticMarkup(createElement(Markdown, { nestedHeadings: true, children: "## 为什么先训练\n\n说明训练的作用\n\n### 何时使用\n\n说明适用条件" }));
+    expect(html).toContain("<h4>为什么先训练</h4>");
+    expect(html).toContain("<h5>何时使用</h5>");
+    expect(html).not.toContain("<h2>");
+  });
 });

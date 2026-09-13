@@ -62,6 +62,7 @@ export function evaluateReleaseClosure(release: { pages: PageLesson[]; pageIds: 
 
 export interface TeachingNarrativeInput {
   lessonFlowVersion?: 2;
+  strictWritingStyle?: boolean;
   chapterBridgeMarkdown?: string;
   learningObjectives: string[];
   mainContentMarkdown: string;
@@ -142,6 +143,29 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     if (/(?<![\p{L}\p{N}])(?:[A-Za-z]{1,3}_[A-Za-z0-9{}]+|[A-Za-z]{1,3}\^[A-Za-z0-9{}]+)/u.test(outsideMath)) issues.push("TEACHING_BARE_MATH_SYMBOL");
   }
 
+  if (input.strictWritingStyle) {
+    if (hasUnpairedEnglishPhrase(learnerText)) issues.push("TEACHING_UNPAIRED_ENGLISH");
+    const summaryLines = input.mainContentMarkdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (summaryLines.length < 2 || summaryLines.length > 5 || summaryLines.some((line) => !/^[-*+]\s+\S/u.test(line))) {
+      issues.push("TEACHING_SUMMARY_MUST_BE_BULLETS");
+    }
+    const bridge = input.chapterBridgeMarkdown?.trim() || "";
+    if (bridge && bridge.length > 120 && !/\n\s*\n|\n\s*[-*+]\s/u.test(bridge)) issues.push("TEACHING_BRIDGE_NEEDS_BLOCKS");
+    if (bridge && hasUnpairedEnglishPhrase(bridge)) issues.push("TEACHING_BRIDGE_UNPAIRED_ENGLISH");
+    for (const prior of input.priorKnowledge) {
+      const definition = prior.trim().replace(/^[-*+]\s+/, "");
+      const split = definition.indexOf("：");
+      const clauses = split < 0 ? [] : definition.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
+      if (split < 2 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 12)) {
+        issues.push("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
+      }
+      if (hasUnpairedEnglishPhrase(definition)) issues.push("TEACHING_PRIOR_UNPAIRED_ENGLISH");
+    }
+    for (const question of input.questions) {
+      if (question.explanation.trim().length < 48) issues.push("TEACHING_QUESTION_EXPLANATION_TOO_SHORT");
+    }
+  }
+
   const paragraphs = explanation.split(/\n\s*\n/)
     .map((paragraph) => paragraph.replace(/^#+\s*/, "").replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim())
     .filter((paragraph) => paragraph.length >= 24);
@@ -163,6 +187,12 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
   if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+function hasUnpairedEnglishPhrase(markdown: string): boolean {
+  const visible = stripProtectedMarkdown(markdown)
+    .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, "");
+  return /(?:^|[^\p{L}])(?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+)(?=$|[^\p{L}])/u.test(visible);
 }
 
 /**

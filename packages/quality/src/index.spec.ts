@@ -77,6 +77,34 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
   });
 
+  it("rejects a dense mixed-language bridge, shallow definitions and a second summary heading", () => {
+    const flawed = {
+      ...valid,
+      strictWritingStyle: true,
+      chapterBridgeMarkdown: "上一页列出了可学习参数的五个部分，其中 Graph Encoder 由 Node embedding FC 和 Edge embedding FC 构成，但没有解释为什么要保留、训练它有什么作用、与后续网络怎样连接；本页回答它是什么、为什么先训练、怎么使用",
+      mainContentMarkdown: "## 编码器与迁移学习\n\n- 保留已经学到的表示",
+      priorKnowledge: ["网表：一种描述电路连接的结构化数据，本页的编码器接收它"]
+    };
+    expect(validateTeachingNarrative(flawed)).toEqual(expect.arrayContaining([
+      "TEACHING_BRIDGE_NEEDS_BLOCKS",
+      "TEACHING_BRIDGE_UNPAIRED_ENGLISH",
+      "TEACHING_PRIOR_DEFINITION_INCOMPLETE",
+      "TEACHING_SUMMARY_MUST_BE_BULLETS",
+      "TEACHING_QUESTION_EXPLANATION_TOO_SHORT"
+    ]));
+  });
+
+  it("accepts the same structure on a distinct calculation page when each item is explained", () => {
+    const developed = {
+      ...valid,
+      strictWritingStyle: true,
+      chapterBridgeMarkdown: "前页已经给出预测值和实际值；本页接着计算两者相差多少，并判断平方后的结果表示什么",
+      priorKnowledge: ["平方：把一个数与自己相乘的运算；本页用它处理预测值与实际值之间的差；先计算差，再让差与自身相乘，得到一个非负结果；当题目要求平方误差时才执行这一步，不能把差的绝对值直接当成平方结果"],
+      questions: [{ prompt: "预测误差怎样计算", explanation: "先用 1.15 减去 1.5，得到差值 -0.35；再将差值与自己相乘，得到 0.1225；平方误差是这个非负结果，不能停在差的绝对值 0.35" }]
+    };
+    expect(validateTeachingNarrative(developed)).toEqual([]);
+  });
+
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
     const explained = { ...valid, lessonFlowVersion: 2 as const, priorKnowledge: ["输入条件：规则只对满足输入条件的对象执行，因此要先确认对象是否满足条件，再计算并核对结果是否符合目标"], misconceptions: ["把未满足条件的结果直接当作答案会出错，由于规则的前提不成立，应先核对输入条件再判断结果"] };
     expect(validateTeachingNarrative(explained)).toEqual([]);

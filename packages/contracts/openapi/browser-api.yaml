@@ -613,7 +613,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        '201': { description: Question attempt, feedback and mastery evidence stored }
+        '201': { description: Question attempt and feedback stored; mastery is null when a free-text answer cannot be verified automatically }
   /costs:
     get:
       operationId: listGenerationCosts

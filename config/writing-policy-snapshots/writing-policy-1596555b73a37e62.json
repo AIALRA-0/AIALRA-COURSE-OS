@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0.0",
+  "policySnapshotId": "writing-policy:1596555b73a37e62",
+  "status": "approved",
+  "sourceCommit": "43133c20eabd0edde5ff8effa8d8a51c7ee8afa3",
+  "summary": "当前中文写作策略：零基础解释、来源保真、公式推导与局部复核",
+  "files": [
+    {
+      "path": "SKILL.md",
+      "sourcePath": "SKILL.md",
+      "sha256": "3c6f61480da62478ce462bcc50706b57a2469b1d79d6d51e003e4cf708280a65"
+    },
+    {
+      "path": "references/format-rules.md",
+      "sourcePath": "references/format-rules.md",
+      "sha256": "c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240"
+    },
+    {
+      "path": "references/explanation-framework.md",
+      "sourcePath": "references/explanation-framework.md",
+      "sha256": "a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c"
+    },
+    {
+      "path": "references/formula-explanation.md",
+      "sourcePath": "references/formula-explanation.md",
+      "sha256": "65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e"
+    }
+  ],
+  "aggregateSha256": "1596555b73a37e62399c870a19244a285a7aaf4733f82cda97d2e0efb89d3d1f"
+}

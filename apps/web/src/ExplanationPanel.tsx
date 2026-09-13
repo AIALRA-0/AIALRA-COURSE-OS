@@ -79,7 +79,7 @@ function sectionDescriptor(value: string): string {
 
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
   if (!section) return null;
-  return <article className={`lesson-block section-${section.kind}`}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown>{section.markdown}</Markdown> : null}{children}</article>;
+  return <article className={`lesson-block section-${section.kind}`}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{section.markdown}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {
@@ -125,7 +125,7 @@ function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePage
   </div>;
 }
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
-  const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(false); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
+  const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [feedbackState, setFeedbackState] = useState<Record<string, "correct" | "incorrect" | "unverified" | "error">>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(false); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
   const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>());
   useEffect(() => { setAvailable(page.questionBank?.filter((item) => item.status === "approved").length ?? 0); setDraftCount(page.questionBank?.filter((item) => item.status === "draft").length ?? 0); }, [page.id, page.questionBank]);
   useEffect(() => { if (!sessionId) return; setLoading(true); api.selectQuestions(page.id, sessionId).then((result) => { setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0); }).catch((error) => setFeedback({ load: error instanceof Error ? error.message : "随机问题加载失败" })).finally(() => setLoading(false)); }, [page.id, sessionId]);
@@ -134,14 +134,17 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
     if (!selection || !sessionId || !answer || pendingRef.current.has(item.id)) return;
     pendingRef.current.add(item.id);
     setPendingQuestionIds(new Set(pendingRef.current));
+    setFeedback((current) => ({ ...current, [item.id]: "" }));
     const replayKey = `${selection.id}:${item.id}:${answer}`;
     const idempotencyKey = idempotencyKeysRef.current.get(replayKey) ?? crypto.randomUUID();
     idempotencyKeysRef.current.set(replayKey, idempotencyKey);
     try {
       const result = await api.questionAttempt({ selectionId: selection.id, sessionId, courseReleaseId: release.id, pageId: page.id, questionId: item.id, answer, usedHintLevel: 0 }, idempotencyKey);
       idempotencyKeysRef.current.delete(replayKey);
-      setFeedback((current) => ({ ...current, [item.id]: `${result.attempt.correct ? "回答正确" : "还需要复习"}：${result.feedback}` }));
+      setFeedbackState((current) => ({ ...current, [item.id]: result.evaluationState }));
+      setFeedback((current) => ({ ...current, [item.id]: result.feedback }));
     } catch (error) {
+      setFeedbackState((current) => ({ ...current, [item.id]: "error" }));
       setFeedback((current) => ({ ...current, [item.id]: error instanceof Error ? error.message : "作答保存失败" }));
     } finally {
       pendingRef.current.delete(item.id);
@@ -152,7 +155,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
   if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /> <p className="empty-inline">学习会话建立后会抽取 1道理解题和 1道选择题</p></>;
   if (loading) return <p className="empty-inline">正在从 ReadWeave 抽取问题</p>;
   if (!questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || "本页题库尚未达到发布要求，请从制作模式补齐题目"}</p></>;
-  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><p>{item.prompt}</p>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} />{option}</label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!answers[item.id]?.trim() || pending} aria-busy={pending} title={!answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : "提交并保存记录"}</button>{feedback[item.id] && <p className="answer" aria-live="polite">{feedback[item.id]}</p>}</section>; })}</div></>;
+  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><p>{item.prompt}</p>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} />{option}</label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!answers[item.id]?.trim() || pending} aria-busy={pending} title={!answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div></>;
 }
 
 function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
@@ -170,6 +173,7 @@ function normalizeSections(page: PageLesson): LessonSection[] {
       const section = byKind.get(kind);
       if (kind === "chapter_bridge" && !section) return undefined;
       if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
+      if (kind === "main_content" && section.markdown) return { ...section, markdown: summaryMarkdown(section.markdown) };
       if (page.lessonFlowVersion === 2 || kind !== "full_explanation" || !section.markdown || !main) return section;
       const distinctExplanation = removeRepeatedOpening(main, section.markdown);
       return distinctExplanation ? { ...section, markdown: distinctExplanation } : section;
@@ -178,7 +182,12 @@ function normalizeSections(page: PageLesson): LessonSection[] {
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
-  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: removeRepeatedOpening(main, find("core", "example", "deep_dive", "check")) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: main || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: removeRepeatedOpening(main, find("core", "example", "deep_dive", "check")) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+}
+
+export function summaryMarkdown(markdown: string): string {
+  if (!/^\s*[-*+]\s+/m.test(markdown)) return markdown;
+  return markdown.replace(/^\s*#{1,6}\s+[^\n]+\n+/u, "").trim();
 }
 
 /**
