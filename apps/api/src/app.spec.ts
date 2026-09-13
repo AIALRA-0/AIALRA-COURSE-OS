@@ -5,8 +5,8 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { createApp, createDefaultDependencies, normalizeGeneratedMathPunctuation } from "./app.js";
-import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult } from "./model-router.js";
+import { createApp, createDefaultDependencies, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -32,6 +32,20 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("accepts a sourced excerpt inside a coverage explanation without requiring the whole sentence verbatim", () => {
+    const page = {
+      ...testRelease().pages[0]!,
+      atoms: [{ kind: "text_region" as const, id: "source-1", label: "原文片段", observation: "每条边先拼接两个端点再投影" }],
+      coverageRequirements: [{ id: "requirement-1", atomId: "source-1", requiredFields: ["observation"], risk: "high" as const }]
+    };
+    const fullExplanationMarkdown = "先把两个端点和边本身的信息放在一起。接着用同一组权重计算边表示，维度必须与输入长度相容。";
+    const content = {
+      fullExplanationMarkdown,
+      coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "正文写明：接着用同一组权重计算边表示，并说明维度条件。" }]
+    } as TeachingPackage;
+    expect(validateTeachingCoverageEvidence(page, content)).toEqual([]);
+    expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "只声称已经覆盖这个片段，但正文没有对应的连续讲解。" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
+  });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
     expect(normalizeGeneratedMathPunctuation("权重 $0.5、3、0.2$ 用于示例")).toBe("权重 $0.5$、$3$、$0.2$ 用于示例");
     expect(normalizeGeneratedMathPunctuation("公式 $F(x)=0.5L(x)$ 保持原样")).toBe("公式 $F(x)=0.5L(x)$ 保持原样");

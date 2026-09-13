@@ -30,9 +30,14 @@ const DEFAULT_PRICES: PriceDefinition[] = [
 
 export function priceSnapshotFor(provider: string, model: string): UnitPriceSnapshot | undefined {
   const configuration = readPricingConfiguration();
+  // DeepSeek may report its V4 Flash response under this shorter name.
+  // Flash and Flash Vision share the published token rates.
+  const pricedModel = provider === "deepseek" && model === "deepseek-flash" ? "deepseek-v4-flash" : model;
   const custom = configuration.prices?.find((item) => item.provider === provider && item.model === model)
-    ?? configuration.prices?.find((item) => !item.provider && item.model === model);
-  const defaultPrice = DEFAULT_PRICES.find((item) => item.provider === provider && item.model === model);
+    ?? configuration.prices?.find((item) => item.provider === provider && item.model === pricedModel)
+    ?? configuration.prices?.find((item) => !item.provider && item.model === model)
+    ?? configuration.prices?.find((item) => !item.provider && item.model === pricedModel);
+  const defaultPrice = DEFAULT_PRICES.find((item) => item.provider === provider && item.model === pricedModel);
   const definition = custom ?? defaultPrice;
   if (!definition) return undefined;
   const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");

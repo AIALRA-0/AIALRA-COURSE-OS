@@ -2690,7 +2690,7 @@ function assertTeachingCoverageEvidence(page: CourseRelease["pages"][number], co
   if (issues.length > 0) throw new Error(issues[0]);
 }
 
-function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): string[] {
+export function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], content: TeachingPackage): string[] {
   const issues: string[] = [];
   const atomIds = new Set(page.atoms.map((atom) => atom.id));
   const textRegionIds = new Set(page.atoms.filter((atom) => atom.kind === "text_region").map((atom) => atom.id));
@@ -2708,10 +2708,18 @@ function validateTeachingCoverageEvidence(page: CourseRelease["pages"][number], 
     if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) issues.push("TEACHING_COVERAGE_EXPLANATION_VAGUE");
     if (textRegionIds.has(requirement.atomId)) {
       const quote = evidence.explanation.replace(/[`*_#\s]/g, "");
-      if (quote.length < 12 || !compactExplanation.includes(quote)) issues.push("TEACHING_COVERAGE_QUOTE_NOT_FOUND");
+      if (!hasSharedEvidenceFragment(quote, compactExplanation)) issues.push(`TEACHING_COVERAGE_QUOTE_NOT_FOUND:${requirement.atomId}`);
     }
   }
   return [...new Set(issues)];
+}
+
+function hasSharedEvidenceFragment(evidence: string, explanation: string): boolean {
+  const minimumLength = 12;
+  for (let offset = 0; offset <= evidence.length - minimumLength; offset += 1) {
+    if (explanation.includes(evidence.slice(offset, offset + minimumLength))) return true;
+  }
+  return false;
 }
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {

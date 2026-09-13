@@ -11,6 +11,11 @@ describe("cost price snapshots", () => {
     expect(snapshot).toMatchObject({ inputMicrousdPerMillion: 220_000, cachedInputMicrousdPerMillion: 7_000, outputMicrousdPerMillion: 660_000 });
     expect(estimateMicrousd(snapshot, 1_000, 200, 500)).toBe(507);
   });
+  it("prices the model alias reported by DeepSeek without calling a billed request free", () => {
+    const snapshot = priceSnapshotFor("deepseek", "deepseek-flash");
+    expect(snapshot).toMatchObject({ model: "deepseek-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000 });
+    expect(estimateMicrousd(snapshot, 1_000, 0, 500)).toBe(550);
+  });
 
   it("records subscription quota as consumption instead of silently calling it free", () => {
     expect(billingBreakdown("opencode-go", "subscription_quota", 12_345)).toEqual({ cashCostMicrousd: 0, quotaConsumedMicrousd: 12_345 });
