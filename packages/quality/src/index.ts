@@ -134,7 +134,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
     }
     for (const misconception of input.misconceptions) {
-      const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆)/u.test(misconception);
+      if (/\s+[-*+]\s+(?=[\p{Script=Han}“])|\n\s*[-*+]\s/u.test(misconception)) issues.push("TEACHING_MISCONCEPTIONS_PACKED");
+      const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆|只有|没有|未给出|未说明|不包含)/u.test(misconception);
       const clauses = misconception.split(/[；;]/).map((clause) => clause.trim()).filter(Boolean);
       const hasExplainedCorrection = /[：:][^；;。\n]{18,}[；;][^；;。\n]{12,}/u.test(misconception)
         || (clauses.length >= 3 && clauses[0]!.length >= 8 && clauses[1]!.length >= 15 && clauses.slice(2).some((clause) => clause.length >= 12))
@@ -162,6 +163,10 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     for (const prior of input.priorKnowledge) {
       const definition = prior.trim().replace(/^[-*+]\s+/, "");
       const split = definition.indexOf("：");
+      const label = split < 0 ? "" : definition.slice(0, split).trim();
+      if (label.length >= 2 && new RegExp(`^\\s*(?:[-*+]\\s*)?${escapeRegExp(label)}：`, "mu").test(explanation)) {
+        issues.push("TEACHING_PRIOR_DEFINITION_REPEATED");
+      }
       if (split >= 0 && definition.slice(split + 1).includes("：")) issues.push("TEACHING_PRIOR_MULTIPLE_DEFINITIONS");
       const clauses = split < 0 ? [] : definition.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
       if (split < 2 || definition.length < 70 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 8)) {
@@ -211,6 +216,23 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
     .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
   const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
   return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
+}
+
+export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";
+
+export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): TeachingNarrativeField[] {
+  const parts: Record<TeachingNarrativeField, string> = {
+    chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
+    learningObjectives: input.learningObjectives.join("\n"),
+    mainContentMarkdown: input.mainContentMarkdown,
+    priorKnowledge: input.priorKnowledge.join("\n"),
+    fullExplanationMarkdown: input.fullExplanationMarkdown,
+    misconceptions: input.misconceptions.join("\n"),
+    questions: input.questions.map((question) => `${question.prompt}\n${question.explanation}`).join("\n")
+  };
+  const learnerText = Object.values(parts).join("\n");
+  const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
+  return (Object.keys(parts) as TeachingNarrativeField[]).filter((field) => hasUnpairedEnglishPhrase(parts[field], sourceNames));
 }
 
 function definedSourceNames(title: string, learnerText: string): string[] {

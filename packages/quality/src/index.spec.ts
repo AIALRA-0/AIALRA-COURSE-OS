@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -111,6 +111,21 @@ describe("learner-facing teaching narrative", () => {
     };
     expect(validateTeachingNarrative(input)).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
     expect(validateTeachingNarrative({ ...input, misconceptions: ["把流程理解错了：页面没有说明"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+  });
+
+  it("accepts a stated source limit with a correction, but rejects several misconceptions packed into one item", () => {
+    const boundary = "把目录中的标题当成已经解释过的概念；这一页只有名称和阅读顺序，没有定义与做法；正确判断是先将它当作后续章节的入口，核对办法是到对应章节找定义";
+    const input = { ...valid, lessonFlowVersion: 2 as const, misconceptions: [boundary] };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+    expect(validateTeachingNarrative({ ...input, misconceptions: [`${boundary} - 以为右侧曲线与左侧柱状图来自同一实验；两张图的横轴不同，因此必须分别比较`] })).toContain("TEACHING_MISCONCEPTIONS_PACKED");
+  });
+
+  it("rejects a full definition repeated after prior knowledge and locates unpaired English fields", () => {
+    const prior = "图编码器（Graph Encoder）：把图结构转换为数值表示的组件；它为后续网络提供可计算的输入；通过邻居间的信息传递更新每个位置的表示；在图结构需要进入网络时使用；它不同于直接输出决策的预测层";
+    const input = { ...valid, strictWritingStyle: true, priorKnowledge: [prior], fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图编码器（Graph Encoder）：把图结构转换为数值表示的组件；它为后续网络提供可计算的输入；通过邻居间的信息传递更新每个位置的表示；在图结构需要进入网络时使用；它不同于直接输出决策的预测层`, mainContentMarkdown: "- CPU 组柱更高\n- 两图不能直接合并判断" };
+    expect(validateTeachingNarrative(input)).toContain("TEACHING_PRIOR_DEFINITION_REPEATED");
+    expect(unpairedEnglishTeachingFields(input)).toContain("mainContentMarkdown");
+    expect(unpairedEnglishTeachingFields(input)).not.toContain("priorKnowledge");
   });
 
   it("accepts a verified long English term in one definition but rejects stacked definitions", () => {

@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, validatePageForPublication, validateTeachingNarrative, validateTex } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2525,7 +2525,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
           if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
-          const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues);
+          const englishFields = repairIssues.includes("TEACHING_UNPAIRED_ENGLISH")
+            ? unpairedEnglishTeachingFields({ ...previousGeneration.content, sourceTitle: page.title }) : [];
+          const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues, englishFields);
           if (focused) {
             repaired.content = focused;
           } else if (validatedCoverageEvidence) {
@@ -2709,13 +2711,26 @@ function combineTeachingGenerations(initial: TeachingGenerationResult, repaired:
   };
 }
 
-export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[]): TeachingPackage | undefined {
-  if (issues.length !== 1) return undefined;
-  const issue = issues[0]!;
-  if (issue.startsWith("TEACHING_COVERAGE_")) return { ...previous, coverageEvidence: repaired.coverageEvidence };
-  if (issue.startsWith("TEACHING_PRIOR_")) return { ...previous, priorKnowledge: repaired.priorKnowledge };
-  if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING") return { ...previous, misconceptions: repaired.misconceptions };
-  return undefined;
+export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[], englishFields: TeachingNarrativeField[] = []): TeachingPackage | undefined {
+  const fields = new Set<keyof TeachingPackage>();
+  for (const issue of issues) {
+    if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
+    else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
+    else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
+    else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
+    else if (issue === "TEACHING_BRIDGE_UNPAIRED_ENGLISH" || issue === "TEACHING_BRIDGE_NEEDS_BLOCKS") fields.add("chapterBridgeMarkdown");
+    else if (issue === "TEACHING_SUMMARY_MUST_BE_BULLETS") fields.add("mainContentMarkdown");
+    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION"].includes(issue)) fields.add("fullExplanationMarkdown");
+    else if (issue === "TEACHING_QUESTION_EXPLANATION_TOO_SHORT") fields.add("questions");
+    else return undefined;
+  }
+  if (!fields.size) return undefined;
+  // Coverage excerpts point into the explanation. Changing that text without
+  // its excerpts can leave a formerly valid claim attached to absent prose.
+  if (fields.has("fullExplanationMarkdown")) fields.add("coverageEvidence");
+  const merged = { ...previous };
+  for (const field of fields) Object.assign(merged, { [field]: repaired[field] });
+  return merged;
 }
 
 function deterministicTeachingPackage(page: CourseRelease["pages"][number]): TeachingGenerationResult {
