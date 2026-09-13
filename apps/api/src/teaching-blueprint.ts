@@ -48,11 +48,15 @@ export function buildGenerationSourceText(page: PageLesson): string {
   ].join("\n\n");
 }
 
-export function buildTeachingBlueprint(page: PageLesson, sourceText: string, language: string, qualityMode: string, writingPolicySnapshotId: string, imageAvailable: boolean): TeachingBlueprint {
+export function buildTeachingBlueprint(page: PageLesson, _sourceText: string, language: string, qualityMode: string, writingPolicySnapshotId: string, imageAvailable: boolean): TeachingBlueprint {
   const atomIds = page.atoms.map((atom) => atom.id);
   const requirementIds = page.coverageRequirements.map((requirement) => requirement.id);
-  const pageKind = classifyTeachingPage(page, sourceText);
-  const sourceDensity = classifySourceDensity(sourceText);
+  // The transport text also contains serialized atoms and requirements. Only
+  // the slide's extracted words describe its kind and visible density.
+  const visibleSourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text)
+    .map((anchor) => anchor.text!.trim()).join("\n");
+  const pageKind = classifyTeachingPage(page, visibleSourceText);
+  const sourceDensity = classifySourceDensity(visibleSourceText);
   const technicalPage = ["formula", "diagram", "table", "code", "mixed"].includes(pageKind);
   const steps: TeachingBlueprintStep[] = [
     { id: `${page.id}:purpose`, kind: "purpose", objective: "用日常语言说明这页要解决的问题和可验证学习结果", atomIds: [], requirementIds: [], output: "根据页面类型决定是否需要独立开头", required: true },
@@ -66,7 +70,7 @@ export function buildTeachingBlueprint(page: PageLesson, sourceText: string, lan
     version: "2.0.0" as const,
     pageId: page.id,
     pageNumber: page.pageNumber,
-    resourcePackage: { version: "2.0.0" as const, pageId: page.id, pageTitle: page.title, sourceText: sourceText.slice(0, 45_000), sourceAnchorIds: page.anchors.map((anchor) => anchor.id), atomIds, imageAvailable, pageKind, sourceDensity },
+    resourcePackage: { version: "2.0.0" as const, pageId: page.id, pageTitle: page.title, sourceText: visibleSourceText.slice(0, 45_000), sourceAnchorIds: page.anchors.map((anchor) => anchor.id), atomIds, imageAvailable, pageKind, sourceDensity },
     requirementPackage: { version: "2.0.0" as const, requirements: page.coverageRequirements, objective: `让零基础读者能够理解并使用第 ${page.pageNumber} 页“${page.title}”中的全部有效内容`, requiredSections: [...requiredSections] },
     rulePackage: { version: "2.0.0" as const, language, qualityMode, rules: ["执行批准写作策略的全部格式与解释规则", "正文结构服从页面内容而不是固定模板", "来源、背景和推断不能混写", "每个要求绑定真实 atomId 和正文证据", "避免重复句、装饰性说明和流水线标签", "保留条件、否定、数字、变量、范围与因果", "专业术语首次完整定义", "公式使用合法 KaTeX", "每页 2 道理解题和 2 道选择题"], questionRule: { comprehension: 2, multipleChoice: 2, optionsPerMultipleChoice: 4 } },
     steps,
@@ -96,9 +100,9 @@ function classifyTeachingPage(page: PageLesson, sourceText: string): TeachingBlu
   const value = `${page.title}\n${sourceText}`;
   const kinds = new Set(page.atoms.map((atom) => atom.kind));
   if (/(目录|大纲|outline|agenda|contents)/i.test(page.title)) return "agenda";
-  if (kinds.has("pseudocode_line") || kinds.has("code_block") || /```|\b(?:for|while|if|else|return)\b/i.test(sourceText)) return "code";
+  if (kinds.has("pseudocode_line") || kinds.has("code_block") || /```|^\s*(?:for\s*\(|while\s*\(|if\s*\(|return\s+\S+)/im.test(sourceText)) return "code";
   if (/\|[^\n]+\|[^\n]+\|/.test(sourceText)) return "table";
-  if (kinds.has("math_expression") || /\\(?:frac|sum|prod|int|sqrt|begin)|[$][^$\n]+[$]/.test(sourceText)) return "formula";
+  if (kinds.has("math_expression") || /\\(?:frac|sum|prod|int|sqrt|begin)|[$][^$\n]+[$]|(?:formula|公式)[\s\S]{0,300}(?:[=∈]|\b\d+\s*[×x]\s*\d+\b)/i.test(sourceText)) return "formula";
   if (kinds.has("diagram_node") || kinds.has("diagram_edge")) return "diagram";
   const mediaSignals = [/(图|figure|diagram|graph)/i.test(value), /(表|table)/i.test(value), /(公式|equation)/i.test(value)].filter(Boolean).length;
   if (mediaSignals > 1) return "mixed";

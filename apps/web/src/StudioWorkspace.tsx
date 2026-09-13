@@ -310,7 +310,7 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
     <InspectorSection title="当前任务实证">
       <Definition label="供应商" value={latest?.provider || "尚无调用"} />
       <Definition label="模型" value={latest?.model || "尚无调用"} />
-      <Definition label="实际成本" value={latest ? formatMicrousd(latest.actualMicrousd) : "$0.0000"} />
+      <Definition label="调用费用" value={latest ? latest.costBasis === "provider_reported" ? `${formatMicrousd(latest.actualMicrousd)}（供应商回报）` : latest.costBasis === "price_snapshot" ? `${formatMicrousd(latest.estimatedMicrousd)}（价格估算）` : "费用未知" : "尚无调用"} />
       <Definition label="耗时" value={latest ? `${latest.durationMs} ms` : "—"} />
       <Definition label="质量结果" value={latest ? latest.qualityPassed ? "通过" : "未通过" : "等待生成"} />
     </InspectorSection>
@@ -345,26 +345,28 @@ function CostInspector({ release, page, job }: { release: CourseRelease; page: P
   const load = () => api.costs({ courseId: release.courseId }).then((result) => { setEntries(result.entries); setRollups(result.rollups); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "成本账本读取失败"));
   useEffect(() => { load(); }, [release.courseId, job?.state]);
   const course = rollups.find((item) => item.scope === "course" && item.scopeId === release.courseId);
-  const currentPage = rollups.find((item) => item.scope === "page" && item.scopeId === page.id);
   const pageEntries = entries.filter((item) => item.pageId === page.id).slice().reverse();
-  const used = course?.actualMicrousd ?? Math.round(release.costUsd * 1_000_000);
-  const cash = course?.cashCostMicrousd ?? pageEntries.reduce((sum, item) => sum + (item.cashCostMicrousd ?? 0), 0);
-  const quota = course?.quotaConsumedMicrousd ?? pageEntries.reduce((sum, item) => sum + (item.quotaConsumedMicrousd ?? 0), 0);
-  const estimated = course?.estimatedMicrousd ?? used;
+  const accounted = (entry: GenerationCostEntry) => entry.costBasis === "provider_reported" ? entry.actualMicrousd : entry.estimatedMicrousd;
+  const used = entries.reduce((sum, item) => sum + accounted(item), 0);
+  const pageUsed = pageEntries.reduce((sum, item) => sum + accounted(item), 0);
+  const cash = entries.filter((item) => item.costBasis === "provider_reported").reduce((sum, item) => sum + (item.cashCostMicrousd ?? 0), 0);
+  const quota = entries.filter((item) => item.costBasis === "provider_reported").reduce((sum, item) => sum + (item.quotaConsumedMicrousd ?? 0), 0);
+  const estimated = entries.reduce((sum, item) => sum + item.estimatedMicrousd, 0);
   const estimatedCash = course?.estimatedCashCostMicrousd ?? pageEntries.reduce((sum, item) => sum + (item.estimatedCashCostMicrousd ?? item.cashCostMicrousd ?? 0), 0);
   const estimatedQuota = course?.estimatedQuotaConsumedMicrousd ?? pageEntries.reduce((sum, item) => sum + (item.estimatedQuotaConsumedMicrousd ?? item.quotaConsumedMicrousd ?? 0), 0);
-  const projectedCourseCost = course && course.callCount > 0 ? Math.round(estimated / course.callCount * release.pages.length) : 0;
+  const projectedCourseCost = entries.length > 0 ? Math.round(estimated / entries.length * release.pages.length) : 0;
+  const unknownCosts = entries.filter((item) => item.costBasis === "not_available").length;
   const snapshot = pageEntries.find((entry) => entry.unitPriceSnapshot.source !== "价格未配置")?.unitPriceSnapshot;
   return <div className="inspector-body cost-inspector">
-    <div className="cost-hero"><div><span>课程累计</span><strong>{formatMicrousd(used)}</strong><small>API 等价总额</small></div><div><span>本页累计</span><strong>{formatMicrousd(currentPage?.actualMicrousd ?? 0)}</strong><small>{pageEntries.length} 次调用</small></div></div>
-    <div className="cost-ledger-grid"><div><span>现金支出</span><strong>{formatMicrousd(cash)}</strong><small>按量供应商实际计费</small></div><div><span>套餐额度折算</span><strong>{formatMicrousd(quota)}</strong><small>OpenCode Go 使用量</small></div><div><span>预计完课成本</span><strong>{formatMicrousd(projectedCourseCost)}</strong><small>按当前平均调用外推</small></div><div><span>预计总成本</span><strong>{formatMicrousd(estimated)}</strong><small>已记录调用的价格快照估算</small></div></div>
+    <div className="cost-hero"><div><span>课程累计</span><strong>{formatMicrousd(used)}</strong><small>供应商回报与价格估算合计</small></div><div><span>本页累计</span><strong>{formatMicrousd(pageUsed)}</strong><small>{pageEntries.length} 次调用</small></div></div>
+    <div className="cost-ledger-grid"><div><span>供应商回报费用</span><strong>{formatMicrousd(cash)}</strong><small>不是账单确认金额</small></div><div><span>套餐额度折算</span><strong>{formatMicrousd(quota)}</strong><small>仅含供应商回报</small></div><div><span>预计完课成本</span><strong>{formatMicrousd(projectedCourseCost)}</strong><small>按当前平均调用外推</small></div><div><span>价格快照估算</span><strong>{formatMicrousd(estimated)}</strong><small>{unknownCosts ? `${unknownCosts} 次调用费用未知` : "所有调用均可估算"}</small></div></div>
     <div className="cost-source"><span className="live-dot" /><span>{snapshot ? `价格快照 ${snapshot.capturedAt.slice(0, 10)} · ${snapshot.source}` : "尚未取得可用价格快照，已显示供应商回报或待配置状态"}</span></div>
-    <div className="budget-card"><div><span>质量模式硬预算</span><strong>$8.00</strong></div><div className="budget-track"><span style={{ width: `${Math.min(100, used / 8_000_000 * 100)}%` }} /></div><small>{used >= 8_000_000 ? "已经达到硬预算，新的模型调用会被阻止" : used >= 6_400_000 ? "已经达到 80%，非必要补题会停止" : `还可使用 ${formatMicrousd(8_000_000 - used)}`}</small></div>
+    <div className="budget-card"><div><span>新生成单页调用上限</span><strong>$0.06</strong></div><div className="budget-track"><span style={{ width: `${Math.min(100, pageUsed / 60_000 * 100)}%` }} /></div><small>按模型回报或价格快照核算，达到上限会停止后续调用；首次调用的计费须在返回后确认</small></div>
     <InspectorSection title="现金与额度账本"><div className="cost-accounting"><Definition label="已用 API 等价总额" value={formatMicrousd(used)} /><Definition label="现金支出" value={formatMicrousd(cash)} /><Definition label="套餐额度折算" value={formatMicrousd(quota)} /><Definition label="预计现金支出" value={formatMicrousd(estimatedCash)} /><Definition label="预计套餐额度" value={formatMicrousd(estimatedQuota)} /></div></InspectorSection>
     {job && <InspectorSection title="当前任务"><Definition label="任务状态" value={job.state} /><Definition label="页面进度" value={`${job.completedPageIds.length}/${job.pageIds.length}`} /><Definition label="任务花费" value={`$${job.spentUsd.toFixed(4)}`} /></InspectorSection>}
-    <InspectorSection title="按阶段"><div className="cost-bars">{(course?.byStage ?? []).map((item) => <div key={item.stage}><span>{stageLabel(item.stage)}</span><i><b style={{ width: `${course?.actualMicrousd ? item.actualMicrousd / course.actualMicrousd * 100 : 0}%` }} /></i><strong>{formatMicrousd(item.actualMicrousd)}</strong></div>)}</div></InspectorSection>
-    <InspectorSection title="按模型"><div className="cost-bars">{(course?.byModel ?? []).map((item) => <div key={item.model}><span>{item.model}</span><i><b style={{ width: `${course?.actualMicrousd ? item.actualMicrousd / course.actualMicrousd * 100 : 0}%` }} /></i><strong>{formatMicrousd(item.actualMicrousd)}</strong></div>)}</div></InspectorSection>
-    <InspectorSection title={`本页调用明细 · ${pageEntries.length}`}>{pageEntries.length ? <div className="cost-entry-list">{pageEntries.map((entry) => <article key={entry.id}><header><strong>{entry.model}</strong><span>{formatMicrousd(entry.actualMicrousd)}</span></header><p>{stageLabel(entry.stage)} · {entry.inputTokens} 输入 · {entry.outputTokens} 输出 · {entry.durationMs} ms</p><small>{entry.status === "succeeded" ? `质量检查${entry.qualityPassed ? "通过" : "未通过"}` : entry.status === "cancelled" ? "调用已取消" : "调用失败"}</small></article>)}</div> : <p className="empty-inline">本页还没有模型调用记录</p>}</InspectorSection>
+    <InspectorSection title="按阶段"><div className="cost-bars">{(course?.byStage ?? []).map((item) => { const amount = entries.filter((entry) => entry.stage === item.stage).reduce((sum, entry) => sum + accounted(entry), 0); return <div key={item.stage}><span>{stageLabel(item.stage)}</span><i><b style={{ width: `${used ? amount / used * 100 : 0}%` }} /></i><strong>{formatMicrousd(amount)}</strong></div>; })}</div></InspectorSection>
+    <InspectorSection title="按模型"><div className="cost-bars">{(course?.byModel ?? []).map((item) => { const amount = entries.filter((entry) => entry.model === item.model).reduce((sum, entry) => sum + accounted(entry), 0); return <div key={item.model}><span>{item.model}</span><i><b style={{ width: `${used ? amount / used * 100 : 0}%` }} /></i><strong>{formatMicrousd(amount)}</strong></div>; })}</div></InspectorSection>
+    <InspectorSection title={`本页调用明细 · ${pageEntries.length}`}>{pageEntries.length ? <div className="cost-entry-list">{pageEntries.map((entry) => <article key={entry.id}><header><strong>{entry.model}</strong><span>{entry.costBasis === "not_available" ? "费用未知" : `${formatMicrousd(accounted(entry))}${entry.costBasis === "provider_reported" ? "（供应商回报）" : "（估算）"}`}</span></header><p>{stageLabel(entry.stage)} · {entry.inputTokens} 输入 · {entry.outputTokens} 输出 · {entry.durationMs} ms</p><small>{entry.status === "succeeded" ? `质量检查${entry.qualityPassed ? "通过" : "未通过"}` : entry.status === "cancelled" ? "调用已取消" : "调用失败"}</small></article>)}</div> : <p className="empty-inline">本页还没有模型调用记录</p>}</InspectorSection>
     {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
     <button className="quiet-button" onClick={load}>刷新成本账本</button>
   </div>;

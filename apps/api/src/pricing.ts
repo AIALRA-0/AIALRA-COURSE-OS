@@ -16,15 +16,18 @@ type PricingConfiguration = {
 
 const DEEPSEEK_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing/";
 const OPENCODE_SOURCE = "https://opencode.ai/docs/go/";
-const DEFAULT_CAPTURED_AT = "2026-08-30T00:00:00.000Z";
+const DEFAULT_CAPTURED_AT = "2026-09-10T04:00:00.000Z";
 
 const DEFAULT_PRICES: PriceDefinition[] = [
   { provider: "opencode-go", model: "qwen3.8-flash", inputMicrousdPerMillion: 150_000, outputMicrousdPerMillion: 470_000, cachedInputMicrousdPerMillion: 16_000 },
   { provider: "opencode-go", model: "deepseek-v4-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
   { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
   { provider: "opencode-go", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 },
-  { provider: "deepseek", model: "deepseek-v4-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
-  { provider: "deepseek", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
+  // Conservative peak rates for V4.1 Flash; the legacy V4 Flash names now
+  // route to this model. Runtime configuration may replace this snapshot.
+  { provider: "deepseek", model: "deepseek-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
+  { provider: "deepseek", model: "deepseek-v4-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
+  { provider: "deepseek", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
   { provider: "deepseek", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 }
 ];
 
@@ -32,7 +35,7 @@ export function priceSnapshotFor(provider: string, model: string): UnitPriceSnap
   const configuration = readPricingConfiguration();
   // DeepSeek may report its V4 Flash response under this shorter name.
   // Flash and Flash Vision share the published token rates.
-  const pricedModel = provider === "deepseek" && model === "deepseek-flash" ? "deepseek-v4-flash" : model;
+  const pricedModel = model;
   const custom = configuration.prices?.find((item) => item.provider === provider && item.model === model)
     ?? configuration.prices?.find((item) => item.provider === provider && item.model === pricedModel)
     ?? configuration.prices?.find((item) => !item.provider && item.model === model)

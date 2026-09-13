@@ -67,7 +67,14 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     SOURCE_TEXT: input.sourceText.slice(0, 45_000),
     PREVIOUS_PAGE_CONTEXT: input.previousPageContext?.slice(0, 2_000) || "未提供可靠的前页来源；不要编写前页或上一章回顾"
   }).trim();
-  const blueprintText = input.blueprint ? `\n\n## 教学蓝图（必须遵循）\n${JSON.stringify(input.blueprint)}` : "";
+  // Source atoms and requirements already appear in SOURCE_TEXT. Send only the
+  // decisions the blueprint adds, rather than a second copy of the source.
+  const blueprintText = input.blueprint ? `\n\n## 本页讲解安排\n${JSON.stringify({
+    pageKind: input.blueprint.resourcePackage.pageKind,
+    sourceDensity: input.blueprint.resourcePackage.sourceDensity,
+    imageAvailable: input.blueprint.resourcePackage.imageAvailable,
+    steps: input.blueprint.steps.map(({ kind, objective, required }) => ({ kind, objective, required }))
+  })}` : "";
   const repairText = input.repair ? [
     "\n\n## 局部修复任务",
     "下面的对象是上一轮模型草稿，不是 SOURCE，不能用它替代原始课件",

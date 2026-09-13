@@ -57,4 +57,30 @@ describe("teaching blueprint", () => {
     const blueprint = buildTeachingBlueprint(prepared, buildGenerationSourceText(prepared), "zh-CN", "quality", "writing-policy:test", true);
     expect(validateTeachingBlueprint(prepared, blueprint)).toEqual([]);
   });
+
+  it("classifies the visible slide instead of serialized bookkeeping or English prose", () => {
+    const imported = {
+      ...page,
+      title: "EDGE-GNN: EDGE EMBEDDING",
+      anchors: [{ ...page.anchors[0]!, text: "Formula\nOnly one matrix for all edges\nW_e ∈ R32×64\ne_ij = W_e [v_i; v_j] + b" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }],
+      coverageRequirements: [{ id: "whole-page:requirement", atomId: "whole-page", requiredFields: ["label", "observation"], risk: "general" }]
+    } as PageLesson;
+    const prepared = preparePageForGeneration(imported);
+    const blueprint = buildTeachingBlueprint(prepared, buildGenerationSourceText(prepared), "zh-CN", "quality", "writing-policy:test", true);
+    expect(blueprint.resourcePackage).toMatchObject({ pageKind: "formula", sourceDensity: "sparse" });
+    expect(blueprint.resourcePackage.sourceText).not.toContain("whole-page:requirement");
+  });
+
+  it("does not treat ordinary prose containing 'for' as pseudocode", () => {
+    const imported = {
+      ...page,
+      title: "EDGE-GNN: WHY?",
+      anchors: [{ ...page.anchors[0]!, text: "A learned representation encoder for the given netlist\nPre-train it with labelled data" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }]
+    } as PageLesson;
+    const prepared = preparePageForGeneration(imported);
+    const blueprint = buildTeachingBlueprint(prepared, buildGenerationSourceText(prepared), "zh-CN", "quality", "writing-policy:test", true);
+    expect(blueprint.resourcePackage).toMatchObject({ pageKind: "concept", sourceDensity: "sparse" });
+  });
 });

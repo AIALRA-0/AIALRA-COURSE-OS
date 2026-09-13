@@ -2431,8 +2431,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       if (blueprintIssues.length > 0) throw new Error(`BLUEPRINT_INVALID:${blueprintIssues.join(",")}`);
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
+      const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
       let generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v9`, stage: "teach" })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v10`, stage: "teach", maxCostUsd: pageCostLimitUsd })
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
@@ -2448,8 +2449,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         });
         let repairIssues = [...new Set([...coverageIssues, ...narrativeIssues])];
         const requiredRepair = repairIssues.length > 0;
-        for (let repairAttempt = 1; repairAttempt <= 2 && repairIssues.length > 0; repairAttempt += 1) {
+        for (let repairAttempt = 1; repairAttempt <= 1 && repairIssues.length > 0; repairAttempt += 1) {
           const previousGeneration = generation;
+          const spentOnPage = generationUsageCostUsd(generation);
+          if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
           const maximumExplanationCharacters = maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity });
           await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { repairAttempt, issues: repairIssues, maximumExplanationCharacters });
           const repaired = await runtimeModelRouter.generateTeachingPackage({
@@ -2462,7 +2465,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
             language: currentJob.language || "zh-CN",
             qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
-            idempotencyKey: `course-os:${jobId}:${page.id}:repair:${repairAttempt}:v2`,
+            idempotencyKey: `course-os:${jobId}:${page.id}:repair:${repairAttempt}:v3`,
+            maxCostUsd: pageCostLimitUsd - spentOnPage,
             stage: "repair",
             repair: { issues: repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
           });
@@ -2807,7 +2811,7 @@ function makeGenerationCostEntry(jobId: string, job: GenerationJob, release: Cou
   const snapshotEstimate = estimateMicrousd(snapshot, usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
   const reported = typeof usage.apiEquivalentUsd === "number" && Number.isFinite(usage.apiEquivalentUsd) ? Math.max(0, Math.round(usage.apiEquivalentUsd * 1_000_000)) : undefined;
   const estimatedMicrousd = snapshotEstimate ?? reported ?? 0;
-  const actualMicrousd = reported ?? estimatedMicrousd;
+  const actualMicrousd = reported ?? 0;
   const billingMode = billingModeForProvider(provider);
   const actualBilling = billingBreakdown(provider, billingMode, actualMicrousd);
   const estimatedBilling = billingBreakdown(provider, billingMode, estimatedMicrousd);
@@ -2857,8 +2861,15 @@ function unavailablePriceSnapshot(provider: string, model: string) {
   };
 }
 
+function generationUsageCostUsd(generation: TeachingGenerationResult): number | undefined {
+  if (generation.usage.apiEquivalentUsd !== null) return generation.usage.apiEquivalentUsd;
+  const estimate = estimateMicrousd(priceSnapshotFor(generation.provider, generation.model), generation.usage.inputTokens, generation.usage.cachedInputTokens, generation.usage.outputTokens);
+  return estimate === undefined ? undefined : estimate / 1_000_000;
+}
+
 function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: OperationalState, dependencies: AppDependencies): void {
-  job.spentUsd = Math.round((job.spentUsd + cost.actualMicrousd / 1_000_000) * 1_000_000) / 1_000_000;
+  const accountedMicrousd = cost.costBasis === "provider_reported" ? cost.actualMicrousd : cost.estimatedMicrousd;
+  job.spentUsd = Math.round((job.spentUsd + accountedMicrousd / 1_000_000) * 1_000_000) / 1_000_000;
   job.updatedAt = new Date().toISOString();
   if (job.planId) {
     const plan = state.generationPlans.find((item) => item.id === job.planId);

@@ -8,13 +8,13 @@ describe("cost price snapshots", () => {
 
   it("calculates cached input, uncached input and output separately", () => {
     const snapshot = priceSnapshotFor("deepseek", "deepseek-v4-flash-vision-exp");
-    expect(snapshot).toMatchObject({ inputMicrousdPerMillion: 220_000, cachedInputMicrousdPerMillion: 7_000, outputMicrousdPerMillion: 660_000 });
-    expect(estimateMicrousd(snapshot, 1_000, 200, 500)).toBe(507);
+    expect(snapshot).toMatchObject({ inputMicrousdPerMillion: 300_000, cachedInputMicrousdPerMillion: 6_000, outputMicrousdPerMillion: 1_200_000 });
+    expect(estimateMicrousd(snapshot, 1_000, 200, 500)).toBe(841);
   });
   it("prices the model alias reported by DeepSeek without calling a billed request free", () => {
     const snapshot = priceSnapshotFor("deepseek", "deepseek-flash");
-    expect(snapshot).toMatchObject({ model: "deepseek-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000 });
-    expect(estimateMicrousd(snapshot, 1_000, 0, 500)).toBe(550);
+    expect(snapshot).toMatchObject({ model: "deepseek-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000 });
+    expect(estimateMicrousd(snapshot, 1_000, 0, 500)).toBe(900);
   });
 
   it("records subscription quota as consumption instead of silently calling it free", () => {

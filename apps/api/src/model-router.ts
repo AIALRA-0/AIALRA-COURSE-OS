@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, teachingPackageSchema } from "./generation-harness.js";
+import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
@@ -50,6 +51,7 @@ export interface ModelRouterInput {
   language: string;
   qualityMode: string;
   idempotencyKey: string;
+  maxCostUsd?: number;
   stage?: GenerationStage | "qa";
   blueprint?: TeachingBlueprint;
   repair?: {
@@ -64,10 +66,10 @@ export interface ModelRouterClient {
 }
 
 export function teachingOutputTokenLimit(qualityMode: string): number {
-  // Reasoning providers count hidden reasoning and the final structured JSON
-  // against the same output budget. Keep enough headroom to finish the JSON;
-  // page-kind validators separately enforce learner-visible length limits.
-  return qualityMode === "economy" ? 12_000 : qualityMode === "quality" ? 32_000 : 20_000;
+  // DeepSeek defaults to high-effort thinking. The teaching response is a
+  // bounded JSON page, so reserve only the final answer and fail explicitly
+  // if a page cannot fit instead of silently spending on hidden reasoning.
+  return qualityMode === "economy" ? 4_000 : qualityMode === "quality" ? 8_000 : 6_000;
 }
 
 export class ModelRouterGenerationError extends Error {
@@ -264,6 +266,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       if (!(error instanceof ModelRouterGenerationError) || !error.code.startsWith("MODEL_ROUTER_")) throw error;
       firstFailure = error;
     }
+    if (input.maxCostUsd !== undefined) {
+      const spent = this.usageCostUsd(firstFailure.usage);
+      if (spent === undefined || spent >= input.maxCostUsd) throw firstFailure;
+      input = { ...input, maxCostUsd: input.maxCostUsd - spent };
+    }
     try {
       const recovered = await this.generateOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:schema-retry` }, firstFailure.code);
       return { ...recovered, usage: sumProviderUsage(firstFailure.usage, recovered.usage), schemaRetries: 1 };
@@ -293,6 +300,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     }
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
+    if (input.maxCostUsd !== undefined) {
+      const spent = this.usageCostUsd(usage);
+      if (spent === undefined) throw new ModelRouterGenerationError("MODEL_PROVIDER_COST_UNAVAILABLE", body.model || this.connection.model, usage, this.connection.providerId);
+      if (spent > input.maxCostUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", body.model || this.connection.model, usage, this.connection.providerId);
+    }
     const output = extractProviderOutput(body);
     if (output === undefined || output === null) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", body.model || this.connection.model, usage, this.connection.providerId);
     let content: TeachingPackage;
@@ -312,6 +324,13 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     }
   }
 
+  private usageCostUsd(usage: ModelRouterUsage): number | undefined {
+    if (usage.apiEquivalentUsd !== null) return usage.apiEquivalentUsd;
+    if (usage.inputTokens === 0 && usage.outputTokens === 0) return undefined;
+    const estimate = estimateMicrousd(priceSnapshotFor(this.connection.providerId, this.connection.model), usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
+    return estimate === undefined ? undefined : estimate / 1_000_000;
+  }
+
   private buildRequest(input: ModelRouterInput, previousShapeError?: string) {
     const baseUrl = this.connection.baseUrl.replace(/\/$/, "");
     const text = modelInput(input);
@@ -328,7 +347,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           instructions: instruction,
           input: text,
           max_output_tokens: teachingOutputTokenLimit(input.qualityMode),
-          temperature: 0.2,
+          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
           metadata: { product: "course-os", stage: input.stage || "teach", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         }

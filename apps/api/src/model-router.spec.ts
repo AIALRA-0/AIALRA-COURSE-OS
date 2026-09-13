@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.2.1", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.3.0", taskContract: "GENERATE + TEACHING" });
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
     expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"]);
@@ -15,9 +15,9 @@ describe("generation harness", () => {
   });
 
   it("bounds model output so one slide cannot consume an unbounded response", () => {
-    expect(teachingOutputTokenLimit("economy")).toBe(12_000);
-    expect(teachingOutputTokenLimit("balanced")).toBe(20_000);
-    expect(teachingOutputTokenLimit("quality")).toBe(32_000);
+    expect(teachingOutputTokenLimit("economy")).toBe(4_000);
+    expect(teachingOutputTokenLimit("balanced")).toBe(6_000);
+    expect(teachingOutputTokenLimit("quality")).toBe(8_000);
   });
 
   it("labels a previous model draft and gives repair an exact learner-visible limit", () => {
@@ -31,6 +31,7 @@ describe("generation harness", () => {
     expect(text).toContain("TEACHING_EXPLANATION_TOO_LONG");
     expect(text).toContain("最多 3500 个字符");
     expect(text).toContain(JSON.stringify(previousTeachingPackage));
+    expect(text).not.toContain('"resourcePackage":{"version"');
   });
 });
 
@@ -151,8 +152,10 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   it("uses DeepSeek Responses with structured output and image input", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://api.deepseek.test/responses");
-      const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string; image_url?: string }> }>; text?: { format?: { type?: string; json_schema?: unknown } } };
+      const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string; image_url?: string }> }>; reasoning?: { effort?: string }; temperature?: number; text?: { format?: { type?: string; json_schema?: unknown } } };
       expect(body.text?.format?.type).toBe("json_schema");
+      expect(body.reasoning?.effort).toBe("none");
+      expect(body.temperature).toBeUndefined();
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
       expect(body.input[0]?.content[1]?.image_url).toMatch(/^data:image\/png;base64,/);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 300, output_tokens: 400, input_tokens_details: { cached_tokens: 50 }, total_cost: 0.012 } });
@@ -206,6 +209,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("shape-retry-test"));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, cachedInputTokens: 20, outputTokens: 400 } });
+  });
+
+  it("stops a billed page after the first call exceeds its remaining cost limit", async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      model: "deepseek-v4-flash-vision-exp",
+      output_text: JSON.stringify(providerTeachingContent()),
+      usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.07 }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", billingMode: "metered" });
+    const failure = await client.generateTeachingPackage({ ...providerInput("cost-limit-test"), maxCostUsd: 0.06 }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", usage: { apiEquivalentUsd: 0.07 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("reads only the final message and ignores Responses reasoning items", async () => {
