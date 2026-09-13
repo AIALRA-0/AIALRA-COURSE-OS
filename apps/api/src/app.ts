@@ -2433,11 +2433,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
       let generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:${page.id}:teach:v10`, stage: "teach", maxCostUsd: pageCostLimitUsd })
+        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd })
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
+      let rejectedNarrativeIssues: string[] = [];
       if (runtimeModelRouter) {
         let coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
         let validatedCoverageEvidence = coverageIssues.length === 0 ? structuredClone(generation.content.coverageEvidence) : undefined;
@@ -2465,7 +2466,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
             language: currentJob.language || "zh-CN",
             qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
-            idempotencyKey: `course-os:${jobId}:${page.id}:repair:${repairAttempt}:v3`,
+            idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:repair:${repairAttempt}:v4`,
             maxCostUsd: pageCostLimitUsd - spentOnPage,
             stage: "repair",
             repair: { issues: repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
@@ -2493,13 +2494,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         if (!requiredRepair) {
           await appendGenerationStageEvent(jobId, page.id, "repair", "skipped", dependencies, { reason: "没有发现需要修复的质量问题" });
         }
-        if (repairIssues.length > 0) throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
+        rejectedNarrativeIssues = repairIssues;
+        if (repairIssues.length > 0 && release.lifecycle !== "draft_source") throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       assertTeachingCoverageEvidence(page, generation.content);
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
-      const issues = validatePageForPublication(generatedPage);
+      const issues = [...new Set([...validatePageForPublication(generatedPage), ...rejectedNarrativeIssues])];
       generatedPage.quality = {
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
@@ -2536,6 +2538,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         const job = state.jobs.find((item) => item.id === jobId);
         if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
         applyActualCost(job, cost, state, dependencies);
+        if (rejectedNarrativeIssues.length > 0) {
+          if (!job.failedPageIds.includes(page.id)) job.failedPageIds.push(page.id);
+          dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId: page.id, issue: rejectedNarrativeIssues[0], draftRevision: saved.revision, contentHash: saved.contentHash, draftStatus: "needs_review" });
+          if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
+          return;
+        }
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
         dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
         if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {

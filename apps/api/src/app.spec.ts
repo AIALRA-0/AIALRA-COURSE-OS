@@ -442,6 +442,24 @@ describe("Course OS API", () => {
     expect(saved?.page.lessonSections?.find((section) => section.kind === "misconceptions")?.items?.[0]?.text).toContain("因为规则只对满足前提的对象有效");
   }, 60_000);
 
+  it("keeps a rejected candidate page readable while the generation job remains failed", async () => {
+    const candidate = testRelease();
+    candidate.lifecycle = "draft_source";
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        const result = testTeachingResult(0.001);
+        result.content.misconceptions = ["不要跳过输入条件"];
+        return result;
+      }
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, candidate);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "candidate-rejected-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 2 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], completedPageIds: [] });
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING"]) } } });
+    expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
+  }, 60_000);
+
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.02)
@@ -454,7 +472,7 @@ describe("Course OS API", () => {
     expect(costs.body.entries).toEqual([expect.objectContaining({ status: "succeeded", actualMicrousd: 20_000 })]);
   }, 60_000);
 
-  it("retries only failed pages with the original provider idempotency key", async () => {
+  it("retries only failed pages with a new provider key for the next attempt", async () => {
     const keys: string[] = [];
     let calls = 0;
     const modelRouter: ModelRouterClient = {
@@ -471,7 +489,9 @@ describe("Course OS API", () => {
     await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], attempt: 2, spentUsd: 0.015 });
     expect(keys).toHaveLength(2);
-    expect(keys[1]).toBe(keys[0]);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[0]).toContain(":attempt:1:");
+    expect(keys[1]).toContain(":attempt:2:");
     const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
     expect(costs.body.entries.map((item: { status: string; actualMicrousd: number }) => ({ status: item.status, actualMicrousd: item.actualMicrousd }))).toEqual([{ status: "failed", actualMicrousd: 0 }, { status: "succeeded", actualMicrousd: 15_000 }]);
   }, 60_000);

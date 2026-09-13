@@ -4,10 +4,10 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.3.1", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.3.2", taskContract: "GENERATE + TEACHING" });
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
