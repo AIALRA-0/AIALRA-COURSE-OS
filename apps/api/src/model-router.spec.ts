@@ -188,7 +188,24 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     content.learningObjectives = [{ first: "目标甲", second: "目标乙" }];
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content) }, { status: 200 })));
     const failure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("ambiguous-shape-repair-test")).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID" });
+    expect(failure).toMatchObject({ code: "MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID", responseShape: expect.stringContaining("learningObjectives=array:1:object") });
+  });
+
+  it("retries malformed structured output once with a distinct idempotency key and accounts for both calls", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      attempts += 1;
+      const body = JSON.parse(String(init?.body)) as { instructions: string };
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(attempts === 1 ? "shape-retry-test" : "shape-retry-test:schema-retry");
+      if (attempts === 2) expect(body.instructions).toContain("MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID");
+      const content = providerTeachingContent() as Record<string, unknown>;
+      if (attempts === 1) content.learningObjectives = [{ first: "目标甲", second: "目标乙" }];
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify(content), usage: { input_tokens: 100, output_tokens: 200, cached_tokens: 10 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("shape-retry-test"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, cachedInputTokens: 20, outputTokens: 400 } });
   });
 
   it("reads only the final message and ignores Responses reasoning items", async () => {

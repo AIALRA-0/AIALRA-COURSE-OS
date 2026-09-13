@@ -37,6 +37,7 @@ export interface TeachingGenerationResult {
   provider: string;
   model: string;
   usage: ModelRouterUsage;
+  schemaRetries?: number;
 }
 
 export interface ModelRouterInput {
@@ -76,7 +77,8 @@ export class ModelRouterGenerationError extends Error {
     readonly code: string,
     readonly model: string,
     readonly usage: ModelRouterUsage,
-    provider = "aialra-model-router"
+    provider = "aialra-model-router",
+    readonly responseShape?: string
   ) {
     super(code);
     this.name = "ModelRouterGenerationError";
@@ -182,6 +184,30 @@ function normalizeUsage(usage: Partial<ModelRouterUsage> | undefined, started: n
   };
 }
 
+function sumProviderUsage(first: ModelRouterUsage, second: ModelRouterUsage): ModelRouterUsage {
+  return {
+    inputTokens: first.inputTokens + second.inputTokens,
+    cachedInputTokens: first.cachedInputTokens + second.cachedInputTokens,
+    outputTokens: first.outputTokens + second.outputTokens,
+    apiEquivalentUsd: first.apiEquivalentUsd !== null && second.apiEquivalentUsd !== null
+      ? first.apiEquivalentUsd + second.apiEquivalentUsd : null,
+    durationMs: first.durationMs + second.durationMs
+  };
+}
+
+function describeTeachingResponseShape(value: unknown): string {
+  const shape = (item: unknown): string => Array.isArray(item)
+    ? `array:${item.length}:${item.length ? typeof item[0] : "empty"}`
+    : item === null ? "null" : typeof item;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return `root=${shape(value)}`;
+  const record = value as Record<string, unknown>;
+  const fields = ["learningObjectives", "priorKnowledge", "misconceptions", "coverageEvidence", "questions"]
+    .map((key) => `${key}=${Object.hasOwn(record, key) ? shape(record[key]) : "missing"}`);
+  const wrappers = ["teachingPackage", "package", "content", "result", "data"]
+    .filter((key) => Object.hasOwn(record, key));
+  return `root=object;${fields.join(";")};wrappers=${wrappers.join(",") || "none"}`;
+}
+
 export function modelRouterFromEnvironment(): ModelRouterClient | undefined {
   const baseUrl = process.env.MODEL_ROUTER_URL;
   const apiKey = process.env.MODEL_ROUTER_API_KEY;
@@ -231,8 +257,25 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly connection: ProviderConnection) {}
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
+    let firstFailure: ModelRouterGenerationError;
+    try {
+      return await this.generateOnce(input);
+    } catch (error) {
+      if (!(error instanceof ModelRouterGenerationError) || !error.code.startsWith("MODEL_ROUTER_")) throw error;
+      firstFailure = error;
+    }
+    try {
+      const recovered = await this.generateOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:schema-retry` }, firstFailure.code);
+      return { ...recovered, usage: sumProviderUsage(firstFailure.usage, recovered.usage), schemaRetries: 1 };
+    } catch (error) {
+      if (!(error instanceof ModelRouterGenerationError)) throw error;
+      throw new ModelRouterGenerationError(error.code, error.model, sumProviderUsage(firstFailure.usage, error.usage), error.provider, error.responseShape);
+    }
+  }
+
+  private async generateOnce(input: ModelRouterInput, previousShapeError?: string): Promise<TeachingGenerationResult> {
     const started = Date.now();
-    const request = this.buildRequest(input);
+    const request = this.buildRequest(input, previousShapeError);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180_000);
     let response: Response;
@@ -265,14 +308,16 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       return { content, provider: this.connection.providerId, model: body.model || this.connection.model, usage };
     } catch (error) {
       const code = error instanceof Error && /^[A-Z0-9_:-]+$/.test(error.message) ? error.message : "MODEL_PROVIDER_INVALID_TEACHING_PACKAGE";
-      throw new ModelRouterGenerationError(code, body.model || this.connection.model, usage, this.connection.providerId);
+      throw new ModelRouterGenerationError(code, body.model || this.connection.model, usage, this.connection.providerId, describeTeachingResponseShape(content));
     }
   }
 
-  private buildRequest(input: ModelRouterInput) {
+  private buildRequest(input: ModelRouterInput, previousShapeError?: string) {
     const baseUrl = this.connection.baseUrl.replace(/\/$/, "");
     const text = modelInput(input);
-    const instruction = professorInstructions(input.language);
+    const instruction = professorInstructions(input.language) + (previousShapeError
+      ? `\n\n上一次输出未通过结构校验（${previousShapeError}）。请重新生成完整的单个 JSON 对象；learningObjectives、priorKnowledge 和 misconceptions 必须是字符串数组，不要包裹在外层对象中。`
+      : "");
     const headers = { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey || randomUUID() };
     if (this.connection.protocol === "responses") {
       return {

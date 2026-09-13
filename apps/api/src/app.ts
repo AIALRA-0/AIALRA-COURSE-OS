@@ -2435,7 +2435,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
         : deterministicTeachingPackage(page);
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
-      await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens });
+      await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
       if (runtimeModelRouter) {
         let coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
         let validatedCoverageEvidence = coverageIssues.length === 0 ? structuredClone(generation.content.coverageEvidence) : undefined;
@@ -2483,7 +2483,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
             sourceDensity: blueprint.resourcePackage.sourceDensity
           });
           repairIssues = [...new Set([...coverageIssues, ...narrativeIssues])];
-          await appendGenerationStageEvent(jobId, page.id, "repair", "completed", dependencies, { repairAttempt, provider: repaired.provider, model: repaired.model, inputTokens: repaired.usage.inputTokens, outputTokens: repaired.usage.outputTokens, remainingIssueCount: repairIssues.length, remainingIssues: repairIssues });
+          await appendGenerationStageEvent(jobId, page.id, "repair", "completed", dependencies, { repairAttempt, provider: repaired.provider, model: repaired.model, inputTokens: repaired.usage.inputTokens, outputTokens: repaired.usage.outputTokens, schemaRetries: repaired.schemaRetries ?? 0, remainingIssueCount: repairIssues.length, remainingIssues: repairIssues });
         }
         if (!requiredRepair) {
           await appendGenerationStageEvent(jobId, page.id, "repair", "skipped", dependencies, { reason: "没有发现需要修复的质量问题" });
@@ -2556,7 +2556,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies): Promis
           }
         });
       }
-      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120) } : {});
+      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {});
     }
   }
   await dependencies.operations.mutate((state) => {
