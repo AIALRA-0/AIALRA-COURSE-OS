@@ -115,10 +115,15 @@ describe("ReadWeave ETAPI adapter", () => {
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
     pageNoteId = (await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "native-qa-draft" })).readweaveNoteId!;
     const writesBefore = remote.requests.filter((item) => item.method !== "GET").length;
+    const requestsBefore = remote.requests.length;
     const result = await api.listNativePageQuestions("page-1");
     expect(result.questions).toEqual([{ objectId: "object-1", title: "为什么要保留状态？", excerpt: "因为下一步需要它", updatedAt: undefined }]);
     expect(result.noteUrl).toContain(pageNoteId);
+    expect(await api.listNativePageQuestions("page-1", "another-workspace")).toEqual({ pageId: "page-1", questions: [] });
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
+    const readRequests = remote.requests.slice(requestsBefore);
+    expect(readRequests.filter((item) => item.path === "/notes")).toHaveLength(2);
+    expect(readRequests.some((item) => item.path.startsWith("/notes/") && item.path.endsWith("/content") && !item.path.includes("link-") && !item.path.includes("object-"))).toBe(false);
     expect(nativeRequests.every((item) => item.startsWith("GET "))).toBe(true);
   });
   it("creates the course tree and imports direct block edits as a new revision", async () => {
@@ -390,7 +395,25 @@ class FakeEtapi {
     if (path === "/notes" && (init?.method ?? "GET") === "GET") {
       const query = url.searchParams.get("search") ?? "";
       const match = /^#([^=]+)=(.*)$/.exec(query);
-      const results = [...this.notes.entries()].filter(([, note]) => !note.deleted && match && note.labels[match[1]!] === match[2]).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
+      const value = match?.[2]?.replace(/^"|"$/g, "");
+      const ancestor = url.searchParams.get("ancestorNoteId");
+      const isDescendant = (noteId: string): boolean => {
+        if (!ancestor) return true;
+        const pending = [noteId];
+        const seen = new Set<string>();
+        while (pending.length > 0) {
+          const current = pending.pop()!;
+          if (current === ancestor) return true;
+          if (seen.has(current)) continue;
+          seen.add(current);
+          for (const branchId of this.notes.get(current)?.parentBranchIds ?? []) {
+            const parent = this.branches.get(branchId)?.parentNoteId;
+            if (parent) pending.push(parent);
+          }
+        }
+        return false;
+      };
+      const results = [...this.notes.entries()].filter(([noteId, note]) => !note.deleted && match && note.labels[match[1]!] === value && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
       return Response.json({ results });
     }
     if (path === "/create-note" && init?.method === "POST") {

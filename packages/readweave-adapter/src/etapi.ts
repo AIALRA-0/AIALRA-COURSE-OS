@@ -322,11 +322,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return pageId ? questions.filter((item) => item.pageId === pageId) : questions;
   }
 
-  async listNativePageQuestions(pageId: string): Promise<import("@course-os/contracts").ReadWeavePageQuestions> {
-    const state = await this.readState();
-    const draft = state.drafts.find((item) => item.pageId === pageId && item.workspaceId === this.workspaceId);
-    const pageNoteId = draft && (state.projections.drafts[draft.id]?.pageNoteId ?? draft.readweaveNoteId);
-    if (!pageNoteId) return { pageId, questions: [] };
+  async listNativePageQuestions(pageId: string, workspaceId = this.workspaceId): Promise<import("@course-os/contracts").ReadWeavePageQuestions> {
+    if (workspaceId !== this.workspaceId || !/^[A-Za-z0-9:._-]{1,256}$/.test(pageId) || !/^[A-Za-z0-9:._-]{1,256}$/.test(workspaceId)) return { pageId, questions: [] };
+    // The structured index is tens of megabytes. Search the verified workspace
+    // and page labels instead of loading it for every learner-side QA refresh.
+    const workspaceQuery = new URLSearchParams({ search: `#courseOsWorkspaceId="${workspaceId}"`, ancestorNoteId: this.config.parentNoteId, ancestorDepth: "lt5", fastSearch: "true" });
+    const workspaces = (await this.request<SearchResponse>(`/notes?${workspaceQuery.toString()}`)).results;
+    if (workspaces.length !== 1) return { pageId, questions: [] };
+    const pageQuery = new URLSearchParams({ search: `#courseOsObjectId="${pageId}"`, ancestorNoteId: workspaces[0]!.noteId, ancestorDepth: "lt12", fastSearch: "true" });
+    const pages = (await this.request<SearchResponse>(`/notes?${pageQuery.toString()}`)).results.filter((item) => item.type === "text");
+    if (pages.length !== 1) return { pageId, questions: [] };
+    const pageNoteId = pages[0]!.noteId;
     const pageNote = await this.getNote(pageNoteId);
     const noteIds = new Set([pageNoteId, ...(pageNote.childNoteIds ?? [])]);
     const directChildren = pageNote.childNoteIds ?? [];
@@ -346,7 +352,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (!title) continue;
       byObject.set(link.objectId, { objectId: link.objectId, title, excerpt: plainReadWeaveText(link.displayBody ?? object.body ?? "").slice(0, 500), updatedAt: object.updatedAt });
     }
-    return { pageId, noteUrl: (await this.getDeepLink(pageNoteId))?.url, questions: [...byObject.values()] };
+    const base = trustedPublicBase(this.config.publicUrl || "https://readweave.example.com");
+    return { pageId, noteUrl: `${base.origin}/#root/${encodeURIComponent(pageNoteId)}`, questions: [...byObject.values()] };
   }
 
   private async readNativeLinks(): Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]> {

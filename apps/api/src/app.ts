@@ -467,11 +467,12 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/pages/:id/readweave-questions", async (request, response) => {
     const workspaceId = request.header("X-Workspace-Id") || "personal";
     try {
+      const reader = dependencies.readweave.listNativePageQuestions;
+      const native = reader ? await reader.call(dependencies.readweave, request.params.id, workspaceId) : undefined;
+      if (native?.noteUrl) return response.json(native);
       const source = findPageSource(await listWorkspaceReleases(dependencies.readweave, workspaceId), request.params.id);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
-      const reader = dependencies.readweave.listNativePageQuestions;
-      if (!reader) return response.json({ pageId: request.params.id, questions: [] });
-      response.json(await reader.call(dependencies.readweave, request.params.id));
+      response.json(native ?? { pageId: request.params.id, questions: [] });
     } catch {
       sendError(request, response, 503, "READWEAVE_NATIVE_QA_UNAVAILABLE", "ReadWeave 问答记录暂时无法读取，请稍后重试", true);
     }

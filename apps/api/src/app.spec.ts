@@ -32,6 +32,21 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("serves a workspace-scoped native QA note without scanning every release", async () => {
+    const { app, readweave, release } = await seededApp();
+    const pageId = release.pages[0]!.id;
+    const nativeReader = vi.fn(async (requestedPageId: string, workspaceId: string) => workspaceId === "personal"
+      ? { pageId: requestedPageId, noteUrl: "https://readweave.example.com/#root/known-page", questions: [] }
+      : { pageId: requestedPageId, questions: [] });
+    Object.assign(readweave, { listNativePageQuestions: nativeReader });
+    const listReleases = vi.spyOn(readweave, "listReleases");
+    const result = await request(app).get(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`).set("X-Workspace-Id", "personal").expect(200);
+    expect(result.body.noteUrl).toBe("https://readweave.example.com/#root/known-page");
+    expect(nativeReader).toHaveBeenCalledWith(pageId, "personal");
+    expect(listReleases).not.toHaveBeenCalled();
+    await request(app).get(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`).set("X-Workspace-Id", "other-workspace").expect(404);
+  });
+
   it("accepts a sourced excerpt inside a coverage explanation without requiring the whole sentence verbatim", () => {
     const page = {
       ...testRelease().pages[0]!,
