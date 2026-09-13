@@ -86,6 +86,7 @@ describe("learner-facing teaching narrative", () => {
 
   it("keeps source course codes and quoted slide labels while rejecting unexplained English", () => {
     expect(hasUnpairedEnglishPhrase("课程编号 EE 680，强化学习 RL 即强化学习，原页“Interconnections between partitions”对应连接目标")).toBe(false);
+    expect(hasUnpairedEnglishPhrase('目录中 "Google RL Floorplanner" 是原图引用的一级条目名称')).toBe(false);
     expect(hasUnpairedEnglishPhrase("作者发表于 Bell System Technical Journal 的文章给出原始方法")).toBe(false);
     expect(hasUnpairedEnglishPhrase("上一页说 PDA 会处理输入，读者尚不知道这个缩写是什么")).toBe(true);
     expect(hasUnpairedEnglishPhrase("Graph Encoder 直接决定输出")).toBe(true);
@@ -117,6 +118,8 @@ describe("learner-facing teaching narrative", () => {
     const boundary = "把目录中的标题当成已经解释过的概念；这一页只有名称和阅读顺序，没有定义与做法；正确判断是先将它当作后续章节的入口，核对办法是到对应章节找定义";
     const input = { ...valid, lessonFlowVersion: 2 as const, misconceptions: [boundary] };
     expect(validateTeachingNarrative(input)).not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
+    expect(validateTeachingNarrative({ ...input, misconceptions: ['把 "Results" 当成基础部分的子条目；错因是只看到条目靠后，没有核对缩进；正确判断是两者同级；检查办法是比较行首是否对齐'] }))
+      .not.toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
     expect(validateTeachingNarrative({ ...input, misconceptions: [`${boundary} - 以为右侧曲线与左侧柱状图来自同一实验；两张图的横轴不同，因此必须分别比较`] })).toContain("TEACHING_MISCONCEPTIONS_PACKED");
   });
 

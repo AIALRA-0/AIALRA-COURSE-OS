@@ -135,7 +135,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     }
     for (const misconception of input.misconceptions) {
       if (/\s+[-*+]\s+(?=[\p{Script=Han}“])|\n\s*[-*+]\s/u.test(misconception)) issues.push("TEACHING_MISCONCEPTIONS_PACKED");
-      const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆|只有|没有|未给出|未说明|不包含)/u.test(misconception);
+      const hasReason = /(因为|由于|原因|错因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆|只有|没有|未给出|未说明|不包含)/u.test(misconception);
       const clauses = misconception.split(/[；;]/).map((clause) => clause.trim()).filter(Boolean);
       const hasExplainedCorrection = /[：:][^；;。\n]{18,}[；;][^；;。\n]{12,}/u.test(misconception)
         || (clauses.length >= 3 && clauses[0]!.length >= 8 && clauses[1]!.length >= 15 && clauses.slice(2).some((clause) => clause.length >= 12))
@@ -243,6 +243,7 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
     .replace(/\b[A-Z]{2,8}\s*即[\p{Script=Han}]{2,20}/gu, "")
     .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")
     .replace(/“[A-Za-z][^”\n]{2,100}”/gu, "")
+    .replace(/"[A-Za-z][^"\n]{2,100}"/gu, "")
     .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
   const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
   return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
