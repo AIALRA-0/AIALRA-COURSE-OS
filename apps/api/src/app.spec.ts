@@ -59,6 +59,8 @@ describe("Course OS API", () => {
       coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "正文写明：接着用同一组权重计算边表示，并说明维度条件。" }]
     } as TeachingPackage;
     expect(validateTeachingCoverageEvidence(page, content)).toEqual([]);
+    const paraphrasedPage = { ...page, atoms: [{ ...page.atoms[0]!, observation: "Remove the value prediction layer" }] };
+    expect(validateTeachingCoverageEvidence(paraphrasedPage, { ...content, fullExplanationMarkdown: "先去掉价值预测层，再把编码器接入策略网络", coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "先移除价值预测层，然后连接策略网络" }] })).toEqual([]);
     expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "只声称已经覆盖这个片段，但正文没有对应的连续讲解。" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
   });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
@@ -450,6 +452,7 @@ describe("Course OS API", () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
+        result.content.priorKnowledge = ["输入条件：先确认参与计算的对象和输入范围，只有满足规则前提时才能计算结果\n输出结果：计算结束后核对输出是否属于允许范围，避免把中间值误当成最终答案"];
         result.content.misconceptions = ["不要跳过输入条件"];
         result.content.coverageEvidence = [{ atomId: "atom-source", coveredFields: ["observation"], explanation: "这段解释并没有出现在完整讲解正文之中" }];
         return result;
@@ -460,6 +463,7 @@ describe("Course OS API", () => {
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], completedPageIds: [] });
     const draft = await readweave.getDraftByPage("page-1");
     expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:atom-source"]) } } });
+    expect(draft?.page.lessonSections?.find((section) => section.kind === "prior_knowledge")?.items).toHaveLength(2);
     expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
   }, 60_000);
 

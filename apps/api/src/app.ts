@@ -2735,7 +2735,9 @@ export function validateTeachingCoverageEvidence(page: CourseRelease["pages"][nu
 }
 
 function hasSharedEvidenceFragment(evidence: string, explanation: string): boolean {
-  const minimumLength = 12;
+  // Short technical terms and Chinese object names can be complete evidence
+  // even when the surrounding sentence is paraphrased.
+  const minimumLength = 5;
   for (let offset = 0; offset <= evidence.length - minimumLength; offset += 1) {
     if (explanation.includes(evidence.slice(offset, offset + minimumLength))) return true;
   }
@@ -2744,12 +2746,19 @@ function hasSharedEvidenceFragment(evidence: string, explanation: string): boole
 
 function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {
   const normalize = (value: string) => normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(value));
+  const priorKnowledge = content.priorKnowledge.flatMap((value) => {
+    const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,40}：\s*.{10,}$/u.test(line))) {
+      return lines.map((line) => line.replace(/^[-*]\s*/, ""));
+    }
+    return [normalize(value)];
+  });
   return {
     ...content,
     chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
     learningObjectives: content.learningObjectives.map(normalize),
     mainContentMarkdown: normalize(content.mainContentMarkdown),
-    priorKnowledge: content.priorKnowledge.map(normalize),
+    priorKnowledge,
     fullExplanationMarkdown: normalize(content.fullExplanationMarkdown),
     misconceptions: content.misconceptions.map(normalize),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
