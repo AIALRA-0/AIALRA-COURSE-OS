@@ -81,6 +81,7 @@ describe("learner-facing teaching narrative", () => {
     const explained = { ...valid, lessonFlowVersion: 2 as const, priorKnowledge: ["输入条件：规则只对满足输入条件的对象执行，因此要先确认对象是否满足条件，再计算并核对结果是否符合目标"], misconceptions: ["把未满足条件的结果直接当作答案会出错，由于规则的前提不成立，应先核对输入条件再判断结果"] };
     expect(validateTeachingNarrative(explained)).toEqual([]);
     expect(validateTeachingNarrative({ ...explained, misconceptions: ["以为可以直接接入完整模型：完整网络末端留着价值预测层，输出的是奖励数值而不是策略所需的表示；核对时检查末端是否仍包含价值预测输出"] })).toEqual([]);
+    expect(validateTeachingNarrative({ ...explained, misconceptions: ["把一万个设计样本当成推理阶段的数据规模；它在材料中紧跟预训练步骤，描述的是学习编码器时使用的有标注样本数量；核对办法是回到原文训练步骤，确认数字所在位置"] })).toEqual([]);
     expect(validateTeachingNarrative({ ...explained, misconceptions: ["不要直接套用结果"] })).toContain("TEACHING_MISCONCEPTION_REASON_MISSING");
   });
 

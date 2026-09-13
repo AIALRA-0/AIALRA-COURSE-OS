@@ -132,7 +132,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     }
     for (const misconception of input.misconceptions) {
       const hasReason = /(因为|由于|原因|导致|所以|因此|错误在于|问题在于|不成立|不满足|混淆)/u.test(misconception);
-      const hasExplainedCorrection = /[：:][^；;。\n]{24,}[；;][^；;。\n]{12,}/u.test(misconception);
+      const clauses = misconception.split(/[；;]/).map((clause) => clause.trim()).filter(Boolean);
+      const hasExplainedCorrection = /[：:][^；;。\n]{24,}[；;][^；;。\n]{12,}/u.test(misconception)
+        || (clauses.length >= 3 && clauses[0]!.length >= 12 && clauses[1]!.length >= 24 && clauses.slice(2).some((clause) => clause.length >= 12));
       const hasCorrection = /(正确|应当|应该|检查|核对|判断|验证|确认|应先|应以|可通过|可以通过)/u.test(misconception);
       if ((!hasReason && !hasExplainedCorrection) || !hasCorrection) issues.push("TEACHING_MISCONCEPTION_REASON_MISSING");
     }
