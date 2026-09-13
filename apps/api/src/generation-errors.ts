@@ -20,6 +20,7 @@ function normalizeCode(raw: string): string {
   if (raw.includes("429") || raw.includes("RATE_LIMIT")) return "PROVIDER_RATE_LIMIT";
   if (raw.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (raw.includes("NETWORK")) return "PROVIDER_NETWORK_FAILURE";
+  if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
   if (raw.includes("READWEAVE") && raw.includes("MISMATCH")) return "READWEAVE_HASH_MISMATCH";
   if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
   if (raw.includes("JSON") || raw.includes("OUTPUT")) return "MODEL_INVALID_OUTPUT";
@@ -34,6 +35,7 @@ function safeMessage(code: string): string {
   if (code === "PROVIDER_AUTH") return "模型服务认证失败，请检查供应商凭据";
   if (code === "PROVIDER_RATE_LIMIT") return "模型服务达到限额，请稍后重试";
   if (code === "PROVIDER_TIMEOUT") return "模型服务响应超时，当前页面未完成生成";
+  if (code === "PROVIDER_INVALID_REQUEST") return "模型服务拒绝了生成请求，请检查当前提示词和输出结构";
   if (code === "READWEAVE_UNAVAILABLE") return "ReadWeave 暂时不可访问，内容尚未保存";
   return "当前页面生成失败，请根据请求编号重试";
 }

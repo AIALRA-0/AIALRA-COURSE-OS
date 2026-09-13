@@ -38,6 +38,6 @@
       }
     }
   },
-  "required": ["learningObjectives", "mainContentMarkdown", "priorKnowledge", "fullExplanationMarkdown", "misconceptions", "coverageEvidence", "questions"],
+  "required": ["chapterBridgeMarkdown", "learningObjectives", "mainContentMarkdown", "priorKnowledge", "fullExplanationMarkdown", "misconceptions", "coverageEvidence", "questions"],
   "additionalProperties": false
 }
