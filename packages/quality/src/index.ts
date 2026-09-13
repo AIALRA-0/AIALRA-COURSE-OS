@@ -249,6 +249,20 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
   return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
 }
 
+/** Keep a source label quoted when a question repeats it outside code or math. */
+export function quoteRepeatedSourceLabels(text: string, explanation: string): string {
+  const labels = [...new Set([...explanation.matchAll(/(?:“([^”\n]{2,80})”|"([^"\n]{2,80})")/gu)]
+    .map((match) => match[1] || match[2] || "")
+    .filter((label) => /^[A-Za-z][A-Za-z0-9 .:/_-]*$/u.test(label)))]
+    .sort((left, right) => right.length - left.length);
+  return text.split(/(`[^`]*`|\$[^$]*\$|https?:\/\/[^\s）”"]+)/gu).map((part, index) => {
+    if (index % 2 === 1) return part;
+    return labels.reduce((current, label) => current.replace(
+      new RegExp(`(?<![A-Za-z0-9“"])${escapeRegExp(label)}(?![A-Za-z0-9”"])`, "gu"), `“${label}”`
+    ), part);
+  }).join("");
+}
+
 export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";
 
 export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): TeachingNarrativeField[] {

@@ -13,7 +13,7 @@ export type MasteryState = "unseen" | "introduced" | "practicing" | "mastered" |
 export type WorkspaceMode = "studio" | "learn" | "review";
 export type LessonSectionKind = "chapter_bridge" | "learning_objectives" | "main_content" | "prior_knowledge" | "full_explanation" | "misconceptions";
 export type QuestionKind = "comprehension" | "multiple_choice";
-export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "question_refill";
+export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "semantic_audit" | "question_refill";
 export type CourseTreeNodeKind = "workspace" | "course" | "module" | "material" | "section" | "release" | "page" | "trash";
 export type TreeNodeCapability =
   | "create"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -94,6 +94,18 @@ describe("learner-facing teaching narrative", () => {
     expect(hasUnpairedEnglishPhrase("参考文献发表于《Bell System Technical Journal》，本页没有给出该论文的实验数据")).toBe(false);
     expect(hasUnpairedEnglishPhrase("Kernighan-Lin 算法按交换顶点改善划分", ["Kernighan-Lin"])).toBe(false);
     expect(validateTeachingNarrative({ ...valid, sourceTitle: "Kernighan-Lin 算法规则", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\nKernighan-Lin 算法（Kernighan-Lin Algorithm）：通过交换顶点改善划分，原图页脚引用《Bell System Technical Journal》作为出处`, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
+  });
+
+  it("quotes a previously cited source label consistently in questions and answers", () => {
+    const source = "原图的“Google RL Floorplanner”列在目录第二部分";
+    expect(quoteRepeatedSourceLabels("Google RL Floorplanner 属于哪一部分？", source))
+      .toBe("“Google RL Floorplanner” 属于哪一部分？");
+    expect(quoteRepeatedSourceLabels("“Google RL Floorplanner” 已列出", source))
+      .toBe("“Google RL Floorplanner” 已列出");
+    expect(quoteRepeatedSourceLabels("`Google RL Floorplanner` 与 $Google RL Floorplanner$", source))
+      .toBe("`Google RL Floorplanner` 与 $Google RL Floorplanner$");
+    expect(quoteRepeatedSourceLabels("Graph Encoder 仍需先定义", source))
+      .toBe("Graph Encoder 仍需先定义");
   });
 
   it("allows a source model name only after the page actually explains it", () => {

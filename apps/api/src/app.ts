@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2550,6 +2550,42 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (!requiredRepair) {
           await appendGenerationStageEvent(jobId, page.id, "repair", "skipped", dependencies, { reason: "没有发现需要修复的质量问题" });
         }
+        if (repairIssues.length === 0 && blueprint.resourcePackage.pageKind !== "cover" && blueprint.resourcePackage.pageKind !== "agenda"
+          && (Boolean(sourceImageDataUrl) || page.anchors.some((anchor) => anchor.kind === "text" && Boolean(anchor.text?.trim())))) {
+          const beforeAudit = generation;
+          const spentOnPage = generationUsageCostUsd(beforeAudit);
+          if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
+          await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "started", dependencies);
+          const audited = await runtimeModelRouter.generateTeachingPackage({
+            pageTitle: page.title,
+            pageNumber: page.pageNumber,
+            sourceText,
+            previousPageContext,
+            sourceImageDataUrl,
+            blueprint,
+            writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+            language: currentJob.language || "zh-CN",
+            qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+            idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-audit:v1`,
+            maxCostUsd: pageCostLimitUsd - spentOnPage,
+            stage: "repair",
+            repair: { issues: ["TEACHING_SEMANTIC_CROSSCHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: beforeAudit.content }
+          });
+          audited.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(audited.content.mainContentMarkdown, audited.content.fullExplanationMarkdown);
+          audited.content = normalizeTeachingPackageMath(audited.content);
+          const auditIssues = [...new Set([
+            ...validateTeachingCoverageEvidence(page, audited.content),
+            ...validateTeachingNarrative({ ...audited.content, lessonFlowVersion: 2, strictWritingStyle: true, sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+          ])];
+          const changedFields = (Object.keys(beforeAudit.content) as Array<keyof TeachingPackage>)
+            .filter((field) => stableStringify(beforeAudit.content[field]) !== stableStringify(audited.content[field]));
+          generation = combineTeachingGenerations(beforeAudit, audited);
+          if (auditIssues.length > 0) {
+            generation.content = beforeAudit.content;
+            repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
+          }
+          await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, { provider: audited.provider, model: audited.model, inputTokens: audited.usage.inputTokens, outputTokens: audited.usage.outputTokens, schemaRetries: audited.schemaRetries ?? 0, changedFields, issueCount: auditIssues.length });
+        }
         rejectedNarrativeIssues = repairIssues;
         if (repairIssues.length > 0 && release.lifecycle !== "draft_source") throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
       }
@@ -2834,16 +2870,18 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
     }
     return [normalize(value)];
   });
+  const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown));
+  const quoteQuestionLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
     ...content,
     chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
     learningObjectives: content.learningObjectives.map(normalize),
     mainContentMarkdown: normalize(content.mainContentMarkdown),
     priorKnowledge,
-    fullExplanationMarkdown: normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)),
+    fullExplanationMarkdown,
     misconceptions: content.misconceptions.map(normalize),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
-    questions: content.questions.map((item) => ({ ...item, prompt: normalize(item.prompt), options: item.options?.map(normalize), expectedAnswer: normalize(item.expectedAnswer), explanation: normalize(item.explanation) }))
+    questions: content.questions.map((item) => ({ ...item, prompt: quoteQuestionLabel(item.prompt), options: item.options?.map(quoteQuestionLabel), expectedAnswer: quoteQuestionLabel(item.expectedAnswer), explanation: quoteQuestionLabel(item.explanation) }))
   };
 }
 

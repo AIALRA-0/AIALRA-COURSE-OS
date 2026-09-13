@@ -485,6 +485,52 @@ describe("Course OS API", () => {
     expect((await operations.read()).events.some((event) => event.streamId === created.body.id && event.type === "generation.bridge.omitted")).toBe(true);
   }, 60_000);
 
+  it("cross-checks technical teaching after structural repair and records the bounded model pass", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.title = "公式计算";
+    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式 $x=1+1=2$" }];
+    const calls: Array<{ stage: string; issues?: string[] }> = [];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        calls.push({ stage: input.stage || "teach", issues: input.repair?.issues });
+        const result = testTeachingResult(0.001);
+        if (input.repair?.issues.includes("TEACHING_SEMANTIC_CROSSCHECK")) result.content.fullExplanationMarkdown += "\n\n核验结果说明输入的一加一等于二，原值与输出值没有混淆";
+        return result;
+      }
+    };
+    const { app, operations, readweave, release } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-audit-technical-page")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.002 });
+    expect(calls).toEqual([{ stage: "teach", issues: undefined }, { stage: "repair", issues: ["TEACHING_SEMANTIC_CROSSCHECK"] }]);
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("核验结果说明输入");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { stage?: string }).stage === "semantic_audit")).toBe(true);
+  }, 60_000);
+
+  it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {
+    const candidate = testRelease();
+    candidate.lifecycle = "draft_source";
+    candidate.pages[0]!.pageNumber = 2;
+    candidate.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式 $x=1+1=2$" }];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (input.repair?.issues.includes("TEACHING_SEMANTIC_CROSSCHECK")) result.content.fullExplanationMarkdown += "\n\nGraph Encoder 没有解释就直接出现";
+        return result;
+      }
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, candidate);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-audit-invalid-page")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], spentUsd: 0.002 });
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.status).toBe("needs_review");
+    expect(draft?.page.quality.issues).toContain("TEACHING_SEMANTIC_AUDIT_INVALID");
+  }, 60_000);
+
   it("repairs a structurally valid but overlong model draft once before saving", async () => {
     const calls: Array<{ stage?: string; repair?: { issues: string[]; maximumExplanationCharacters: number } }> = [];
     const coveredRelease = testRelease();
