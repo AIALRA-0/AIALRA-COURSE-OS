@@ -297,7 +297,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       refreshIdleTimeout();
       let body: ProviderResponseBody;
       try {
-        body = useResponsesStream && response.headers?.get("content-type")?.includes("text/event-stream") && response.body
+        const contentType = response.headers?.get("content-type") || "";
+        body = useResponsesStream && response.body && !contentType.includes("application/json")
           ? await readResponsesEventStream(response.body, refreshIdleTimeout)
           : await response.json() as ProviderResponseBody;
       } catch (error) {
@@ -796,7 +797,7 @@ async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onAc
   const decoder = new TextDecoder();
   let buffer = "";
   let finalResponse: ProviderResponseBody | undefined;
-  const processEvent = (block: string) => {
+  const processEvent = (block: string): ProviderResponseBody | undefined => {
     const data = block.split(/\r?\n/u).filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trimStart()).join("\n");
     if (!data) return;
@@ -804,6 +805,7 @@ async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onAc
     if (["response.completed", "response.incomplete", "response.failed"].includes(event.type || "") && event.response) {
       finalResponse = event.response;
     }
+    return finalResponse;
   };
   try {
     while (true) {
@@ -813,7 +815,13 @@ async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onAc
       buffer += decoder.decode(value, { stream: true });
       const blocks = buffer.split(/\r?\n\r?\n/u);
       buffer = blocks.pop() || "";
-      for (const block of blocks) processEvent(block);
+      for (const block of blocks) {
+        const completed = processEvent(block);
+        if (completed) {
+          await reader.cancel();
+          return completed;
+        }
+      }
     }
     buffer += decoder.decode();
     if (buffer.trim()) processEvent(buffer);

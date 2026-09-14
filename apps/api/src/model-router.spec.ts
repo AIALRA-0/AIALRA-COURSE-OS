@@ -214,7 +214,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
         controller.enqueue(encoder.encode(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", sequence_number: 0, response: { status: "in_progress" } })}\n\n`));
         controller.enqueue(encoder.encode(`event: response.completed\ndata: ${JSON.stringify(final)}\n\n`));
         controller.close();
-      } }), { headers: { "Content-Type": "text/event-stream" } });
+      } }), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }));
     const result = await new HttpProviderTeachingClient({
       providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token",
