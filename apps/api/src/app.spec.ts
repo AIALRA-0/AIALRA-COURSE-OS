@@ -32,6 +32,18 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("reads a structured page and its release without listing every release", async () => {
+    const release = testRelease();
+    release.id = "structured-release";
+    release.pageIds = ["structured-release:page:1"];
+    release.pages[0]!.id = release.pageIds[0]!;
+    const { app, readweave } = await seededApp(undefined, release);
+    const listReleases = vi.spyOn(readweave, "listReleases").mockRejectedValue(new Error("FULL_RELEASE_SCAN_FORBIDDEN"));
+    expect((await request(app).get("/api/v1/pages/structured-release:page:1/lesson").expect(200)).body.page.id).toBe(release.pageIds[0]);
+    expect((await request(app).get("/api/v1/releases/structured-release").expect(200)).body.id).toBe(release.id);
+    expect(listReleases).not.toHaveBeenCalled();
+  });
+
   it("applies only exact, unambiguous semantic corrections and preserves unrelated fields", () => {
     const before = testTeachingResult(0).content;
     before.misconceptions[0] = "原始比值是 1.2，但裁剪后仍是 1.2";

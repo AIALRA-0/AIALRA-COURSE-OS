@@ -437,7 +437,7 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const pageId = request.params.id;
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const source = findPageSource(await listWorkspaceReleases(dependencies.readweave, workspaceId), pageId);
+      const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, pageId);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
       const saved = await dependencies.readweave.getDraftByPage(pageId);
       if (saved && saved.workspaceId === workspaceId && saved.courseId === source.release.courseId) return response.json(saved);
@@ -448,8 +448,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/pages/:id/lesson", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const releases = await listWorkspaceReleases(dependencies.readweave, workspaceId);
-      const source = findPageSource(releases, request.params.id);
+      const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, request.params.id);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
       const candidateDraft = await dependencies.readweave.getDraftByPage(request.params.id);
       const draft = candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined;
@@ -2022,6 +2021,16 @@ function findPageSource(releases: CourseRelease[], pageId: string) {
   return undefined;
 }
 
+async function findWorkspacePageSource(readweave: ReadWeaveCourseApi, workspaceId: string, pageId: string) {
+  const marker = pageId.lastIndexOf(":page:");
+  if (marker > 0) {
+    const release = await getWorkspaceRelease(readweave, pageId.slice(0, marker), workspaceId);
+    const page = release?.pages.find((item) => item.id === pageId);
+    if (release && page) return { release, page };
+  }
+  return findPageSource(await listWorkspaceReleases(readweave, workspaceId), pageId);
+}
+
 function formalWorkspaceCourses(courses: CourseProject[], workspaceId: string): CourseProject[] {
   return courses.filter((course) => course.workspaceId === workspaceId && course.status !== "archived" && !isRegressionAsset(course.id, course.title));
 }
@@ -2036,7 +2045,9 @@ async function listWorkspaceReleases(readweave: ReadWeaveCourseApi, workspaceId:
 async function getWorkspaceRelease(readweave: ReadWeaveCourseApi, releaseId: string, workspaceId: string): Promise<CourseRelease | undefined> {
   const release = await readweave.getRelease(releaseId);
   if (!release) return undefined;
-  return (await listWorkspaceReleases(readweave, workspaceId, release.courseId)).some((candidate) => candidate.id === release.id) ? release : undefined;
+  const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
+  return courses.some((course) => course.id === release.courseId)
+    && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`) ? release : undefined;
 }
 
 async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: CourseRelease, pageId: string, workspaceId: string): Promise<CourseRelease["pages"][number] | undefined> {
