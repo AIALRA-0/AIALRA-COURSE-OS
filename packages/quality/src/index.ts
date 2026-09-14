@@ -175,8 +175,16 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     };
     for (const [field, markdown] of Object.entries(mathFields)) {
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
+      if (hasMathFormattedAsCode(markdown)) issues.push(`TEACHING_MATH_AS_CODE:${field}`);
       if (hasUnqualifiedWeightedTrend(markdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
     }
+    const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
+      /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));
+    const explanationDeniesCalculation = /(?:更新后|更新结果|参数)[^。；\n]{0,30}(?:具体)?(?:数值|结果)[^。；\n]{0,18}(?:无法|不能)[^。；\n]{0,12}(?:确定|算出|计算)|(?:无法|不能)[^。；\n]{0,18}(?:确定|算出|计算)[^。；\n]{0,30}(?:更新后|更新结果|参数)(?:的)?(?:具体)?(?:数值|结果)/u.test(explanation);
+    if (objectivePromisesCalculation && explanationDeniesCalculation) issues.push("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+    const terminalRewardShown = /\$r_(?:T|\{T\})\$|\$r_(?:T|\{T\})\s*=|末端回报[^。；\n]{0,30}(?:表达式|由|组成|写成)/u.test(learnerText);
+    const terminalRewardDenied = /(?:没有|未)(?:给出|说明)[^。；\n]{0,20}(?:最终|末端)(?:奖励|回报)[^。；\n]{0,20}(?:哪里|位置|形式|表达式|数值|来源|如何)/u.test(learnerText);
+    if (terminalRewardShown && terminalRewardDenied) issues.push("TEACHING_OBJECT_PRESENCE_CONTRADICTION");
     const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
     if (hasUnpairedEnglishPhrase(learnerText, sourceNames)) issues.push("TEACHING_UNPAIRED_ENGLISH");
     const summaryLines = input.mainContentMarkdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -236,6 +244,14 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
   if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+/** Mathematical state, action and reward expressions must reach KaTeX rather than render as code. */
+function hasMathFormattedAsCode(markdown: string): boolean {
+  const spans = [...markdown.matchAll(/`([^`\r\n]{1,80})`/gu)].map((match) => match[1]!.trim());
+  if (spans.some((value) => /^(?:[A-Za-z](?:_?\d+)?\s*[=<>≤≥+*/^-]\s*-?\d|[A-Za-z]_\{?[A-Za-z0-9]+\}?)/u.test(value))) return true;
+  const compactIndexed = spans.filter((value) => /^[A-Za-z]\d+$/u.test(value));
+  return compactIndexed.length >= 2 && /(?:状态|动作|回报|奖励|参数|向量|公式)/u.test(markdown);
 }
 
 /** A symbolic weight has no guaranteed sign, so a trend conclusion needs its condition beside the claim. */

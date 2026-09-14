@@ -360,6 +360,19 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(formulaOnlyInSource)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
   });
 
+  it("rejects cross-field teaching contradictions and mathematical expressions rendered as code", () => {
+    const cannotMeetObjective = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["能够代入回报和学习率算出一轮参数更新后的结果"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n更新后的参数具体数值无法确定` };
+    expect(validateTeachingNarrative(cannotMeetObjective)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+    const mathAsCode = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n状态从 \`s0\` 经过动作 \`a0\`，回报写成 \`r0 = 0\`` };
+    expect(validateTeachingNarrative(mathAsCode)).toContain("TEACHING_MATH_AS_CODE:fullExplanationMarkdown");
+    const deniedReward = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n末端回报 $r_T$ 由三个分项组成。页面没有给出最终回报在哪里` };
+    expect(validateTeachingNarrative(deniedReward)).toContain("TEACHING_OBJECT_PRESENCE_CONTRADICTION");
+  });
+
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
     const explained = { ...valid, lessonFlowVersion: 2 as const, priorKnowledge: ["输入条件：规则只对满足输入条件的对象执行，因此要先确认对象是否满足条件，再计算并核对结果是否符合目标"], misconceptions: ["把未满足条件的结果直接当作答案会出错，由于规则的前提不成立，应先核对输入条件再判断结果"] };
     expect(validateTeachingNarrative(explained)).toEqual([]);
