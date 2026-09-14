@@ -208,6 +208,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
         issues.push("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
       }
       if (hasUnpairedEnglishPhrase(definition, sourceNames)) issues.push("TEACHING_PRIOR_UNPAIRED_ENGLISH");
+      if (/（[^）\n]*[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(label)) issues.push("TEACHING_PRIOR_ABBREVIATION_PLACEMENT");
     }
     for (const question of input.questions) {
       if (question.explanation.trim().length < 48) issues.push("TEACHING_QUESTION_EXPLANATION_TOO_SHORT");
@@ -347,6 +348,14 @@ export function normalizeBareMathSymbols(text: string): string {
       /(?<![\p{L}\p{N}])([A-Za-z]{1,3}(?:_[A-Za-z0-9{}]+|\^[A-Za-z0-9{}]+))(?![\p{L}\p{N}])/gu,
       "$$$1$"
     )).join("");
+}
+
+/** Move a trailing abbreviation before the Chinese term and keep only the official English name in parentheses. */
+export function normalizePriorDefinitionAbbreviation(text: string): string {
+  return text.replace(
+    /^(\s*)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
+    "$1$4 $2（$3）："
+  );
 }
 
 export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";

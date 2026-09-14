@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3203,11 +3203,12 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
       normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(translateMathHeadingReference(value), sourceText)), mathTerms)))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
-    const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const normalizedValue = normalizePriorDefinitionAbbreviation(normalize(value));
+    const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
       return lines.map((line) => line.replace(/^[-*]\s*/, ""));
     }
-    return [normalize(value)];
+    return [normalizedValue];
   });
   const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)
     .split(/\r?\n/)
@@ -3232,7 +3233,9 @@ function normalizeKnownTeachingTerms(markdown: string): string {
   return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[^）\r\n]+）)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\bsoftmax\b/gu, "软最大函数")
       .replace(/([\p{Script=Han}])\s+软最大函数(?=\s*[\p{Script=Han}])/gu, "$1软最大函数")
-      .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数"))
+      .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数")
+      .replace(/软最大函数(?:函数)+/gu, "软最大函数")
+      .replace(/(软最大函数|马尔可夫决策过程|策略梯度|学习率|动作概率|参数更新)(?:\s*\1)+/gu, "$1"))
     .join("");
 }
 

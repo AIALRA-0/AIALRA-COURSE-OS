@@ -119,6 +119,16 @@ describe("Course OS API", () => {
     const normalized = normalizeTeachingPackageMath(content);
     expect(normalized.questions[0]!.explanation).toBe("把 $e^0$ = 1 代入，再比较 $x_1$ 与 $x_2$");
   });
+
+  it("normalizes abbreviation placement and repeated teaching terms", () => {
+    const content = testTeachingResult(0).content;
+    content.priorKnowledge = ["马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架；描述状态与动作；按转移产生结果；用于连续决策；不同于单步分类"];
+    content.fullExplanationMarkdown += "\n\n动作概率由软最大函数函数计算";
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.priorKnowledge[0]).toMatch(/^MDP 马尔可夫决策过程（Markov Decision Process）：/u);
+    expect(normalized.fullExplanationMarkdown).toContain("动作概率由软最大函数计算");
+    expect(normalized.fullExplanationMarkdown).not.toContain("函数函数");
+  });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
     const pageId = release.pages[0]!.id;
