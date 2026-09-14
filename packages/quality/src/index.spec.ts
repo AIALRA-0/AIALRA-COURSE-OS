@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -170,6 +170,16 @@ describe("learner-facing teaching narrative", () => {
       .toBe("`Google RL Floorplanner` 与 $Google RL Floorplanner$");
     expect(quoteRepeatedSourceLabels("Graph Encoder 仍需先定义", source))
       .toBe("Graph Encoder 仍需先定义");
+  });
+
+  it("quotes contextual English labels only when they occur in the source", () => {
+    const source = "Setup\nOne episode with one action\nUpdate Rule";
+    expect(quoteContextualSourceLabels("左栏是 Setup 部分，回到页面 Update Rule 一行核对", source))
+      .toBe("左栏是 “Setup” 部分，回到页面 “Update Rule” 一行核对");
+    expect(quoteContextualSourceLabels("回到页面 Hidden Rule 一行核对", source))
+      .toBe("回到页面 Hidden Rule 一行核对");
+    expect(quoteContextualSourceLabels("代码 `Update Rule` 与原文“Setup”保持不变", source))
+      .toBe("代码 `Update Rule` 与原文“Setup”保持不变");
   });
 
   it("allows a source model name only after the page actually explains it", () => {

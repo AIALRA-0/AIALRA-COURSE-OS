@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3201,7 +3201,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(translateMathHeadingReference(value), mathTerms)))), quotedSourceLabels);
+      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(quoteContextualSourceLabels(translateMathHeadingReference(value), sourceText), mathTerms)))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
@@ -3213,18 +3213,18 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .split(/\r?\n/)
     .filter((line) => !/^(?:\s*[-*+]\s*)?[^\n]{0,60}(?:\d+\s*\/\s*\d+\s*[”"']?\s*为页码|页码[：:]\s*\d+\s*\/\s*\d+)[^\n]{0,30}$/u.test(line.trim()))
     .join("\n"));
-  const quoteQuestionLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
+  const quoteExplainedSourceLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
     ...content,
     chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : quoteRepeatedSourceLabels(
       normalize(content.chapterBridgeMarkdown), titleAcronyms.map((label) => `“${label}”`).join(" ")),
-    learningObjectives: content.learningObjectives.map(normalize),
-    mainContentMarkdown: normalize(content.mainContentMarkdown),
-    priorKnowledge,
+    learningObjectives: content.learningObjectives.map(quoteExplainedSourceLabel),
+    mainContentMarkdown: quoteExplainedSourceLabel(content.mainContentMarkdown),
+    priorKnowledge: priorKnowledge.map((value) => quoteRepeatedSourceLabels(value, fullExplanationMarkdown)),
     fullExplanationMarkdown,
-    misconceptions: content.misconceptions.map(normalize),
+    misconceptions: content.misconceptions.map(quoteExplainedSourceLabel),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
-    questions: content.questions.map((item) => ({ ...item, prompt: quoteQuestionLabel(item.prompt), options: item.options?.map(quoteQuestionLabel), expectedAnswer: quoteQuestionLabel(item.expectedAnswer), explanation: quoteQuestionLabel(item.explanation) }))
+    questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
   };
 }
 

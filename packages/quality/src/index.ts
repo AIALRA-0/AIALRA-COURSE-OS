@@ -330,6 +330,16 @@ export function quoteRepeatedSourceLabels(text: string, explanation: string): st
   }).join("");
 }
 
+/** Quote verbatim English labels when the surrounding Chinese identifies them as source UI or diagram text. */
+export function quoteContextualSourceLabels(text: string, sourceText: string): string {
+  const appearsInSource = (label: string) => new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(label)}(?![A-Za-z0-9])`, "iu").test(sourceText);
+  return text.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(
+      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+){0,5})(?=\s*(?:部分|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
+      (label) => appearsInSource(label.trim()) ? `“${label.trim()}”` : label
+    )).join("");
+}
+
 export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";
 
 export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): TeachingNarrativeField[] {

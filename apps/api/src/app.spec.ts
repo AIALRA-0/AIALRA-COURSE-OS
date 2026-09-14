@@ -5,6 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import { unpairedEnglishTeachingFields } from "@course-os/quality";
 import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
@@ -100,6 +101,16 @@ describe("Course OS API", () => {
     expect(normalized.fullExplanationMarkdown).toContain("```txt\nWhat is $W_e$ 一栏\n```");
     expect(normalized.misconceptions[0]).toContain("解释 $W_e$ 的栏目");
     expect(normalized.misconceptions[0]).not.toContain("What is");
+  });
+
+  it("keeps source labels quoted across the explanation and misconception fields", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown += "\n\n左栏是 Setup 部分，右栏给出“Update Rule”并解释参数怎样变化";
+    content.misconceptions = ["回到页面 Update Rule 一行，核对梯度是否已经展开"];
+    const normalized = normalizeTeachingPackageMath(content, "Setup\nUpdate Rule", "TINY MDP EXAMPLE");
+    expect(normalized.fullExplanationMarkdown).toContain("“Setup” 部分");
+    expect(normalized.misconceptions[0]).toContain("“Update Rule” 一行");
+    expect(unpairedEnglishTeachingFields({ ...normalized, sourceTitle: "TINY MDP EXAMPLE" })).toEqual([]);
   });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
