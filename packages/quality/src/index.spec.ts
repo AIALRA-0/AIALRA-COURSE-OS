@@ -230,6 +230,15 @@ describe("learner-facing teaching narrative", () => {
       .not.toContain("TEACHING_LAYOUT_COMMENTARY");
   });
 
+  it("rejects irrelevant absence checklists while preserving a meaningful chart limitation", () => {
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中没有横轴、纵轴、图例或表格` }))
+      .toContain("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中没有横轴、纵轴和图例，因此无法读取数值刻度` }))
+      .not.toContain("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
+  });
+
   it("turns only an empty adjacent heading into a lead sentence", () => {
     const source = "### 第一步：算比率\n\n## 比率等于新概率除以旧概率\n\n代入两项概率后得到 1.5\n\n### 第二步：比较贡献";
     expect(normalizeAdjacentTeachingHeadings(source)).toBe("### 第一步：算比率\n\n比率等于新概率除以旧概率\n\n代入两项概率后得到 1.5\n\n### 第二步：比较贡献");

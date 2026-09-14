@@ -3078,7 +3078,7 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
     else if (issue === "TEACHING_BRIDGE_UNPAIRED_ENGLISH" || issue === "TEACHING_BRIDGE_NEEDS_BLOCKS") fields.add("chapterBridgeMarkdown");
     else if (issue === "TEACHING_SUMMARY_MUST_BE_BULLETS") fields.add("mainContentMarkdown");
-    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION", "TEACHING_LAYOUT_COMMENTARY"].includes(issue)) fields.add("fullExplanationMarkdown");
+    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION", "TEACHING_LAYOUT_COMMENTARY", "TEACHING_IRRELEVANT_ABSENCE_CHECKLIST"].includes(issue)) fields.add("fullExplanationMarkdown");
     else if (issue === "TEACHING_QUESTION_EXPLANATION_TOO_SHORT") fields.add("questions");
     else return undefined;
   }
@@ -3189,6 +3189,7 @@ function hasSharedEvidenceFragment(evidence: string, explanation: string): boole
 }
 
 export function normalizeTeachingPackageMath(content: TeachingPackage, sourceText = "", sourceTitle = ""): TeachingPackage {
+  const mathTerms = [...new Set([...content.fullExplanationMarkdown.matchAll(/\\text\{\s*([A-Za-z]{8,})\s*\}/gu)].map((match) => match[1]!))];
   const sourceQuestionLabels = [...new Set([...sourceText.matchAll(/\b(?:What|How|Why|Where|When)\s+[A-Za-z][A-Za-z ]{2,65}\?/gu)]
     .map((match) => match[0].slice(0, -1).trim()))];
   const quotedSourceLabels = sourceQuestionLabels.map((label) => `“${label}”`).join(" ");
@@ -3200,7 +3201,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      translateMathHeadingReference(value))), quotedSourceLabels);
+      normalizeNearMissMathTerms(translateMathHeadingReference(value), mathTerms))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
@@ -3225,6 +3226,33 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteQuestionLabel(item.prompt), options: item.options?.map(quoteQuestionLabel), expectedAnswer: quoteQuestionLabel(item.expectedAnswer), explanation: quoteQuestionLabel(item.explanation) }))
   };
+}
+
+function normalizeNearMissMathTerms(markdown: string, mathTerms: string[]): string {
+  if (mathTerms.length === 0) return markdown;
+  return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+)/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\b[A-Za-z]{8,}\b/gu, (word) => {
+      const near = mathTerms.filter((term) => term.toLowerCase() !== word.toLowerCase()
+        && term.length >= 8 && term.slice(0, 4).toLowerCase() === word.slice(0, 4).toLowerCase()
+        && term.slice(-2).toLowerCase() === word.slice(-2).toLowerCase()
+        && Math.abs(term.length - word.length) <= 2
+        && termDistance(term.toLowerCase(), word.toLowerCase()) <= 3);
+      return near.length === 1 ? near[0]! : word;
+    })).join("");
+}
+
+function termDistance(left: string, right: string): number {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    let previous = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const before = row[j]!;
+      row[j] = Math.min(before + 1, row[j - 1]! + 1, previous + (left[i - 1] === right[j - 1] ? 0 : 1));
+      previous = before;
+    }
+  }
+  return row[right.length]!;
 }
 
 export function normalizeGeneratedMathPunctuation(value: string): string {

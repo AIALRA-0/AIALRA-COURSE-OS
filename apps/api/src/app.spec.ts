@@ -145,6 +145,17 @@ describe("Course OS API", () => {
     expect(normalizeGeneratedMathPunctuation("$$\\frac12+\u000crac12=1。$$")).toBe("$$\\frac12+\\frac12=1$$。");
     expect(normalizeGeneratedMathPunctuation("系数 $\u0009ext{Wirelength}$ 与 $\\gamma$")).toBe("系数 $\\text{Wirelength}$ 与 $\\gamma$");
   });
+  it("corrects a near-miss technical term only when the page's own formula supplies one unambiguous spelling", () => {
+    const content = {
+      chapterBridgeMarkdown: "", learningObjectives: [], priorKnowledge: [], misconceptions: [], coverageEvidence: [], questions: [],
+      mainContentMarkdown: "拥塞项是 congcyion，连接 connection 保持原样",
+      fullExplanationMarkdown: "公式 $$r=-\\text{congestion}$$ 中的 congcyion 表示拥塞；`congcyion` 是代码示例"
+    } as TeachingPackage;
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.fullExplanationMarkdown).toContain("公式 $$r=-\\text{congestion}$$ 中的 congestion 表示拥塞");
+    expect(normalized.fullExplanationMarkdown).toContain("`congcyion` 是代码示例");
+    expect(normalized.mainContentMarkdown).toContain("congestion，连接 connection 保持原样");
+  });
 
   it("reports liveness without waiting for ReadWeave", async () => {
     const { app, readweave } = await seededApp();

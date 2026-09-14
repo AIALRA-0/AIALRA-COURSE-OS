@@ -158,6 +158,12 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       || (input.pageKind === "agenda" && /\b\d+\s*\/\s*\d+\b/u.test(explanation))) {
       issues.push("TEACHING_LAYOUT_COMMENTARY");
     }
+    if (explanation.split(/[；。\n]/u).some((clause) =>
+      /(?:图中|页面)(?:并)?没有/u.test(clause)
+      && (clause.match(/横轴|纵轴|图例|表格/gu) || []).length >= 3
+      && !/(?:因此|所以|无法|不能|需要|难以|难以确认)/u.test(clause))) {
+      issues.push("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
+    }
     const mathFields = {
       chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
       learningObjectives: input.learningObjectives.join("\n"),
