@@ -2663,6 +2663,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               check.verdict + "：" + check.claim.slice(0, 180) + "；原图证据：" + check.evidence.slice(0, 220)))].slice(0, 6);
             let sourceRepairAttempted = false;
             let sourceRepairAccepted = false;
+            let sourceRepairFailureKind: "local_quality" | "final_audit_findings" | "final_audit_unsupported" | "final_audit_insufficient_checks" | undefined;
+            let sourceRepairIssueCodes: string[] = [];
+            let finalAuditFindingCount: number | undefined;
+            let finalAuditSourceCheckCount: number | undefined;
+            let finalAuditUnsupportedCount: number | undefined;
             if (auditIssues.length > 0 && unsupportedChecks.length > 0) {
               const spentBeforeSourceRepair = generationUsageCostUsd(generation);
               if (spentBeforeSourceRepair === undefined || spentBeforeSourceRepair >= pageCostLimitUsd) {
@@ -2692,6 +2697,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
                   sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
               ])];
+              sourceRepairIssueCodes = sourceRepairIssues.map((issue) => issue.split(":", 1)[0]!);
               if (sourceRepairIssues.length === 0) {
                 const spentBeforeFinalAudit = generationUsageCostUsd(generation);
                 if (spentBeforeFinalAudit === undefined || spentBeforeFinalAudit >= pageCostLimitUsd) {
@@ -2710,14 +2716,19 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 });
                 generation = combineTeachingGenerations(generation, { content: sourceRepair.content,
                   provider: finalAudit.provider, model: finalAudit.model, usage: finalAudit.usage });
+                finalAuditFindingCount = finalAudit.findings.length;
+                finalAuditSourceCheckCount = finalAudit.sourceChecks?.length ?? 0;
+                finalAuditUnsupportedCount = finalAudit.sourceChecks?.filter((check) => check.verdict !== "supported").length ?? 0;
                 sourceRepairAccepted = finalAudit.findings.length === 0
                   && (finalAudit.sourceChecks?.length ?? 0) >= Math.min(sourceRepairTargets.length, 8)
                   && finalAudit.sourceChecks!.every((check) => check.verdict === "supported");
+                if (!sourceRepairAccepted) sourceRepairFailureKind = finalAudit.findings.length > 0 ? "final_audit_findings"
+                  : finalAuditUnsupportedCount > 0 ? "final_audit_unsupported" : "final_audit_insufficient_checks";
                 if (sourceRepairAccepted) {
                   auditIssues = [];
                   correctedFields.push("source_claim_repair");
                 }
-              }
+              } else sourceRepairFailureKind = "local_quality";
             }
             if (auditIssues.length) generation.content = beforeAudit.content;
             if (auditIssues.length) repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
@@ -2728,7 +2739,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               sourceChecks: [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? []), ...(verification?.sourceChecks ?? [])]
                 .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
               recheckCount: (recheck ? 1 : 0) + (verification ? 1 : 0),
-              sourceRepairAttempted, sourceRepairAccepted,
+              sourceRepairAttempted, sourceRepairAccepted, sourceRepairFailureKind, sourceRepairTargetCount: sourceRepairTargets.length,
+              sourceRepairIssueCodes, finalAuditFindingCount, finalAuditSourceCheckCount, finalAuditUnsupportedCount,
               correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {

@@ -697,12 +697,15 @@ describe("Course OS API", () => {
           findings: audits === 1 ? [{ field: "mainContentMarkdown", original: "先识别输入", replacement: "先检查输入", evidence: "来源说明先检查输入" }] : [] };
       }
     };
-    const { app, readweave, release } = await seededApp(modelRouter, technicalRelease);
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-unverified-page")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"] });
     expect(audits).toBe(3);
     expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { sourceRepairFailureKind?: string }).sourceRepairFailureKind === "final_audit_unsupported"
+        && (event.payload as { finalAuditUnsupportedCount?: number }).finalAuditUnsupportedCount === 1)).toBe(true);
   }, 60_000);
 
   it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {
