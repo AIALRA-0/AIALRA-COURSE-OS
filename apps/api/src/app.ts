@@ -49,7 +49,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
@@ -2427,6 +2427,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     return;
   }
   const runtimeModelRouter = await resolveRuntimeModelRouter(dependencies);
+  if (!runtimeModelRouter) {
+    await failGenerationJob(jobId, "MODEL_PROVIDER_NOT_CONFIGURED", dependencies, fenceToken);
+    return;
+  }
   if (initial.writingPolicySnapshotId?.startsWith("writing-policy:")) {
     const currentPolicy = await currentWritingPolicy();
     if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== initial.writingPolicySnapshotId) {
@@ -2466,9 +2470,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
-      let generation = runtimeModelRouter
-        ? await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd })
-        : deterministicTeachingPackage(page);
+      let generation = await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content);
       const bridgeIsUnsafe = (content: TeachingPackage): boolean => validateTeachingNarrative({
@@ -2789,8 +2791,11 @@ async function failGenerationJob(jobId: string, issue: string, dependencies: App
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "running") return;
     if (fenceToken !== undefined && job.lease?.fenceToken !== fenceToken) return;
+    for (const pageId of job.pageIds) {
+      if (!job.completedPageIds.includes(pageId) && !job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
+    }
     Object.assign(job, transitionJob(job, "failed"));
-    dependencies.operations.appendEvent(state, job.id, "job.failed", { issue });
+    dependencies.operations.appendEvent(state, job.id, "job.failed", { issue, failedPageIds: job.failedPageIds });
   });
 }
 
@@ -3799,7 +3804,7 @@ function groupedCost(entries: GenerationCostEntry[], keyOf: (entry: GenerationCo
   return [...groups.entries()];
 }
 
-export function createDefaultDependencies(dataDir: string, readweave: ReadWeaveCourseApi, modelRouter: ModelRouterClient | undefined = modelRouterFromEnvironment()): AppDependencies {
+export function createDefaultDependencies(dataDir: string, readweave: ReadWeaveCourseApi, modelRouter?: ModelRouterClient): AppDependencies {
   const conversion = process.env.COURSE_OS_CONVERSION_QUEUE_MODE === "file"
     ? new FileConversionQueueClient({ queueRoot: join(dataDir, "conversion-queue") })
     : { enqueueAndWait: (request: ConversionRequest) => convertMaterial(request) };

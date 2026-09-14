@@ -301,6 +301,18 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, cachedInputTokens: 20, outputTokens: 400 } });
   });
 
+  it("retries invalid provider JSON once, while preserving both calls' usage", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const attempt = fetchMock.mock.calls.length;
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(attempt === 1 ? "json-retry" : "json-retry:schema-retry");
+      return Response.json({ model: "deepseek-flash", output_text: attempt === 1 ? '{"learningObjectives":[' : JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 150 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("json-retry"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, outputTokens: 300 } });
+  });
+
   it("requires the full explanation and summary when a provider omits them on a sparse page", async () => {
     let attempts = 0;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {

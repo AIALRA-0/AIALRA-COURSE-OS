@@ -38,7 +38,7 @@ const modelRouterToken = process.env.MODEL_ROUTER_API_KEY || await loadSecretFil
 const emergencyRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" && process.env.MODEL_ROUTER_URL && modelRouterToken
   ? new HttpModelRouterClient(process.env.MODEL_ROUTER_URL, modelRouterToken)
   : undefined;
-const modelRouter = configuredProviderRouter ?? emergencyRouter;
+const modelRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" ? configuredProviderRouter ?? emergencyRouter : undefined;
 
 const dependencies = createDefaultDependencies(dataDir, readweave, modelRouter);
 if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {

@@ -165,6 +165,15 @@ describe("Course OS API", () => {
     expect((await readweave.listReleases()).filter((release) => release.lifecycle !== "draft_source")).toHaveLength(0);
   }, 45_000);
 
+  it("fails generation when no configured model is available instead of saving a local substitute", async () => {
+    const { app, readweave } = await seededApp();
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "missing-provider-job")
+      .send({ materialVersionId: "test-release-v1", pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    const job = await waitForJob(app, created.body.id);
+    expect(job.state).toBe("failed");
+    expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
+  });
+
   it("returns a safe candidate writing policy without private paths", async () => {
     const policy = await request(await testApp()).get("/api/v1/writing-policy/current").expect(200);
     expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:56493c1af3d98aa0", sourceCommit: "installed-skill-sha256:66daa0de90d708c439cd3013ebf65aaa84786998e989d62d33f7b9a1e3a9b989", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
@@ -742,7 +751,13 @@ describe("Course OS API", () => {
   it("does not count a draft that failed publication checks as a completed page", async () => {
     const candidate = testRelease();
     candidate.lifecycle = "draft_source";
-    const { app, readweave, release } = await seededApp(undefined, candidate);
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: async () => {
+      const result = testTeachingResult(0.005);
+      result.content.misconceptions = ["不要跳过输入条件"];
+      result.content.coverageEvidence = [{ atomId: "atom-source", coveredFields: ["observation"], explanation: "这段解释并没有出现在完整讲解正文之中" }];
+      return result;
+    } };
+    const { app, readweave, release } = await seededApp(modelRouter, candidate);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unpublishable-candidate")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });

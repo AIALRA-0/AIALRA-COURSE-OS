@@ -393,7 +393,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try {
       return await this.generateOnce(input);
     } catch (error) {
-      if (!(error instanceof ModelRouterGenerationError) || !error.code.startsWith("MODEL_ROUTER_")) throw error;
+      if (!(error instanceof ModelRouterGenerationError) || !isTeachingShapeError(error.code)) throw error;
       firstFailure = error;
     }
     if (input.maxCostUsd !== undefined) {
@@ -568,6 +568,12 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     ];
     return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: teachingOutputTokenLimit(input.qualityMode), temperature: 0.2, messages, response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } } } };
   }
+}
+
+function isTeachingShapeError(code: string): boolean {
+  return code === "MODEL_PROVIDER_OUTPUT_JSON_INVALID"
+    || code === "MODEL_PROVIDER_INVALID_TEACHING_PACKAGE"
+    || /^MODEL_ROUTER_(?:INVALID_TEACHING_PACKAGE|[A-Z_]+_INVALID)$/.test(code);
 }
 
 function providerFailureCode(status: number, error: ProviderResponseBody["error"]): string {
