@@ -129,6 +129,14 @@ describe("Course OS API", () => {
     expect(normalized.fullExplanationMarkdown).toContain("动作概率由软最大函数计算");
     expect(normalized.fullExplanationMarkdown).not.toContain("函数函数");
   });
+
+  it("renders source diagram labels as quotations instead of code", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown += "\n\n椭圆标记 `Agent`，方框写着 `Macro order: place larger ones first`";
+    const normalized = normalizeTeachingPackageMath(content, "Agent\nMacro order: place larger ones first");
+    expect(normalized.fullExplanationMarkdown).toContain("椭圆标记 “Agent”");
+    expect(normalized.fullExplanationMarkdown).toContain("方框写着 “Macro order: place larger ones first”");
+  });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
     const pageId = release.pages[0]!.id;

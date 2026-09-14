@@ -245,7 +245,7 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
     .map((match) => match[1] || match[2] || "");
   if (!formulas.some((formula) => /(?:^|\s)(?:r|R|J)(?:_[A-Za-z0-9{}]+)?\s*=[\s\S]{0,150}[-−]\s*\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(formula))) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
-    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升).{0,60}(?:下降|降低|减少|减小|变小)|(?:增大|增加|提高|上升).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,60}(?:下降|降低|减少|减小|变小)/u);
+    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升).{0,60}(?:下降|降低|减少|减小|变小)|(?:增大|增加|提高|上升).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小)/u);
     if (!trend) return false;
     // A warning that explicitly rejects the trend is not an assertion of it.
     const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升)/u)));
@@ -356,6 +356,19 @@ export function normalizePriorDefinitionAbbreviation(text: string): string {
     /^(\s*)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
     "$1$4 $2（$3）："
   );
+}
+
+/** Turn a source label mistakenly formatted as inline code back into a quoted source object. */
+export function normalizeSourceLabelCodeSpans(text: string, sourceText: string): string {
+  return text.replace(/`([^`\r\n]{1,100})`/gu, (whole, rawLabel: string, offset: number) => {
+    const label = rawLabel.trim();
+    const context = text.slice(Math.max(0, offset - 24), offset);
+    const naturalLabel = /^[A-Za-z][A-Za-z0-9 +,:?/-]*$/u.test(label)
+      && !/[=_{}();]|\b(?:npm|pnpm|yarn|curl|git|docker)\b/iu.test(label);
+    const sourceBacked = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(label)}(?![A-Za-z0-9])`, "iu").test(sourceText);
+    const introducedAsLabel = /(?:写着|标记|标为|标着|文字为|题注|标签|一行|起点是|分别是|名称是|称为|为|是)\s*$/u.test(context);
+    return naturalLabel && sourceBacked && introducedAsLabel ? `“${label}”` : whole;
+  });
 }
 
 export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";

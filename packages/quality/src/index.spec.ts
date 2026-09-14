@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -196,6 +196,14 @@ describe("learner-facing teaching narrative", () => {
       .toBe("策略（Policy）：动作的概率分布");
   });
 
+  it("restores source labels from code spans without changing commands or identifiers", () => {
+    const source = "Agent\nMacro order: place larger ones first\npnpm run build";
+    expect(normalizeSourceLabelCodeSpans("椭圆标记 `Agent`，方框写着 `Macro order: place larger ones first`", source))
+      .toBe("椭圆标记 “Agent”，方框写着 “Macro order: place larger ones first”");
+    expect(normalizeSourceLabelCodeSpans("运行 `pnpm run build`，读取 `edge_id`", source))
+      .toBe("运行 `pnpm run build`，读取 `edge_id`");
+  });
+
   it("allows a source model name only after the page actually explains it", () => {
     const developed = { ...valid, sourceTitle: "EDGE-GNN: WHY?", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\nEdge-GNN 是处理边关系的图编码器，负责把连接信息变成可复用的表示`, strictWritingStyle: false };
     expect(validateTeachingNarrative(developed)).not.toContain("TEACHING_UNPAIRED_ENGLISH");
@@ -345,6 +353,9 @@ describe("learner-facing teaching narrative", () => {
       explanation: "先代入公式，再比较改变一个输入之前与之后的输出数值，最后说明判断需要的条件"
     }] };
     expect(validateTeachingNarrative(answerOnly)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions");
+    const symbolicResult = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "三个量增大都会让回报下降", "三个量中任何一项增大都会让 $r_T$ 变小") };
+    expect(validateTeachingNarrative(symbolicResult)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
   });
 
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {

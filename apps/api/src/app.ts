@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3201,7 +3201,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(translateMathHeadingReference(value), sourceText)), mathTerms)))), quotedSourceLabels);
+      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms)))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const normalizedValue = normalizePriorDefinitionAbbreviation(normalize(value));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
