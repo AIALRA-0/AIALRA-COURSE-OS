@@ -2657,6 +2657,68 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               provider: recheck.provider, model: recheck.model, usage: recheck.usage });
             if (verification) generation = combineTeachingGenerations(generation, { content: corrected,
               provider: verification.provider, model: verification.model, usage: verification.usage });
+            const unsupportedChecks = [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? []),
+              ...(verification?.sourceChecks ?? [])].filter((check) => check.verdict !== "supported");
+            const sourceRepairTargets = [...new Set(unsupportedChecks.map((check) =>
+              check.verdict + "：" + check.claim.slice(0, 180) + "；原图证据：" + check.evidence.slice(0, 220)))].slice(0, 6);
+            let sourceRepairAttempted = false;
+            let sourceRepairAccepted = false;
+            if (auditIssues.length > 0 && unsupportedChecks.length > 0) {
+              const spentBeforeSourceRepair = generationUsageCostUsd(generation);
+              if (spentBeforeSourceRepair === undefined || spentBeforeSourceRepair >= pageCostLimitUsd) {
+                throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
+              }
+              sourceRepairAttempted = true;
+              const sourceRepair = await runtimeModelRouter.generateTeachingPackage({
+                pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                idempotencyKey: "course-os:" + jobId + ":attempt:" + currentJob.attempt + ":" + page.id + ":source-claim-repair:v1",
+                maxCostUsd: pageCostLimitUsd - spentBeforeSourceRepair, stage: "repair",
+                repair: {
+                  issues: ["TEACHING_SOURCE_CLAIM_REPAIR", ...sourceRepairTargets],
+                  maximumExplanationCharacters: maximumTeachingExplanationCharacters({
+                    pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity
+                  }),
+                  previousTeachingPackage: beforeAudit.content
+                }
+              });
+              sourceRepair.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(
+                sourceRepair.content.mainContentMarkdown, sourceRepair.content.fullExplanationMarkdown);
+              sourceRepair.content = normalizeTeachingPackageMath(sourceRepair.content);
+              generation = combineTeachingGenerations(generation, sourceRepair);
+              const sourceRepairIssues = [...new Set([
+                ...validateTeachingCoverageEvidence(page, sourceRepair.content),
+                ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
+                  sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+              ])];
+              if (sourceRepairIssues.length === 0) {
+                const spentBeforeFinalAudit = generationUsageCostUsd(generation);
+                if (spentBeforeFinalAudit === undefined || spentBeforeFinalAudit >= pageCostLimitUsd) {
+                  throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
+                }
+                const finalAudit = await runtimeModelRouter.auditTeachingPackage({
+                  pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                  writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                  language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                  idempotencyKey: "course-os:" + jobId + ":attempt:" + currentJob.attempt + ":" + page.id + ":source-claim-verification:v1",
+                  maxCostUsd: pageCostLimitUsd - spentBeforeFinalAudit, stage: "semantic_audit", teachingPackage: sourceRepair.content,
+                  repair: { issues: ["TEACHING_SOURCE_CLAIM_VERIFICATION", ...sourceRepairTargets],
+                    maximumExplanationCharacters: maximumTeachingExplanationCharacters({
+                      pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity
+                    }), previousTeachingPackage: sourceRepair.content }
+                });
+                generation = combineTeachingGenerations(generation, { content: sourceRepair.content,
+                  provider: finalAudit.provider, model: finalAudit.model, usage: finalAudit.usage });
+                sourceRepairAccepted = finalAudit.findings.length === 0
+                  && (finalAudit.sourceChecks?.length ?? 0) >= Math.min(sourceRepairTargets.length, 8)
+                  && finalAudit.sourceChecks!.every((check) => check.verdict === "supported");
+                if (sourceRepairAccepted) {
+                  auditIssues = [];
+                  correctedFields.push("source_claim_repair");
+                }
+              }
+            }
             if (auditIssues.length) generation.content = beforeAudit.content;
             if (auditIssues.length) repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
             await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
@@ -2666,6 +2728,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               sourceChecks: [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? []), ...(verification?.sourceChecks ?? [])]
                 .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
               recheckCount: (recheck ? 1 : 0) + (verification ? 1 : 0),
+              sourceRepairAttempted, sourceRepairAccepted,
               correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {

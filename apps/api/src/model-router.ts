@@ -341,11 +341,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try {
       return await this.auditTeachingOnce(input);
     } catch (error) {
-      if (!(error instanceof ModelRouterGenerationError) || !["MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID"].includes(error.code)) throw error;
+      if (!(error instanceof ModelRouterGenerationError) || error.code !== "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID") throw error;
       const spent = this.usageCostUsd(error.usage);
       if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) throw error;
       try {
-        const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:${error.code === "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID" ? "invalid" : "unresolved"}-retry`,
+        const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:invalid-retry`,
           maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0) }, true);
         return { ...retry, usage: sumProviderUsage(error.usage, retry.usage) };
       } catch (retryError) {
@@ -408,9 +408,6 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (sourceChecks.length > 16 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
-    if (sourceChecks.some((item) => item.verdict !== "supported") && findings.length === 0) {
-      throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", model, usage, this.connection.providerId);
-    }
     return { findings, sourceChecks, provider: this.connection.providerId, model, usage };
   }
 

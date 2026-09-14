@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.24", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.26", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -200,19 +200,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("rechecks an unresolved source contradiction once and accounts for both audit calls", async () => {
+  it("returns unresolved source checks for the page-level repair loop", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      const retry = fetchMock.mock.calls.length === 2;
-      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(retry ? "audit-unresolved:unresolved-retry" : "audit-unresolved");
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("audit-unresolved");
       const sourceChecks = [{ claim: "原始比值是 1.2", evidence: "来源页写 0.30 / 0.20", verdict: "contradicted" }];
-      const findings = retry ? [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] : [];
+      const findings: unknown[] = [];
       return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ sourceChecks, findings }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
     const result = await client.auditTeachingPackage({ ...providerInput("audit-unresolved", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ findings: [{ replacement: "原始比值是 1.5" }], usage: { inputTokens: 240, outputTokens: 160, apiEquivalentUsd: 0.002 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ findings: [], sourceChecks: [{ verdict: "contradicted" }],
+      usage: { inputTokens: 120, outputTokens: 80, apiEquivalentUsd: 0.001 } });
   });
 
   it("retries one malformed audit within the page budget without hiding its cost", async () => {

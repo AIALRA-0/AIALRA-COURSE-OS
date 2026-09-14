@@ -643,6 +643,46 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { recheckCount?: number }).recheckCount === 1)).toBe(true);
   }, 60_000);
 
+  it("repairs an unsupported visual claim and reaudits the corrected whole page", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-agents", pageId: "page-1", kind: "text",
+      label: "提取文字", text: "图中两处写着 Agent，但材料没有说明它们是同一个对象" }];
+    let audits = 0;
+    let repairs = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
+          repairs += 1;
+          expect(input.repair.issues.join(" ")).toContain("原图证据");
+        } else {
+          result.content.fullExplanationMarkdown += "\n\n所有动作必然由同一个智能体执行";
+        }
+        return result;
+      },
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        if (audits === 3) expect(input.repair?.issues).toContain("TEACHING_SOURCE_CLAIM_VERIFICATION");
+        const unsupported = input.teachingPackage.fullExplanationMarkdown.includes("所有动作必然由同一个智能体执行");
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          sourceChecks: [{ claim: "所有动作必然由同一个智能体执行",
+            evidence: "原图只出现两个 Agent 标签，没有说明是否同一对象",
+            verdict: unsupported ? "unverified" as const : "supported" as const }], findings: [] };
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-source-repair")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.005 });
+    expect(audits).toBe(3);
+    expect(repairs).toBe(1);
+    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
+      .not.toContain("所有动作必然由同一个智能体执行");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
+  }, 60_000);
+
   it("does not mark a page ready when a source claim remains unverified after correction", async () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
@@ -661,7 +701,7 @@ describe("Course OS API", () => {
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-unverified-page")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"] });
-    expect(audits).toBe(2);
+    expect(audits).toBe(3);
     expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
   }, 60_000);
 

@@ -153,7 +153,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   }
 
   if (input.strictWritingStyle) {
-    if (/(?:页码|页脚|版式信息)/u.test(explanation) || (input.pageKind === "agenda" && /\b\d+\s*\/\s*\d+\b/u.test(explanation))) {
+    if (/(?:页码|页脚|版式信息|读者刚翻到|材料第\s*\d+\s*页)/u.test(explanation)
+      || (input.pageKind === "agenda" && /\b\d+\s*\/\s*\d+\b/u.test(explanation))) {
       issues.push("TEACHING_LAYOUT_COMMENTARY");
     }
     const mathFields = {

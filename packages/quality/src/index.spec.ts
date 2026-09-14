@@ -124,6 +124,9 @@ describe("learner-facing teaching narrative", () => {
     const adjacent = { ...valid, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 怎样使用\n\n## 两个步骤\n先检查输入，再执行转换` };
     expect(validateTeachingNarrative(adjacent)).toContain("TEACHING_ADJACENT_HEADINGS");
     expect(validateTeachingNarrative({ ...adjacent, fullExplanationMarkdown: adjacent.fullExplanationMarkdown.replace("## 怎样使用\n\n", "") })).not.toContain("TEACHING_ADJACENT_HEADINGS");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `读者刚翻到材料第 2 页，最想先知道后面会讲什么\n\n${valid.fullExplanationMarkdown}` }))
+      .toContain("TEACHING_LAYOUT_COMMENTARY");
     expect(validateTeachingNarrative({ ...valid, pageKind: "agenda", fullExplanationMarkdown: "目录说明本页展示的阅读层级，先看基础，再看方法，最后看结果\n\n".repeat(40) })).toContain("TEACHING_EXPLANATION_TOO_LONG");
   });
 

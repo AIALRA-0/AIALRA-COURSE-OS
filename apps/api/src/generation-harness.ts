@@ -85,6 +85,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
       ? "独立核对上一轮草稿与原图、提取文字和自身各字段的语义一致性；这不是润色任务"
       : `只修复这些已验证问题：${input.repair.issues.join("、")}`,
     ...(input.repair.issues.includes("TEACHING_SEMANTIC_CROSSCHECK") ? ["逐式复算所有数值关系，分别辨认原始量、比值、裁剪或归一化后的量、目标值与损失；同一个量在完整讲解、易错点、总结和题目中必须保持同一含义。逐一核对图表横纵轴、图例、比较对象和来源边界，不把指标名称相近当成同一个量。发现矛盾时只改错误断言及受影响的答案；没有错误时保持原文。不得为了通过检查补造来源之外的事实；只返回完整 TeachingPackage JSON，不把核验过程写进学习正文"] : []),
+    ...(input.repair.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR") ? ["来源核验列出的 contradicted 主张须按原图更正，unverified 主张须删除或改成仅描述图上确实可见的对象与位置；不得把位置、相邻关系或相同标签推成同一智能体、动作先后、回报来源或系数用途。先改完整讲解，再同步改总结、易错点和题目答案，最后从新正文逐字填写 coverageEvidence。保留其他已核实的教学内容，不得把核验标签写进正文"] : []),
     ...(input.repair.issues.some((issue) => issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") ? ["只改 misconceptions。逐项重写为‘错误理解：……；错因：……；正确判断：……；核对方法：……’四个完整片段；错因必须指出它与本页的对象、条件、运算或关系为何冲突，不能只复述错误。一个数组元素只写一处误解，不得用‘ - ’把多条塞进一项"] : []),
     ...(input.repair.issues.includes("TEACHING_PRIOR_DEFINITION_REPEATED") ? ["先验知识已经定义的术语在完整讲解里只解释如何作用于本页对象，不再使用同一个‘名称：定义’段落重复定义"] : []),
     ...(input.repair.issues.some((issue) => issue.includes("UNPAIRED_ENGLISH")) ? ["逐字段检查承上启下、目标、定义、完整讲解、总结、易错点和四道题的题干与答案解释。普通英文名称或缩写在首次定义后改用已核实的中文名称；首次按策略写成中文全称（官方英文全称），缩写放在中文名称之前。原图中的坐标轴、图例和条目标签若保留英文，逐项用引号包住完整原文，连续列举也不能只给首项加引号；不得把原图标签当作无须解释的普通英语放在正文中。原图中的整段代码原样放进 Markdown 行内代码或代码块，再用中文说明用途；无法核实全称的原图标签用中文引出，并用引号保留原样，说明当前页能确认什么，不得猜测英文全称；原文论文标题用书名号保留。尤其不能让题目解释重新裸用正文已经解释过的缩写"] : []),
