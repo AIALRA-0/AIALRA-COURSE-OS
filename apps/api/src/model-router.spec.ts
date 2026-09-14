@@ -4,11 +4,11 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.12", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.13", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("b15dcd70817c1dc88a925a935355059c2dc6eb3ae280775dc09faae1f51a1a7b");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
@@ -180,6 +180,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("responses-test", true));
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
+  });
+
+  it("requests a small source-backed semantic findings report instead of a rewritten lesson", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };
+      expect(body.text.format.name).toBe("course_os_semantic_audit");
+      expect(body.max_output_tokens).toBe(1_500);
+      expect(body.metadata.stage).toBe("semantic_audit");
+      expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ findings: [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.auditTeachingPackage({ ...providerInput("semantic-audit-test", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(result.findings).toHaveLength(1);
+    expect(result.usage.apiEquivalentUsd).toBe(0.001);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("preserves a provider's summary list when it returns an array instead of Markdown", async () => {

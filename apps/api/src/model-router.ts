@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
-import { modelInput, professorInstructions, teachingPackageSchema } from "./generation-harness.js";
+import { modelInput, professorInstructions, semanticAuditPrompt, semanticAuditSchema, teachingPackageSchema } from "./generation-harness.js";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
@@ -63,6 +63,14 @@ export interface ModelRouterInput {
 
 export interface ModelRouterClient {
   generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult>;
+  auditTeachingPackage?(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult>;
+}
+
+export interface SemanticAuditResult {
+  findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
+  provider: string;
+  model: string;
+  usage: ModelRouterUsage;
 }
 
 export function teachingOutputTokenLimit(qualityMode: string): number {
@@ -258,6 +266,49 @@ export async function probeProviderConnection(connection: ProviderConnection): P
  */
 export class HttpProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly connection: ProviderConnection) {}
+
+  async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
+    if (this.connection.protocol !== "responses") throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(Date.now()), this.connection.providerId);
+    const started = Date.now();
+    const prompt = `${semanticAuditPrompt.trim()}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
+      sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage, teachingPackage: input.teachingPackage })}`;
+    const userInput = input.sourceImageDataUrl
+      ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
+      : prompt;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180_000);
+    let response: Response;
+    try {
+      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST", signal: controller.signal,
+        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
+        body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
+          max_output_tokens: 1_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
+          text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: semanticAuditSchema, strict: true } },
+          metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+        })
+      });
+    } catch (error) {
+      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
+    } finally { clearTimeout(timeout); }
+    let body: ProviderResponseBody;
+    try { body = await response.json() as ProviderResponseBody; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+    const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
+    const model = body.model || this.connection.model;
+    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
+    const spent = this.usageCostUsd(usage);
+    if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
+    let parsed: unknown;
+    try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId); }
+    const findings = (parsed as { findings?: unknown } | null)?.findings;
+    if (!Array.isArray(findings) || findings.length > 6 || findings.some((item) => !item || typeof item !== "object" ||
+      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId);
+    }
+    return { findings, provider: this.connection.providerId, model, usage };
+  }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
     let firstFailure: ModelRouterGenerationError;
@@ -458,6 +509,12 @@ function anthropicImagePart(imageUrl: string): { type: "image"; source: { type: 
 export class RoutedProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly connections: ProviderConnection[]) {}
 
+  async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
+    const connection = [...this.connections].sort((left, right) => scoreConnection(left, input) - scoreConnection(right, input))[0];
+    if (!connection) throw new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
+    return new HttpProviderTeachingClient(connection).auditTeachingPackage(input);
+  }
+
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
     const candidates = [...this.connections].sort((left, right) => scoreConnection(left, input) - scoreConnection(right, input));
     let lastError: ModelRouterGenerationError | undefined;
@@ -487,6 +544,19 @@ export interface SettingsProviderSource {
  */
 export class SettingsProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly source: SettingsProviderSource) {}
+
+  async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
+    const { providers, policy, credential } = await this.source.load();
+    const rule = policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
+    if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
+    const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
+    const model = provider?.models.find((item) => item.id === rule.modelId);
+    const apiKey = provider ? await credential(provider.id) : undefined;
+    if (!provider || !model || !apiKey) throw new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", rule.modelId, emptyUsage(Date.now()), rule.providerId);
+    if (input.sourceImageDataUrl && !model.supportsVision) throw new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
+    return new HttpProviderTeachingClient({ providerId: provider.id, baseUrl: provider.baseUrl, apiKey, model: model.id,
+      protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode }).auditTeachingPackage(input);
+  }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
     const { providers, policy, credential } = await this.source.load();

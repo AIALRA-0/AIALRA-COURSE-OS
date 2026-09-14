@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "properties": {
+          "field": { "type": "string" },
+          "original": { "type": "string" },
+          "replacement": { "type": "string" },
+          "evidence": { "type": "string" }
+        },
+        "required": ["field", "original", "replacement", "evidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["findings"],
+  "additionalProperties": false
+}

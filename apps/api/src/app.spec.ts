@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -32,6 +32,17 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("applies only exact, unambiguous semantic corrections and preserves unrelated fields", () => {
+    const before = testTeachingResult(0).content;
+    before.misconceptions[0] = "原始比值是 1.2，但裁剪后仍是 1.2";
+    const applied = applySemanticAuditFindings(before, [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "来源页：0.30 / 0.20 = 1.5" }]);
+    expect(applied.content.misconceptions[0]).toContain("原始比值是 1.5，但裁剪后仍是 1.2");
+    expect(applied.content.fullExplanationMarkdown).toBe(before.fullExplanationMarkdown);
+    expect(before.misconceptions[0]).toContain("原始比值是 1.2");
+    expect(() => applySemanticAuditFindings(before, [{ field: "fullExplanationMarkdown", original: "不存在的句子", replacement: "改写", evidence: "来源" }])).toThrow();
+    expect(() => applySemanticAuditFindings(before, [{ field: "questions:0:expectedAnswer", original: "答案", replacement: "改写", evidence: "来源" }])).toThrow();
+  });
+
   it("keeps verified teaching fields when repairing only coverage or a prior definition", () => {
     const previous: TeachingPackage = { chapterBridgeMarkdown: "", learningObjectives: ["解释作用"], mainContentMarkdown: "- 已知关系", priorKnowledge: ["原定义"], fullExplanationMarkdown: "这里已经解释了原图中两个对象的关系，以及它们怎样共同产生结果".repeat(3), misconceptions: ["原易错点"], coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "旧引用" }], questions: [] };
     const repaired: TeachingPackage = { ...previous, priorKnowledge: ["新定义"], fullExplanationMarkdown: "模型意外重写了讲解".repeat(6), coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "新的真实引用" }] };
@@ -508,6 +519,29 @@ describe("Course OS API", () => {
     expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("核验结果说明输入");
     expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
       .some((event) => (event.payload as { stage?: string }).stage === "semantic_audit")).toBe(true);
+  }, 60_000);
+
+  it("uses a bounded semantic findings report without rewriting valid teaching fields", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "新概率 0.3，旧概率 0.2，原始比值 1.5，裁剪值 1.2" }];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        const result = testTeachingResult(0.001);
+        result.content.fullExplanationMarkdown += "\n\n原始比值是 1.2，裁剪值也是 1.2";
+        return result;
+      },
+      auditTeachingPackage: async () => ({ provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+        findings: [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "原始比值 1.5，裁剪值 1.2" }] })
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-findings-page")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.002 });
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("原始比值是 1.5，裁剪值也是 1.2");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { findingCount?: number }).findingCount === 1)).toBe(true);
   }, 60_000);
 
   it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {

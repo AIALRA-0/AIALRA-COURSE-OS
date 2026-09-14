@@ -49,7 +49,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
@@ -2556,6 +2556,37 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           const spentOnPage = generationUsageCostUsd(beforeAudit);
           if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
           await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "started", dependencies);
+          if (runtimeModelRouter.auditTeachingPackage) {
+            const audit = await runtimeModelRouter.auditTeachingPackage({
+              pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+              writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+              language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+              idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-findings:v1`,
+              maxCostUsd: pageCostLimitUsd - spentOnPage, stage: "semantic_audit", teachingPackage: beforeAudit.content
+            });
+            let corrected = beforeAudit.content;
+            let auditIssues: string[] = [];
+            let correctedFields: string[] = [];
+            try {
+              const applied = applySemanticAuditFindings(beforeAudit.content, audit.findings);
+              corrected = normalizeTeachingPackageMath(applied.content);
+              correctedFields = applied.fields;
+              auditIssues = [...new Set([
+                ...validateTeachingCoverageEvidence(page, corrected),
+                ...validateTeachingNarrative({ ...corrected, lessonFlowVersion: 2, strictWritingStyle: true, sourceTitle: page.title,
+                  pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+              ])];
+            } catch {
+              auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
+            }
+            generation = combineTeachingGenerations(beforeAudit, { content: auditIssues.length ? beforeAudit.content : corrected,
+              provider: audit.provider, model: audit.model, usage: audit.usage });
+            if (auditIssues.length) repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
+            await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
+              provider: audit.provider, model: audit.model, inputTokens: audit.usage.inputTokens, outputTokens: audit.usage.outputTokens,
+              findingCount: audit.findings.length, correctedFields, issueCount: auditIssues.length
+            });
+          } else {
           const audited = await runtimeModelRouter.generateTeachingPackage({
             pageTitle: page.title,
             pageNumber: page.pageNumber,
@@ -2585,6 +2616,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
           }
           await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, { provider: audited.provider, model: audited.model, inputTokens: audited.usage.inputTokens, outputTokens: audited.usage.outputTokens, schemaRetries: audited.schemaRetries ?? 0, changedFields, issueCount: auditIssues.length });
+          }
         }
         rejectedNarrativeIssues = repairIssues;
         if (repairIssues.length > 0 && release.lifecycle !== "draft_source") throw new ModelRouterGenerationError(`MODEL_PROVIDER_TEACHING_QUALITY_FAILED:${repairIssues[0]}`, generation.model, generation.usage, generation.provider);
@@ -2745,6 +2777,35 @@ function combineTeachingGenerations(initial: TeachingGenerationResult, repaired:
       durationMs: initial.usage.durationMs + repaired.usage.durationMs
     }
   };
+}
+
+/** Apply only unambiguous minimal corrections; never accept a wholesale model rewrite. */
+export function applySemanticAuditFindings(content: TeachingPackage, findings: SemanticAuditResult["findings"]): { content: TeachingPackage; fields: string[] } {
+  const corrected = structuredClone(content);
+  const fields: string[] = [];
+  for (const finding of findings) {
+    if (!finding.original.trim() || !finding.replacement.trim() || !finding.evidence.trim()
+      || finding.original.length > 1200 || finding.replacement.length > 1200 || finding.evidence.length > 500) throw new Error("TEACHING_SEMANTIC_AUDIT_INVALID");
+    let value: string;
+    let set: (text: string) => void;
+    if (finding.field === "fullExplanationMarkdown" || finding.field === "mainContentMarkdown") {
+      value = corrected[finding.field];
+      set = (text) => { corrected[finding.field as "fullExplanationMarkdown" | "mainContentMarkdown"] = text; };
+    } else if (/^misconceptions:[0-9]+$/.test(finding.field)) {
+      const index = Number(finding.field.split(":")[1]);
+      value = corrected.misconceptions[index] ?? "";
+      set = (text) => { corrected.misconceptions[index] = text; };
+    } else if (/^questions:[0-9]+:explanation$/.test(finding.field)) {
+      const index = Number(finding.field.split(":")[1]);
+      value = corrected.questions[index]?.explanation ?? "";
+      set = (text) => { corrected.questions[index]!.explanation = text; };
+    } else throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
+    const at = value.indexOf(finding.original);
+    if (at < 0 || value.lastIndexOf(finding.original) !== at || finding.original === finding.replacement) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
+    set(value.slice(0, at) + finding.replacement + value.slice(at + finding.original.length));
+    fields.push(finding.field);
+  }
+  return { content: corrected, fields };
 }
 
 export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[], englishFields: TeachingNarrativeField[] = []): TeachingPackage | undefined {
