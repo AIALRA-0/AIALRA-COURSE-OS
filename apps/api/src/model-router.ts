@@ -267,16 +267,39 @@ export async function probeProviderConnection(connection: ProviderConnection): P
  * endpoint and silently switching formats makes failures hard to diagnose
  */
 export class HttpProviderTeachingClient implements ModelRouterClient {
-  constructor(private readonly connection: ProviderConnection, private readonly requestTimeoutMs = 180_000) {}
+  constructor(
+    private readonly connection: ProviderConnection,
+    private readonly requestTimeoutMs = 180_000,
+    private readonly requestAbsoluteTimeoutMs = 12 * 60_000
+  ) {}
 
   private async requestJson(url: string, init: RequestInit, started: number): Promise<{ response: Response; body: ProviderResponseBody }> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    let idleTimeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const absoluteTimeout = setTimeout(() => controller.abort(), Math.max(this.requestTimeoutMs, this.requestAbsoluteTimeoutMs));
+    const refreshIdleTimeout = () => {
+      clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    };
     try {
-      const response = await fetch(url, { ...init, signal: controller.signal });
+      const rawBody = init.body;
+      const useResponsesStream = this.connection.providerId === "deepseek" && this.connection.protocol === "responses"
+        && typeof rawBody === "string";
+      const requestBody = useResponsesStream
+        ? JSON.stringify({ ...(JSON.parse(rawBody as string) as Record<string, unknown>), stream: true })
+        : rawBody;
+      const response = await fetch(url, {
+        ...init,
+        body: requestBody,
+        headers: useResponsesStream ? { ...Object.fromEntries(new Headers(init.headers).entries()), Accept: "text/event-stream" } : init.headers,
+        signal: controller.signal
+      });
+      refreshIdleTimeout();
       let body: ProviderResponseBody;
       try {
-        body = await response.json() as ProviderResponseBody;
+        body = useResponsesStream && response.headers?.get("content-type")?.includes("text/event-stream") && response.body
+          ? await readResponsesEventStream(response.body, refreshIdleTimeout)
+          : await response.json() as ProviderResponseBody;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
@@ -290,7 +313,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE",
       this.connection.model, emptyUsage(started), this.connection.providerId);
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(idleTimeout);
+      clearTimeout(absoluteTimeout);
     }
   }
 
@@ -333,7 +357,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
-    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
+    if (!response.ok || providerBodyFailed(body)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(body)), model, usage, this.connection.providerId);
     const spent = this.usageCostUsd(usage);
     if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) {
       throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
@@ -393,7 +417,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
-    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
+    if (!response.ok || providerBodyFailed(body)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(body)), model, usage, this.connection.providerId);
     const spent = this.usageCostUsd(usage);
     if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
     let parsed: unknown;
@@ -454,7 +478,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const { response, body } = await this.requestJson(request.url,
       { method: "POST", headers: request.headers, body: JSON.stringify(request.body) }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
-    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
+    if (!response.ok || providerBodyFailed(body)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(body)), body.model || this.connection.model, usage, this.connection.providerId);
     if (input.maxCostUsd !== undefined) {
       const spent = this.usageCostUsd(usage);
       if (spent === undefined) throw new ModelRouterGenerationError("MODEL_PROVIDER_COST_UNAVAILABLE", body.model || this.connection.model, usage, this.connection.providerId);
@@ -508,7 +532,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         })
       }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
-    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
+    if (!response.ok || providerBodyFailed(body)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(body)), body.model || this.connection.model, usage, this.connection.providerId);
     const spent = this.usageCostUsd(usage);
     if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", body.model || this.connection.model, usage, this.connection.providerId);
     const output = extractProviderOutput(body);
@@ -762,7 +786,53 @@ interface ProviderResponseBody {
     total_cost?: number;
   };
   cost?: number;
+  status?: string;
+  incomplete_details?: { reason?: string } | null;
   error?: { code?: string; message?: string };
+}
+
+async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onActivity: () => void): Promise<ProviderResponseBody> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: ProviderResponseBody | undefined;
+  const processEvent = (block: string) => {
+    const data = block.split(/\r?\n/u).filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart()).join("\n");
+    if (!data) return;
+    const event = JSON.parse(data) as { type?: string; response?: ProviderResponseBody };
+    if (["response.completed", "response.incomplete", "response.failed"].includes(event.type || "") && event.response) {
+      finalResponse = event.response;
+    }
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      onActivity();
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/u);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) processEvent(block);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) processEvent(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+  if (!finalResponse) throw new Error("MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING");
+  return finalResponse;
+}
+
+function providerBodyFailed(body: ProviderResponseBody): boolean {
+  return body.status === "failed" || body.status === "incomplete";
+}
+
+function providerBodyError(body: ProviderResponseBody): ProviderResponseBody["error"] {
+  if (body.error) return body.error;
+  if (body.status === "incomplete") return { code: body.incomplete_details?.reason || "response_incomplete" };
+  if (body.status === "failed") return { code: "response_failed" };
+  return undefined;
 }
 
 function extractProviderOutput(body: ProviderResponseBody): unknown {

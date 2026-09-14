@@ -200,6 +200,30 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
   });
 
+  it("consumes DeepSeek Responses events and keeps final usage", async () => {
+    const content = providerTeachingContent();
+    const encoder = new TextEncoder();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ stream: true });
+      const final = { type: "response.completed", sequence_number: 3, response: {
+        status: "completed", model: "deepseek-v4-flash-vision-exp",
+        output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(content) }] }],
+        usage: { input_tokens: 220, output_tokens: 330, input_tokens_details: { cached_tokens: 20 }, total_cost: 0.004 }
+      } };
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(encoder.encode(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", sequence_number: 0, response: { status: "in_progress" } })}\n\n`));
+        controller.enqueue(encoder.encode(`event: response.completed\ndata: ${JSON.stringify(final)}\n\n`));
+        controller.close();
+      } }), { headers: { "Content-Type": "text/event-stream" } });
+    }));
+    const result = await new HttpProviderTeachingClient({
+      providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token",
+      model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered"
+    }, 50).generateTeachingPackage(providerInput("responses-stream", true));
+    expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp",
+      usage: { inputTokens: 220, cachedInputTokens: 20, outputTokens: 330, apiEquivalentUsd: 0.004 } });
+  });
+
   it("requests a small source-backed semantic findings report instead of a rewritten lesson", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };
