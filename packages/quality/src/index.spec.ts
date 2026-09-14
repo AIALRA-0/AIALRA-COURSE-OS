@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -180,6 +180,13 @@ describe("learner-facing teaching narrative", () => {
       .toBe("回到页面 Hidden Rule 一行核对");
     expect(quoteContextualSourceLabels("代码 `Update Rule` 与原文“Setup”保持不变", source))
       .toBe("代码 `Update Rule` 与原文“Setup”保持不变");
+  });
+
+  it("delimits narrow bare math symbols while protecting authored objects", () => {
+    expect(normalizeBareMathSymbols("代入 e^0 = 1，并检查 x_1 与 ab_{2}"))
+      .toBe("代入 $e^0$ = 1，并检查 $x_1$ 与 $ab_{2}$");
+    expect(normalizeBareMathSymbols("保留 $e^0$、`x_1`、https://example.test/x_1 和原文“e^0”"))
+      .toBe("保留 $e^0$、`x_1`、https://example.test/x_1 和原文“e^0”");
   });
 
   it("allows a source model name only after the page actually explains it", () => {

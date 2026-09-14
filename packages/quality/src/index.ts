@@ -340,6 +340,15 @@ export function quoteContextualSourceLabels(text: string, sourceText: string): s
     )).join("");
 }
 
+/** Add math delimiters to the same narrow symbol forms rejected by the teaching validator. */
+export function normalizeBareMathSymbols(text: string): string {
+  return text.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(
+      /(?<![\p{L}\p{N}])([A-Za-z]{1,3}(?:_[A-Za-z0-9{}]+|\^[A-Za-z0-9{}]+))(?![\p{L}\p{N}])/gu,
+      "$$$1$"
+    )).join("");
+}
+
 export type TeachingNarrativeField = "chapterBridgeMarkdown" | "learningObjectives" | "mainContentMarkdown" | "priorKnowledge" | "fullExplanationMarkdown" | "misconceptions" | "questions";
 
 export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): TeachingNarrativeField[] {

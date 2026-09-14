@@ -112,6 +112,13 @@ describe("Course OS API", () => {
     expect(normalized.misconceptions[0]).toContain("“Update Rule” 一行");
     expect(unpairedEnglishTeachingFields({ ...normalized, sourceTitle: "TINY MDP EXAMPLE" })).toEqual([]);
   });
+
+  it("delimits bare exponent and subscript notation before teaching validation", () => {
+    const content = testTeachingResult(0).content;
+    content.questions[0]!.explanation = "把 e^0 = 1 代入，再比较 x_1 与 x_2";
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.questions[0]!.explanation).toBe("把 $e^0$ = 1 代入，再比较 $x_1$ 与 $x_2$");
+  });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
     const pageId = release.pages[0]!.id;
