@@ -1,7 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
 
@@ -11,6 +11,28 @@ it("defaults to the current DeepSeek visual route without hidden fallbacks", () 
   const policy = defaultModelRoutePolicy("personal");
   expect(policy.allowProviderFallback).toBe(false);
   expect(policy.rules.every((rule) => rule.providerId === "deepseek" && rule.modelId === "deepseek-flash" && !rule.fallbackProviderId)).toBe(true);
+});
+
+it("shares a brief ReadWeave read snapshot and invalidates it before a write", async () => {
+  const remote = new FakeEtapi();
+  const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  const clock = vi.spyOn(Date, "now");
+  const base = Date.now();
+  clock.mockReturnValue(base);
+  try {
+    await api.listCourses();
+    const contentReads = () => remote.requests.filter((item) => item.method === "GET" && item.path.endsWith("/content")).length;
+    const firstReads = contentReads();
+    clock.mockReturnValue(base + 1_000);
+    await api.getRelease("missing-release");
+    expect(contentReads()).toBe(firstReads);
+    const course = { id: "snapshot-course", workspaceId: "personal", title: "快照课程", status: "active" as const,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await api.createCourse(course, { ...context, idempotencyKey: "snapshot-course-create" });
+    expect((await api.listCourses()).some((item) => item.id === course.id)).toBe(true);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 const context: IdempotentWriteContext = {

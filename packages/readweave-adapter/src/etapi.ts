@@ -125,6 +125,7 @@ const SECTION_DEFINITIONS = [
 ] as const;
 
 export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
+  private static readonly readCacheTtlMs = 5_000;
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;
@@ -1524,7 +1525,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     this.stateReadInFlight = read;
     try {
       const state = await read;
-      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + 350 };
+      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       return structuredClone(state);
     } finally {
       if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
@@ -1543,7 +1544,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     try {
       await this.putContent(state.projections.stateNoteId, JSON.stringify(state, null, 2));
       this.lastWriteAt = new Date().toISOString();
-      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + 350 };
+      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
     } catch (error) {
       this.invalidateStateCache();
       throw error;
