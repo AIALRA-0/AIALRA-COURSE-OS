@@ -103,6 +103,15 @@ describe("learner-facing teaching narrative", () => {
     questions: [{ prompt: "对象是什么", explanation: "对象提供计算的起点" }]
   };
 
+  it("rejects a claimed loss of softmax normalization after changing one parameter", () => {
+    const wrong = { ...valid, misconceptions: [
+      "错误理解：未选动作不会改变；错因：两个动作共用分母；正确判断：改动一个参数也会影响两个动作；核对方法：把新参数代回 softmax，检查两个概率是否相加等于 $1$，如果只改一个参数，和就不是 $1$"
+    ] };
+    expect(validateTeachingNarrative(wrong)).toContain("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions");
+    const correct = { ...wrong, misconceptions: [wrong.misconceptions[0]!.replace("和就不是 $1$", "和仍等于 $1$")] };
+    expect(validateTeachingNarrative(correct)).not.toContain("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions");
+  });
+
   it("blocks a page whose answer conflicts with its own counted objects", () => {
     const inconsistent = { ...valid,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,

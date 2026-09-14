@@ -78,6 +78,8 @@ describe("Course OS API", () => {
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH"], ["fullExplanationMarkdown"])).toEqual({ ...previous, fullExplanationMarkdown: repaired.fullExplanationMarkdown, coverageEvidence: repaired.coverageEvidence });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_WEIGHTED_TREND_CONDITION_MISSING:mainContentMarkdown"]))
       .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions"]))
+      .toEqual({ ...previous, misconceptions: repaired.misconceptions });
   });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();

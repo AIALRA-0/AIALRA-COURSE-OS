@@ -131,6 +131,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   issues.push(...validateHumanReadableChinese(learnerText));
   issues.push(...validateTeachingCountConsistency(learnerText, input.questions));
+  for (const field of softmaxNormalizationIssueFields(input)) issues.push(`TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:${field}`);
   if (input.lessonFlowVersion === 2) {
     for (const prior of input.priorKnowledge) {
       if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
@@ -331,6 +332,21 @@ export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): Te
   const learnerText = Object.values(parts).join("\n");
   const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
   return (Object.keys(parts) as TeachingNarrativeField[]).filter((field) => hasUnpairedEnglishPhrase(parts[field], sourceNames));
+}
+
+function softmaxNormalizationIssueFields(input: TeachingNarrativeInput): TeachingNarrativeField[] {
+  const parts: Record<TeachingNarrativeField, string> = {
+    chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
+    learningObjectives: input.learningObjectives.join("\n"),
+    mainContentMarkdown: input.mainContentMarkdown,
+    priorKnowledge: input.priorKnowledge.join("\n"),
+    fullExplanationMarkdown: input.fullExplanationMarkdown,
+    misconceptions: input.misconceptions.flatMap((item) => item.split(/(?:正确判断|核对方法)[：:]/u).slice(1)).join("\n"),
+    questions: input.questions.map((question) => question.explanation).join("\n")
+  };
+  if (!/\bsoftmax\b/iu.test(Object.values(parts).join("\n"))) return [];
+  return (Object.keys(parts) as TeachingNarrativeField[]).filter((field) => parts[field].split(/[；;。！？\n]/u).some((clause) =>
+    /(?:概率|softmax)[^；;。！？\n]{0,110}(?:如果|若|当|只改|仅改)[^；;。！？\n]{0,90}(?:概率)?(?:之和|总和|和|加起来)[^；;。！？\n]{0,16}(?:不等于|不是|不为|≠)[^；;。！？\n]{0,10}\$?1\$?/iu.test(clause)));
 }
 
 function definedSourceNames(title: string, learnerText: string): string[] {
