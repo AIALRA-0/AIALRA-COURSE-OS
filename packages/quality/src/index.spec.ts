@@ -71,6 +71,12 @@ describe("learner-facing teaching narrative", () => {
       .toContain("TEACHING_COUNT_CONTRADICTION:硬件");
     expect(validateTeachingCountConsistency("图中有四组柱的比较，另一张图有两组柱的比较；训练条件并不相同"))
       .toEqual([]);
+    expect(validateTeachingCountConsistency("策略有两个动作可以选择，本回合只执行一个动作"))
+      .toEqual([]);
+    expect(validateTeachingCountConsistency("每个块对应一个节点，边嵌入读取两个节点向量"))
+      .toEqual([]);
+    expect(validateTeachingCountConsistency("前四个模块属于一类模块，另有一种硬件"))
+      .toEqual([]);
   });
   const valid = {
     learningObjectives: ["能够解释对象之间的关系"],
@@ -91,6 +97,11 @@ describe("learner-facing teaching narrative", () => {
       questions: [{ prompt: "四种硬件分别是什么", explanation: "先按图中标签核对" }]
     };
     expect(validateTeachingNarrative(inconsistent)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+    const answerOnly = { ...valid,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,
+      questions: [{ prompt: "列出图中对象", explanation: "按横轴名称依次核对", expectedAnswer: "这里只列出四种硬件" }]
+    };
+    expect(validateTeachingNarrative(answerOnly)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
   });
 
   it("accepts adaptive structure without learner-facing audit labels", () => {
@@ -281,6 +292,8 @@ describe("learner-facing teaching narrative", () => {
     expect(maximumTeachingExplanationCharacters({ pageKind: "cover", sourceDensity: "dense" })).toBe(900);
     expect(maximumTeachingExplanationCharacters({ pageKind: "agenda", sourceDensity: "dense" })).toBe(1_000);
     expect(maximumTeachingExplanationCharacters({ pageKind: "concept", sourceDensity: "sparse" })).toBe(2_000);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "formula", sourceDensity: "sparse" })).toBe(3_500);
+    expect(maximumTeachingExplanationCharacters({ pageKind: "diagram", sourceDensity: "sparse" })).toBe(3_500);
     expect(maximumTeachingExplanationCharacters({ pageKind: "formula", sourceDensity: "normal" })).toBe(3_500);
     expect(maximumTeachingExplanationCharacters({ pageKind: "diagram", sourceDensity: "dense" })).toBe(5_000);
   });

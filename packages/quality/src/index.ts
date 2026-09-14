@@ -69,7 +69,7 @@ export interface TeachingNarrativeInput {
   priorKnowledge: string[];
   fullExplanationMarkdown: string;
   misconceptions: string[];
-  questions: Array<{ prompt: string; explanation: string }>;
+  questions: Array<{ prompt: string; explanation: string; expectedAnswer?: string }>;
   pageKind?: "cover" | "agenda" | "concept" | "formula" | "diagram" | "table" | "code" | "mixed";
   sourceDensity?: "sparse" | "normal" | "dense";
   sourceTitle?: string;
@@ -78,6 +78,7 @@ export interface TeachingNarrativeInput {
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
   return input.pageKind === "cover" ? 900
     : input.pageKind === "agenda" ? 1_000
+      : input.sourceDensity === "sparse" && ["formula", "diagram", "table", "code", "mixed"].includes(input.pageKind ?? "") ? 3_500
       : input.sourceDensity === "sparse" ? 2_000
         : input.sourceDensity === "dense" ? 5_000
           : 3_500;
@@ -129,7 +130,10 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   ];
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   issues.push(...validateHumanReadableChinese(learnerText));
-  issues.push(...validateTeachingCountConsistency(learnerText));
+  // The answer key is learner-facing truth even when the question and its
+  // explanation omit the conflicting number.
+  const answerKeys = input.questions.map((question) => question.expectedAnswer ?? "").join("\n");
+  issues.push(...validateTeachingCountConsistency(`${learnerText}\n${answerKeys}`));
   if (input.lessonFlowVersion === 2) {
     for (const prior of input.priorKnowledge) {
       if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
@@ -230,19 +234,23 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
 /** Flag conflicting counts for the same named object across teaching and questions. */
 export function validateTeachingCountConsistency(markdown: string): string[] {
   const numerals: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-  const nouns = ["训练方式", "训练条件", "硬件", "算法", "模型", "步骤", "对象", "图表", "曲线", "公式", "参数", "节点", "模块", "方法", "方案", "样本", "图像", "表格", "层级", "部分", "章节", "流程", "动作", "状态", "结构", "数据", "变量", "数值", "任务", "页面", "指标", "例子", "问题", "区段", "材料", "需求", "选项"];
+  // Keep types, instances and groups separate; a page can have four instances
+  // of one type without contradicting a statement about one class of objects.
+  const nouns = ["训练方式", "训练条件", "节点向量", "硬件", "算法", "模型", "图表", "曲线", "公式", "节点", "模块", "图像", "表格", "章节", "材料", "选项"];
   const counts = new Map<string, Set<number>>();
-  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(?:个|种|组|类|项|条|张|根)([\p{Script=Han}]{2,7})/gu)) {
+  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(个|种|组|类|项|条|张|根)([\p{Script=Han}]{2,7})/gu)) {
     const value = numerals[match[1]!] ?? Number(match[1]);
     if (!Number.isFinite(value)) continue;
-    const tail = match[2]!.replace(/^(?:不同的?|主要的?|相关的?|被比较的?)/u, "");
+    const tail = match[3]!.replace(/^(?:不同的?|主要的?|相关的?|被比较的?)/u, "");
     const noun = nouns.find((candidate) => tail.startsWith(candidate));
     if (!noun) continue;
-    const seen = counts.get(noun) ?? new Set<number>();
+    const measure = ["种", "类"].includes(match[2]!) ? "type" : match[2] === "组" ? "group" : "instance";
+    const key = `${measure}:${noun}`;
+    const seen = counts.get(key) ?? new Set<number>();
     seen.add(value);
-    counts.set(noun, seen);
+    counts.set(key, seen);
   }
-  return [...counts].filter(([, seen]) => seen.size > 1).map(([noun]) => `TEACHING_COUNT_CONTRADICTION:${noun}`);
+  return [...new Set([...counts].filter(([, seen]) => seen.size > 1).map(([key]) => `TEACHING_COUNT_CONTRADICTION:${key.split(":")[1]}`))];
 }
 
 /** Keep every heading's words while turning an empty nested heading into prose. */
