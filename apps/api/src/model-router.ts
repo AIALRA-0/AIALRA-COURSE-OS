@@ -274,6 +274,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const prompt = `${semanticAuditPrompt.trim()}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
       sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
       detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage })}`;
+    const auditSchema = structuredClone(semanticAuditSchema) as { properties: { sourceChecks: { minItems: number } } };
+    if (input.blueprint?.resourcePackage.pageKind === "diagram") auditSchema.properties.sourceChecks.minItems = 3;
     const userInput = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
@@ -286,7 +288,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
         body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
           max_output_tokens: 1_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
-          text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: semanticAuditSchema, strict: true } },
+          text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
           metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
       });
@@ -302,18 +304,22 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const spent = this.usageCostUsd(usage);
     if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
     let parsed: unknown;
+    const invalidAudit = (reason: string): never => {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId,
+        `${reason}:output_tokens=${usage.outputTokens}`);
+    };
     try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output; }
-    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId); }
+    catch { return invalidAudit("json_unparseable"); }
     const findings = (parsed as { findings?: unknown } | null)?.findings;
     const sourceChecks = (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
-    if (!Array.isArray(findings) || findings.length > 6 || findings.some((item) => !item || typeof item !== "object" ||
-      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))
-      || !Array.isArray(sourceChecks) || sourceChecks.length < (input.blueprint?.resourcePackage.pageKind === "diagram" ? 3 : 1)
-      || sourceChecks.length > 8 || sourceChecks.some((item) => !item || typeof item !== "object"
-        || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
-        || !["supported", "contradicted", "unverified"].includes(item.verdict))) {
-      throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId);
-    }
+    if (!Array.isArray(findings)) return invalidAudit("findings_missing");
+    if (findings.length > 6 || findings.some((item) => !item || typeof item !== "object" ||
+      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit("findings_shape");
+    if (!Array.isArray(sourceChecks)) return invalidAudit("source_checks_missing");
+    if (sourceChecks.length < auditSchema.properties.sourceChecks.minItems) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
+    if (sourceChecks.length > 8 || sourceChecks.some((item) => !item || typeof item !== "object"
+      || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
+      || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit("source_checks_shape");
     if (sourceChecks.some((item) => item.verdict !== "supported") && findings.length === 0) {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", model, usage, this.connection.providerId);
     }

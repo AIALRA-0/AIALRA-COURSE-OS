@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.17", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.18", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -208,7 +208,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
     await expect(client.auditTeachingPackage({ ...providerInput("empty-audit-test", true),
       teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
-      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID" });
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: "source_checks_too_few:0:output_tokens=6" });
+  });
+
+  it("requires three concrete source checks for a diagram", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { text: { format: { schema: { properties: { sourceChecks: { minItems: number } } } } } };
+      expect(body.text.format.schema.properties.sourceChecks.minItems).toBe(3);
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ findings: [],
+        sourceChecks: ["起点", "动作", "结果"].map((claim) => ({ claim, evidence: `图中标记${claim}`, verdict: "supported" })) }),
+        usage: { input_tokens: 120, output_tokens: 100, total_cost: 0.001 } });
+    }));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const blueprint = { resourcePackage: { pageKind: "diagram" } } as ModelRouterInput["blueprint"];
+    const result = await client.auditTeachingPackage({ ...providerInput("diagram-audit-test", true), blueprint,
+      teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(result.sourceChecks).toHaveLength(3);
   });
 
   it("preserves a provider's summary list when it returns an array instead of Markdown", async () => {
