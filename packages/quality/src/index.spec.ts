@@ -301,6 +301,9 @@ describe("learner-facing teaching narrative", () => {
     const conditional = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "若权重为正且其他量不变，三个量增大都会让回报下降") };
     expect(validateTeachingNarrative(conditional)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const rejectsUnqualifiedTrend = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "三个量增大都会让回报下降", "不能把‘三个量增大都会让回报下降’当作已经证明的结论；只有当权重为正且其他量不变时，才能判断增大其中一个量会让回报下降") };
+    expect(validateTeachingNarrative(rejectsUnqualifiedTrend)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
     const missingSign = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "若三个量增大，回报都会下降") };
     expect(validateTeachingNarrative(missingSign)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
