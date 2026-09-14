@@ -135,6 +135,10 @@ describe("Course OS API", () => {
       .toContain("TEACHING_COVERAGE_DUPLICATE_ATOM");
   });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
+    expect(normalizeGeneratedMathPunctuation("权重 $\u0000lambda$ 与 $\\gamma$"))
+      .toBe("权重 $\\lambda$ 与 $\\gamma$");
+    expect(normalizeGeneratedMathPunctuation("普通文本中有 \u0000unknown 控制字符"))
+      .toContain("\u0000unknown");
     expect(normalizeGeneratedMathPunctuation("权重 $0.5、3、0.2$ 用于示例")).toBe("权重 $0.5$、$3$、$0.2$ 用于示例");
     expect(normalizeGeneratedMathPunctuation("公式 $F(x)=0.5L(x)$ 保持原样")).toBe("公式 $F(x)=0.5L(x)$ 保持原样");
     expect(normalizeGeneratedMathPunctuation("文字 $\\text{甲、乙}$ 不做破坏性拆分")).toBe("文字 $\\text{甲、乙}$ 不做破坏性拆分");

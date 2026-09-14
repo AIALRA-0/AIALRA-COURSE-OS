@@ -3259,6 +3259,7 @@ export function normalizeGeneratedMathPunctuation(value: string): string {
   const repairedEscapes = normalizeLegacyMathDelimiters(value)
     .replace(/\u000crac/g, "\\frac")
     .replace(/\u0009ext(?=\{)/g, "\\text")
+    .replace(/\u0000(?=(?:alpha|beta|gamma|lambda|mu|pi|sigma|theta)\b)/gu, "\\")
     .replace(/\\text\{\s*μm\s*\}/g, "\\,\\mu\\mathrm{m}");
   const displaysNormalized = repairedEscapes.replace(/\$\$([\s\S]*?)\$\$/g, (match, source: string) => normalizeMathSpan(match, source, "$$"));
   return displaysNormalized.replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, (match, source: string) => normalizeMathSpan(match, source, "$"));
