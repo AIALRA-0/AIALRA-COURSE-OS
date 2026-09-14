@@ -351,7 +351,10 @@ export function validateHumanReadableChinese(markdown: string): string[] {
   const visible = stripProtectedMarkdown(markdown);
   if (visible.includes("。")) issues.push("WRITING_CHINESE_FULL_STOP_FORBIDDEN");
   if (visible.split(/\r?\n/).some((line) => /；\s*$/.test(line))) issues.push("WRITING_LINE_END_SEMICOLON_FORBIDDEN");
-  if (visible.split(/\r?\n/).some((line) => /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
+  // Inspect the original visible line: removing inline math/code can turn
+  // “这个回报是：$r_T=...$” into a fake empty colon heading.
+  const headingLines = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "").replace(/^\s*>.*$/gm, "").replace(/`([^`\r\n]+)`/g, "$1");
+  if (headingLines.split(/\r?\n/).some((line) => /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
   return issues;
 }
 

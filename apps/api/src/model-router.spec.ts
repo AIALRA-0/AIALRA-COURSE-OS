@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.18", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.19", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -197,6 +197,25 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.sourceChecks).toHaveLength(1);
     expect(result.usage.apiEquivalentUsd).toBe(0.001);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs only the failing teaching field and keeps the verified page intact", async () => {
+    const before = providerTeachingContent() as TeachingPackage;
+    const replacement = ["输入：这是处理开始前已知的对象；它决定规则作用于什么；处理时按规则逐步检查；没有输入就不能确定输出"];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { text: { format: { schema: { required: string[] } } }; input: Array<{ content: Array<{ type: string }> }>; max_output_tokens: number };
+      expect(body.text.format.schema.required).toEqual(["priorKnowledge"]);
+      expect(body.input[0]?.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
+      expect(body.max_output_tokens).toBe(2_500);
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ priorKnowledge: replacement }), usage: { input_tokens: 200, output_tokens: 80, total_cost: 0.002 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.repairTeachingFields({ ...providerInput("field-repair-test", true), stage: "repair", maxCostUsd: 0.01,
+      repair: { issues: ["TEACHING_PRIOR_DEFINITION_INCOMPLETE"], maximumExplanationCharacters: 3_500, previousTeachingPackage: before } }, ["priorKnowledge"]);
+    expect(result.content).toEqual({ ...before, priorKnowledge: replacement });
+    expect(result.usage.apiEquivalentUsd).toBe(0.002);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

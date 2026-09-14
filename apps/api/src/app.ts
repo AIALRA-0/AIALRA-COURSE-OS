@@ -2506,7 +2506,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             ].flatMap((part) => unpairedEnglishPhrases(part)))].slice(0, 16)
             : [];
           await appendGenerationStageEvent(jobId, page.id, "repair", "started", dependencies, { repairAttempt, issues: repairIssues, maximumExplanationCharacters });
-          const repaired = await runtimeModelRouter.generateTeachingPackage({
+          const repairInput = {
             pageTitle: page.title,
             pageNumber: page.pageNumber,
             sourceText,
@@ -2518,14 +2518,18 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
             idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:repair:${repairAttempt}:v4`,
             maxCostUsd: pageCostLimitUsd - spentOnPage,
-            stage: "repair",
+            stage: "repair" as const,
             repair: { issues: englishExamples.length > 0 ? [...repairIssues, `需要逐处核对的英文片段：${englishExamples.join("、")}`] : repairIssues, maximumExplanationCharacters, previousTeachingPackage: generation.content }
-          });
+          };
+          const englishFields = repairIssues.includes("TEACHING_UNPAIRED_ENGLISH")
+            ? unpairedEnglishTeachingFields({ ...previousGeneration.content, sourceTitle: page.title }) : [];
+          const focusedFields = focusedTeachingRepairFields(repairIssues, englishFields);
+          const repaired = focusedFields && runtimeModelRouter.repairTeachingFields
+            ? await runtimeModelRouter.repairTeachingFields(repairInput, focusedFields)
+            : await runtimeModelRouter.generateTeachingPackage(repairInput);
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content);
           if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
-          const englishFields = repairIssues.includes("TEACHING_UNPAIRED_ENGLISH")
-            ? unpairedEnglishTeachingFields({ ...previousGeneration.content, sourceTitle: page.title }) : [];
           const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues, englishFields);
           if (focused) {
             repaired.content = focused;
@@ -2853,7 +2857,7 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
   return { content: corrected, fields };
 }
 
-export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[], englishFields: TeachingNarrativeField[] = []): TeachingPackage | undefined {
+export function focusedTeachingRepairFields(issues: string[], englishFields: TeachingNarrativeField[] = []): Array<keyof TeachingPackage> | undefined {
   const fields = new Set<keyof TeachingPackage>();
   for (const issue of issues) {
     if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
@@ -2871,6 +2875,12 @@ export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: 
   // Coverage excerpts point into the explanation. Changing that text without
   // its excerpts can leave a formerly valid claim attached to absent prose.
   if (fields.has("fullExplanationMarkdown")) fields.add("coverageEvidence");
+  return [...fields];
+}
+
+export function mergeFocusedTeachingRepair(previous: TeachingPackage, repaired: TeachingPackage, issues: string[], englishFields: TeachingNarrativeField[] = []): TeachingPackage | undefined {
+  const fields = focusedTeachingRepairFields(issues, englishFields);
+  if (!fields) return undefined;
   const merged = { ...previous };
   for (const field of fields) Object.assign(merged, { [field]: repaired[field] });
   return merged;

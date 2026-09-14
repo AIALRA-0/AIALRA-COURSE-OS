@@ -327,6 +327,15 @@ describe("learner-facing teaching narrative", () => {
       "WRITING_LINE_END_SEMICOLON_FORBIDDEN"
     ]));
   });
+
+  it("does not mistake a sentence with inline math or code for an empty colon heading", () => {
+    expect(validateHumanReadableChinese("它旁边给出的回报是一段表达式：$r_T=-x$\n下一句解释这项回报"))
+      .not.toContain("WRITING_COLON_PSEUDO_HEADING");
+    expect(validateHumanReadableChinese("原图的标签是：`Force-directed method`\n这里解释标签"))
+      .not.toContain("WRITING_COLON_PSEUDO_HEADING");
+    expect(validateHumanReadableChinese("操作：\n执行检查"))
+      .toContain("WRITING_COLON_PSEUDO_HEADING");
+  });
 });
 
 describe("pseudocode", () => {

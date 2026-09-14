@@ -63,6 +63,7 @@ export interface ModelRouterInput {
 
 export interface ModelRouterClient {
   generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult>;
+  repairTeachingFields?(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult>;
   auditTeachingPackage?(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult>;
 }
 
@@ -267,6 +268,67 @@ export async function probeProviderConnection(connection: ProviderConnection): P
  */
 export class HttpProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly connection: ProviderConnection) {}
+
+  async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
+    if (this.connection.protocol !== "responses" || !input.repair?.previousTeachingPackage || fields.length === 0) {
+      return this.generateTeachingPackage(input);
+    }
+    const started = Date.now();
+    const previous = input.repair.previousTeachingPackage;
+    const properties = teachingPackageSchema.properties as Record<string, unknown>;
+    const schema = { type: "object", properties: Object.fromEntries(fields.map((field) => [field, properties[field]])), required: fields, additionalProperties: false };
+    const prompt = JSON.stringify({
+      pageTitle: input.pageTitle, pageNumber: input.pageNumber, sourceText: input.sourceText.slice(0, 6_000),
+      previousPageContext: input.previousPageContext?.slice(0, 800),
+      issues: input.repair.issues, fields,
+      existingFields: Object.fromEntries(fields.map((field) => [field, previous[field]])),
+      explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, 2_500),
+      coverageAtomIds: input.blueprint?.resourcePackage.atomIds
+    });
+    const content = input.sourceImageDataUrl
+      ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
+      : prompt;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180_000);
+    let response: Response;
+    try {
+      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST", signal: controller.signal,
+        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
+        body: JSON.stringify({ model: this.connection.model,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。`,
+          input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
+          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+          text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
+          metadata: { product: "course-os", stage: "repair", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+        })
+      });
+    } catch (error) {
+      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
+    } finally { clearTimeout(timeout); }
+    let body: ProviderResponseBody;
+    try { body = await response.json() as ProviderResponseBody; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+    const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
+    const model = body.model || this.connection.model;
+    if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
+    const spent = this.usageCostUsd(usage);
+    if (input.maxCostUsd !== undefined && (spent === undefined || spent > input.maxCostUsd)) {
+      throw new ModelRouterGenerationError(spent === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
+    }
+    let partial: Record<string, unknown>;
+    try {
+      const output = extractProviderOutput(body);
+      partial = (typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output) as Record<string, unknown>;
+    } catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_JSON_INVALID", model, usage, this.connection.providerId); }
+    if (!partial || typeof partial !== "object" || fields.some((field) => !(field in partial))) {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INCOMPLETE", model, usage, this.connection.providerId);
+    }
+    const repaired = normalizeTeachingPackageShape({ ...previous, ...Object.fromEntries(fields.map((field) => [field, partial[field]])) } as TeachingPackage);
+    try { validateTeachingPackage(repaired); }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INVALID", model, usage, this.connection.providerId); }
+    return { content: repaired, provider: this.connection.providerId, model, usage };
+  }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
     if (this.connection.protocol !== "responses") throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(Date.now()), this.connection.providerId);
@@ -560,6 +622,20 @@ export interface SettingsProviderSource {
  */
 export class SettingsProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly source: SettingsProviderSource) {}
+
+  async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
+    const { providers, policy, credential } = await this.source.load();
+    const rule = policy.rules.find((candidate) => candidate.stage === "repair" && candidate.enabled)
+      || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
+    if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
+    const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
+    const model = provider?.models.find((item) => item.id === rule.modelId);
+    const apiKey = provider ? await credential(provider.id) : undefined;
+    if (!provider || !model || !apiKey) throw new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", rule.modelId, emptyUsage(Date.now()), rule.providerId);
+    if (input.sourceImageDataUrl && !model.supportsVision) throw new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
+    return new HttpProviderTeachingClient({ providerId: provider.id, baseUrl: provider.baseUrl, apiKey, model: model.id,
+      protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode }).repairTeachingFields(input, fields);
+  }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
     const { providers, policy, credential } = await this.source.load();
