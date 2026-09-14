@@ -68,6 +68,7 @@ export interface ModelRouterClient {
 
 export interface SemanticAuditResult {
   findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
+  sourceChecks?: Array<{ claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
   provider: string;
   model: string;
   usage: ModelRouterUsage;
@@ -304,11 +305,19 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output; }
     catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId); }
     const findings = (parsed as { findings?: unknown } | null)?.findings;
+    const sourceChecks = (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
     if (!Array.isArray(findings) || findings.length > 6 || findings.some((item) => !item || typeof item !== "object" ||
-      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) {
+      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))
+      || !Array.isArray(sourceChecks) || sourceChecks.length < (input.blueprint?.resourcePackage.pageKind === "diagram" ? 3 : 1)
+      || sourceChecks.length > 8 || sourceChecks.some((item) => !item || typeof item !== "object"
+        || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
+        || !["supported", "contradicted", "unverified"].includes(item.verdict))) {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId);
     }
-    return { findings, provider: this.connection.providerId, model, usage };
+    if (sourceChecks.some((item) => item.verdict !== "supported") && findings.length === 0) {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", model, usage, this.connection.providerId);
+    }
+    return { findings, sourceChecks, provider: this.connection.providerId, model, usage };
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {

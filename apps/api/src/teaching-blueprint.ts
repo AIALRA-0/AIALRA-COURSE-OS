@@ -107,7 +107,10 @@ function classifyTeachingPage(page: PageLesson, sourceText: string): TeachingBlu
   if (/(目录|大纲|outline|agenda|contents)/i.test(page.title)) return "agenda";
   if (kinds.has("pseudocode_line") || kinds.has("code_block") || /```|^\s*(?:for\s*\(|while\s*\(|if\s*\(|return\s+\S+)/im.test(sourceText)) return "code";
   if (/\|[^\n]+\|[^\n]+\|/.test(sourceText)) return "table";
-  if (kinds.has("math_expression") || /\\(?:frac|sum|prod|int|sqrt|begin)|[$][^$\n]+[$]|(?:formula|公式)[\s\S]{0,300}(?:[=∈]|\b\d+\s*[×x]\s*\d+\b)/i.test(sourceText)) return "formula";
+  const mathematicalGlyphs = [...sourceText.matchAll(/[\p{Script=Greek}\u{1D400}-\u{1D7FF}]/gu)].length;
+  if (kinds.has("math_expression") || mathematicalGlyphs >= 3 && /[=∇∑∏∫←∈]/u.test(sourceText)
+    || /\\(?:frac|sum|prod|int|sqrt|begin)|[$][^$\n]+[$]|(?:formula|公式)[\s\S]{0,300}(?:[=∈]|\b\d+\s*[×x]\s*\d+\b)/i.test(sourceText)) return "formula";
+  if (/(?:flow|flowchart|pipeline|流程|框图|架构图|示意图)/iu.test(page.title)) return "diagram";
   if (kinds.has("diagram_node") || kinds.has("diagram_edge")) return "diagram";
   const mediaSignals = [/(图|figure|diagram|graph)/i.test(value), /(表|table)/i.test(value), /(公式|equation)/i.test(value)].filter(Boolean).length;
   if (mediaSignals > 1) return "mixed";

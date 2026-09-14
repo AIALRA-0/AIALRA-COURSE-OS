@@ -130,10 +130,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   ];
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   issues.push(...validateHumanReadableChinese(learnerText));
-  // The answer key is learner-facing truth even when the question and its
-  // explanation omit the conflicting number.
-  const answerKeys = input.questions.map((question) => question.expectedAnswer ?? "").join("\n");
-  issues.push(...validateTeachingCountConsistency(`${learnerText}\n${answerKeys}`));
+  issues.push(...validateTeachingCountConsistency(learnerText, input.questions));
   if (input.lessonFlowVersion === 2) {
     for (const prior of input.priorKnowledge) {
       if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
@@ -231,26 +228,40 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   return [...new Set(issues)];
 }
 
-/** Flag conflicting counts for the same named object across teaching and questions. */
-export function validateTeachingCountConsistency(markdown: string): string[] {
+/** Compare only explicit totals for the same source scope, not incidental counts. */
+export function validateTeachingCountConsistency(markdown: string, questions: Array<{ prompt: string; expectedAnswer?: string }> = []): string[] {
   const numerals: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-  // Keep types, instances and groups separate; a page can have four instances
-  // of one type without contradicting a statement about one class of objects.
   const nouns = ["训练方式", "训练条件", "节点向量", "硬件", "算法", "模型", "图表", "曲线", "公式", "节点", "模块", "图像", "表格", "章节", "材料", "选项"];
-  const counts = new Map<string, Set<number>>();
-  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(个|种|组|类|项|条|张|根)([\p{Script=Han}]{2,7})/gu)) {
-    const value = numerals[match[1]!] ?? Number(match[1]);
-    if (!Number.isFinite(value)) continue;
-    const tail = match[3]!.replace(/^(?:不同的?|主要的?|相关的?|被比较的?)/u, "");
-    const noun = nouns.find((candidate) => tail.startsWith(candidate));
-    if (!noun) continue;
-    const measure = ["种", "类"].includes(match[2]!) ? "type" : match[2] === "组" ? "group" : "instance";
-    const key = `${measure}:${noun}`;
-    const seen = counts.get(key) ?? new Set<number>();
-    seen.add(value);
-    counts.set(key, seen);
+  const parse = (value: string) => [...stripProtectedMarkdown(value).matchAll(/(?<![A-Za-z0-9约近第])([一二两三四五六七八九十]|[1-9][0-9]?)(个|种|组|类|项|条|张|根)([\p{Script=Han}]{2,7})/gu)]
+    .map((match) => {
+      const noun = nouns.find((candidate) => match[3]!.replace(/^(?:不同的?|主要的?|相关的?|被比较的?)/u, "").startsWith(candidate));
+      const measure = ["种", "类"].includes(match[2]!) ? "type" : match[2] === "组" ? "group" : "instance";
+      return { index: match.index, noun, measure, value: numerals[match[1]!] ?? Number(match[1]) };
+    }).filter((fact) => fact.noun && Number.isFinite(fact.value));
+  const visible = stripProtectedMarkdown(markdown);
+  const totals = new Map<string, Set<number>>();
+  for (const fact of parse(markdown)) {
+    const before = visible.slice(Math.max(0, fact.index - 80), fact.index).split(/[，。；\n]/u).at(-1) ?? "";
+    const scope = [...before.matchAll(/(图中|本页|页面|该图|左图|右图|横轴|纵轴|图例|表中|表格)[^，。；\n]{0,50}?(?:有|共|列出|包含|包括|显示|比较|给出|分成)/gu)].at(-1)?.[1];
+    if (!scope) continue;
+    const key = `${scope}:${fact.measure}:${fact.noun}`;
+    const seen = totals.get(key) ?? new Set<number>();
+    seen.add(fact.value);
+    totals.set(key, seen);
   }
-  return [...new Set([...counts].filter(([, seen]) => seen.size > 1).map(([key]) => `TEACHING_COUNT_CONTRADICTION:${key.split(":")[1]}`))];
+  for (const question of questions) {
+    if (!/(?:图中|页面|本页|左图|右图|横轴|图例|全部|所有)/u.test(question.prompt)
+      || !/(?:哪些|列出|分别|共有|总共|几个|几种|几类|几组)/u.test(question.prompt)) continue;
+    for (const fact of parse(question.expectedAnswer ?? "")) {
+      const answerVisible = stripProtectedMarkdown(question.expectedAnswer ?? "");
+      const before = answerVisible.slice(Math.max(0, fact.index - 6), fact.index);
+      if (/(?:前|其中|部分|某些)$/u.test(before)) continue;
+      for (const [key, seen] of totals) {
+        if (key.endsWith(`:${fact.measure}:${fact.noun}`)) seen.add(fact.value);
+      }
+    }
+  }
+  return [...new Set([...totals].filter(([, seen]) => seen.size > 1).map(([key]) => `TEACHING_COUNT_CONTRADICTION:${key.split(":")[2]}`))];
 }
 
 /** Keep every heading's words while turning an empty nested heading into prose. */

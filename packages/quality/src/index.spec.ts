@@ -61,14 +61,14 @@ describe("coverage", () => {
 
 describe("learner-facing teaching narrative", () => {
   it("detects conflicting object counts across explanation, summary, and questions", () => {
-    expect(validateTeachingCountConsistency("图中有五种硬件。\n- 五种硬件各有柱形\n问：四种硬件怎样比较？"))
+    expect(validateTeachingCountConsistency("图中有五种硬件。\n另有一段说图中列出四种硬件。"))
       .toContain("TEACHING_COUNT_CONTRADICTION:硬件");
     expect(validateTeachingCountConsistency("图中有五种硬件，另有四种算法。"))
       .toEqual([]);
     expect(validateTeachingCountConsistency("`四种硬件`是代码样例，图中有五种硬件。"))
       .toEqual([]);
     expect(validateTeachingCountConsistency("图中有五种硬件，四类训练条件，不同硬件上的柱高各异；四种不同硬件的说法错误"))
-      .toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+      .toEqual([]);
     expect(validateTeachingCountConsistency("图中有四组柱的比较，另一张图有两组柱的比较；训练条件并不相同"))
       .toEqual([]);
     expect(validateTeachingCountConsistency("策略有两个动作可以选择，本回合只执行一个动作"))
@@ -76,6 +76,10 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingCountConsistency("每个块对应一个节点，边嵌入读取两个节点向量"))
       .toEqual([]);
     expect(validateTeachingCountConsistency("前四个模块属于一类模块，另有一种硬件"))
+      .toEqual([]);
+    expect(validateTeachingCountConsistency("图中有五种硬件，其中前四种硬件属于同一类；另一个训练阶段只使用一种硬件"))
+      .toEqual([]);
+    expect(validateTeachingCountConsistency("左图显示四种算法，右图显示两种算法"))
       .toEqual([]);
   });
   const valid = {
@@ -94,12 +98,12 @@ describe("learner-facing teaching narrative", () => {
   it("blocks a page whose answer conflicts with its own counted objects", () => {
     const inconsistent = { ...valid,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,
-      questions: [{ prompt: "四种硬件分别是什么", explanation: "先按图中标签核对" }]
+      questions: [{ prompt: "图中列出四种硬件分别是什么", explanation: "先按图中标签核对" }]
     };
     expect(validateTeachingNarrative(inconsistent)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
     const answerOnly = { ...valid,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,
-      questions: [{ prompt: "列出图中对象", explanation: "按横轴名称依次核对", expectedAnswer: "这里只列出四种硬件" }]
+      questions: [{ prompt: "图中全部硬件有哪些", explanation: "按横轴名称依次核对", expectedAnswer: "这里只列出四种硬件" }]
     };
     expect(validateTeachingNarrative(answerOnly)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
   });

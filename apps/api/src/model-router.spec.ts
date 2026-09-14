@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.16", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.17", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -189,14 +189,26 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.max_output_tokens).toBe(1_500);
       expect(body.metadata.stage).toBe("semantic_audit");
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
-      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ findings: [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ sourceChecks: [{ claim: "原始比值是 1.2", evidence: "来源页写 0.30 / 0.20", verdict: "contradicted" }], findings: [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
     const result = await client.auditTeachingPackage({ ...providerInput("semantic-audit-test", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
     expect(result.findings).toHaveLength(1);
+    expect(result.sourceChecks).toHaveLength(1);
     expect(result.usage.apiEquivalentUsd).toBe(0.001);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an empty semantic audit instead of treating it as source verification", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-v4-flash-vision-exp",
+      output_text: JSON.stringify({ sourceChecks: [], findings: [] }),
+      usage: { input_tokens: 120, output_tokens: 6, total_cost: 0.001 } })));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    await expect(client.auditTeachingPackage({ ...providerInput("empty-audit-test", true),
+      teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID" });
   });
 
   it("preserves a provider's summary list when it returns an array instead of Markdown", async () => {

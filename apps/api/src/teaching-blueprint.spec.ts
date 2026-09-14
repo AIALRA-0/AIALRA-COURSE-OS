@@ -86,4 +86,26 @@ describe("teaching blueprint", () => {
     const blueprint = buildTeachingBlueprint(prepared, buildGenerationSourceText(prepared), "zh-CN", "quality", "writing-policy:test", true);
     expect(blueprint.resourcePackage).toMatchObject({ pageKind: "concept", sourceDensity: "sparse" });
   });
+
+  it("recognizes a sparse slide with Unicode mathematical symbols as a formula page", () => {
+    const imported = {
+      ...page,
+      title: "公式示例",
+      anchors: [{ ...page.anchors[0]!, text: "策略参数 𝜃𝜃1 = 0，𝜃𝜃2 = 0；梯度更新 𝜃𝜃 ← 𝜃𝜃 + 𝛼𝛼 ∇𝜃𝜃 log 𝜋𝜋" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }]
+    } as PageLesson;
+    const blueprint = buildTeachingBlueprint(imported, "", "zh-CN", "quality", "writing-policy:test", true);
+    expect(blueprint.resourcePackage).toMatchObject({ pageKind: "formula", sourceDensity: "sparse" });
+  });
+
+  it("classifies a flow slide as a diagram even when text extraction misses graphic labels", () => {
+    const imported = {
+      ...page,
+      title: "OVERALL FLOW",
+      anchors: [{ ...page.anchors[0]!, text: "Macro placement then standard-cell placement" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }]
+    } as PageLesson;
+    const blueprint = buildTeachingBlueprint(imported, "", "zh-CN", "quality", "writing-policy:test", true);
+    expect(blueprint.resourcePackage).toMatchObject({ pageKind: "diagram", sourceDensity: "sparse" });
+  });
 });

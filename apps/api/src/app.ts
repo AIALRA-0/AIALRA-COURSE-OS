@@ -2616,7 +2616,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
               provider: generation.provider, model: generation.model, inputTokens: audit.usage.inputTokens + (recheck?.usage.inputTokens ?? 0),
               outputTokens: audit.usage.outputTokens + (recheck?.usage.outputTokens ?? 0),
-              findingCount: audit.findings.length + (recheck?.findings.length ?? 0), recheckCount: recheck ? 1 : 0,
+              findingCount: audit.findings.length + (recheck?.findings.length ?? 0), sourceCheckCount: (audit.sourceChecks?.length ?? 0) + (recheck?.sourceChecks?.length ?? 0),
+              sourceChecks: [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? [])]
+                .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
+              recheckCount: recheck ? 1 : 0,
               correctedFields, issueCount: auditIssues.length
             });
           } else {

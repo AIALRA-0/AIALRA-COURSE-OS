@@ -553,7 +553,7 @@ describe("Course OS API", () => {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
         result.content.mainContentMarkdown += "\n- 图中有四种硬件供比较";
-        result.content.questions[0]!.prompt = "四种硬件分别是什么";
+        result.content.questions[0]!.prompt = "图中列出四种硬件分别是什么";
         return result;
       },
       auditTeachingPackage: async (input) => {
