@@ -3018,6 +3018,7 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
   for (const issue of issues) {
     if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
     else if (issue.startsWith("TEACHING_MATH_INVALID:")) fields.add(issue.slice("TEACHING_MATH_INVALID:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:")) fields.add(issue.slice("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));

@@ -164,10 +164,11 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       fullExplanationMarkdown: input.fullExplanationMarkdown,
       mainContentMarkdown: input.mainContentMarkdown,
       misconceptions: input.misconceptions.join("\n"),
-      questions: input.questions.map((question) => `${question.prompt}\n${question.explanation}`).join("\n")
+      questions: input.questions.map((question) => `${question.prompt}\n${question.expectedAnswer || ""}\n${question.explanation}`).join("\n")
     };
     for (const [field, markdown] of Object.entries(mathFields)) {
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
+      if (hasUnqualifiedWeightedTrend(markdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
     }
     const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);
     if (hasUnpairedEnglishPhrase(learnerText, sourceNames)) issues.push("TEACHING_UNPAIRED_ENGLISH");
@@ -227,6 +228,18 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
   if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+/** A symbolic weight has no guaranteed sign, so a trend conclusion needs its condition beside the claim. */
+function hasUnqualifiedWeightedTrend(markdown: string): boolean {
+  if (!/\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(markdown)) return false;
+  return markdown.split(/[；;。\n]/u).some((clause) => {
+    if (!/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升).{0,60}(?:下降|降低|减少|减小|变小)|(?:增大|增加|提高|上升).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,60}(?:下降|降低|减少|减小|变小)/u.test(clause)) return false;
+    const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);
+    const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
+    const otherInputsControlled = /(?:其他|其余|别的)[^，]{0,20}(?:不变|固定|保持)|(?:同时|一起)[^，]{0,12}(?:增大|增加)/u.test(clause);
+    return !(explicitlyConditional && weightsQualified && otherInputsControlled);
+  });
 }
 
 /** Compare only explicit totals for the same source scope, not incidental counts. */

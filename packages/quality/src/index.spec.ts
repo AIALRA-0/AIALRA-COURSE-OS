@@ -275,6 +275,24 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(developed)).toEqual([]);
   });
 
+  it("requires a sign condition for a trend claimed from symbolic weights", () => {
+    const weighted = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n回报式为 $r=-x-\\lambda y-\\gamma z$，三个量增大都会让回报下降`,
+      mainContentMarkdown: "- 回报由三个量计算\n- 系数决定每项影响" };
+    expect(validateTeachingNarrative(weighted)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const conditional = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "三个量增大都会让回报下降", "若权重为正且其他量不变，三个量增大都会让回报下降") };
+    expect(validateTeachingNarrative(conditional)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const missingSign = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "三个量增大都会让回报下降", "若三个量增大，回报都会下降") };
+    expect(validateTeachingNarrative(missingSign)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const answerOnly = { ...valid, strictWritingStyle: true, questions: [{
+      prompt: "怎样判断结果变化", expectedAnswer: "由 $r=-x-\\lambda y-\\gamma z$ 可知，三个量增大都会让回报下降",
+      explanation: "先代入公式，再比较改变一个输入之前与之后的输出数值，最后说明判断需要的条件"
+    }] };
+    expect(validateTeachingNarrative(answerOnly)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions");
+  });
+
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
     const explained = { ...valid, lessonFlowVersion: 2 as const, priorKnowledge: ["输入条件：规则只对满足输入条件的对象执行，因此要先确认对象是否满足条件，再计算并核对结果是否符合目标"], misconceptions: ["把未满足条件的结果直接当作答案会出错，由于规则的前提不成立，应先核对输入条件再判断结果"] };
     expect(validateTeachingNarrative(explained)).toEqual([]);

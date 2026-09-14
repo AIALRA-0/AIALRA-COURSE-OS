@@ -76,6 +76,8 @@ describe("Course OS API", () => {
     expect(mergeFocusedTeachingRepair(previous, { ...repaired, learningObjectives: ["修好的公式"] }, ["TEACHING_MATH_INVALID:learningObjectives"]))
       .toEqual({ ...previous, learningObjectives: ["修好的公式"] });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH"], ["fullExplanationMarkdown"])).toEqual({ ...previous, fullExplanationMarkdown: repaired.fullExplanationMarkdown, coverageEvidence: repaired.coverageEvidence });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_WEIGHTED_TREND_CONDITION_MISSING:mainContentMarkdown"]))
+      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
   });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();
