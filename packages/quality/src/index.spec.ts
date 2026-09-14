@@ -130,6 +130,8 @@ describe("learner-facing teaching narrative", () => {
   it("keeps source course codes and quoted slide labels while rejecting unexplained English", () => {
     expect(hasUnpairedEnglishPhrase("课程编号 EE 680，强化学习 RL 即强化学习，原页“Interconnections between partitions”对应连接目标")).toBe(false);
     expect(hasUnpairedEnglishPhrase('目录中 "Google RL Floorplanner" 是原图引用的一级条目名称')).toBe(false);
+    expect(hasUnpairedEnglishPhrase("原图标题「Step 1: Compute clip」指向先计算比例")).toBe(false);
+    expect(hasUnpairedEnglishPhrase("Step 1: Compute clip 应当直接照搬到讲解中")).toBe(true);
     expect(hasUnpairedEnglishPhrase('原页把“RL”列在标题中，尚未解释其含义')).toBe(false);
     expect(hasUnpairedEnglishPhrase("作者发表于 Bell System Technical Journal 的文章给出原始方法")).toBe(false);
     expect(hasUnpairedEnglishPhrase("上一页说 PDA 会处理输入，读者尚不知道这个缩写是什么")).toBe(true);

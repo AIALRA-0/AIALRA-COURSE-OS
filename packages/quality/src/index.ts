@@ -282,6 +282,7 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
     .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")
     .replace(/“[A-Za-z][^”\n]{0,100}”/gu, "")
     .replace(/"[A-Za-z][^"\n]{0,100}"/gu, "")
+    .replace(/「[A-Za-z][^」\n]{0,100}」/gu, "")
     .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
   const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
   return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
