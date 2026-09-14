@@ -2663,11 +2663,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               check.verdict + "：" + check.claim.slice(0, 180) + "；原图证据：" + check.evidence.slice(0, 220)))].slice(0, 6);
             let sourceRepairAttempted = false;
             let sourceRepairAccepted = false;
-            let sourceRepairFailureKind: "local_quality" | "final_audit_findings" | "final_audit_unsupported" | "final_audit_insufficient_checks" | undefined;
+            let sourceRepairFailureKind: "local_quality" | "final_audit_patch_invalid" | "final_audit_findings" | "final_audit_unsupported" | "final_audit_insufficient_checks" | undefined;
             let sourceRepairIssueCodes: string[] = [];
             let finalAuditFindingCount: number | undefined;
             let finalAuditSourceCheckCount: number | undefined;
             let finalAuditUnsupportedCount: number | undefined;
+            let finalAuditPatchApplied = false;
             if (auditIssues.length > 0 && unsupportedChecks.length > 0) {
               const spentBeforeSourceRepair = generationUsageCostUsd(generation);
               if (spentBeforeSourceRepair === undefined || spentBeforeSourceRepair >= pageCostLimitUsd) {
@@ -2716,13 +2717,48 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 });
                 generation = combineTeachingGenerations(generation, { content: sourceRepair.content,
                   provider: finalAudit.provider, model: finalAudit.model, usage: finalAudit.usage });
-                finalAuditFindingCount = finalAudit.findings.length;
-                finalAuditSourceCheckCount = finalAudit.sourceChecks?.length ?? 0;
-                finalAuditUnsupportedCount = finalAudit.sourceChecks?.filter((check) => check.verdict !== "supported").length ?? 0;
-                sourceRepairAccepted = finalAudit.findings.length === 0
-                  && (finalAudit.sourceChecks?.length ?? 0) >= Math.min(sourceRepairTargets.length, 8)
-                  && finalAudit.sourceChecks!.every((check) => check.verdict === "supported");
-                if (!sourceRepairAccepted) sourceRepairFailureKind = finalAudit.findings.length > 0 ? "final_audit_findings"
+                let decisiveAudit = finalAudit;
+                if (finalAudit.findings.length > 0) {
+                  try {
+                    const patched = normalizeTeachingPackageMath(applySemanticAuditFindings(sourceRepair.content, finalAudit.findings).content);
+                    const patchIssues = [...new Set([
+                      ...validateTeachingCoverageEvidence(page, patched),
+                      ...validateTeachingNarrative({ ...patched, lessonFlowVersion: 2, strictWritingStyle: true,
+                        sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+                    ])];
+                    sourceRepairIssueCodes.push(...patchIssues.map((issue) => issue.split(":", 1)[0]!));
+                    if (patchIssues.length === 0) {
+                      const spentBeforePatchCheck = generationUsageCostUsd(generation);
+                      if (spentBeforePatchCheck === undefined || spentBeforePatchCheck >= pageCostLimitUsd) {
+                        throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
+                      }
+                      decisiveAudit = await runtimeModelRouter.auditTeachingPackage({
+                        pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                        writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                        language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                        idempotencyKey: "course-os:" + jobId + ":attempt:" + currentJob.attempt + ":" + page.id + ":source-claim-patch-check:v1",
+                        maxCostUsd: pageCostLimitUsd - spentBeforePatchCheck, stage: "semantic_audit", teachingPackage: patched,
+                        repair: { issues: ["TEACHING_SOURCE_CLAIM_RECHECK"],
+                          maximumExplanationCharacters: maximumTeachingExplanationCharacters({
+                            pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity
+                          }), previousTeachingPackage: patched }
+                      });
+                      generation = combineTeachingGenerations(generation, { content: patched,
+                        provider: decisiveAudit.provider, model: decisiveAudit.model, usage: decisiveAudit.usage });
+                      finalAuditPatchApplied = true;
+                    } else sourceRepairFailureKind = "final_audit_patch_invalid";
+                  } catch (error) {
+                    if (error instanceof ModelRouterGenerationError) throw error;
+                    sourceRepairFailureKind = "final_audit_patch_invalid";
+                  }
+                }
+                finalAuditFindingCount = decisiveAudit.findings.length;
+                finalAuditSourceCheckCount = decisiveAudit.sourceChecks?.length ?? 0;
+                finalAuditUnsupportedCount = decisiveAudit.sourceChecks?.filter((check) => check.verdict !== "supported").length ?? 0;
+                sourceRepairAccepted = !sourceRepairFailureKind && decisiveAudit.findings.length === 0
+                  && (decisiveAudit.sourceChecks?.length ?? 0) >= Math.min(sourceRepairTargets.length, 8)
+                  && decisiveAudit.sourceChecks!.every((check) => check.verdict === "supported");
+                if (!sourceRepairAccepted && !sourceRepairFailureKind) sourceRepairFailureKind = decisiveAudit.findings.length > 0 ? "final_audit_findings"
                   : finalAuditUnsupportedCount > 0 ? "final_audit_unsupported" : "final_audit_insufficient_checks";
                 if (sourceRepairAccepted) {
                   auditIssues = [];
@@ -2740,7 +2776,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
               recheckCount: (recheck ? 1 : 0) + (verification ? 1 : 0),
               sourceRepairAttempted, sourceRepairAccepted, sourceRepairFailureKind, sourceRepairTargetCount: sourceRepairTargets.length,
-              sourceRepairIssueCodes, finalAuditFindingCount, finalAuditSourceCheckCount, finalAuditUnsupportedCount,
+              sourceRepairIssueCodes, finalAuditFindingCount, finalAuditSourceCheckCount, finalAuditUnsupportedCount, finalAuditPatchApplied,
               correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {

@@ -683,6 +683,45 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
   }, 60_000);
 
+  it("applies a sourced final audit correction and verifies it before saving", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-step", pageId: "page-1", kind: "text",
+      label: "提取文字", text: "先检查输入；图中两个 Agent 标签不表示同一对象" }];
+    let audits = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (!input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
+          result.content.fullExplanationMarkdown += "\n\n两个 Agent 标签必然表示同一对象";
+        }
+        return result;
+      },
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        const falseAgentClaim = input.teachingPackage.fullExplanationMarkdown.includes("两个 Agent 标签必然表示同一对象");
+        const falseStepClaim = input.teachingPackage.mainContentMarkdown.includes("先识别输入");
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          findings: audits === 3 ? [{ field: "mainContentMarkdown", original: "先识别输入",
+            replacement: "先检查输入", evidence: "课件写着先检查输入" }] : [],
+          sourceChecks: [{ claim: falseAgentClaim ? "两个 Agent 标签必然表示同一对象" : "两个 Agent 标签分别出现",
+            evidence: "课件没有说明两个标签是同一对象", verdict: falseAgentClaim ? "unverified" as const : "supported" as const },
+          { claim: falseStepClaim ? "先识别输入" : "先检查输入", evidence: "课件写着先检查输入",
+            verdict: falseStepClaim ? "contradicted" as const : "supported" as const }] };
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-final-patch")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [] });
+    expect(audits).toBe(4);
+    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "main_content")?.markdown)
+      .toContain("先检查输入");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { finalAuditPatchApplied?: boolean; sourceRepairAccepted?: boolean }).finalAuditPatchApplied === true
+        && (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
+  }, 60_000);
+
   it("does not mark a page ready when a source claim remains unverified after correction", async () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
