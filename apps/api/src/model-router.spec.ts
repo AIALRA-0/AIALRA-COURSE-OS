@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.28", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.29", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -353,6 +353,14 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.content.learningObjectives).toHaveLength(2);
     expect(result.content.questions.filter((question) => question.kind === "comprehension")).toHaveLength(2);
     expect(result.content.questions.filter((question) => question.kind === "multiple_choice")).toHaveLength(2);
+  });
+
+  it("keeps both a prior concept and its definition when a provider returns objects", async () => {
+    const content = providerTeachingContent() as Record<string, unknown>;
+    content.priorKnowledge = [{ term: "归一化", definition: "把几个正数转换为总和等于一的比例" }];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-flash", output_text: JSON.stringify(content), usage: { input_tokens: 100, output_tokens: 80, total_cost: 0.001 } })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("prior-term-definition"));
+    expect(result.content.priorKnowledge).toEqual(["归一化：把几个正数转换为总和等于一的比例"]);
   });
 
   it("unwraps a uniquely identifiable nested objective without guessing between alternatives", async () => {

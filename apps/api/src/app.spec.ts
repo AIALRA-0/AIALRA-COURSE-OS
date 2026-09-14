@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, validateTeachingCoverageEvidence } from "./app.js";
+import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -32,6 +32,11 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("records a safe ReadWeave failure kind without exposing a private response", () => {
+    expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_503:private response"))).toBe("http_503");
+    expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_NETWORK:This operation was aborted"))).toBe("timeout");
+    expect(safeReadWeaveFailureKind(new Error("READWEAVE_DRAFT_READBACK_MISMATCH"))).toBe("readback_mismatch");
+  });
   it("reads a structured page and its release without listing every release", async () => {
     const release = testRelease();
     release.id = "structured-release";
@@ -750,7 +755,9 @@ describe("Course OS API", () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
         const result = testTeachingResult(0.001);
-        if (!input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
+        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
+          result.content.coverageEvidence = result.content.coverageEvidence.map((claim) => ({ ...claim, explanation: "这条新引用不在讲解中" }));
+        } else {
           result.content.fullExplanationMarkdown += "\n\n两个 Agent 标签必然表示同一对象";
         }
         return result;

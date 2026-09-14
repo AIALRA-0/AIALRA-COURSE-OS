@@ -2457,6 +2457,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       continue;
     }
     const page = preparePageForGeneration(sourcePage);
+    let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
@@ -2695,6 +2696,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               sourceRepair.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(
                 sourceRepair.content.mainContentMarkdown, sourceRepair.content.fullExplanationMarkdown);
               sourceRepair.content = normalizeTeachingPackageMath(sourceRepair.content, sourceText, page.title);
+              if (validatedCoverageEvidence) {
+                const withPreservedEvidence = { ...sourceRepair.content, coverageEvidence: validatedCoverageEvidence };
+                if (validateTeachingCoverageEvidence(page, withPreservedEvidence).length === 0) sourceRepair.content = withPreservedEvidence;
+              }
               let sourceRepairIssues = [...new Set([
                 ...validateTeachingCoverageEvidence(page, sourceRepair.content),
                 ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
@@ -2867,7 +2872,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         publishable: coverage.publishable && issues.length === 0 && Boolean(runtimeModelRouter),
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
-      await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable });
+      const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
+      await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
+        provider: cost.provider, model: cost.model, estimatedMicrousd: cost.estimatedMicrousd, actualMicrousd: cost.actualMicrousd, costBasis: cost.costBasis });
+      persistenceStage = "load_draft";
       const existing = await dependencies.readweave.getDraftByPage(page.id);
       await assertGenerationFence(jobId, fenceToken, dependencies);
       const now = new Date().toISOString();
@@ -2887,11 +2895,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         readweaveNoteId: existing?.readweaveNoteId,
         updatedAt: now
       };
+      persistenceStage = "save_draft";
       const saved = await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId));
+      persistenceStage = "read_back";
       const readBack = await dependencies.readweave.getDraftByPage(page.id);
       if (!readBack || readBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_DRAFT_READBACK_MISMATCH");
-      const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
+      persistenceStage = "append_cost";
       await dependencies.readweave.appendCostEntry(cost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
+      persistenceStage = undefined;
       await dependencies.operations.mutate((state) => {
         const job = state.jobs.find((item) => item.id === jobId);
         if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
@@ -2927,7 +2938,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           }
         });
       }
-      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}, fenceToken);
+      await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
+        ...(error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}),
+        ...(persistenceStage ? { persistenceStage, backendFailureKind: safeReadWeaveFailureKind(error) } : {})
+      }, fenceToken);
     }
   }
   await dependencies.operations.mutate((state) => {
@@ -3351,6 +3365,16 @@ function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: O
 function safeGenerationIssue(error: unknown): string {
   if (error instanceof ModelRouterGenerationError) return describeGenerationError(new Error(error.code)).code;
   return describeGenerationError(error).code;
+}
+
+export function safeReadWeaveFailureKind(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const status = /^READWEAVE_ETAPI_(\d{3})(?::|$)/u.exec(message)?.[1];
+  if (status) return `http_${status}`;
+  if (message.startsWith("READWEAVE_ETAPI_NETWORK:")) return /abort|timeout/u.test(message.toLowerCase()) ? "timeout" : "network";
+  if (message.startsWith("READWEAVE_DRAFT_READBACK_MISMATCH")) return "readback_mismatch";
+  if (message.startsWith("READWEAVE_REVISION_CONFLICT")) return "revision_conflict";
+  return "unknown";
 }
 
 function isAllowedProviderBaseUrl(value: string): boolean {

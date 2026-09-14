@@ -964,6 +964,11 @@ function normalizeStringListItem(value: unknown, depth = 0): string | undefined 
   if (depth > 4) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
+  const term = record.term ?? record.name ?? record.concept ?? record.knowledge;
+  const definition = record.definition ?? record.explanation ?? record.description;
+  if (typeof term === "string" && term.trim() && typeof definition === "string" && definition.trim()) {
+    return `${term.trim().replace(/[：:]$/u, "")}：${definition.trim()}`;
+  }
   for (const key of ["text", "value", "objective", "knowledge", "point", "description", "content", "label"]) {
     const candidate = record[key];
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
