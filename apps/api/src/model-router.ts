@@ -277,6 +277,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const previous = input.repair.previousTeachingPackage;
     const properties = teachingPackageSchema.properties as Record<string, unknown>;
     const schema = { type: "object", properties: Object.fromEntries(fields.map((field) => [field, properties[field]])), required: fields, additionalProperties: false };
+    const coverageQuoteInstruction = fields.includes("fullExplanationMarkdown")
+      ? "修复 coverageEvidence 时，每条 explanation 必须逐字摘取本次同一 JSON 返回的 fullExplanationMarkdown 中连续至少 12 个字符；先写定完整讲解，再填写覆盖证据，不得引用旧草稿或自行改写摘录"
+      : "修复 coverageEvidence 时，每条 explanation 必须逐字摘取 explanationContext 中连续至少 12 个字符，不得引用旧草稿或自行改写摘录";
     const prompt = JSON.stringify({
       pageTitle: input.pageTitle, pageNumber: input.pageNumber, sourceText: input.sourceText.slice(0, 6_000),
       previousPageContext: input.previousPageContext?.slice(0, 800),
@@ -284,7 +287,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       maximumExplanationCharacters: input.repair.maximumExplanationCharacters,
       existingFields: Object.fromEntries(fields.map((field) => [field, previous[field]])),
       explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, fields.includes("coverageEvidence") ? 12_000 : 2_500),
-      coverageAtomIds: input.blueprint?.resourcePackage.atomIds
+      coverageAtomIds: input.blueprint?.resourcePackage.atomIds,
+      coverageRequirements: input.blueprint?.requirementPackage.requirements.map((item) => ({
+        atomId: item.atomId, requiredFields: item.requiredFields
+      }))
     });
     const content = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
@@ -297,7 +303,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         method: "POST", signal: controller.signal,
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
         body: JSON.stringify({ model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。修复 coverageEvidence 时，explanation 必须逐字摘取 explanationContext 中连续至少 12 个字符，不可改写、拼接或引用旧版本讲解；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。`,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
@@ -369,7 +375,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         method: "POST", signal: controller.signal,
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
         body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-          max_output_tokens: 3_000, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
+          max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
           text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
           metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
@@ -395,13 +401,13 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const findings = (parsed as { findings?: unknown } | null)?.findings;
     const sourceChecks = (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
     if (!Array.isArray(findings)) return invalidAudit("findings_missing");
-    if (findings.length > 6 || findings.some((item) => !item || typeof item !== "object" ||
-      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit("findings_shape");
+    if (findings.length > 12 || findings.some((item) => !item || typeof item !== "object" ||
+      ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit(`findings_shape:${findings.length}`);
     if (!Array.isArray(sourceChecks)) return invalidAudit("source_checks_missing");
     if (sourceChecks.length < auditSchema.properties.sourceChecks.minItems) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
-    if (sourceChecks.length > 8 || sourceChecks.some((item) => !item || typeof item !== "object"
+    if (sourceChecks.length > 16 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
-      || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit("source_checks_shape");
+      || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
     if (sourceChecks.some((item) => item.verdict !== "supported") && findings.length === 0) {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", model, usage, this.connection.providerId);
     }

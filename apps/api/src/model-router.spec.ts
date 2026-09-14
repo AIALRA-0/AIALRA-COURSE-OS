@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.23", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.24", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -186,7 +186,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };
       expect(body.text.format.name).toBe("course_os_semantic_audit");
-      expect(body.max_output_tokens).toBe(3_000);
+      expect(body.max_output_tokens).toBe(4_500);
       expect(body.metadata.stage).toBe("semantic_audit");
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ sourceChecks: [{ claim: "原始比值是 1.2", evidence: "来源页写 0.30 / 0.20", verdict: "contradicted" }], findings: [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
@@ -263,6 +263,44 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
     await client.repairTeachingFields({ ...providerInput("coverage-repair", true), repair: { issues: ["TEACHING_COVERAGE_QUOTE_NOT_FOUND"], maximumExplanationCharacters: 8000, previousTeachingPackage: before } }, ["coverageEvidence"]);
+  });
+
+  it("binds coverage excerpts to the newly repaired explanation when both fields change", async () => {
+    const before = providerTeachingContent() as TeachingPackage;
+    const explanation = "先找出图上的输入，再说明计算怎样得到输出，同时逐项核对原图的箭头与符号。".repeat(5);
+    const evidence = [{ atomId: "atom-1", coveredFields: ["observation"], explanation: "正文逐字写明：先找出图上的输入，再说明计算怎样得到输出" }];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { instructions: string; input: Array<{ content: Array<{ text?: string }> }> };
+      expect(body.instructions).toContain("本次同一 JSON 返回的 fullExplanationMarkdown");
+      expect(body.instructions).not.toContain("必须逐字摘取 explanationContext");
+      expect(body.input[0]?.content[0]?.text).toContain('"fullExplanationMarkdown"');
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ fullExplanationMarkdown: explanation, coverageEvidence: evidence }),
+        usage: { input_tokens: 200, output_tokens: 80, total_cost: 0.002 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.repairTeachingFields({ ...providerInput("paired-coverage-repair", true),
+      repair: { issues: ["TEACHING_COVERAGE_QUOTE_NOT_FOUND", "TEACHING_EXPLANATION_TOO_LONG"],
+        maximumExplanationCharacters: 3500, previousTeachingPackage: before } }, ["fullExplanationMarkdown", "coverageEvidence"]);
+    expect(result.content.fullExplanationMarkdown).toBe(explanation);
+    expect(result.content.coverageEvidence).toEqual(evidence);
+  });
+
+  it("accepts source checks for a dense page without dropping verified objects", async () => {
+    const sourceChecks = Array.from({ length: 9 }, (_, index) => ({
+      claim: `图中对象 ${index + 1} 的位置`,
+      evidence: `原图第 ${index + 1} 个对象`,
+      verdict: "supported" as const
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-flash",
+      output_text: JSON.stringify({ sourceChecks, findings: [] }),
+      usage: { input_tokens: 120, output_tokens: 240, total_cost: 0.001 } })));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.auditTeachingPackage({ ...providerInput("dense-audit", true),
+      teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(result.sourceChecks).toHaveLength(9);
   });
 
   it("rejects an empty semantic audit instead of treating it as source verification", async () => {
