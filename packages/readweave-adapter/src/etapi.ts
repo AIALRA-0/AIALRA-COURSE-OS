@@ -222,7 +222,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {
-    return (await this.readState()).releases.find((release) => release.id === releaseId);
+    const release = (await this.readStateReference()).releases.find((item) => item.id === releaseId);
+    return release ? structuredClone(release) : undefined;
   }
 
   async getManifest(releaseId: string): Promise<ReleaseManifest | undefined> {
@@ -321,8 +322,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listQuestions(pageId?: string): Promise<PageQuestion[]> {
-    const questions = (await this.readState()).questions;
-    return pageId ? questions.filter((item) => item.pageId === pageId) : questions;
+    const questions = (await this.readStateReference()).questions;
+    return structuredClone(pageId ? questions.filter((item) => item.pageId === pageId) : questions);
   }
 
   async listNativePageQuestions(pageId: string, workspaceId = this.workspaceId): Promise<import("@course-os/contracts").ReadWeavePageQuestions> {
@@ -578,6 +579,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return reconciled.draft;
   }
 
+  async getDraftSnapshotByPage(pageId: string): Promise<LessonDraft | undefined> {
+    const cached = this.draftReadCache.get(pageId);
+    if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
+    const draft = (await this.readStateReference()).drafts.find((item) => item.pageId === pageId);
+    return draft ? structuredClone(draft) : undefined;
+  }
+
   async saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
     const result = await this.mutate(async (state): Promise<{ saved?: LessonDraft; conflict?: CourseConflict }> => {
       const replay = state.idempotency[context.idempotencyKey];
@@ -647,7 +655,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async getSyncStatus(): Promise<ReadWeaveSyncStatus> {
     try {
-      const state = await this.readState(true);
+      const state = await this.readStateReference(true);
       return {
         state: "connected",
         authority: "readweave",
@@ -1523,8 +1531,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async readState(requireFresh = false): Promise<EtapiState> {
+    return structuredClone(await this.readStateReference(requireFresh));
+  }
+
+  private async readStateReference(requireFresh = false): Promise<EtapiState> {
     const now = Date.now();
-    if (this.stateCache && this.stateCache.expiresAt > now) return structuredClone(this.stateCache.state);
+    if (this.stateCache && this.stateCache.expiresAt > now) return this.stateCache.state;
     if (!this.stateReadInFlight) {
       const read = this.readRemoteState();
       this.stateReadInFlight = read;
@@ -1535,9 +1547,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       });
     }
     if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
-      return structuredClone(this.stateCache.state);
+      return this.stateCache.state;
     }
-    return structuredClone(await this.stateReadInFlight);
+    return await this.stateReadInFlight;
   }
 
   private async readRemoteState(): Promise<EtapiState> {

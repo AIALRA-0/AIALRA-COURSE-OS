@@ -66,6 +66,7 @@ export interface ReadWeaveCourseApi {
   searchResearch(query: string): Promise<Array<{ archiveId: string; title: string; snippets: string[] }>>;
   listDrafts(): Promise<LessonDraft[]>;
   getDraftByPage(pageId: string): Promise<LessonDraft | undefined>;
+  getDraftSnapshotByPage?(pageId: string): Promise<LessonDraft | undefined>;
   saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft>;
   listConflicts(): Promise<CourseConflict[]>;
   resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict>;

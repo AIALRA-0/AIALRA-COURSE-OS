@@ -450,7 +450,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, request.params.id);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
-      const candidateDraft = await dependencies.readweave.getDraftByPage(request.params.id);
+      const candidateDraft = dependencies.readweave.getDraftSnapshotByPage
+        ? await dependencies.readweave.getDraftSnapshotByPage(request.params.id)
+        : await dependencies.readweave.getDraftByPage(request.params.id);
       const draft = candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined;
       response.json({
         releaseId: source.release.id,

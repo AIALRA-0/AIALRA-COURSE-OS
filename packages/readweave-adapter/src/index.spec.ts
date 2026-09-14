@@ -201,6 +201,10 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(saved.readweaveNoteId).toBeTruthy();
     expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
     remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
+    const requestsBeforeSnapshot = remote.requests.length;
+    const snapshot = await api.getDraftSnapshotByPage("page-1");
+    expect(snapshot?.revision).toBe(1);
+    expect(remote.requests).toHaveLength(requestsBeforeSnapshot);
     const writesBeforeRead = remote.requests.filter((item) => item.method !== "GET").length;
     const reconciled = await api.getDraftByPage("page-1");
     expect(reconciled?.revision).toBe(2);

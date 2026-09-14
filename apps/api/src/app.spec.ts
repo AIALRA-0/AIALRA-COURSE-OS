@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
+import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
@@ -42,6 +42,17 @@ describe("Course OS API", () => {
     expect((await request(app).get("/api/v1/pages/structured-release:page:1/lesson").expect(200)).body.page.id).toBe(release.pageIds[0]);
     expect((await request(app).get("/api/v1/releases/structured-release").expect(200)).body.id).toBe(release.id);
     expect(listReleases).not.toHaveBeenCalled();
+  });
+
+  it("serves the learner lesson from a saved draft snapshot without waiting for block reconciliation", async () => {
+    const { app, readweave } = await seededApp();
+    const snapshot = await readweave.getDraftByPage("page-1");
+    const fastRead = vi.fn(async () => snapshot);
+    (readweave as ReadWeaveCourseApi).getDraftSnapshotByPage = fastRead;
+    const reconciledRead = vi.spyOn(readweave, "getDraftByPage").mockRejectedValue(new Error("SLOW_BLOCK_RECONCILIATION"));
+    await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(fastRead).toHaveBeenCalledWith("page-1");
+    expect(reconciledRead).not.toHaveBeenCalled();
   });
 
   it("applies only exact, unambiguous semantic corrections and preserves unrelated fields", () => {
