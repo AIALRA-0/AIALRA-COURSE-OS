@@ -680,7 +680,8 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
     const { providers: savedProviders, policy, credential } = await this.source.load();
     const providers = withCurrentDeepSeekModels(savedProviders);
-    const rule = policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
+    const rule = policy.rules.find((candidate) => candidate.stage === "semantic_audit" && candidate.enabled)
+      || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
     if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
     const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
     const model = provider?.models.find((item) => item.id === rule.modelId);

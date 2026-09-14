@@ -557,6 +557,34 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("uses an explicitly configured semantic audit route without changing the teaching route", async () => {
+    const models = ["deepseek-flash", "deepseek-v4-flash-vision-exp"].map((id) => ({ id, displayName: id,
+      protocol: "responses" as const, supportsVision: true, supportsJsonSchema: true,
+      supportsReasoning: true, billingMode: "metered" as const }));
+    const seenModels: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model: string };
+      seenModels.push(body.model);
+      return Response.json({ model: body.model, output_text: JSON.stringify({
+        sourceChecks: [{ claim: "图中标出两个对象", evidence: "原图有两个标签", verdict: "supported" }], findings: []
+      }), usage: { input_tokens: 100, output_tokens: 50, total_cost: 0.001 } });
+    }));
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [{ id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true,
+        credential: { configured: true }, models }],
+      policy: { workspaceId: "personal", allowProviderFallback: false, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), rules: [
+          { stage: "teach", providerId: "deepseek", modelId: "deepseek-flash", enabled: true },
+          { stage: "semantic_audit", providerId: "deepseek", modelId: "deepseek-v4-flash-vision-exp", enabled: true }
+        ] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.auditTeachingPackage({ ...providerInput("explicit-audit-route", true),
+      teachingPackage: providerTeachingContent() as TeachingPackage });
+    expect(result.model).toBe("deepseek-v4-flash-vision-exp");
+    expect(seenModels).toEqual(["deepseek-v4-flash-vision-exp"]);
+  });
+
   it("classifies insufficient provider balance without retaining the provider message", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
       error: { code: "invalid_request_error", message: "Insufficient Balance" }
