@@ -96,6 +96,7 @@ describe("Course OS API", () => {
     expect(normalizeGeneratedMathPunctuation("曲线 $对应线性端点，$ 再比较")).toBe("曲线 对应线性端点， 再比较");
     expect(normalizeGeneratedMathPunctuation("换算 $1000\\text{ μm}=1\\text{ mm}$")).toBe("换算 $1000\\,\\mu\\mathrm{m}=1\\text{ mm}$");
     expect(normalizeGeneratedMathPunctuation("$$\\frac12+\u000crac12=1。$$")).toBe("$$\\frac12+\\frac12=1$$。");
+    expect(normalizeGeneratedMathPunctuation("系数 $\u0009ext{Wirelength}$ 与 $\\gamma$")).toBe("系数 $\\text{Wirelength}$ 与 $\\gamma$");
   });
 
   it("reports liveness without waiting for ReadWeave", async () => {
@@ -525,19 +526,26 @@ describe("Course OS API", () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
     technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "新概率 0.3，旧概率 0.2，原始比值 1.5，裁剪值 1.2" }];
+    let audits = 0;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
         result.content.fullExplanationMarkdown += "\n\n原始比值是 1.2，裁剪值也是 1.2";
         return result;
       },
-      auditTeachingPackage: async () => ({ provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-        findings: [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "原始比值 1.5，裁剪值 1.2" }] })
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        if (audits === 2) expect(input.teachingPackage.fullExplanationMarkdown).toContain("原始比值是 1.5");
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          sourceChecks: [{ claim: "原始比值为 1.5", evidence: "来源写明原始比值 1.5", verdict: "supported" as const }],
+          findings: audits === 1 ? [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "原始比值 1.5，裁剪值 1.2" }] : [] };
+      }
     };
     const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-findings-page")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.002 });
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.003 });
+    expect(audits).toBe(2);
     const draft = await readweave.getDraftByPage("page-1");
     expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("原始比值是 1.5，裁剪值也是 1.2");
     expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
@@ -573,6 +581,28 @@ describe("Course OS API", () => {
     expect((await readweave.getDraftByPage("page-1"))?.page.questionBank?.[0]?.prompt).toContain("五种硬件");
     expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
       .some((event) => (event.payload as { recheckCount?: number }).recheckCount === 1)).toBe(true);
+  }, 60_000);
+
+  it("does not mark a page ready when a source claim remains unverified after correction", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式第一项没有额外系数" }];
+    let audits = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => testTeachingResult(0.001),
+      auditTeachingPackage: async () => {
+        audits += 1;
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          sourceChecks: [{ claim: "公式第一项的系数", evidence: "原图辨认不清", verdict: "unverified" as const }],
+          findings: audits === 1 ? [{ field: "mainContentMarkdown", original: "先识别输入", replacement: "先检查输入", evidence: "来源说明先检查输入" }] : [] };
+      }
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-unverified-page")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"] });
+    expect(audits).toBe(2);
+    expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
   }, 60_000);
 
   it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {

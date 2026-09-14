@@ -2584,7 +2584,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
             }
             let recheck: SemanticAuditResult | undefined;
-            if (auditIssues.length === 1 && auditIssues[0]!.startsWith("TEACHING_COUNT_CONTRADICTION:")) {
+            const countRecheck = auditIssues.length === 1 && auditIssues[0]!.startsWith("TEACHING_COUNT_CONTRADICTION:");
+            const sourceRecheck = auditIssues.length === 0 && Boolean(audit.sourceChecks?.length)
+              && (audit.findings.length > 0 || audit.sourceChecks!.some((check) => check.verdict !== "supported"));
+            if (countRecheck || sourceRecheck) {
               const spentAfterFirst = generationUsageCostUsd(combineTeachingGenerations(beforeAudit, {
                 content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage
               }));
@@ -2593,9 +2596,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                 writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                 language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
-                idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-count-recheck:v1`,
+                idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-${countRecheck ? "count" : "source"}-recheck:v1`,
                 maxCostUsd: pageCostLimitUsd - spentAfterFirst, stage: "semantic_audit", teachingPackage: corrected,
-                repair: { issues: auditIssues, maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind,
+                repair: { issues: countRecheck ? auditIssues : ["TEACHING_SOURCE_CLAIM_RECHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind,
                   sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
               });
               try {
@@ -2609,6 +2612,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 ])];
               } catch {
                 auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
+              }
+              if (recheck.sourceChecks?.some((check) => check.verdict !== "supported")
+                || (recheck.sourceChecks?.length && recheck.findings.length > 0)) {
+                auditIssues.push("TEACHING_SEMANTIC_AUDIT_UNRESOLVED");
               }
             }
             generation = combineTeachingGenerations(beforeAudit, { content: corrected,
@@ -3004,6 +3011,7 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
 export function normalizeGeneratedMathPunctuation(value: string): string {
   const repairedEscapes = normalizeLegacyMathDelimiters(value)
     .replace(/\u000crac/g, "\\frac")
+    .replace(/\u0009ext(?=\{)/g, "\\text")
     .replace(/\\text\{\s*μm\s*\}/g, "\\,\\mu\\mathrm{m}");
   const displaysNormalized = repairedEscapes.replace(/\$\$([\s\S]*?)\$\$/g, (match, source: string) => normalizeMathSpan(match, source, "$$"));
   return displaysNormalized.replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, (match, source: string) => normalizeMathSpan(match, source, "$"));
