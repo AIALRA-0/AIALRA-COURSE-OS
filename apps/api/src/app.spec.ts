@@ -685,6 +685,46 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
   }, 60_000);
 
+  it("repairs only malformed math introduced by a sourced correction before final verification", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-claim", pageId: "page-1", kind: "text",
+      label: "提取文字", text: "页面没有说明两个对象一定相同" }];
+    let mathRepairs = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
+          result.content.mainContentMarkdown += "\n- 来源关系 $\\badmacro$";
+        } else if (input.stage === "teach") {
+          result.content.fullExplanationMarkdown += "\n\n两个对象一定相同";
+        }
+        return result;
+      },
+      repairTeachingFields: async (input, fields) => {
+        mathRepairs += 1;
+        expect(input.repair?.issues).toContain("TEACHING_MATH_INVALID:mainContentMarkdown");
+        expect(fields).toEqual(["mainContentMarkdown"]);
+        return testTeachingResult(0.001);
+      },
+      auditTeachingPackage: async (input) => ({ provider: "deepseek", model: "synthetic-vision",
+        usage: testTeachingResult(0.001).usage, findings: [],
+        sourceChecks: [{ claim: "两个对象一定相同", evidence: "来源未说明两者一定相同",
+          verdict: input.teachingPackage.fullExplanationMarkdown.includes("两个对象一定相同") ? "unverified" : "supported" }] })
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "sourced-math-repair")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [] });
+    expect(mathRepairs).toBe(1);
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.page.quality.publishable).toBe(true);
+    expect(draft?.page.lessonSections?.find((section) => section.kind === "main_content")?.markdown).not.toContain("badmacro");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id)
+      .some((event) => (event.payload as { sourceRepairAccepted?: boolean; sourceRepairMathFixed?: boolean }).sourceRepairAccepted === true
+        && (event.payload as { sourceRepairMathFixed?: boolean }).sourceRepairMathFixed === true)).toBe(true);
+  }, 60_000);
+
   it("applies a sourced final audit correction and verifies it before saving", async () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;

@@ -2665,17 +2665,20 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             let sourceRepairAccepted = false;
             let sourceRepairFailureKind: "local_quality" | "final_audit_patch_invalid" | "final_audit_findings" | "final_audit_unsupported" | "final_audit_insufficient_checks" | undefined;
             let sourceRepairIssueCodes: string[] = [];
+            let sourceRepairMathIssueCodes: string[] = [];
+            let sourceRepairMathFixed = false;
             let finalAuditFindingCount: number | undefined;
             let finalAuditSourceCheckCount: number | undefined;
             let finalAuditUnsupportedCount: number | undefined;
             let finalAuditPatchApplied = false;
+            let finalAuditPatchIssueCodes: string[] = [];
             if (auditIssues.length > 0 && unsupportedChecks.length > 0) {
               const spentBeforeSourceRepair = generationUsageCostUsd(generation);
               if (spentBeforeSourceRepair === undefined || spentBeforeSourceRepair >= pageCostLimitUsd) {
                 throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
               }
               sourceRepairAttempted = true;
-              const sourceRepair = await runtimeModelRouter.generateTeachingPackage({
+              let sourceRepair = await runtimeModelRouter.generateTeachingPackage({
                 pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                 writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                 language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2692,12 +2695,43 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               sourceRepair.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(
                 sourceRepair.content.mainContentMarkdown, sourceRepair.content.fullExplanationMarkdown);
               sourceRepair.content = normalizeTeachingPackageMath(sourceRepair.content);
-              generation = combineTeachingGenerations(generation, sourceRepair);
-              const sourceRepairIssues = [...new Set([
+              let sourceRepairIssues = [...new Set([
                 ...validateTeachingCoverageEvidence(page, sourceRepair.content),
                 ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
                   sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
               ])];
+              if (sourceRepairIssues.length > 0 && sourceRepairIssues.every((issue) => issue.startsWith("TEACHING_MATH_INVALID:"))
+                && runtimeModelRouter.repairTeachingFields) {
+                sourceRepairMathIssueCodes = sourceRepairIssues.map((issue) => issue.split(":", 1)[0]!);
+                const spentBeforeLocalRepair = generationUsageCostUsd(combineTeachingGenerations(generation, sourceRepair));
+                if (spentBeforeLocalRepair === undefined || spentBeforeLocalRepair >= pageCostLimitUsd) {
+                  throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", sourceRepair.model, sourceRepair.usage, sourceRepair.provider);
+                }
+                const fields = focusedTeachingRepairFields(sourceRepairIssues);
+                if (fields) {
+                  const mathRepair = await runtimeModelRouter.repairTeachingFields({
+                    pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                    writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                    language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                    idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:source-claim-local-math:v1`,
+                    maxCostUsd: pageCostLimitUsd - spentBeforeLocalRepair, stage: "repair",
+                    repair: { issues: sourceRepairIssues, maximumExplanationCharacters: maximumTeachingExplanationCharacters({
+                      pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity
+                    }), previousTeachingPackage: sourceRepair.content }
+                  }, fields);
+                  const merged = mergeFocusedTeachingRepair(sourceRepair.content, mathRepair.content, sourceRepairIssues);
+                  if (merged) {
+                    sourceRepair = combineTeachingGenerations(sourceRepair, { ...mathRepair, content: normalizeTeachingPackageMath(merged) });
+                    sourceRepairIssues = [...new Set([
+                      ...validateTeachingCoverageEvidence(page, sourceRepair.content),
+                      ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
+                        sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+                    ])];
+                    sourceRepairMathFixed = sourceRepairIssues.length === 0;
+                  }
+                }
+              }
+              generation = combineTeachingGenerations(generation, sourceRepair);
               sourceRepairIssueCodes = sourceRepairIssues.map((issue) => issue.split(":", 1)[0]!);
               if (sourceRepairIssues.length === 0) {
                 const spentBeforeFinalAudit = generationUsageCostUsd(generation);
@@ -2727,6 +2761,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                         sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
                     ])];
                     sourceRepairIssueCodes.push(...patchIssues.map((issue) => issue.split(":", 1)[0]!));
+                    finalAuditPatchIssueCodes = patchIssues.map((issue) => issue.split(":", 1)[0]!);
                     if (patchIssues.length === 0) {
                       const spentBeforePatchCheck = generationUsageCostUsd(generation);
                       if (spentBeforePatchCheck === undefined || spentBeforePatchCheck >= pageCostLimitUsd) {
@@ -2776,7 +2811,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
               recheckCount: (recheck ? 1 : 0) + (verification ? 1 : 0),
               sourceRepairAttempted, sourceRepairAccepted, sourceRepairFailureKind, sourceRepairTargetCount: sourceRepairTargets.length,
-              sourceRepairIssueCodes, finalAuditFindingCount, finalAuditSourceCheckCount, finalAuditUnsupportedCount, finalAuditPatchApplied,
+              sourceRepairIssueCodes, sourceRepairMathIssueCodes, sourceRepairMathFixed, finalAuditPatchIssueCodes,
+              finalAuditFindingCount, finalAuditSourceCheckCount, finalAuditUnsupportedCount, finalAuditPatchApplied,
               correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {
