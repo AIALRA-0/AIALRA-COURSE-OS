@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.20", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.21", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -186,7 +186,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };
       expect(body.text.format.name).toBe("course_os_semantic_audit");
-      expect(body.max_output_tokens).toBe(1_500);
+      expect(body.max_output_tokens).toBe(3_000);
       expect(body.metadata.stage).toBe("semantic_audit");
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ sourceChecks: [{ claim: "原始比值是 1.2", evidence: "来源页写 0.30 / 0.20", verdict: "contradicted" }], findings: [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 / 0.20 = 1.5" }] }), usage: { input_tokens: 120, output_tokens: 80, total_cost: 0.001 } });
@@ -390,6 +390,21 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" }).generateTeachingPackage(providerInput("wrapped-json-test"));
     expect(result.provider).toBe("deepseek");
     expect(result.content.questions).toHaveLength(4);
+  });
+
+  it("repairs unescaped TeX backslashes inside a complete provider JSON object", async () => {
+    const raw = JSON.stringify(providerTeachingContent()).replace("输入是处理开始前", String.raw`符号 $\lambda$ 表示系数；输入是处理开始前`);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-flash", output_text: raw, usage: { input_tokens: 100, output_tokens: 300 } })));
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", billingMode: "metered" }).generateTeachingPackage(providerInput("raw-tex-json"));
+    expect(result.content.fullExplanationMarkdown).toContain("$\\lambda$");
+  });
+
+  it("does not mistake a nested coverage item for a complete teaching package", async () => {
+    const nested = '{"learningObjectives":["未闭合"],"coverageEvidence":[{"atomId":"a1","coveredFields":["text"],"explanation":"原句"}';
+    const fetchMock = vi.fn(async () => Response.json({ model: "deepseek-flash", output_text: nested, usage: { input_tokens: 100, output_tokens: 150 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const failure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", billingMode: "metered" }).generateTeachingPackage(providerInput("truncated-outer-json")).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "MODEL_PROVIDER_OUTPUT_JSON_INVALID" });
   });
 
   it("falls back once and never exposes a provider secret in errors", async () => {

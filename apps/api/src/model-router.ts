@@ -319,7 +319,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     let partial: Record<string, unknown>;
     try {
       const output = extractProviderOutput(body);
-      partial = (typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output) as Record<string, unknown>;
+      partial = (typeof output === "string" ? parseProviderJson(output) : output) as Record<string, unknown>;
     } catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_JSON_INVALID", model, usage, this.connection.providerId); }
     if (!partial || typeof partial !== "object" || fields.some((field) => !(field in partial))) {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INCOMPLETE", model, usage, this.connection.providerId);
@@ -349,7 +349,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         method: "POST", signal: controller.signal,
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
         body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-          max_output_tokens: 1_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
+          max_output_tokens: 3_000, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
           text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
           metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
@@ -370,7 +370,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", model, usage, this.connection.providerId,
         `${reason}:output_tokens=${usage.outputTokens}`);
     };
-    try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? JSON.parse(stripJsonFences(output)) : output; }
+    try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? parseProviderJson(output) : output; }
     catch { return invalidAudit("json_unparseable"); }
     const findings = (parsed as { findings?: unknown } | null)?.findings;
     const sourceChecks = (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
@@ -782,9 +782,33 @@ function stripJsonFences(value: string): string {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
+function parseProviderJson(value: string): unknown {
+  const source = stripJsonFences(value);
+  try { return JSON.parse(source); }
+  catch {
+    let inString = false;
+    let escaped = false;
+    let repaired = "";
+    for (let index = 0; index < source.length; index += 1) {
+      const character = source[index]!;
+      if (escaped) { repaired += character; escaped = false; continue; }
+      if (character === '"') { inString = !inString; repaired += character; continue; }
+      if (inString && character === "\\") {
+        const next = source[index + 1] || "";
+        if (next && !/^["\\/bfnrtu]$/.test(next)) repaired += "\\";
+        repaired += character;
+        escaped = true;
+        continue;
+      }
+      repaired += character;
+    }
+    return JSON.parse(repaired);
+  }
+}
+
 function parseTeachingPackageJson(value: string): TeachingPackage {
   const normalized = stripJsonFences(value);
-  try { return JSON.parse(normalized) as TeachingPackage; }
+  try { return parseProviderJson(normalized) as TeachingPackage; }
   catch {
     let firstParsed: TeachingPackage | undefined;
     for (let start = normalized.indexOf("{"); start >= 0; start = normalized.indexOf("{", start + 1)) {
@@ -803,8 +827,9 @@ function parseTeachingPackageJson(value: string): TeachingPackage {
         if (character === "{") depth += 1;
         else if (character === "}" && --depth === 0) {
           try {
-            const candidate = JSON.parse(normalized.slice(start, index + 1)) as TeachingPackage;
-            firstParsed ??= candidate;
+            const candidate = parseProviderJson(normalized.slice(start, index + 1)) as TeachingPackage;
+            if (candidate && typeof candidate === "object" && Array.isArray(candidate.learningObjectives)
+              && typeof candidate.fullExplanationMarkdown === "string") firstParsed ??= candidate;
             try {
               validateTeachingPackage(candidate);
               return candidate;

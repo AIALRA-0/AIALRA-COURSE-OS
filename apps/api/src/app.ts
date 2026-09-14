@@ -2993,7 +2993,10 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
     }
     return [normalize(value)];
   });
-  const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown));
+  const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)
+    .split(/\r?\n/)
+    .filter((line) => !/^(?:\s*[-*+]\s*)?[^\n]{0,60}(?:\d+\s*\/\s*\d+\s*[”"']?\s*为页码|页码[：:]\s*\d+\s*\/\s*\d+)[^\n]{0,30}$/u.test(line.trim()))
+    .join("\n"));
   const quoteQuestionLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
     ...content,
