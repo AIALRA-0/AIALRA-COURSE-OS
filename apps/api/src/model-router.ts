@@ -281,6 +281,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       pageTitle: input.pageTitle, pageNumber: input.pageNumber, sourceText: input.sourceText.slice(0, 6_000),
       previousPageContext: input.previousPageContext?.slice(0, 800),
       issues: input.repair.issues, fields,
+      maximumExplanationCharacters: input.repair.maximumExplanationCharacters,
       existingFields: Object.fromEntries(fields.map((field) => [field, previous[field]])),
       explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, 2_500),
       coverageAtomIds: input.blueprint?.resourcePackage.atomIds
@@ -296,7 +297,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         method: "POST", signal: controller.signal,
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
         body: JSON.stringify({ model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。`,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
@@ -331,9 +332,28 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
+    try {
+      return await this.auditTeachingOnce(input);
+    } catch (error) {
+      if (!(error instanceof ModelRouterGenerationError) || error.code !== "MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED") throw error;
+      const spent = this.usageCostUsd(error.usage);
+      if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) throw error;
+      try {
+        const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:unresolved-retry`,
+          maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0) }, true);
+        return { ...retry, usage: sumProviderUsage(error.usage, retry.usage) };
+      } catch (retryError) {
+        if (!(retryError instanceof ModelRouterGenerationError)) throw retryError;
+        throw new ModelRouterGenerationError(retryError.code, retryError.model,
+          sumProviderUsage(error.usage, retryError.usage), retryError.provider, retryError.responseShape);
+      }
+    }
+  }
+
+  private async auditTeachingOnce(input: ModelRouterInput & { teachingPackage: TeachingPackage }, unresolvedRetry = false): Promise<SemanticAuditResult> {
     if (this.connection.protocol !== "responses") throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(Date.now()), this.connection.providerId);
     const started = Date.now();
-    const prompt = `${semanticAuditPrompt.trim()}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
+    const prompt = `${semanticAuditPrompt.trim()}${unresolvedRetry ? "\n\n上次核验标记了矛盾或无法确认，却没有给出可执行的最小修正。这次须逐项重新核对原图；能证实错误时给出确实存在于教学字段中的 original 和有来源依据的 replacement，无法确认时保持 unverified，绝不能为通过检查编造修正。" : ""}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
       sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
       detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage })}`;
     const auditSchema = structuredClone(semanticAuditSchema) as { properties: { sourceChecks: { minItems: number } } };

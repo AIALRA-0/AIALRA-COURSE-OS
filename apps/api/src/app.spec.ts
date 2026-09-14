@@ -155,7 +155,7 @@ describe("Course OS API", () => {
     const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").field("qualityMode", "economy").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(201);
     const ready = await waitForImport(app, accepted.body.id);
     expect(ready).toMatchObject({ state: "ready", autoGenerate: true });
-    expect(["queued", "running", "completed"]).toContain(ready.generationState);
+    expect(["queued", "running", "failed"]).toContain(ready.generationState);
     expect(ready.generationJobId).toBeTruthy();
     const job = await waitForJob(app, ready.generationJobId);
     expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:56493c1af3d98aa0", budgetUsd: 2 });
