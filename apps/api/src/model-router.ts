@@ -267,7 +267,32 @@ export async function probeProviderConnection(connection: ProviderConnection): P
  * endpoint and silently switching formats makes failures hard to diagnose
  */
 export class HttpProviderTeachingClient implements ModelRouterClient {
-  constructor(private readonly connection: ProviderConnection) {}
+  constructor(private readonly connection: ProviderConnection, private readonly requestTimeoutMs = 180_000) {}
+
+  private async requestJson(url: string, init: RequestInit, started: number): Promise<{ response: Response; body: ProviderResponseBody }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      let body: ProviderResponseBody;
+      try {
+        body = await response.json() as ProviderResponseBody;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
+        }
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId);
+      }
+      return { response, body };
+    } catch (error) {
+      if (error instanceof ModelRouterGenerationError) throw error;
+      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError"
+        ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE",
+      this.connection.model, emptyUsage(started), this.connection.providerId);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 
   async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
     if (this.connection.protocol !== "responses" || !input.repair?.previousTeachingPackage || fields.length === 0) {
@@ -295,12 +320,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const content = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180_000);
-    let response: Response;
-    try {
-      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
-        method: "POST", signal: controller.signal,
+    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
         body: JSON.stringify({ model: this.connection.model,
           instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
@@ -309,13 +330,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
           metadata: { product: "course-os", stage: "repair", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
-      });
-    } catch (error) {
-      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
-    } finally { clearTimeout(timeout); }
-    let body: ProviderResponseBody;
-    try { body = await response.json() as ProviderResponseBody; }
-    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+      }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
     if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
@@ -367,25 +382,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const userInput = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180_000);
-    let response: Response;
-    try {
-      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
-        method: "POST", signal: controller.signal,
+    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
         body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
           max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
           text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
           metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
-      });
-    } catch (error) {
-      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
-    } finally { clearTimeout(timeout); }
-    let body: ProviderResponseBody;
-    try { body = await response.json() as ProviderResponseBody; }
-    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+      }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
     if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), model, usage, this.connection.providerId);
@@ -446,21 +451,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   private async generateOnce(input: ModelRouterInput, previousShapeError?: string): Promise<TeachingGenerationResult> {
     const started = Date.now();
     const request = this.buildRequest(input, previousShapeError);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180_000);
-    let response: Response;
-    try {
-      response = await fetch(request.url, { method: "POST", headers: request.headers, body: JSON.stringify(request.body), signal: controller.signal });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
-      throw new ModelRouterGenerationError("MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
-    } finally {
-      clearTimeout(timeout);
-    }
-    let body: ProviderResponseBody = {};
-    try { body = await response.json() as ProviderResponseBody; } catch {
-      throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId);
-    }
+    const { response, body } = await this.requestJson(request.url,
+      { method: "POST", headers: request.headers, body: JSON.stringify(request.body) }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
     if (input.maxCostUsd !== undefined) {
@@ -489,8 +481,6 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
 
   private async generateMissingTeachingTail(input: ModelRouterInput, partial: TeachingPackage, missing: TeachingTailField[]): Promise<TeachingGenerationResult> {
     const started = Date.now();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180_000);
     const schemaProperties = teachingPackageSchema.properties as Record<string, unknown>;
     const refillSchema = { type: "object", properties: Object.fromEntries(missing.map((field) => [field, schemaProperties[field]])), required: missing, additionalProperties: false };
     const onlyQuestions = missing.length === 1 && missing[0] === "questions";
@@ -504,12 +494,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       atomIds: input.blueprint?.resourcePackage.atomIds,
       requirements: input.blueprint?.requirementPackage.requirements
     };
-    let response: Response;
-    try {
-      response = await fetch(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
         method: "POST",
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:${stage}` },
-        signal: controller.signal,
         body: JSON.stringify({
           model: this.connection.model,
           instructions: professorInstructions(input.language),
@@ -519,13 +506,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           text: { format: { type: "json_schema", name: `course_os_${stage}`, schema: refillSchema, strict: true } },
           metadata: { product: "course-os", stage, writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
-      });
-    } catch (error) {
-      throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError" ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE", this.connection.model, emptyUsage(started), this.connection.providerId);
-    } finally { clearTimeout(timeout); }
-    let body: ProviderResponseBody;
-    try { body = await response.json() as ProviderResponseBody; }
-    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId); }
+      }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     if (!response.ok) throw new ModelRouterGenerationError(providerFailureCode(response.status, body.error), body.model || this.connection.model, usage, this.connection.providerId);
     const spent = this.usageCostUsd(usage);

@@ -160,6 +160,21 @@ describe("Course OS API", () => {
     expect(normalized.fullExplanationMarkdown).toContain("`congcyion` 是代码示例");
     expect(normalized.mainContentMarkdown).toContain("congestion，连接 connection 保持原样");
   });
+  it("uses the established Chinese term for bare softmax while preserving source quotations and code", () => {
+    const content = {
+      chapterBridgeMarkdown: "", learningObjectives: ["解释 softmax 的作用"],
+      mainContentMarkdown: "- 用 softmax 得到概率", priorKnowledge: ["软最大函数（Softmax Function）：把向量转换成概率分布；用于选择动作；通过指数和归一化计算；在需要可微概率时使用；与直接取最大值不同"],
+      fullExplanationMarkdown: "策略由 softmax 控制，原图标签“softmax”保持原样，代码 `softmax(x)` 保持原样",
+      misconceptions: [], coverageEvidence: [], questions: []
+    } as TeachingPackage;
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.learningObjectives[0]).toBe("解释软最大函数的作用");
+    expect(normalized.mainContentMarkdown).toContain("用软最大函数得到概率");
+    expect(normalized.priorKnowledge[0]).toContain("软最大函数（Softmax Function）");
+    expect(normalized.fullExplanationMarkdown).toContain("策略由软最大函数控制");
+    expect(normalized.fullExplanationMarkdown).toContain("原图标签“softmax”保持原样");
+    expect(normalized.fullExplanationMarkdown).toContain("代码 `softmax(x)` 保持原样");
+  });
 
   it("reports liveness without waiting for ReadWeave", async () => {
     const { app, readweave } = await seededApp();

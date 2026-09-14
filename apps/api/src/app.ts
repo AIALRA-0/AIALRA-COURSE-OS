@@ -3201,7 +3201,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeNearMissMathTerms(translateMathHeadingReference(value), mathTerms))), quotedSourceLabels);
+      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(translateMathHeadingReference(value), mathTerms)))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
@@ -3226,6 +3226,14 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteQuestionLabel(item.prompt), options: item.options?.map(quoteQuestionLabel), expectedAnswer: quoteQuestionLabel(item.expectedAnswer), explanation: quoteQuestionLabel(item.explanation) }))
   };
+}
+
+function normalizeKnownTeachingTerms(markdown: string): string {
+  return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[^）\r\n]+）)/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\bsoftmax\b/gu, "软最大函数")
+      .replace(/([\p{Script=Han}])\s+软最大函数(?=\s*[\p{Script=Han}])/gu, "$1软最大函数")
+      .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数"))
+    .join("");
 }
 
 function normalizeNearMissMathTerms(markdown: string, mathTerms: string[]): string {

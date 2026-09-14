@@ -182,6 +182,24 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
   });
 
+  it("keeps the provider timeout active while reading the response body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: () => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "AbortError")), { once: true });
+      })
+    } as Response)));
+    const client = new HttpProviderTeachingClient({
+      providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token",
+      model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered"
+    }, 10);
+    const failure = await client.generateTeachingPackage(providerInput("response-body-timeout", true)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "ModelRouterGenerationError", code: "MODEL_PROVIDER_TIMEOUT", provider: "deepseek", model: "deepseek-v4-flash-vision-exp"
+    });
+  });
+
   it("requests a small source-backed semantic findings report instead of a rewritten lesson", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };
