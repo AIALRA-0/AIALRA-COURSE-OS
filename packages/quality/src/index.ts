@@ -230,11 +230,14 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
 /** Flag conflicting counts for the same named object across teaching and questions. */
 export function validateTeachingCountConsistency(markdown: string): string[] {
   const numerals: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const nouns = ["训练方式", "训练条件", "硬件", "算法", "模型", "步骤", "对象", "图表", "曲线", "公式", "参数", "节点", "模块", "方法", "方案", "样本", "图像", "表格", "层级", "部分", "章节", "流程", "动作", "状态", "结构", "数据", "变量", "数值", "任务", "页面", "指标", "例子", "问题", "区段", "材料", "需求", "选项"];
   const counts = new Map<string, Set<number>>();
-  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(?:个|种|组|类|项|条|张|根)([\p{Script=Han}]{2})/gu)) {
+  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(?:个|种|组|类|项|条|张|根)([\p{Script=Han}]{2,7})/gu)) {
     const value = numerals[match[1]!] ?? Number(match[1]);
     if (!Number.isFinite(value)) continue;
-    const noun = match[2]!;
+    const tail = match[2]!.replace(/^(?:不同的?|主要的?|相关的?|被比较的?)/u, "");
+    const noun = nouns.find((candidate) => tail.startsWith(candidate));
+    if (!noun) continue;
     const seen = counts.get(noun) ?? new Set<number>();
     seen.add(value);
     counts.set(noun, seen);

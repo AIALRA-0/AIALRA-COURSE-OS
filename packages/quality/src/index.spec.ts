@@ -67,6 +67,10 @@ describe("learner-facing teaching narrative", () => {
       .toEqual([]);
     expect(validateTeachingCountConsistency("`四种硬件`是代码样例，图中有五种硬件。"))
       .toEqual([]);
+    expect(validateTeachingCountConsistency("图中有五种硬件，四类训练条件，不同硬件上的柱高各异；四种不同硬件的说法错误"))
+      .toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+    expect(validateTeachingCountConsistency("图中有四组柱的比较，另一张图有两组柱的比较；训练条件并不相同"))
+      .toEqual([]);
   });
   const valid = {
     learningObjectives: ["能够解释对象之间的关系"],
