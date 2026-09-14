@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, validateTeachingCoverageEvidence } from "./app.js";
+import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -80,6 +80,20 @@ describe("Course OS API", () => {
       .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions"]))
       .toEqual({ ...previous, misconceptions: repaired.misconceptions });
+  });
+
+  it("quotes exact source headings and translates a formula-heading reference without changing its symbol", () => {
+    const content = testTeachingResult(0).content;
+    content.chapterBridgeMarkdown = "上一页把 EDGE-GNN 接入了网络";
+    content.fullExplanationMarkdown += "\n\n图中 What is happening 一栏列出计算顺序\n\n```txt\nWhat is $W_e$ 一栏\n```";
+    content.misconceptions = ["核对 What is $W_e$ 一栏的原图说明，不能把矩阵当成每条边各有一份"];
+    const normalized = normalizeTeachingPackageMath(content,
+      "EDGE-GNN: EDGE EMBEDDING\nWhat is happening?\nWhat is W_e?", "EDGE-GNN: EDGE EMBEDDING");
+    expect(normalized.chapterBridgeMarkdown).toContain("“EDGE-GNN”");
+    expect(normalized.fullExplanationMarkdown).toContain("“What is happening”");
+    expect(normalized.fullExplanationMarkdown).toContain("```txt\nWhat is $W_e$ 一栏\n```");
+    expect(normalized.misconceptions[0]).toContain("解释 $W_e$ 的栏目");
+    expect(normalized.misconceptions[0]).not.toContain("What is");
   });
   it("serves a workspace-scoped native QA note without scanning every release", async () => {
     const { app, readweave, release } = await seededApp();

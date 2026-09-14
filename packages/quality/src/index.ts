@@ -233,7 +233,10 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
 
 /** A symbolic weight has no guaranteed sign, so a trend conclusion needs its condition beside the claim. */
 function hasUnqualifiedWeightedTrend(markdown: string): boolean {
-  if (!/\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(markdown)) return false;
+  // This rule concerns a weighted score, not every use of a learning-rate symbol.
+  const formulas = [...markdown.matchAll(/\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\r\n]+)\$(?!\$)/gu)]
+    .map((match) => match[1] || match[2] || "");
+  if (!formulas.some((formula) => /(?:^|\s)(?:r|R|J)(?:_[A-Za-z0-9{}]+)?\s*=[\s\S]{0,150}[-−]\s*\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(formula))) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
     if (!/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升).{0,60}(?:下降|降低|减少|减小|变小)|(?:增大|增加|提高|上升).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,60}(?:下降|降低|减少|减小|变小)/u.test(clause)) return false;
     const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);

@@ -112,6 +112,12 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(correct)).not.toContain("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions");
   });
 
+  it("does not mistake a positive learning rate for an unspecified reward weight", () => {
+    const update = { ...valid, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n` +
+      "更新式 $\\theta \\leftarrow \\theta + \\alpha G \\nabla_{\\theta} \\log \\pi(a \\mid s)$，学习率 $\\alpha=0.1$，奖励为正，因此被选动作概率上升，另一动作概率下降" };
+    expect(validateTeachingNarrative(update)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+  });
+
   it("blocks a page whose answer conflicts with its own counted objects", () => {
     const inconsistent = { ...valid,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,
@@ -289,6 +295,9 @@ describe("learner-facing teaching narrative", () => {
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n回报式为 $r=-x-\\lambda y-\\gamma z$，三个量增大都会让回报下降`,
       mainContentMarkdown: "- 回报由三个量计算\n- 系数决定每项影响" };
     expect(validateTeachingNarrative(weighted)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const multiline = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "$r=-x-\\lambda y-\\gamma z$", () => "$$\nr=-x\n-\\lambda y\n-\\gamma z\n$$") };
+    expect(validateTeachingNarrative(multiline)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
     const conditional = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "若权重为正且其他量不变，三个量增大都会让回报下降") };
     expect(validateTeachingNarrative(conditional)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");

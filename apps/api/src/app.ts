@@ -2474,7 +2474,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
       let generation = await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
-      generation.content = normalizeTeachingPackageMath(generation.content);
+      generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
       const bridgeIsUnsafe = (content: TeachingPackage): boolean => validateTeachingNarrative({
         ...content,
         lessonFlowVersion: 2,
@@ -2543,7 +2543,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             ? await runtimeModelRouter.repairTeachingFields(repairInput, focusedFields)
             : await runtimeModelRouter.generateTeachingPackage(repairInput);
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
-          repaired.content = normalizeTeachingPackageMath(repaired.content);
+          repaired.content = normalizeTeachingPackageMath(repaired.content, sourceText, page.title);
           if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
           const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues, englishFields);
           if (focused) {
@@ -2588,7 +2588,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             let correctedFields: string[] = [];
             try {
               const applied = applySemanticAuditFindings(beforeAudit.content, audit.findings);
-              corrected = normalizeTeachingPackageMath(applied.content);
+              corrected = normalizeTeachingPackageMath(applied.content, sourceText, page.title);
               correctedFields = applied.fields;
               auditIssues = [...new Set([
                 ...validateTeachingCoverageEvidence(page, corrected),
@@ -2620,7 +2620,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               });
               try {
                 const applied = applySemanticAuditFindings(corrected, recheck.findings);
-                corrected = normalizeTeachingPackageMath(applied.content);
+                corrected = normalizeTeachingPackageMath(applied.content, sourceText, page.title);
                 correctedFields.push(...applied.fields);
                 auditIssues = [...new Set([
                   ...validateTeachingCoverageEvidence(page, corrected),
@@ -2694,7 +2694,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               });
               sourceRepair.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(
                 sourceRepair.content.mainContentMarkdown, sourceRepair.content.fullExplanationMarkdown);
-              sourceRepair.content = normalizeTeachingPackageMath(sourceRepair.content);
+              sourceRepair.content = normalizeTeachingPackageMath(sourceRepair.content, sourceText, page.title);
               let sourceRepairIssues = [...new Set([
                 ...validateTeachingCoverageEvidence(page, sourceRepair.content),
                 ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
@@ -2721,7 +2721,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                   }, fields);
                   const merged = mergeFocusedTeachingRepair(sourceRepair.content, mathRepair.content, sourceRepairIssues);
                   if (merged) {
-                    sourceRepair = combineTeachingGenerations(sourceRepair, { ...mathRepair, content: normalizeTeachingPackageMath(merged) });
+                    sourceRepair = combineTeachingGenerations(sourceRepair, { ...mathRepair, content: normalizeTeachingPackageMath(merged, sourceText, page.title) });
                     sourceRepairIssues = [...new Set([
                       ...validateTeachingCoverageEvidence(page, sourceRepair.content),
                       ...validateTeachingNarrative({ ...sourceRepair.content, lessonFlowVersion: 2, strictWritingStyle: true,
@@ -2754,7 +2754,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 let decisiveAudit = finalAudit;
                 if (finalAudit.findings.length > 0) {
                   try {
-                    const patched = normalizeTeachingPackageMath(applySemanticAuditFindings(sourceRepair.content, finalAudit.findings).content);
+                    const patched = normalizeTeachingPackageMath(applySemanticAuditFindings(sourceRepair.content, finalAudit.findings).content, sourceText, page.title);
                     const patchIssues = [...new Set([
                       ...validateTeachingCoverageEvidence(page, patched),
                       ...validateTeachingNarrative({ ...patched, lessonFlowVersion: 2, strictWritingStyle: true,
@@ -2784,6 +2784,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                     } else sourceRepairFailureKind = "final_audit_patch_invalid";
                   } catch (error) {
                     if (error instanceof ModelRouterGenerationError) throw error;
+                    if (error instanceof Error && /^TEACHING_SEMANTIC_AUDIT_[A-Z_]+$/.test(error.message)) {
+                      finalAuditPatchIssueCodes = [error.message];
+                    }
                     sourceRepairFailureKind = "final_audit_patch_invalid";
                   }
                 }
@@ -2832,7 +2835,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             repair: { issues: ["TEACHING_SEMANTIC_CROSSCHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: beforeAudit.content }
           });
           audited.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(audited.content.mainContentMarkdown, audited.content.fullExplanationMarkdown);
-          audited.content = normalizeTeachingPackageMath(audited.content);
+          audited.content = normalizeTeachingPackageMath(audited.content, sourceText, page.title);
           const auditIssues = [...new Set([
             ...validateTeachingCoverageEvidence(page, audited.content),
             ...validateTeachingNarrative({ ...audited.content, lessonFlowVersion: 2, strictWritingStyle: true, sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
@@ -3171,8 +3174,19 @@ function hasSharedEvidenceFragment(evidence: string, explanation: string): boole
   return false;
 }
 
-function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage {
-  const normalize = (value: string) => normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(value));
+export function normalizeTeachingPackageMath(content: TeachingPackage, sourceText = "", sourceTitle = ""): TeachingPackage {
+  const sourceQuestionLabels = [...new Set([...sourceText.matchAll(/\b(?:What|How|Why|Where|When)\s+[A-Za-z][A-Za-z ]{2,65}\?/gu)]
+    .map((match) => match[0].slice(0, -1).trim()))];
+  const quotedSourceLabels = sourceQuestionLabels.map((label) => `“${label}”`).join(" ");
+  const titleAcronyms = [...new Set([...sourceTitle.matchAll(/\b[A-Z]{2,}(?:-[A-Z]{2,})+\b/gu)]
+    .map((match) => match[0]))];
+  const translateMathHeadingReference = (value: string) => value
+    .split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”)/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\bWhat is\s+(\$[^$\r\n]+\$)\s+一栏/gu, "解释 $1 的栏目"))
+    .join("");
+  const normalize = (value: string) => quoteRepeatedSourceLabels(
+    normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
+      translateMathHeadingReference(value))), quotedSourceLabels);
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const lines = normalize(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
@@ -3187,7 +3201,8 @@ function normalizeTeachingPackageMath(content: TeachingPackage): TeachingPackage
   const quoteQuestionLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
     ...content,
-    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : quoteRepeatedSourceLabels(
+      normalize(content.chapterBridgeMarkdown), titleAcronyms.map((label) => `“${label}”`).join(" ")),
     learningObjectives: content.learningObjectives.map(normalize),
     mainContentMarkdown: normalize(content.mainContentMarkdown),
     priorKnowledge,
