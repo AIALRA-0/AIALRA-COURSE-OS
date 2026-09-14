@@ -10,7 +10,7 @@ export function preparePageForGeneration(page: PageLesson): PageLesson {
   const textRegions = importedWholePage ? sourceTextRegions(page.id, sourceText) : [];
   const expandedAtoms: PageLesson["atoms"] = [...page.atoms, ...textRegions];
   const atoms = new Map(expandedAtoms.map((atom) => [atom.id, atom]));
-  const coverageRequirements = [...page.coverageRequirements, ...textRegions.map((region) => ({
+  const coverageRequirements = [...page.coverageRequirements, ...textRegions.filter((region) => !isPresentationHeadingOnly(region.observation, page.title)).map((region) => ({
     id: `${page.id}:requirement:${region.id}`,
     atomId: region.id,
     // The region label is a generated bookkeeping number, not slide content.
@@ -35,6 +35,16 @@ function sourceTextRegions(pageId: string, text: string): Extract<PageLesson["at
     regions.push({ kind: "text_region", id: `${pageId}:source-text-region:${regions.length + 1}`, label: `原文片段 ${String(regions.length + 1).padStart(2, "0")}`, observation });
   }
   return regions;
+}
+
+function isPresentationHeadingOnly(observation: string, pageTitle: string): boolean {
+  const lines = observation.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0 || lines.length > 2) return false;
+  return lines.every((line) => {
+    if (/[=<>≤≥∈∑∇+*/]|\d|[?!？：:；;]/u.test(line) || /^[-•▪]/u.test(line)) return false;
+    if (line.replace(/\s+/gu, " ").toLocaleLowerCase() === pageTitle.trim().replace(/\s+/gu, " ").toLocaleLowerCase()) return true;
+    return /^(?:setup|formula|example|overview|introduction|summary|background|motivation|problem|method|result|conclusion|主要内容|学习目标|背景|公式|例子|示例|概述|引言|总结)$/iu.test(line);
+  });
 }
 
 function learningSourceText(text: string): string {

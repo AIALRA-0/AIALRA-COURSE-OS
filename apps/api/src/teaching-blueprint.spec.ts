@@ -61,6 +61,36 @@ describe("teaching blueprint", () => {
     expect(validateTeachingBlueprint(prepared, blueprint)).toEqual([]);
   });
 
+  it("keeps slide headings as source context without demanding a teaching claim for them", () => {
+    const imported = {
+      ...page,
+      title: "TINY MDP EXAMPLE",
+      anchors: [{ ...page.anchors[0]!, text: "TINY MDP EXAMPLE\nSetup\nSingle state: s\nTwo actions: a1, a2" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }],
+      coverageRequirements: []
+    } as PageLesson;
+    const prepared = preparePageForGeneration(imported);
+    expect(prepared.atoms.filter((atom) => atom.kind === "text_region")).toHaveLength(4);
+    expect(prepared.coverageRequirements.map((item) => item.atomId)).toEqual([
+      "page:1:source-text-region:3", "page:1:source-text-region:4"
+    ]);
+    expect(buildGenerationSourceText(prepared)).toContain("TINY MDP EXAMPLE");
+    expect(buildGenerationSourceText(prepared)).toContain("Two actions: a1, a2");
+  });
+
+  it("does not mistake capitalized factual statements or formulas for headings", () => {
+    const imported = {
+      ...page,
+      anchors: [{ ...page.anchors[0]!, text: "OVERVIEW\nONLY ONE MATRIX FOR ALL EDGES\nW_e ∈ R32×64\nMacro order: place larger ones first" }],
+      atoms: [{ kind: "image_region", id: "whole-page", label: "整页来源画面", observation: "原始画面" }],
+      coverageRequirements: []
+    } as PageLesson;
+    const prepared = preparePageForGeneration(imported);
+    expect(prepared.coverageRequirements.map((item) => item.atomId)).toEqual([
+      "page:1:source-text-region:2", "page:1:source-text-region:3", "page:1:source-text-region:4"
+    ]);
+  });
+
   it("classifies the visible slide instead of serialized bookkeeping or English prose", () => {
     const imported = {
       ...page,
