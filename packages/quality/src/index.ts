@@ -129,6 +129,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   ];
   for (const phrase of forbidden) if (learnerText.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   issues.push(...validateHumanReadableChinese(learnerText));
+  issues.push(...validateTeachingCountConsistency(learnerText));
   if (input.lessonFlowVersion === 2) {
     for (const prior of input.priorKnowledge) {
       if (!/^[^：\n]{2,100}：\s*.{30,}$/u.test(prior.trim())) issues.push("TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW");
@@ -224,6 +225,21 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   const questionPrompts = input.questions.map((question) => question.prompt.replace(/\s+/g, "").trim());
   if (new Set(questionPrompts).size !== questionPrompts.length) issues.push("TEACHING_QUESTION_DUPLICATE");
   return [...new Set(issues)];
+}
+
+/** Flag conflicting counts for the same named object across teaching and questions. */
+export function validateTeachingCountConsistency(markdown: string): string[] {
+  const numerals: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const counts = new Map<string, Set<number>>();
+  for (const match of stripProtectedMarkdown(markdown).matchAll(/(?<![A-Za-z0-9约近])([一二两三四五六七八九十]|[1-9][0-9]?)(?:个|种|组|类|项|条|张|根)([\p{Script=Han}]{2})/gu)) {
+    const value = numerals[match[1]!] ?? Number(match[1]);
+    if (!Number.isFinite(value)) continue;
+    const noun = match[2]!;
+    const seen = counts.get(noun) ?? new Set<number>();
+    seen.add(value);
+    counts.set(noun, seen);
+  }
+  return [...counts].filter(([, seen]) => seen.size > 1).map(([noun]) => `TEACHING_COUNT_CONTRADICTION:${noun}`);
 }
 
 /** Keep every heading's words while turning an empty nested heading into prose. */

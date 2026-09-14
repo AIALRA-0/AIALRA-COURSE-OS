@@ -544,6 +544,37 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { findingCount?: number }).findingCount === 1)).toBe(true);
   }, 60_000);
 
+  it("rechecks a counted-object contradiction introduced by an audit patch", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-count", pageId: "page-1", kind: "text", label: "提取文字", text: "五种硬件供比较" }];
+    let audits = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        const result = testTeachingResult(0.001);
+        result.content.mainContentMarkdown += "\n- 图中有四种硬件供比较";
+        result.content.questions[0]!.prompt = "四种硬件分别是什么";
+        return result;
+      },
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        if (audits === 2) expect(input.repair?.issues).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          findings: audits === 1
+            ? [{ field: "mainContentMarkdown", original: "四种硬件供比较", replacement: "五种硬件供比较", evidence: "五种硬件供比较" }]
+            : [{ field: "questions:0:prompt", original: "四种硬件", replacement: "五种硬件", evidence: "五种硬件供比较" }] };
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-count-recheck")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.003 });
+    expect(audits).toBe(2);
+    expect((await readweave.getDraftByPage("page-1"))?.page.questionBank?.[0]?.prompt).toContain("五种硬件");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { recheckCount?: number }).recheckCount === 1)).toBe(true);
+  }, 60_000);
+
   it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {
     const candidate = testRelease();
     candidate.lifecycle = "draft_source";

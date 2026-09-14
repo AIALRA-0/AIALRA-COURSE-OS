@@ -271,7 +271,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (this.connection.protocol !== "responses") throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(Date.now()), this.connection.providerId);
     const started = Date.now();
     const prompt = `${semanticAuditPrompt.trim()}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
-      sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage, teachingPackage: input.teachingPackage })}`;
+      sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
+      detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage })}`;
     const userInput = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;

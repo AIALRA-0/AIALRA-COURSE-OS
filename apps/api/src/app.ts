@@ -2579,12 +2579,45 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             } catch {
               auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
             }
-            generation = combineTeachingGenerations(beforeAudit, { content: auditIssues.length ? beforeAudit.content : corrected,
+            let recheck: SemanticAuditResult | undefined;
+            if (auditIssues.length === 1 && auditIssues[0]!.startsWith("TEACHING_COUNT_CONTRADICTION:")) {
+              const spentAfterFirst = generationUsageCostUsd(combineTeachingGenerations(beforeAudit, {
+                content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage
+              }));
+              if (spentAfterFirst === undefined || spentAfterFirst >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", audit.model, audit.usage, audit.provider);
+              recheck = await runtimeModelRouter.auditTeachingPackage({
+                pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-count-recheck:v1`,
+                maxCostUsd: pageCostLimitUsd - spentAfterFirst, stage: "semantic_audit", teachingPackage: corrected,
+                repair: { issues: auditIssues, maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind,
+                  sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
+              });
+              try {
+                const applied = applySemanticAuditFindings(corrected, recheck.findings);
+                corrected = normalizeTeachingPackageMath(applied.content);
+                correctedFields.push(...applied.fields);
+                auditIssues = [...new Set([
+                  ...validateTeachingCoverageEvidence(page, corrected),
+                  ...validateTeachingNarrative({ ...corrected, lessonFlowVersion: 2, strictWritingStyle: true, sourceTitle: page.title,
+                    pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
+                ])];
+              } catch {
+                auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
+              }
+            }
+            generation = combineTeachingGenerations(beforeAudit, { content: corrected,
               provider: audit.provider, model: audit.model, usage: audit.usage });
+            if (recheck) generation = combineTeachingGenerations(generation, { content: corrected,
+              provider: recheck.provider, model: recheck.model, usage: recheck.usage });
+            if (auditIssues.length) generation.content = beforeAudit.content;
             if (auditIssues.length) repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
             await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
-              provider: audit.provider, model: audit.model, inputTokens: audit.usage.inputTokens, outputTokens: audit.usage.outputTokens,
-              findingCount: audit.findings.length, correctedFields, issueCount: auditIssues.length
+              provider: generation.provider, model: generation.model, inputTokens: audit.usage.inputTokens + (recheck?.usage.inputTokens ?? 0),
+              outputTokens: audit.usage.outputTokens + (recheck?.usage.outputTokens ?? 0),
+              findingCount: audit.findings.length + (recheck?.findings.length ?? 0), recheckCount: recheck ? 1 : 0,
+              correctedFields, issueCount: auditIssues.length
             });
           } else {
           const audited = await runtimeModelRouter.generateTeachingPackage({
@@ -2795,10 +2828,19 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
       const index = Number(finding.field.split(":")[1]);
       value = corrected.misconceptions[index] ?? "";
       set = (text) => { corrected.misconceptions[index] = text; };
-    } else if (/^questions:[0-9]+:explanation$/.test(finding.field)) {
-      const index = Number(finding.field.split(":")[1]);
-      value = corrected.questions[index]?.explanation ?? "";
-      set = (text) => { corrected.questions[index]!.explanation = text; };
+    } else if (/^questions:[0-9]+:(?:prompt|expectedAnswer|explanation)$/.test(finding.field)) {
+      const [, position, field] = finding.field.split(":");
+      const question = corrected.questions[Number(position)];
+      if (!question) throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
+      const key = field as "prompt" | "expectedAnswer" | "explanation";
+      value = question[key];
+      set = (text) => { question[key] = text; };
+    } else if (/^questions:[0-9]+:options:[0-9]+$/.test(finding.field)) {
+      const [, position, , optionPosition] = finding.field.split(":");
+      const options = corrected.questions[Number(position)]?.options;
+      if (!options || options[Number(optionPosition)] === undefined) throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
+      value = options[Number(optionPosition)]!;
+      set = (text) => { options[Number(optionPosition)] = text; };
     } else throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
     const at = value.indexOf(finding.original);
     if (at < 0 || value.lastIndexOf(finding.original) !== at || finding.original === finding.replacement) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");

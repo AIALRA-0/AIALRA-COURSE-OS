@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -60,6 +60,14 @@ describe("coverage", () => {
 });
 
 describe("learner-facing teaching narrative", () => {
+  it("detects conflicting object counts across explanation, summary, and questions", () => {
+    expect(validateTeachingCountConsistency("图中有五种硬件。\n- 五种硬件各有柱形\n问：四种硬件怎样比较？"))
+      .toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+    expect(validateTeachingCountConsistency("图中有五种硬件，另有四种算法。"))
+      .toEqual([]);
+    expect(validateTeachingCountConsistency("`四种硬件`是代码样例，图中有五种硬件。"))
+      .toEqual([]);
+  });
   const valid = {
     learningObjectives: ["能够解释对象之间的关系"],
     mainContentMarkdown: "- 先确认对象\n- 再解释关系\n- 最后检查结果",
@@ -72,6 +80,14 @@ describe("learner-facing teaching narrative", () => {
     misconceptions: ["不要跳过输入条件"],
     questions: [{ prompt: "对象是什么", explanation: "对象提供计算的起点" }]
   };
+
+  it("blocks a page whose answer conflicts with its own counted objects", () => {
+    const inconsistent = { ...valid,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n图中列出五种硬件供比较`,
+      questions: [{ prompt: "四种硬件分别是什么", explanation: "先按图中标签核对" }]
+    };
+    expect(validateTeachingNarrative(inconsistent)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
+  });
 
   it("accepts adaptive structure without learner-facing audit labels", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
