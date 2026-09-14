@@ -4,6 +4,29 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
+import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
+
+it("reads legacy state and round-trips a large compressed ReadWeave index", () => {
+  const small = { releases: [{ id: "release-1" }] };
+  expect(decodeReadWeaveStateContent(JSON.stringify(small))).toEqual(small);
+  const large = { releases: [{ id: "release-1", content: "可核对的来源与讲解".repeat(160_000) }] };
+  const encoded = encodeReadWeaveStateContent(large);
+  expect(encoded.startsWith("COURSE_OS_BR_STATE_V1:")).toBe(true);
+  expect(Buffer.byteLength(encoded)).toBeLessThan(Buffer.byteLength(JSON.stringify(large)) / 2);
+  expect(decodeReadWeaveStateContent(encoded)).toEqual(large);
+  const tampered = encoded.replace(/^(COURSE_OS_BR_STATE_V1:)([a-f0-9])/u, (_match, prefix: string, digit: string) => `${prefix}${digit === "0" ? "1" : "0"}`);
+  expect(() => decodeReadWeaveStateContent(tampered)).toThrow("READWEAVE_STATE_CODEC_HASH_MISMATCH");
+});
+
+it("reopens a large published release through the compressed ETAPI index", async () => {
+  const remote = new FakeEtapi();
+  const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  const largeRelease = releaseWithPage();
+  largeRelease.pages[0]!.blocks[0]!.markdown = "逐步核对输入和输出".repeat(160_000);
+  await api.publishRelease(largeRelease, { ...manifest, courseReleaseId: largeRelease.id }, { ...context, idempotencyKey: "large-release-publish" });
+  const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  expect((await reopened.getRelease(largeRelease.id))?.pages[0]?.blocks[0]?.markdown).toBe(largeRelease.pages[0]!.blocks[0]!.markdown);
+});
 
 it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
   const provider = defaultModelProviders().find((item) => item.id === "deepseek");

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from "node:zlib";
 import type {
   AssessmentAttempt,
   CredentialStatus,
@@ -30,6 +31,25 @@ import type {
 import type { MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
 import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings } from "./index.js";
 import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
+
+const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
+
+export function encodeReadWeaveStateContent(state: unknown): string {
+  const plain = JSON.stringify(state);
+  if (Buffer.byteLength(plain) < 1_000_000) return plain;
+  const hash = createHash("sha256").update(plain).digest("hex");
+  const compressed = brotliCompressSync(plain, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 2 } });
+  return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
+}
+
+export function decodeReadWeaveStateContent(content: string): unknown {
+  if (!content.startsWith(stateCodecPrefix)) return JSON.parse(content);
+  const encoded = /^COURSE_OS_BR_STATE_V1:([a-f0-9]{64}):([A-Za-z0-9+/]+={0,2})$/u.exec(content);
+  if (!encoded) throw new Error("READWEAVE_STATE_CODEC_INVALID");
+  const plain = brotliDecompressSync(Buffer.from(encoded[2]!, "base64"), { maxOutputLength: 512_000_000 }).toString("utf8");
+  if (createHash("sha256").update(plain).digest("hex") !== encoded[1]) throw new Error("READWEAVE_STATE_CODEC_HASH_MISMATCH");
+  return JSON.parse(plain);
+}
 
 export interface EtapiReadWeaveConfig {
   baseUrl: string;
@@ -1555,14 +1575,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async readRemoteState(): Promise<EtapiState> {
     const projection = await this.ensureWorkspace();
     const content = await this.getContent(projection.stateNoteId);
-    const parsed = JSON.parse(content) as Partial<EtapiState>;
+    const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
     this.lastReadAt = new Date().toISOString();
     return normalizeState(parsed, projection);
   }
 
   private async writeState(state: EtapiState): Promise<void> {
     try {
-      await this.putContent(state.projections.stateNoteId, JSON.stringify(state, null, 2));
+      await this.putContent(state.projections.stateNoteId, encodeReadWeaveStateContent(state));
       this.lastWriteAt = new Date().toISOString();
       this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
     } catch (error) {
@@ -1610,7 +1630,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const search = await this.request<SearchResponse>(`/notes?${query.toString()}`);
     const existing = search.results[0];
     if (existing) {
-      const parsed = JSON.parse(await this.getContent(existing.noteId)) as Partial<EtapiState>;
+      const parsed = decodeReadWeaveStateContent(await this.getContent(existing.noteId)) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
       return parsed.projections;
     }

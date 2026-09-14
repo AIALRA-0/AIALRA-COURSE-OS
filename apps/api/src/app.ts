@@ -3374,6 +3374,8 @@ export function safeReadWeaveFailureKind(error: unknown): string {
   if (message.startsWith("READWEAVE_ETAPI_NETWORK:")) return /abort|timeout/u.test(message.toLowerCase()) ? "timeout" : "network";
   if (message.startsWith("READWEAVE_DRAFT_READBACK_MISMATCH")) return "readback_mismatch";
   if (message.startsWith("READWEAVE_REVISION_CONFLICT")) return "revision_conflict";
+  const code = /^(READWEAVE_[A-Z0-9_]+)/u.exec(message)?.[1];
+  if (code) return code.toLowerCase();
   return "unknown";
 }
 

@@ -36,6 +36,7 @@ describe("Course OS API", () => {
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_503:private response"))).toBe("http_503");
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_NETWORK:This operation was aborted"))).toBe("timeout");
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_DRAFT_READBACK_MISMATCH"))).toBe("readback_mismatch");
+    expect(safeReadWeaveFailureKind(new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT:private detail"))).toBe("readweave_page_overview_conflict");
   });
   it("reads a structured page and its release without listing every release", async () => {
     const release = testRelease();
