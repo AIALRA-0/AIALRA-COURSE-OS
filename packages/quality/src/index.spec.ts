@@ -356,6 +356,8 @@ describe("learner-facing teaching narrative", () => {
     const symbolicResult = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "三个量中任何一项增大都会让 $r_T$ 变小") };
     expect(validateTeachingNarrative(symbolicResult)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const formulaOnlyInSource = { ...weighted, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n末端回报由三个带负号的加权分项组成，三项前面的负号说明每个指标越大，回报越低；各项权重没有给出` };
+    expect(validateTeachingNarrative(formulaOnlyInSource)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
   });
 
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {

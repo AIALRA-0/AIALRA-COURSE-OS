@@ -243,12 +243,15 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   // This rule concerns a weighted score, not every use of a learning-rate symbol.
   const formulas = [...markdown.matchAll(/\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\r\n]+)\$(?!\$)/gu)]
     .map((match) => match[1] || match[2] || "");
-  if (!formulas.some((formula) => /(?:^|\s)(?:r|R|J)(?:_[A-Za-z0-9{}]+)?\s*=[\s\S]{0,150}[-−]\s*\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(formula))) return false;
+  const hasSymbolicWeightedScore = formulas.some((formula) => /(?:^|\s)(?:r|R|J)(?:_[A-Za-z0-9{}]+)?\s*=[\s\S]{0,150}[-−]\s*\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(formula));
+  const admitsMissingWeights = /(?:权重|系数)[^。；;\n]{0,36}(?:没有给出|未给出|没有说明|未说明|未知|无法确定)/u.test(markdown);
+  const describesWeightedPenalty = /(?:加权|带负号|负向)[^。；;\n]{0,45}(?:回报|奖励|得分|损失|目标函数|评分|结果|组成|分项)|(?:回报|奖励|得分|损失|目标函数|评分|结果)[^。；;\n]{0,45}(?:加权|带负号|负向)/u.test(markdown);
+  if (!hasSymbolicWeightedScore && !(admitsMissingWeights && describesWeightedPenalty)) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
-    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升).{0,60}(?:下降|降低|减少|减小|变小)|(?:增大|增加|提高|上升).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小)/u);
+    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升|越大).{0,60}(?:下降|降低|减少|减小|变小|越低)|(?:增大|增加|提高|上升|越大).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小|越低)/u);
     if (!trend) return false;
     // A warning that explicitly rejects the trend is not an assertion of it.
-    const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升)/u)));
+    const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升|越大)/u)));
     if (/(?:不能|不可|不应|无法|并非|不是|错误)[^，；;。]{0,40}$/u.test(beforeTrend)) return false;
     const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);
     const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
