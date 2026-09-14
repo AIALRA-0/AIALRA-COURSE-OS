@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -56,6 +56,14 @@ describe("coverage", () => {
     );
     expect(result.highRiskCoverage).toBe(0.5);
     expect(result.publishable).toBe(false);
+  });
+});
+
+describe("publication placeholders", () => {
+  it("blocks standalone placeholders without rejecting a real explanation of source uncertainty", () => {
+    expect(hasPlaceholderContent("## 来源\n待确认\n继续讲解")).toBe(true);
+    expect(hasPlaceholderContent("- （待补充）")).toBe(true);
+    expect(hasPlaceholderContent("原图有一项数值待确认，因此本页只比较确定的趋势")).toBe(false);
   });
 });
 

@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.22", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.23", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -215,6 +215,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ findings: [{ replacement: "原始比值是 1.5" }], usage: { inputTokens: 240, outputTokens: 160, apiEquivalentUsd: 0.002 } });
   });
 
+  it("retries one malformed audit within the page budget without hiding its cost", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const retry = fetchMock.mock.calls.length === 2;
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(retry ? "audit-invalid:invalid-retry" : "audit-invalid");
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ findings: [],
+        sourceChecks: retry ? [{ claim: "输入先于输出", evidence: "原图箭头从输入指向输出", verdict: "supported" }]
+          : [{ claim: "", evidence: "", verdict: "supported" }] }),
+      usage: { input_tokens: 100, output_tokens: 70, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.auditTeachingPackage({ ...providerInput("audit-invalid", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.usage.apiEquivalentUsd).toBe(0.002);
+  });
+
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {
     const before = providerTeachingContent() as TeachingPackage;
     const replacement = ["输入：这是处理开始前已知的对象；它决定规则作用于什么；处理时按规则逐步检查；没有输入就不能确定输出"];
@@ -234,6 +250,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.content).toEqual({ ...before, priorKnowledge: replacement });
     expect(result.usage.apiEquivalentUsd).toBe(0.002);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("supplies the full explanation when repairing a coverage quote", async () => {
+    const before = providerTeachingContent() as TeachingPackage;
+    before.fullExplanationMarkdown = `${"先解释来源对象，再按顺序核对其状态变化与输出结果。".repeat(130)}最后核对输出边界`;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ text?: string }> }> };
+      expect(body.input[0]?.content[0]?.text).toContain("最后核对输出边界");
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ coverageEvidence: before.coverageEvidence }), usage: { input_tokens: 200, output_tokens: 60, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    await client.repairTeachingFields({ ...providerInput("coverage-repair", true), repair: { issues: ["TEACHING_COVERAGE_QUOTE_NOT_FOUND"], maximumExplanationCharacters: 8000, previousTeachingPackage: before } }, ["coverageEvidence"]);
   });
 
   it("rejects an empty semantic audit instead of treating it as source verification", async () => {

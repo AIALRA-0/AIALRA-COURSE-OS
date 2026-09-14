@@ -35,6 +35,36 @@ it("shares a brief ReadWeave read snapshot and invalidates it before a write", a
   }
 });
 
+it("serves a recent snapshot while a slow ReadWeave refresh is in flight", async () => {
+  const remote = new FakeEtapi();
+  let delayContent = false;
+  let releaseRefresh: (() => void) | undefined;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    if (delayContent && (init?.method ?? "GET") === "GET" && new URL(String(input)).pathname.endsWith("/content")) {
+      delayContent = false;
+      await new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    }
+    return remote.fetch(input, init);
+  };
+  const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+  const clock = vi.spyOn(Date, "now");
+  const base = Date.now();
+  clock.mockReturnValue(base);
+  try {
+    await api.listCourses();
+    delayContent = true;
+    clock.mockReturnValue(base + 6_000);
+    const result = await Promise.race([api.listCourses().then(() => "cached"), new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 100))]);
+    expect(result).toBe("cached");
+    expect(releaseRefresh).toBeTypeOf("function");
+    releaseRefresh?.();
+    expect((await api.getSyncStatus()).state).toBe("connected");
+  } finally {
+    releaseRefresh?.();
+    clock.mockRestore();
+  }
+});
+
 const context: IdempotentWriteContext = {
   idempotencyKey: "publish-1",
   actor: "test",
@@ -171,9 +201,14 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(saved.readweaveNoteId).toBeTruthy();
     expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
     remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
+    const writesBeforeRead = remote.requests.filter((item) => item.method !== "GET").length;
     const reconciled = await api.getDraftByPage("page-1");
     expect(reconciled?.revision).toBe(2);
     expect(reconciled?.page.blocks[0]?.markdown).toBe("ReadWeave 中直接完成的逐块修改");
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeRead);
+    const readsAfterFirstOpen = remote.requests.length;
+    expect((await api.getDraftByPage("page-1"))?.revision).toBe(2);
+    expect(remote.requests).toHaveLength(readsAfterFirstOpen);
     expect((await api.getSyncStatus()).mode).toBe("etapi");
   });
 

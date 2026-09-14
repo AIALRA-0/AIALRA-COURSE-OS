@@ -2597,10 +2597,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
             }
             let recheck: SemanticAuditResult | undefined;
+            let verification: SemanticAuditResult | undefined;
+            const invalidRecheck = auditIssues.length === 1 && auditIssues[0] === "TEACHING_SEMANTIC_AUDIT_INVALID";
             const countRecheck = auditIssues.length === 1 && auditIssues[0]!.startsWith("TEACHING_COUNT_CONTRADICTION:");
             const sourceRecheck = auditIssues.length === 0 && Boolean(audit.sourceChecks?.length)
               && (audit.findings.length > 0 || audit.sourceChecks!.some((check) => check.verdict !== "supported"));
-            if (countRecheck || sourceRecheck) {
+            if (invalidRecheck || countRecheck || sourceRecheck) {
               const spentAfterFirst = generationUsageCostUsd(combineTeachingGenerations(beforeAudit, {
                 content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage
               }));
@@ -2609,9 +2611,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                 writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                 language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
-                idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-${countRecheck ? "count" : "source"}-recheck:v1`,
+                idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-${invalidRecheck ? "invalid" : countRecheck ? "count" : "source"}-recheck:v1`,
                 maxCostUsd: pageCostLimitUsd - spentAfterFirst, stage: "semantic_audit", teachingPackage: corrected,
-                repair: { issues: countRecheck ? auditIssues : ["TEACHING_SOURCE_CLAIM_RECHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind,
+                repair: { issues: invalidRecheck ? ["TEACHING_SEMANTIC_AUDIT_FINDING_INVALID", ...audit.findings.map((finding) => `${finding.field}:${finding.original.slice(0, 120)}`)] : countRecheck ? auditIssues : ["TEACHING_SOURCE_CLAIM_RECHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind,
                   sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
               });
               try {
@@ -2626,8 +2628,24 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               } catch {
                 auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
               }
-              if (recheck.sourceChecks?.some((check) => check.verdict !== "supported")
-                || (recheck.sourceChecks?.length && recheck.findings.length > 0)) {
+              if (invalidRecheck && recheck.findings.length > 0 && auditIssues.length === 0) {
+                const spentAfterRecheck = generationUsageCostUsd(combineTeachingGenerations(
+                  combineTeachingGenerations(beforeAudit, { content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage }),
+                  { content: corrected, provider: recheck.provider, model: recheck.model, usage: recheck.usage }));
+                if (spentAfterRecheck === undefined || spentAfterRecheck >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", recheck.model, recheck.usage, recheck.provider);
+                verification = await runtimeModelRouter.auditTeachingPackage({
+                  pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
+                  writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+                  language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
+                  idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:semantic-invalid-verification:v1`,
+                  maxCostUsd: pageCostLimitUsd - spentAfterRecheck, stage: "semantic_audit", teachingPackage: corrected,
+                  repair: { issues: ["TEACHING_SOURCE_CLAIM_RECHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
+                });
+              }
+              if ((invalidRecheck && recheck.findings.length === 0)
+                || recheck.sourceChecks?.some((check) => check.verdict !== "supported")
+                || (verification ? verification.findings.length > 0 || verification.sourceChecks?.some((check) => check.verdict !== "supported")
+                  : Boolean(recheck.sourceChecks?.length && recheck.findings.length > 0))) {
                 auditIssues.push("TEACHING_SEMANTIC_AUDIT_UNRESOLVED");
               }
             }
@@ -2635,16 +2653,18 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               provider: audit.provider, model: audit.model, usage: audit.usage });
             if (recheck) generation = combineTeachingGenerations(generation, { content: corrected,
               provider: recheck.provider, model: recheck.model, usage: recheck.usage });
+            if (verification) generation = combineTeachingGenerations(generation, { content: corrected,
+              provider: verification.provider, model: verification.model, usage: verification.usage });
             if (auditIssues.length) generation.content = beforeAudit.content;
             if (auditIssues.length) repairIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID", ...auditIssues];
             await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
-              provider: generation.provider, model: generation.model, inputTokens: audit.usage.inputTokens + (recheck?.usage.inputTokens ?? 0),
-              outputTokens: audit.usage.outputTokens + (recheck?.usage.outputTokens ?? 0),
-              findingCount: audit.findings.length + (recheck?.findings.length ?? 0), sourceCheckCount: (audit.sourceChecks?.length ?? 0) + (recheck?.sourceChecks?.length ?? 0),
-              sourceChecks: [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? [])]
+              provider: generation.provider, model: generation.model, inputTokens: audit.usage.inputTokens + (recheck?.usage.inputTokens ?? 0) + (verification?.usage.inputTokens ?? 0),
+              outputTokens: audit.usage.outputTokens + (recheck?.usage.outputTokens ?? 0) + (verification?.usage.outputTokens ?? 0),
+              findingCount: audit.findings.length + (recheck?.findings.length ?? 0) + (verification?.findings.length ?? 0), sourceCheckCount: (audit.sourceChecks?.length ?? 0) + (recheck?.sourceChecks?.length ?? 0) + (verification?.sourceChecks?.length ?? 0),
+              sourceChecks: [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? []), ...(verification?.sourceChecks ?? [])]
                 .map((check) => ({ claim: check.claim.slice(0, 240), evidence: check.evidence.slice(0, 240), verdict: check.verdict })),
-              recheckCount: recheck ? 1 : 0,
-              correctedFields, issueCount: auditIssues.length
+              recheckCount: (recheck ? 1 : 0) + (verification ? 1 : 0),
+              correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {
           const audited = await runtimeModelRouter.generateTeachingPackage({

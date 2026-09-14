@@ -126,6 +126,7 @@ const SECTION_DEFINITIONS = [
 
 export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private static readonly readCacheTtlMs = 5_000;
+  private static readonly maxStaleReadMs = 20_000;
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;
@@ -133,6 +134,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private writeChain: Promise<void> = Promise.resolve();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
+  private readonly draftReadCache = new Map<string, { draft: LessonDraft; expiresAt: number }>();
   private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
   private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
   private lastReadAt?: string;
@@ -566,14 +568,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
+    const cached = this.draftReadCache.get(pageId);
+    if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
     const state = await this.readState();
     const index = state.drafts.findIndex((draft) => draft.pageId === pageId);
     if (index < 0) return undefined;
     const reconciled = await this.reconcileDraft(state, state.drafts[index]!);
-    if (reconciled.changed) {
-      state.drafts[index] = reconciled.draft;
-      await this.writeState(state);
-    }
+    this.draftReadCache.set(pageId, { draft: structuredClone(reconciled.draft), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs });
     return reconciled.draft;
   }
 
@@ -610,6 +611,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }, context);
     if (result.conflict) throw new Error(`READWEAVE_REVISION_CONFLICT:${result.conflict.id}`);
     if (!result.saved) throw new Error("READWEAVE_DRAFT_SAVE_FAILED");
+    this.draftReadCache.delete(draft.pageId);
     return result.saved;
   }
 
@@ -645,7 +647,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async getSyncStatus(): Promise<ReadWeaveSyncStatus> {
     try {
-      const state = await this.readState();
+      const state = await this.readState(true);
       return {
         state: "connected",
         authority: "readweave",
@@ -1276,10 +1278,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!projection) return { draft, changed: false };
     const next = structuredClone(draft);
     let changed = false;
-    for (const block of next.page.blocks) {
+    const remoteBlocks = await Promise.all(next.page.blocks.map(async (block) => {
       const noteId = projection.blockNoteIds[block.id];
-      if (!noteId) continue;
-      const remoteMarkdown = await this.getContent(noteId);
+      return noteId ? this.getContent(noteId) : undefined;
+    }));
+    for (const [index, block] of next.page.blocks.entries()) {
+      const remoteMarkdown = remoteBlocks[index];
+      if (remoteMarkdown === undefined) continue;
       const remoteHash = sha256(remoteMarkdown);
       if (remoteHash !== projection.blockHashes[block.id]) {
         block.markdown = remoteMarkdown;
@@ -1517,19 +1522,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return `<p>原始页面</p>${image}<p><code>${escapeHtml(draft.page.imageUrl)}</code></p>${extracted ? `<h3>提取文本</h3><pre>${escapeHtml(extracted)}</pre>` : ""}<h3>来源锚点</h3><pre>${escapeHtml(JSON.stringify(draft.page.anchors, null, 2))}</pre>`;
   }
 
-  private async readState(): Promise<EtapiState> {
+  private async readState(requireFresh = false): Promise<EtapiState> {
     const now = Date.now();
     if (this.stateCache && this.stateCache.expiresAt > now) return structuredClone(this.stateCache.state);
-    if (this.stateReadInFlight) return structuredClone(await this.stateReadInFlight);
-    const read = this.readRemoteState();
-    this.stateReadInFlight = read;
-    try {
-      const state = await read;
-      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
-      return structuredClone(state);
-    } finally {
-      if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
+    if (!this.stateReadInFlight) {
+      const read = this.readRemoteState();
+      this.stateReadInFlight = read;
+      void read.then((state) => {
+        if (this.stateReadInFlight === read) this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      }).catch(() => undefined).finally(() => {
+        if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
+      });
     }
+    if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
+      return structuredClone(this.stateCache.state);
+    }
+    return structuredClone(await this.stateReadInFlight);
   }
 
   private async readRemoteState(): Promise<EtapiState> {

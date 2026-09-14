@@ -715,14 +715,18 @@ export function validatePageForPublication(page: PageLesson): string[] {
   ].flatMap((block) => validateMarkdownMath(block.markdown).map((issue) => `${block.id}:${issue}`));
   const sectionIssues = validateLessonStructure(page);
   const placeholderIssues = [
-    ...page.blocks.filter((block) => /待生成|待补充|待核验|待确认/.test(block.markdown)).map((block) => `${block.id}:PLACEHOLDER_CONTENT`),
+    ...page.blocks.filter((block) => hasPlaceholderContent(block.markdown)).map((block) => `${block.id}:PLACEHOLDER_CONTENT`),
     ...(page.lessonSections ?? []).flatMap((section) => [
-      ...(section.markdown && /待生成|待补充|待核验|待确认/.test(section.markdown) ? [`${section.id}:PLACEHOLDER_CONTENT`] : []),
-      ...(section.items ?? []).filter((item) => /待生成|待补充|待核验|待确认/.test(item.text)).map((item) => `${item.id}:PLACEHOLDER_CONTENT`)
+      ...(section.markdown && hasPlaceholderContent(section.markdown) ? [`${section.id}:PLACEHOLDER_CONTENT`] : []),
+      ...(section.items ?? []).filter((item) => hasPlaceholderContent(item.text)).map((item) => `${item.id}:PLACEHOLDER_CONTENT`)
     ])
   ];
   const questionIssues = page.questionBank && page.questionBank.filter((item) => item.status === "approved").length < 4 ? ["QUESTION_BANK_MINIMUM_NOT_MET"] : [];
   return [...page.quality.issues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverage.missing.map((item) => `${item.requirementId}:MISSING:${item.fields.join(",")}`), ...sectionIssues, ...placeholderIssues, ...questionIssues];
+}
+
+export function hasPlaceholderContent(markdown: string): boolean {
+  return markdown.split(/\r?\n/u).some((line) => /^(?:\s*(?:#{1,6}\s*|[-*+]\s*|\d+[.)]\s*)?)?[（(\[]?(?:待生成|待补充|待核验|待确认)[）)\]]?\s*$/u.test(line));
 }
 
 export function validateLessonStructure(page: PageLesson): string[] {

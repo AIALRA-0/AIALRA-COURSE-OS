@@ -573,6 +573,34 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { findingCount?: number }).findingCount === 1)).toBe(true);
   }, 60_000);
 
+  it("rechecks an inapplicable semantic patch without accepting an empty replacement report", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-input", pageId: "page-1", kind: "text", label: "提取文字", text: "先检查输入条件，再执行规则" }];
+    let audits = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => testTeachingResult(0.001),
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        if (audits === 2) expect(input.repair?.issues).toContain("TEACHING_SEMANTIC_AUDIT_FINDING_INVALID");
+        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          sourceChecks: [{ claim: "先检查输入条件", evidence: "来源明确写出先检查输入条件", verdict: "supported" as const }],
+          findings: audits === 1
+            ? [{ field: "mainContentMarkdown", original: "不存在的原句", replacement: "先检查输入", evidence: "来源页" }]
+            : audits === 2 ? [{ field: "mainContentMarkdown", original: "先识别输入", replacement: "先检查输入", evidence: "来源页" }] : [] };
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-invalid-patch-recheck")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    const finished = await waitForJob(app, created.body.id);
+    expect(finished).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.004 });
+    expect(audits).toBe(3);
+    expect((await readweave.getDraftByPage("page-1"))?.page.quality.publishable).toBe(true);
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { stage?: string; recheckCount?: number }).stage === "semantic_audit" && (event.payload as { recheckCount?: number }).recheckCount === 2)).toBe(true);
+  }, 60_000);
+
   it("rechecks a counted-object contradiction introduced by an audit patch", async () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;

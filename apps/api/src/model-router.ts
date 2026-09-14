@@ -283,7 +283,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       issues: input.repair.issues, fields,
       maximumExplanationCharacters: input.repair.maximumExplanationCharacters,
       existingFields: Object.fromEntries(fields.map((field) => [field, previous[field]])),
-      explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, 2_500),
+      explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, fields.includes("coverageEvidence") ? 12_000 : 2_500),
       coverageAtomIds: input.blueprint?.resourcePackage.atomIds
     });
     const content = input.sourceImageDataUrl
@@ -297,7 +297,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         method: "POST", signal: controller.signal,
         headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
         body: JSON.stringify({ model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。`,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。修复 coverageEvidence 时，explanation 必须逐字摘取 explanationContext 中连续至少 12 个字符，不可改写、拼接或引用旧版本讲解；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
@@ -335,11 +335,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try {
       return await this.auditTeachingOnce(input);
     } catch (error) {
-      if (!(error instanceof ModelRouterGenerationError) || error.code !== "MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED") throw error;
+      if (!(error instanceof ModelRouterGenerationError) || !["MODEL_PROVIDER_SEMANTIC_AUDIT_UNRESOLVED", "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID"].includes(error.code)) throw error;
       const spent = this.usageCostUsd(error.usage);
       if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) throw error;
       try {
-        const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:unresolved-retry`,
+        const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:${error.code === "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID" ? "invalid" : "unresolved"}-retry`,
           maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0) }, true);
         return { ...retry, usage: sumProviderUsage(error.usage, retry.usage) };
       } catch (retryError) {
