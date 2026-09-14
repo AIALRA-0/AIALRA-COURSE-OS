@@ -615,6 +615,16 @@ export interface SettingsProviderSource {
   }>;
 }
 
+/** DeepSeek's live model catalog includes this visual Responses route, while older ReadWeave settings may not. */
+export function withCurrentDeepSeekModels(providers: ModelProviderConfig[]): ModelProviderConfig[] {
+  return providers.map((provider) => provider.id !== "deepseek" || provider.models.some((model) => model.id === "deepseek-flash")
+    ? provider
+    : { ...provider, models: [...provider.models, {
+      id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses" as const,
+      supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const
+    }] });
+}
+
 /**
  * Resolve the saved workspace route for every job instead of freezing the
  * provider choice at process start. Credentials are fetched only at call time
@@ -624,7 +634,8 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly source: SettingsProviderSource) {}
 
   async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
-    const { providers, policy, credential } = await this.source.load();
+    const { providers: savedProviders, policy, credential } = await this.source.load();
+    const providers = withCurrentDeepSeekModels(savedProviders);
     const rule = policy.rules.find((candidate) => candidate.stage === "repair" && candidate.enabled)
       || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
     if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
@@ -638,7 +649,8 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
-    const { providers, policy, credential } = await this.source.load();
+    const { providers: savedProviders, policy, credential } = await this.source.load();
+    const providers = withCurrentDeepSeekModels(savedProviders);
     const rule = policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
     if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
     const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
@@ -651,7 +663,8 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
-    const { providers, policy, credential } = await this.source.load();
+    const { providers: savedProviders, policy, credential } = await this.source.load();
+    const providers = withCurrentDeepSeekModels(savedProviders);
     const stage = input.stage || "teach";
     const rule = policy.rules.find((candidate) => candidate.stage === stage && candidate.enabled)
       || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);

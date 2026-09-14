@@ -49,7 +49,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
-import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, modelRouterFromEnvironment, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
@@ -340,7 +340,7 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/model-providers", async (_request, response, next) => {
-    try { response.json(await dependencies.readweave.listModelProviders()); }
+    try { response.json(withCurrentDeepSeekModels(await dependencies.readweave.listModelProviders())); }
     catch (error) { next(error); }
   });
 
@@ -389,7 +389,7 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/model-providers/models", async (_request, response, next) => {
-    try { response.json((await dependencies.readweave.listModelProviders()).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
+    try { response.json(withCurrentDeepSeekModels(await dependencies.readweave.listModelProviders()).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
     catch (error) { next(error); }
   });
 

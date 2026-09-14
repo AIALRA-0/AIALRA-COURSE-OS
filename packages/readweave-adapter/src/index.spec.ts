@@ -3,7 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
-import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi } from "./index.js";
+import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
+
+it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
+  const provider = defaultModelProviders().find((item) => item.id === "deepseek");
+  expect(provider?.models.find((model) => model.id === "deepseek-flash")).toMatchObject({ protocol: "responses", supportsVision: true, supportsJsonSchema: true });
+  const policy = defaultModelRoutePolicy("personal");
+  expect(policy.allowProviderFallback).toBe(false);
+  expect(policy.rules.every((rule) => rule.providerId === "deepseek" && rule.modelId === "deepseek-flash" && !rule.fallbackProviderId)).toBe(true);
+});
 
 const context: IdempotentWriteContext = {
   idempotencyKey: "publish-1",

@@ -147,6 +147,7 @@ export function defaultModelProviders(): ModelProviderConfig[] {
       { id: "deepseek-v4-flash-vision-exp", displayName: "DeepSeek V4 Flash Vision Exp", protocol: "chat_completions", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }
     ] },
     { id: "deepseek", displayName: "DeepSeek API", baseUrl: "https://api.deepseek.com", enabled: true, credential: { configured: false }, models: [
+      { id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" },
       { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" },
       { id: "deepseek-v4-flash-vision-exp", displayName: "DeepSeek V4 Flash Vision Exp", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" },
       { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }
@@ -162,13 +163,8 @@ export function defaultModelRoutePolicy(workspaceId: string): ModelRoutePolicy {
     allowAialraEmergencyFallback: false,
     updatedAt: new Date(0).toISOString(),
     rules: [
-      { stage: "extract", providerId: "opencode-go", modelId: "qwen3.8-flash", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-flash", enabled: true },
-      { stage: "atomize", providerId: "opencode-go", modelId: "qwen3.8-flash", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-flash", enabled: true },
-      { stage: "teach", providerId: "deepseek", modelId: "deepseek-v4-flash-vision-exp", fallbackProviderId: "opencode-go", fallbackModelId: "deepseek-v4-flash-vision-exp", enabled: true },
-      { stage: "review", providerId: "opencode-go", modelId: "qwen3.8-flash", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-pro", enabled: true },
-      { stage: "repair", providerId: "deepseek", modelId: "deepseek-v4-pro", fallbackProviderId: "opencode-go", fallbackModelId: "deepseek-v4-flash", enabled: true },
-      { stage: "question_refill", providerId: "opencode-go", modelId: "qwen3.8-flash", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-flash", enabled: true },
-      { stage: "qa", providerId: "opencode-go", modelId: "qwen3.8-flash", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-pro", enabled: true }
+      ...(["extract", "atomize", "teach", "review", "repair", "question_refill", "qa"] as const)
+        .map((stage) => ({ stage, providerId: "deepseek", modelId: "deepseek-flash", enabled: true }))
     ]
   };
 }

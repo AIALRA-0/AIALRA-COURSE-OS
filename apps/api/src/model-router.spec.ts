@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
@@ -437,6 +437,27 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     }) });
     const failure = await client.generateTeachingPackage(providerInput("no-fallback-test")).catch((error: unknown) => error);
     expect(failure).toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_FAILED:rate_limited" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the current DeepSeek visual route even when persisted model settings are older", async () => {
+    const providers = [{ id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true,
+      credential: { configured: true }, models: [{ id: "deepseek-v4-pro", displayName: "Pro", protocol: "responses" as const,
+        supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const }] }];
+    expect(withCurrentDeepSeekModels(providers).find((provider) => provider.id === "deepseek")?.models.some((model) => model.id === "deepseek-flash" && model.supportsVision)).toBe(true);
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model: string; input: Array<{ content: Array<{ type: string }> }> };
+      expect(body.model).toBe("deepseek-flash");
+      expect(body.input[0]?.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({ providers,
+      policy: { workspaceId: "personal", allowProviderFallback: false, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), rules: [{ stage: "teach", providerId: "deepseek", modelId: "deepseek-flash", enabled: true }] },
+      credential: async () => "synthetic-secret" }) });
+    const result = await client.generateTeachingPackage(providerInput("current-deepseek-flash", true));
+    expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-flash" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
