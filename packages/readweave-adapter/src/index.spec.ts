@@ -184,12 +184,14 @@ describe("ReadWeave ETAPI adapter", () => {
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     await api.createCourse(course, { ...context, idempotencyKey: "replay-course-create" });
     const first = await api.updateTreeNode(course.id, { title: "新标题" }, 0, { ...context, idempotencyKey: "replay-tree-update" });
-    const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
+    const requestsBeforeReplay = remote.requests.length;
 
     const replay = await api.updateTreeNode(course.id, { title: "不应生效" }, 0, { ...context, idempotencyKey: "replay-tree-update" });
 
     expect(replay).toMatchObject({ title: "新标题", revision: first.revision });
-    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
+    const replayRequests = remote.requests.slice(requestsBeforeReplay);
+    expect(replayRequests).toHaveLength(1);
+    expect(replayRequests.every((item) => item.method === "GET" && !item.path.endsWith("/content"))).toBe(true);
   });
 
   it("reads native page questions without writing or importing another page's links", async () => {

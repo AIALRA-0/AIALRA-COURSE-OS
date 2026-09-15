@@ -1621,7 +1621,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       try {
         const pendingRead = this.stateReadInFlight;
         if (pendingRead) await pendingRead.catch(() => undefined);
-        this.invalidateStateCache();
+        // The API process is the only writer of the Course OS state note. Most
+        // write routes have already loaded this snapshot to check workspace
+        // ownership and revisions, so downloading the same multi-megabyte note
+        // again only adds seconds of latency. An expired or missing snapshot is
+        // still fetched from ReadWeave before the mutation.
         const state = await this.readState();
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
         result = await change(state);
