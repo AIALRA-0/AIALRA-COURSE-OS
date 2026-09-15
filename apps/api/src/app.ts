@@ -2069,16 +2069,14 @@ async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: 
 async function resolveWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string): Promise<CourseTreeNode | undefined> {
   const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
-  const [releases, drafts, metadataNodes, trashRecords] = await Promise.all([
-    listWorkspaceReleases(readweave, workspaceId),
-    readweave.listDrafts(),
+  const [metadataNodes, trashRecords] = await Promise.all([
     readweave.listTreeNodes(),
     readweave.listTrash()
   ]);
   const tree = buildCourseTree(
     courses,
-    releases,
-    drafts.filter((draft) => draft.workspaceId === workspaceId && courseIds.has(draft.courseId)),
+    [],
+    [],
     metadataNodes.filter((node) => !isRegressionAsset(node.id, node.title, node.materialId ?? "") && (node.kind === "course"
       ? courseIds.has(node.id)
       : node.kind === "material"

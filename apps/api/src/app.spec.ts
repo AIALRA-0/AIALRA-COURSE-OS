@@ -1080,6 +1080,11 @@ describe("Course OS API", () => {
       currentReleaseId: release.id,
       pageCount: 1
     });
+    const material = tree.body.courses[0].children[0];
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "lightweight-tree-write")
+      .send({ expectedRevision: material.revision, title: "轻量写入" })
+      .expect(200);
     expect(listReleases).not.toHaveBeenCalled();
     expect(listDrafts).not.toHaveBeenCalled();
   });
