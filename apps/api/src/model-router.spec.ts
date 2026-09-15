@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.32", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.33", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -284,7 +284,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-v4-flash-vision-exp", protocol: "responses", supportsVision: true, billingMode: "metered" });
-    const result = await client.auditTeachingPackage({ ...providerInput("semantic-audit-test", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    const result = await client.auditTeachingPackage({ ...providerInput("semantic-audit-test", true), teachingPackage: { ...providerTeachingContent(), misconceptions: ["原始比值是 1.2"] } as TeachingPackage, maxCostUsd: 0.01 });
     expect(result.findings).toHaveLength(1);
     expect(result.sourceChecks).toHaveLength(1);
     expect(result.usage.apiEquivalentUsd).toBe(0.001);
@@ -441,7 +441,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       if (body.text.format.schema.properties.sourceChecks) expect(body.text.format.schema.properties.sourceChecks.minItems).toBe(3);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ findings: [],
         teachingChecks: ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"].map(criterion => ({ criterion, evidence: "正文中的输入、处理步骤和输出都有对应解释", verdict: "supported" })),
-        sourceChecks: ["起点", "动作", "结果"].map((claim) => ({ claim, evidence: `图中标记${claim}`, verdict: "supported" })) }),
+        sourceChecks: ["起点", "动作", "结果"].map((claim) => ({ claim, field: "priorKnowledge:0", quote: "先知道输入和输出分别表示什么", evidence: `图中标记${claim}`, verdict: "supported" })) }),
         usage: { input_tokens: 120, output_tokens: 100, total_cost: 0.001 } });
     }));
     const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
@@ -466,7 +466,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       if (!source) expect(text).toContain("Changed input");
       expect(body.text.format.schema.properties.findings.items.properties.field.enum).toContain("questions:0:expectedAnswer");
       return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(source ? {
-        sourceChecks: [{ claim: "比例相等", evidence: "给定两组分子分母计算结果并不相等", verdict: "contradicted" }],
+        sourceChecks: [{ claim: "比例相等", field: "fullExplanationMarkdown", quote: "Input", evidence: "给定两组分子分母计算结果并不相等", verdict: "contradicted" }],
         findings: [{ field: "fullExplanationMarkdown", original: "Input", replacement: "Changed input", evidence: "逐项相除得到不同结果" }]
       } : { findings: [], teachingChecks: ["entry","terms","prerequisites","structure","objects","reasoning","questions"].map(criterion => ({ criterion, evidence: "对应字段已经分段说明输入、过程与结果", verdict: "supported" })) }),
         usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.002 } });
@@ -479,6 +479,32 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.teachingChecks).toHaveLength(7);
     expect(result.usage.apiEquivalentUsd).toBe(0.004);
+  });
+
+  it("rejects source verdicts that cannot be located in the lesson instead of turning them into content defects", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.input).toContain("错误理解本身不是作者认同的主张");
+      expect(body.text.format.schema.properties.sourceChecks.items.required).toContain("quote");
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ findings: [], sourceChecks: [{
+        field: "misconceptions:0", quote: "不存在的截断句子", claim: "定义被截断", evidence: "声称末尾不完整", verdict: "contradicted"
+      }] }), usage: { input_tokens: 100, output_tokens: 30, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: "synthetic-secret", model: "deepseek-flash", protocol: "responses" });
+    await expect(client.auditTeachingPackage({ ...providerInput("ungrounded-audit"), blueprint: { resourcePackage: { pageKind: "concept" } } as ModelRouterInput["blueprint"], teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: expect.stringContaining("source_check_quote_not_found"), usage: { apiEquivalentUsd: 0.002 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a patch with an invented quotation before another audit can act on it", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model: "deepseek-flash", output_text: JSON.stringify({
+      sourceChecks: [{ claim: "输入先于输出", evidence: "图上有对应箭头", verdict: "supported" }],
+      findings: [{ field: "priorKnowledge:0", original: "不存在的原文", replacement: "替换后的定义", evidence: "声称原句有问题" }]
+    }), usage: { input_tokens: 100, output_tokens: 30, total_cost: 0.001 } })));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: "synthetic-secret", model: "deepseek-flash", protocol: "responses" });
+    await expect(client.auditTeachingPackage({ ...providerInput("invented-patch"), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: expect.stringContaining("finding_quote_not_found") });
   });
 
   it("preserves a provider's summary list when it returns an array instead of Markdown", async () => {

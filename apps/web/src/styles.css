@@ -271,7 +271,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .slide-frame img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; user-select: none; transition: transform 80ms ease-out; }
 .viewer-help { margin: 0; text-align: center; color: #858f89; font-size: 8px; }
 
-.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; background: var(--panel); }
+.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; background: var(--panel); }
 .learning-header { min-height: 70px; }
 .learning-header > div:first-child { min-width: 0; }
 .learning-header-actions { display: flex; align-items: center; gap: 12px; }
@@ -893,6 +893,11 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .workspace-header, .learning-header { min-height: auto; padding: 11px 13px; }
   .title-line h1, .learning-header h1 { font-size: 17px; }
   .learning-header-actions { gap: 7px; }
+  .learning-header { flex-wrap: wrap; gap: 8px; }
+  .learning-header > div:first-child { flex: 1 1 180px; }
+  .learning-header-actions { flex: 0 1 auto; }
+  .learning-progress { min-width: 0; }
+  .viewer-toolbar { flex-wrap: wrap; }
   .explanation-panel { padding: 23px 16px 78px; font-size: calc(16px * var(--course-font-scale)); }
   .lesson-header h2 { font-size: 24px; }
   .lesson-section-title h3 { font-size: 18px; }

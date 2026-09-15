@@ -72,7 +72,7 @@ export interface ModelRouterClient {
 export interface SemanticAuditResult {
   teachingChecks?: Array<{ criterion: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
   findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
-  sourceChecks?: Array<{ claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
+  sourceChecks?: Array<{ claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified"; field?: string; quote?: string }>;
   provider: string;
   model: string;
   usage: ModelRouterUsage;
@@ -520,6 +520,17 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ...input.teachingPackage.questions.flatMap((q, i) => [...["prompt", "expectedAnswer", "explanation"].map(field => `questions:${i}:${field}`), ...(q.options || []).map((_, n) => `questions:${i}:options:${n}`)])];
     const auditSchema = structuredClone(semanticAuditSchema) as { required: string[]; properties: Record<string, any> };
     auditSchema.properties.findings.items.properties.field.enum = allowedFields;
+    const fieldText = (path: string): string => {
+      const value = path.split(":").reduce<unknown>((current, key) => current && typeof current === "object"
+        ? (current as Record<string, unknown>)[key] : undefined, input.teachingPackage);
+      return typeof value === "string" ? value : "";
+    };
+    if (scope === "source") {
+      const check = auditSchema.properties.sourceChecks.items;
+      check.properties.field = { type: "string", enum: allowedFields };
+      check.properties.quote = { type: "string", minLength: 1 };
+      check.required.push("field", "quote");
+    }
     if (input.blueprint?.resourcePackage.pageKind === "diagram") auditSchema.properties.sourceChecks.minItems = 3;
     const minSourceChecks = auditSchema.properties.sourceChecks.minItems as number;
     if (scope !== "combined") {
@@ -534,6 +545,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       previousPageContext: input.previousPageContext?.slice(0, 2_000),
       writingRules: scope === "source" ? undefined : { format: policyFormatRules, explanation: policyExplanationFramework, formula: policyFormulaExplanation },
       compositionContract: scope === "source" ? undefined : teachingCompositionContract,
+      fieldRoles: { misconceptions: "每项包含错误观点及其反驳，必须结合整项判断；错误理解本身不是作者认同的主张",
+        questions: "题干中的待判断观点和选择题干扰项不是作者主张，结合 expectedAnswer 与 explanation 判断",
+        fullExplanationMarkdown: "原样引用、来源冲突与核算说明必须结合相邻段落判断，不能孤立摘取原始错误等式" },
       detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage
     })}`;
     const userInput = input.sourceImageDataUrl
@@ -590,11 +604,14 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (findings.length > 12 || findings.some((item) => !item || typeof item !== "object" ||
       ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit(`findings_shape:${findings.length}`);
     if (findings.some(item => !allowedFields.includes(item.field))) return invalidAudit("finding_field_invalid");
+    if (findings.some(item => !item.original.trim() || !fieldText(item.field).includes(item.original))) return invalidAudit("finding_quote_not_found");
     if (!Array.isArray(sourceChecks)) return invalidAudit("source_checks_missing");
     if (scope !== "teaching" && sourceChecks.length < minSourceChecks) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
     if (sourceChecks.length > 24 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
+    if (scope === "source" && sourceChecks.some(item => !allowedFields.includes(item.field)
+      || typeof item.quote !== "string" || !item.quote.trim() || !fieldText(item.field).includes(item.quote))) return invalidAudit("source_check_quote_not_found");
     const teachingChecks = scope === "source" ? undefined : (parsed as SemanticAuditResult).teachingChecks;
     const criteria = ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"];
     if (scope !== "source" && (input.blueprint || teachingChecks !== undefined)) {
