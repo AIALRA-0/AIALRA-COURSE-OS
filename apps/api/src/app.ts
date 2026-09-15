@@ -2635,7 +2635,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               } catch {
                 auditIssues = ["TEACHING_SEMANTIC_AUDIT_INVALID"];
               }
-              if (invalidRecheck && recheck.findings.length > 0 && auditIssues.length === 0) {
+              // A source recheck may uncover a second, independent error after
+              // the first exact patch. Verify the twice-corrected package once
+              // more instead of treating the historical finding as unresolved.
+              if ((invalidRecheck || sourceRecheck) && recheck.findings.length > 0 && auditIssues.length === 0) {
                 const spentAfterRecheck = generationUsageCostUsd(combineTeachingGenerations(
                   combineTeachingGenerations(beforeAudit, { content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage }),
                   { content: corrected, provider: recheck.provider, model: recheck.model, usage: recheck.usage }));
@@ -2649,10 +2652,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                   repair: { issues: ["TEACHING_SOURCE_CLAIM_RECHECK"], maximumExplanationCharacters: maximumTeachingExplanationCharacters({ pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
                 });
               }
-              if ((invalidRecheck && recheck.findings.length === 0)
-                || recheck.sourceChecks?.some((check) => check.verdict !== "supported")
-                || (verification ? verification.findings.length > 0 || verification.sourceChecks?.some((check) => check.verdict !== "supported")
-                  : Boolean(recheck.sourceChecks?.length && recheck.findings.length > 0))) {
+              const decisiveRecheck = verification ?? recheck;
+              if ((invalidRecheck && !verification && recheck.findings.length === 0)
+                || decisiveRecheck.sourceChecks?.some((check) => check.verdict !== "supported")
+                || (!verification && Boolean(recheck.sourceChecks?.length && recheck.findings.length > 0))) {
                 auditIssues.push("TEACHING_SEMANTIC_AUDIT_UNRESOLVED");
               }
             }
@@ -2662,8 +2665,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               provider: recheck.provider, model: recheck.model, usage: recheck.usage });
             if (verification) generation = combineTeachingGenerations(generation, { content: corrected,
               provider: verification.provider, model: verification.model, usage: verification.usage });
-            const unsupportedChecks = [...(audit.sourceChecks ?? []), ...(recheck?.sourceChecks ?? []),
-              ...(verification?.sourceChecks ?? [])].filter((check) => check.verdict !== "supported");
+            // Only the latest audit describes the current corrected package.
+            // Earlier unsupported checks are evidence that a repair was needed,
+            // not evidence that the repaired text is still wrong.
+            const decisiveSourceChecks = verification?.sourceChecks ?? recheck?.sourceChecks ?? audit.sourceChecks ?? [];
+            const unsupportedChecks = decisiveSourceChecks.filter((check) => check.verdict !== "supported");
             const sourceRepairTargets = [...new Set(unsupportedChecks.map((check) =>
               check.verdict + "：" + check.claim.slice(0, 180) + "；原图证据：" + check.evidence.slice(0, 220)))].slice(0, 6);
             let sourceRepairAttempted = false;

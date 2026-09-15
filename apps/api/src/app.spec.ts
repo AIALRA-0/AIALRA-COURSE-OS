@@ -681,6 +681,51 @@ describe("Course OS API", () => {
       .some((event) => (event.payload as { findingCount?: number }).findingCount === 1)).toBe(true);
   }, 60_000);
 
+  it("verifies sequential source corrections against the latest audit instead of reopening resolved findings", async () => {
+    const technicalRelease = testRelease();
+    technicalRelease.pages[0]!.pageNumber = 2;
+    technicalRelease.pages[0]!.anchors = [{ id: "source-sequence", pageId: "page-1", kind: "text", label: "提取文字",
+      text: "第一项不乘系数，第二项乘 lambda" }];
+    let audits = 0;
+    let sourceRepairs = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        const result = testTeachingResult(0.001);
+        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) sourceRepairs += 1;
+        else result.content.fullExplanationMarkdown += "\n\n第一项乘 lambda，第二项不乘系数";
+        return result;
+      },
+      auditTeachingPackage: async (input) => {
+        audits += 1;
+        if (audits === 2) expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数");
+        if (audits === 3) {
+          expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数，第二项乘 lambda");
+          expect(input.repair?.issues).toContain("TEACHING_SOURCE_CLAIM_RECHECK");
+        }
+        return {
+          provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
+          sourceChecks: [{ claim: "系数位置", evidence: "来源写明第一项不乘，第二项乘", verdict: audits === 3 ? "supported" as const : "contradicted" as const }],
+          findings: audits === 1
+            ? [{ field: "fullExplanationMarkdown", original: "第一项乘 lambda", replacement: "第一项不乘系数", evidence: "来源页" }]
+            : audits === 2
+              ? [{ field: "fullExplanationMarkdown", original: "第二项不乘系数", replacement: "第二项乘 lambda", evidence: "来源页" }]
+              : []
+        };
+      }
+    };
+    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-sequential-source-corrections")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.004 });
+    expect(audits).toBe(3);
+    expect(sourceRepairs).toBe(0);
+    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
+      .toContain("第一项不乘系数，第二项乘 lambda");
+    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
+      .some((event) => (event.payload as { sourceRepairAttempted?: boolean; recheckCount?: number }).sourceRepairAttempted === false
+        && (event.payload as { recheckCount?: number }).recheckCount === 2)).toBe(true);
+  }, 60_000);
+
   it("rechecks an inapplicable semantic patch without accepting an empty replacement report", async () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
