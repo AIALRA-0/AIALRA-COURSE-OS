@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -11,7 +12,7 @@ type VaultFile = Record<string, { iv: string; tag: string; value: string; update
  * must come from the deployment secret, never from a request or a log line
  */
 export class SecretVault {
-  constructor(private readonly filePath: string, masterSecret = process.env.COURSE_OS_SETTINGS_KEY) {
+  constructor(private readonly filePath: string, masterSecret = configuredSettingsSecret()) {
     const resolvedSecret = masterSecret?.trim();
     if (!resolvedSecret && process.env.NODE_ENV === "production") throw new Error("COURSE_OS_SETTINGS_KEY_REQUIRED");
     this.key = createHash("sha256").update(resolvedSecret || "course-os-local-development-key").digest();
@@ -58,5 +59,18 @@ export class SecretVault {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw error;
     }
+  }
+}
+
+function configuredSettingsSecret(): string | undefined {
+  const direct = process.env.COURSE_OS_SETTINGS_KEY?.trim();
+  if (direct) return direct;
+  const filePath = process.env.COURSE_OS_SETTINGS_KEY_FILE?.trim();
+  if (!filePath) return undefined;
+  try {
+    return readFileSync(filePath, "utf8").trim() || undefined;
+  } catch {
+    if (process.env.NODE_ENV === "production") throw new Error("COURSE_OS_SETTINGS_KEY_REQUIRED");
+    return undefined;
   }
 }
