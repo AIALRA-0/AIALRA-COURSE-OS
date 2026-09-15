@@ -372,6 +372,12 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(formulaOnlyInSource)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
     const vagueResultName = { ...weighted, mainContentMarkdown: "- 末态式为 $r_T=-x-\\lambda y-\\gamma z$\n- 线长、拥挤和密度越大，该量越小" };
     expect(validateTeachingNarrative(vagueResultName)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:mainContentMarkdown");
+    const smallerIsBetterWithoutWeightSigns = { ...weighted, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n回报式为 $r_T=-x-\\lambda y-\\gamma z$；这些指标都是越小越好，权重具体符号没有给出` };
+    expect(validateTeachingNarrative(smallerIsBetterWithoutWeightSigns)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const reversedPreference = { ...weighted, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n回报式为 $r_T=-x-\\lambda y-\\gamma z$；取负号后回报数值越大代表布局越差` };
+    expect(validateTeachingNarrative(reversedPreference)).toContain("TEACHING_REWARD_DIRECTION_REVERSED:fullExplanationMarkdown");
+    const correctPreference = { ...weighted, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n回报式为 $r_T=-x-\\lambda y-\\gamma z$；在权重为正且其他输入不变时，成本降低会让回报数值增大，表示惩罚减轻` };
+    expect(validateTeachingNarrative(correctPreference)).not.toContain("TEACHING_REWARD_DIRECTION_REVERSED:fullExplanationMarkdown");
   });
 
   it("rejects cross-field teaching contradictions and mathematical expressions rendered as code", () => {

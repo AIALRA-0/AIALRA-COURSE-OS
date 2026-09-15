@@ -177,6 +177,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
       if (hasMathFormattedAsCode(markdown)) issues.push(`TEACHING_MATH_AS_CODE:${field}`);
       if (hasUnqualifiedWeightedTrend(markdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
+      if (hasReversedNegativeRewardPreference(markdown)) issues.push(`TEACHING_REWARD_DIRECTION_REVERSED:${field}`);
       if (/[\p{Script=Han}]{2,20}（[A-Za-z][A-Za-z .&/-]{1,80}[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(markdown)) {
         issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
       }
@@ -285,6 +286,12 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   const describesWeightedPenalty = /(?:加权|带负号|负向)[^。；;\n]{0,45}(?:回报|奖励|得分|损失|目标函数|评分|结果|组成|分项)|(?:回报|奖励|得分|损失|目标函数|评分|结果)[^。；;\n]{0,45}(?:加权|带负号|负向)/u.test(markdown);
   if (!hasSymbolicWeightedScore && !(admitsMissingWeights && describesWeightedPenalty)) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
+    const unqualifiedSmallerIsBetter = /(?:这些|这[两三四几]项|各项|全部|所有|三个|两项|指标)[^，]{0,45}(?:越小越好|越低越好|越少越好)/u.test(clause);
+    if (unqualifiedSmallerIsBetter) {
+      const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);
+      const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
+      if (!(explicitlyConditional && weightsQualified)) return true;
+    }
     const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升|越大).{0,60}(?:下降|降低|减少|减小|变小|越小|越低)|(?:增大|增加|提高|上升|越大).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|(?:该|此|这个)?(?:量|数值|值|整体)|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小|越小|越低)/u);
     if (!trend) return false;
     // A warning that explicitly rejects the trend is not an assertion of it.
@@ -295,6 +302,17 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
     const otherInputsControlled = /(?:其他|其余|别的)[^，]{0,20}(?:不变|固定|保持)|(?:同时|一起)[^，]{0,12}(?:增大|增加)/u.test(clause);
     return !(explicitlyConditional && weightsQualified && otherInputsControlled);
   });
+}
+
+/** A negated cost used as reward becomes better, not worse, when its value increases. */
+function hasReversedNegativeRewardPreference(markdown: string): boolean {
+  const formulas = [...markdown.matchAll(/\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\r\n]+)\$(?!\$)/gu)]
+    .map((match) => match[1] || match[2] || "");
+  const hasNegativeReward = formulas.some((formula) => /(?:^|\s)(?:r|R)(?:_[A-Za-z0-9{}]+)?\s*=\s*[-−]/u.test(formula));
+  if (!hasNegativeReward) return false;
+  return markdown.split(/[；;。\n]/u).some((clause) =>
+    /(?:回报|奖励|reward|\$?r(?:_[A-Za-z0-9{}]+)?\$?)[^，]{0,45}(?:数值|值)?[^，]{0,20}(?:越大|增大|提高|上升)[^，]{0,24}(?:越差|更差|较差|更坏|越坏)/iu.test(clause)
+    || /(?:取负号|取负值|负号后|负值)[^，]{0,55}(?:数值|值|回报|奖励)[^，]{0,20}(?:越大|增大|提高|上升)[^，]{0,24}(?:越差|更差|较差|更坏|越坏)/u.test(clause));
 }
 
 /** Do not fold an extra edge-weight term into a known 64-D node-pair vector. */
