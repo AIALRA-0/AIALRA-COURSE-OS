@@ -118,6 +118,10 @@ describe("Course OS API", () => {
       .toEqual({ ...previous, misconceptions: repaired.misconceptions });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_ABBREVIATION_PLACEMENT:chapterBridgeMarkdown"]))
       .toEqual({ ...previous, chapterBridgeMarkdown: repaired.chapterBridgeMarkdown });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNTRANSLATED_SOURCE_LABEL:chapterBridgeMarkdown"]))
+      .toEqual({ ...previous, chapterBridgeMarkdown: repaired.chapterBridgeMarkdown });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:mainContentMarkdown:1000:2567"]))
+      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_CONCAT_DIMENSION_CONTRADICTION:mainContentMarkdown"]))
       .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
   });
@@ -988,7 +992,7 @@ describe("Course OS API", () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
     technicalRelease.pages[0]!.anchors = [{ id: "source-step", pageId: "page-1", kind: "text",
-      label: "提取文字", text: "先检查输入；图中两个 Agent 标签不表示同一对象" }];
+      label: "提取文字", text: "先检查输入；图中两个智能体标签不表示同一对象" }];
     let audits = 0;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
@@ -996,18 +1000,18 @@ describe("Course OS API", () => {
         if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
           result.content.coverageEvidence = result.content.coverageEvidence.map((claim) => ({ ...claim, explanation: "这条新引用不在讲解中" }));
         } else {
-          result.content.fullExplanationMarkdown += "\n\n两个 Agent 标签必然表示同一对象";
+          result.content.fullExplanationMarkdown += "\n\n两个智能体标签必然表示同一对象";
         }
         return result;
       },
       auditTeachingPackage: async (input) => {
         audits += 1;
-        const falseAgentClaim = input.teachingPackage.fullExplanationMarkdown.includes("两个 Agent 标签必然表示同一对象");
+        const falseAgentClaim = input.teachingPackage.fullExplanationMarkdown.includes("两个智能体标签必然表示同一对象");
         const falseStepClaim = input.teachingPackage.mainContentMarkdown.includes("先识别输入");
         return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
           findings: audits === 3 ? [{ field: "mainContentMarkdown", original: "先识别输入",
             replacement: "先检查输入", evidence: "课件写着先检查输入" }] : [],
-          sourceChecks: [{ claim: falseAgentClaim ? "两个 Agent 标签必然表示同一对象" : "两个 Agent 标签分别出现",
+          sourceChecks: [{ claim: falseAgentClaim ? "两个智能体标签必然表示同一对象" : "两个智能体标签分别出现",
             evidence: "课件没有说明两个标签是同一对象", verdict: falseAgentClaim ? "unverified" as const : "supported" as const },
           { claim: falseStepClaim ? "先识别输入" : "先检查输入", evidence: "课件写着先检查输入",
             verdict: falseStepClaim ? "contradicted" as const : "supported" as const }] };

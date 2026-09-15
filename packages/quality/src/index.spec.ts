@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -215,6 +215,10 @@ describe("learner-facing teaching narrative", () => {
       .toBe("MDP 马尔可夫决策过程（Markov Decision Process）：一种序贯决策框架");
     expect(normalizePriorDefinitionAbbreviation("- 马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架"))
       .toBe("- MDP 马尔可夫决策过程（Markov Decision Process）：一种序贯决策框架");
+    expect(normalizeEmbeddedDefinitionAbbreviation("将其抽象为马尔可夫决策过程（Markov Decision Process，MDP）的四个要素"))
+      .toBe("将其抽象为马尔可夫决策过程（Markov Decision Process）的四个要素");
+    expect(normalizeTeachingBridgeBlocks("前页给出输入\n本页接着回答两个问题：\n- 第一项\n- 第二项"))
+      .toBe("前页给出输入\n\n本页接着回答两个问题：\n\n- 第一项\n- 第二项");
     expect(normalizePriorDefinitionAbbreviation("策略（Policy）：动作的概率分布"))
       .toBe("策略（Policy）：动作的概率分布");
   });
@@ -304,6 +308,9 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
       questions: [{ prompt: "后一种方法是否一定解决前一种方法的问题", expectedAnswer: "没有依据", explanation: "年代先后不构成逐代替代证据" }] }))
       .not.toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:questions");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      misconceptions: ["错误理解：表格按年代排列，说明后一种方法解决了前一种方法的限制\n\n错因：把时间顺序当成演进关系\n\n正确判断：材料没有说明后一种方法弥补了前一种方法的哪项限制\n\n核对方法：检查表格是否给出替代证据"] }))
+      .not.toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:misconceptions");
   });
 
   it("separates an episode from its steps and preserves negative objective signs", () => {
@@ -313,6 +320,31 @@ describe("learner-facing teaching narrative", () => {
     const sign = { ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$r_T = -\\text{Wirelength} - \\lambda \\text{congestion} - \\gamma \\text{density}$，后两项从线长中减去` };
     expect(validateTeachingNarrative(sign)).toContain("TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:fullExplanationMarkdown");
+  });
+
+  it("does not treat misconception examples or distractors as accepted semantic claims", () => {
+    const misconception = { ...valid, strictWritingStyle: true,
+      misconceptions: ["错误理解：预训练编码器已经对所有网表都有效\n\n错因：把训练目标当成已验证结论\n\n正确判断：泛化效果仍需在目标数据上验证\n\n核对方法：检查是否存在跨网表性能数据"] };
+    expect(validateTeachingNarrative(misconception)).not.toContain("TEACHING_UNBOUNDED_GENERALIZATION:misconceptions");
+    const question = { ...valid, strictWritingStyle: true,
+      questions: [{ prompt: "哪一项错误", options: ["编码器对所有网表都有效", "需要验证"], expectedAnswer: "需要验证", explanation: "材料没有给出跨网表性能数据" }] };
+    expect(validateTeachingNarrative(question)).not.toContain("TEACHING_UNBOUNDED_GENERALIZATION:questions");
+  });
+
+  it("rejects episode-step conflation, untranslated source labels, and an uncorrected factorial magnitude", () => {
+    const sequential = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$s_0$ 后执行 $a_0$，$s_1$ 后执行 $a_1$`,
+      misconceptions: ["错误理解：动作空间只有一个动作\n\n错因：混淆集合与执行\n\n正确判断：动作空间可以包含多个动作，每个回合只选择并执行其中一个\n\n核对方法：检查动作序列"] };
+    expect(validateTeachingNarrative(sequential)).toContain("TEACHING_EPISODE_STEP_CONFLATION:misconceptions");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      chapterBridgeMarkdown: "前页给出“Edge-GNN (Graph Encoder)”的组成\n\n本页继续解释用途" }))
+      .toContain("TEACHING_UNTRANSLATED_SOURCE_LABEL:chapterBridgeMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$1000! = 10^{2500}$` }))
+      .toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n材料把规模粗略写成 $1000! = 10^{2500}$，实际计算更接近 $4.02\\times10^{2567}$` }))
+      .not.toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567");
   });
 
   it("does not invent a fixed-length graph vector from multiple embedding outputs", () => {

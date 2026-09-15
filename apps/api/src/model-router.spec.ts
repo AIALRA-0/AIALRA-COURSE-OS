@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.42", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.43", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -423,6 +423,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     content.misconceptions = ["错误理解：后一种方法依次解决前一种方法；错因：把并列表格写成演进因果；正确判断：只能确认各行限制；核对方法：逐行核对"];
     expect(teachingRepairTargets(content, ["misconceptions"], ["TEACHING_METHOD_PROGRESSION_OVERCLAIM:misconceptions"]))
       .toEqual([expect.objectContaining({ field: "misconceptions:0", quote: content.misconceptions[0] })]);
+  });
+
+  it("targets untranslated labels, factorial errors, and episode-step conflation precisely", () => {
+    const content = providerTeachingContent() as TeachingPackage;
+    content.chapterBridgeMarkdown = "上一页给出“Why?”下面的三项内容";
+    content.fullExplanationMarkdown = "$1000! = 10^{2500}$\n\n从 $s_0$ 执行 $a_0$，再执行 $a_1$，每个回合只选择并执行其中一个";
+    const targets = teachingRepairTargets(content, ["chapterBridgeMarkdown", "fullExplanationMarkdown"], [
+      "TEACHING_UNTRANSLATED_SOURCE_LABEL:chapterBridgeMarkdown",
+      "TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567",
+      "TEACHING_EPISODE_STEP_CONFLATION:fullExplanationMarkdown"
+    ]);
+    expect(targets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "chapterBridgeMarkdown", quote: content.chapterBridgeMarkdown }),
+      expect.objectContaining({ field: "fullExplanationMarkdown", quote: "$1000! = 10^{2500}$" }),
+      expect.objectContaining({ field: "fullExplanationMarkdown", quote: expect.stringContaining("每个回合") })
+    ]));
   });
 
   it("rejects a supported source check whose formula contradicts its evidence", () => {

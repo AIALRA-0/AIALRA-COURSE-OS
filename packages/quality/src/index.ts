@@ -80,6 +80,35 @@ export interface TeachingNarrativeInput {
   sourceTitle?: string;
 }
 
+function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expectedExponent: number }> {
+  const mismatches: Array<{ n: number; expectedExponent: number }> = [];
+  for (const match of markdown.matchAll(/(\d{2,5})!\s*=\s*10\^\{(\d+)\}/gu)) {
+    const n = Number(match[1]);
+    const statedExponent = Number(match[2]);
+    if (!Number.isInteger(n) || n > 10_000 || !Number.isInteger(statedExponent)) continue;
+    let logarithm = 0;
+    for (let value = 2; value <= n; value += 1) logarithm += Math.log10(value);
+    const expectedExponent = Math.floor(logarithm);
+    const hasCorrection = new RegExp(`10\\^\\{${expectedExponent}\\}`).test(markdown)
+      && /(?:原文|材料|页面)[^\n]{0,120}(?:粗略|近似|写成|标为)[^\n]{0,180}(?:实际|准确|严格|更接近|约为)/u.test(markdown);
+    if (Math.abs(statedExponent - expectedExponent) > 1 && !hasCorrection) mismatches.push({ n, expectedExponent });
+  }
+  return mismatches;
+}
+
+function untranslatedSourceLabels(markdown: string): string[] {
+  const labels: string[] = [];
+  for (const match of markdown.matchAll(/“([A-Za-z][A-Za-z0-9 +,:?.()/_-]{2,100})”/gu)) {
+    const label = match[1]!.trim();
+    if (/^[A-Z][A-Z0-9-]{1,12}$/u.test(label)) continue;
+    const start = match.index ?? 0;
+    const after = markdown.slice(start + match[0].length, start + match[0].length + 80);
+    const translated = /^(?:，|,)?\s*(?:(?:即|意为|意思是|可译为|表示|对应)[^。！？\n]{0,55}[\p{Script=Han}]{2}|的[\p{Script=Han}]{2,24}(?:模块|方法|步骤|阶段|栏目|标题|标签|对象|网络|层))/u.test(after);
+    if (!translated) labels.push(label);
+  }
+  return labels;
+}
+
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
   return input.pageKind === "cover" ? 900
     : input.pageKind === "agenda" ? 1_000
@@ -183,42 +212,50 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       questions: input.questions.map((question) => `${question.prompt}\n${question.expectedAnswer || ""}\n${(question.options || []).join("\n")}\n${question.explanation}`).join("\n")
     };
     for (const [field, markdown] of Object.entries(mathFields)) {
+      const semanticMarkdown = field === "questions"
+        ? input.questions.map((question) => `${question.expectedAnswer || ""}\n${question.explanation}`).join("\n")
+        : field === "misconceptions"
+          ? input.misconceptions.map((item) => item.replace(/(^|\n)错误理解：[\s\S]*?(?=\n\n(?:错因|正确判断|核对方法)：|$)/gu, "$1")).join("\n")
+          : markdown;
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
       if (hasMathFormattedAsCode(markdown)) issues.push(`TEACHING_MATH_AS_CODE:${field}`);
-      if (hasUnqualifiedWeightedTrend(markdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
-      if (hasReversedNegativeRewardPreference(markdown)) issues.push(`TEACHING_REWARD_DIRECTION_REVERSED:${field}`);
+      if (hasUnqualifiedWeightedTrend(semanticMarkdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
+      if (hasReversedNegativeRewardPreference(semanticMarkdown)) issues.push(`TEACHING_REWARD_DIRECTION_REVERSED:${field}`);
       if (/[\p{Script=Han}]{2,20}（[A-Za-z][A-Za-z .&/-]{1,80}[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(markdown)) {
         issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
       }
-      const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|(?:没有|不存在)[^；。！？\n]{0,60}(?:一个)?[^；。！？\n]{0,30}(?:同时|全部)[^；。！？\n]{0,24}(?:达到|实现)?最优|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(markdown);
-      const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(markdown);
+      if (untranslatedSourceLabels(markdown).length > 0) issues.push(`TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`);
+      for (const mismatch of factorialMagnitudeMismatches(markdown)) {
+        issues.push(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:${mismatch.n}:${mismatch.expectedExponent}`);
+      }
+      const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|(?:没有|不存在)[^；。！？\n]{0,60}(?:一个)?[^；。！？\n]{0,30}(?:同时|全部)[^；。！？\n]{0,24}(?:达到|实现)?最优|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(semanticMarkdown);
+      const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(semanticMarkdown);
       if (directLogicalOverclaim && !explicitlyLimitedClaim) issues.push(`TEACHING_LOGICAL_OVERCLAIM:${field}`);
-      const progressionText = field === "questions"
-        ? input.questions.map((question) => `${question.expectedAnswer || ""}\n${question.explanation}`).join("\n") : markdown;
-      const progressionDenied = /(?:不|不能|无法|未)(?:等于|代表|构成|足以|能推出)?[^；。！？\n]{0,50}(?:逐代|后一(?:种方法|代)|解决前一)|(?:没有|未给出)[^；。！？\n]{0,50}(?:演进关系|证据|论证)/u.test(progressionText);
+      const progressionText = semanticMarkdown;
+      const progressionDenied = /(?:不|不能|无法|未)(?:等于|代表|构成|足以|能推出)?[^；。！？\n]{0,50}(?:逐代|后一(?:种方法|代)|解决前一)|(?:没有|未)(?:给出|说明|证明|显示)?[^；。！？\n]{0,70}(?:演进关系|替代关系|对比证据|后一(?:种方法|代)[^；。！？\n]{0,35}(?:解决|弥补|取代)(?:了|过)?前一(?:种方法|代))/u.test(progressionText);
       if (!progressionDenied && /(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(progressionText)) {
         issues.push(`TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`);
       }
-      const claimsOneAvailableAction = /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(markdown);
-      const scopesOneExecutedAction = /(?:每(?:个)?回合|单次|一次|该回合|这个回合)[^；。！？\n]{0,36}(?:执行|选择)[^；。！？\n]{0,20}(?:一个|1\s*个)动作|(?:只|仅)(?:执行|选择)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(markdown);
+      const claimsOneAvailableAction = /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(semanticMarkdown);
+      const scopesOneExecutedAction = /(?:每(?:个)?回合|单次|一次|该回合|这个回合)[^；。！？\n]{0,36}(?:执行|选择)[^；。！？\n]{0,20}(?:一个|1\s*个)动作|(?:只|仅)(?:执行|选择)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(semanticMarkdown);
       const pageHasTwoAvailableActions = /(?:两个|2\s*个)动作[^；。！？\n]{0,30}(?:可选|可以选择|供选择|动作空间)|动作(?:空间)?[^；。！？\n]{0,30}(?:包含|有|给出)[^；。！？\n]{0,12}(?:两个|2\s*个)(?:可选)?动作/u.test(learnerText);
       if (pageHasTwoAvailableActions && claimsOneAvailableAction && !scopesOneExecutedAction) {
         issues.push(`TEACHING_ACTION_COUNT_CONFLATION:${field}`);
       }
-      const unboundedNetlistClaim = /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
-      const explicitlyBoundedNetlistClaim = /(?:并非|不能|无法|不代表|不保证|不一定)[^；。！？\n]{0,30}(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
+      const unboundedNetlistClaim = /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(semanticMarkdown);
+      const explicitlyBoundedNetlistClaim = /(?:并非|不能|无法|不代表|不保证|不一定)[^；。！？\n]{0,30}(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(semanticMarkdown);
       if (unboundedNetlistClaim && !explicitlyBoundedNetlistClaim) issues.push(`TEACHING_UNBOUNDED_GENERALIZATION:${field}`);
       const pageHasSequentialActions = /\$?a_(?:0|\{0\})\$?/u.test(learnerText) && /\$?a_(?:1|\{1\})\$?/u.test(learnerText);
-      if (pageHasSequentialActions && /每(?:个)?回合[^；。！？\n]{0,30}(?:只|仅)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(markdown)) {
+      if (pageHasSequentialActions && /每(?:个)?回合[^；。！？\n]{0,36}(?:只|仅)[^；。！？\n]{0,20}(?:(?:选择|执行)[^；。！？\n]{0,16})?(?:其中)?(?:一个|1\s*个)(?:动作)?/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_EPISODE_STEP_CONFLATION:${field}`);
       }
       const negativeWeightedObjective = /=\s*-\s*(?:\\text\{)?(?:Wirelength|wirelength|线长|连线长度)/u.test(learnerText)
         && /-\s*\\(?:lambda|alpha|beta|gamma)/u.test(learnerText);
-      if (negativeWeightedObjective && /后两项[^；。！？\n]{0,80}从(?:线长|连线长度)中减去/u.test(markdown)) {
+      if (negativeWeightedObjective && /后两项[^；。！？\n]{0,80}从(?:线长|连线长度)中减去/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:${field}`);
       }
       const sourceShowsMultipleEmbeddings = /Edge embeddings/u.test(learnerText) && /Macro embeddings/u.test(learnerText);
-      if (sourceShowsMultipleEmbeddings && /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(markdown)) {
+      if (sourceShowsMultipleEmbeddings && /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:${field}`);
       }
     }
@@ -498,6 +535,21 @@ export function normalizePriorDefinitionAbbreviation(text: string): string {
     /^(\s*(?:[-*+]\s+)?)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
     "$1$4 $2（$3）："
   );
+}
+
+/** Remove a trailing abbreviation from parenthetical English when its Chinese term boundary is not structurally known. */
+export function normalizeEmbeddedDefinitionAbbreviation(text: string): string {
+  return text.replace(
+    /（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*[A-Z][A-Z0-9-]{1,12}）/gu,
+    "（$1）"
+  );
+}
+
+/** Keep the previous-page fact, current-page question, and following list as separate readable blocks. */
+export function normalizeTeachingBridgeBlocks(text: string): string {
+  return text
+    .replace(/\n(?!\s*\n)(?=(?:本页|这一页|接下来)[^\n]{0,40}(?:回答|解决|说明|解释|要看))/gu, "\n\n")
+    .replace(/：\n(?!\s*\n)(?=\s*[-*+]\s)/gu, "：\n\n");
 }
 
 /** Preserve every definition fact while keeping the policy's three-to-five-clause shape. */

@@ -150,7 +150,7 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     if (issues.includes(actionIssue)) {
       for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(item))) {
         targets.push({ field: path, quote: line,
-          instruction: "这里混淆了动作集合大小和单次执行数量；若动作空间有两个可选动作，应明确写成每个回合只选择并执行其中一个动作，不能写成只有一个动作" });
+          instruction: "这里混淆了动作集合大小和单次执行数量；若动作空间有两个可选动作，应明确写成每个时间步只选择并执行其中一个动作，不能写成只有一个动作，也不能把时间步写成完整回合" });
       }
     }
     const scopeIssue = `TEACHING_UNBOUNDED_GENERALIZATION:${field}`;
@@ -162,7 +162,7 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     }
     const episodeIssue = `TEACHING_EPISODE_STEP_CONFLATION:${field}`;
     if (issues.includes(episodeIssue)) {
-      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /每(?:个)?回合[^；。！？\n]{0,30}(?:只|仅)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(item))) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /每(?:个)?回合[^；。！？\n]{0,36}(?:只|仅)[^；。！？\n]{0,20}(?:(?:选择|执行)[^；。！？\n]{0,16})?(?:其中)?(?:一个|1\s*个)(?:动作)?/u.test(item))) {
         targets.push({ field: path, quote: line, instruction: "这里把一个时间步误写成一个完整回合；来源连续给出 a_0、a_1 等多个动作时，改成每一步选择并执行一个动作，一个回合由这些连续步骤组成" });
       }
     }
@@ -176,6 +176,23 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     if (issues.includes(representationIssue)) {
       for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(item))) {
         targets.push({ field: path, quote: line, instruction: "来源只显示边嵌入和宏单元嵌入，没有给出固定长度或整图汇总；删除固定长度断言，只说明图编码器把网表转换成后续网络使用的边与宏单元表示" });
+      }
+    }
+  }
+  for (const field of fields) {
+    const untranslatedIssue = `TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`;
+    const factorialIssue = issues.find((issue) => issue.startsWith(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:`));
+    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
+      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    if (issues.includes(untranslatedIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /“[A-Za-z][^”]{2,100}”/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "英文来源标签首次出现时保留引号，并在同一句用‘即’‘意为’或‘表示’给出准确中文；后文只用中文，不用裸英文或只加引号" });
+      }
+    }
+    if (factorialIssue) {
+      const [, , n, expectedExponent] = factorialIssue.split(":");
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => new RegExp(`${n}!\\s*=\\s*10\\^\\{\\d+\\}`).test(item))) {
+        targets.push({ field: path, quote: line, instruction: `保留课件把 ${n}! 写成该等式的原始事实，但明确它只是粗略写法；实际十进制数量级更接近 10^{${expectedExponent}}，不能继续把两个指数写成精确相等` });
       }
     }
   }

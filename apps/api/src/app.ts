@@ -46,7 +46,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3087,6 +3087,8 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:")) fields.add(issue.slice("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_REWARD_DIRECTION_REVERSED:")) fields.add(issue.slice("TEACHING_REWARD_DIRECTION_REVERSED:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_ABBREVIATION_PLACEMENT:")) fields.add(issue.slice("TEACHING_ABBREVIATION_PLACEMENT:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_UNTRANSLATED_SOURCE_LABEL:")) fields.add(issue.slice("TEACHING_UNTRANSLATED_SOURCE_LABEL:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:")) fields.add(issue.split(":")[1] as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);
@@ -3216,11 +3218,11 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\??\s+(一栏|区域|区块|栏目)/gu, "解释 $1 的$2"))
     .join("");
-  const normalize = (value: string) => quoteRepeatedSourceLabels(
+  const normalize = (value: string) => normalizeEmbeddedDefinitionAbbreviation(quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms)))), quotedSourceLabels);
+      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms)))), quotedSourceLabels));
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
-    const normalizedValue = normalizePriorDefinitionClauseCount(normalizePriorDefinitionAbbreviation(normalize(value)));
+    const normalizedValue = normalizePriorDefinitionClauseCount(normalize(normalizePriorDefinitionAbbreviation(value)));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
       return lines.map((line) => line.replace(/^[-*]\s*/, ""));
@@ -3234,8 +3236,8 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
   const quoteExplainedSourceLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
     ...content,
-    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : quoteRepeatedSourceLabels(
-      normalize(content.chapterBridgeMarkdown), titleAcronyms.map((label) => `“${label}”`).join(" ")),
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalizeTeachingBridgeBlocks(quoteRepeatedSourceLabels(
+      normalize(content.chapterBridgeMarkdown), titleAcronyms.map((label) => `“${label}”`).join(" "))),
     learningObjectives: content.learningObjectives.map(quoteExplainedSourceLabel),
     mainContentMarkdown: normalizeTeachingSummaryMarkdown(quoteExplainedSourceLabel(content.mainContentMarkdown)),
     priorKnowledge: priorKnowledge.map((value) => quoteRepeatedSourceLabels(value, fullExplanationMarkdown)),
