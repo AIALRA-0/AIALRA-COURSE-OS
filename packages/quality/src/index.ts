@@ -322,6 +322,7 @@ function hasUnsupportedConcatDimensionClaim(markdown: string): boolean {
       || !/64\s*维/u.test(line)
       || !/(?:拼成|拼接(?:成|为)?|一并进入|共同进入|合成|构成)/u.test(line)) return false;
     if (/(?:不能|不可|无法|不应|并非|不是)[^。\n]{0,100}64\s*维|(?:维度|总维度)[^。\n]{0,50}(?:无法|不能|未知|未给出|未说明)/u.test(line)) return false;
+    if (/(?:需要|必须)(?:先)?(?:知道|确认)[^。\n]{0,80}(?:维度|形状)[^。\n]{0,80}(?:没有给出|未给出|没有说明|未说明|未知|无法确定)/u.test(line)) return false;
     return true;
   });
 }

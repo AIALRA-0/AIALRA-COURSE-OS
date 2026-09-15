@@ -410,6 +410,9 @@ describe("learner-facing teaching narrative", () => {
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n页面主公式除两个节点向量外还多出边权 $w_{ij}^e$；它的维度没有给出，因此总维度无法确定，不能把它与后面 $[v_i;v_j]$ 的 64 维结论合并成同一个维度结论`,
       mainContentMarkdown: "- 两个节点向量拼接后是 64 维\n- 含边权的总维度无法确定" };
     expect(validateTeachingNarrative(correctlySeparatedDimensions)).not.toContain("TEACHING_CONCAT_DIMENSION_CONTRADICTION:fullExplanationMarkdown");
+    const conditionalConcat = { ...correctlySeparatedDimensions,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n如果要把 $w_{ij}^{e}$ 也纳入，需要知道它的维度以及它与 64 维拼接向量的拼接方式，当前页面没有给出这两项信息` };
+    expect(validateTeachingNarrative(conditionalConcat)).not.toContain("TEACHING_CONCAT_DIMENSION_CONTRADICTION:fullExplanationMarkdown");
     const selectedParameterContradiction = { ...valid, strictWritingStyle: true,
       learningObjectives: ["能说明为什么本次更新只改变被选中动作对应的策略权重"],
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n梯度的两个分量都不为零，因此两个策略参数会同时更新` };
