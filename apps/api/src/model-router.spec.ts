@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.35", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.36", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -495,7 +495,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
   it("applies an exact teaching repair once and verifies the corrected revision", async () => {
     const checks = (failed = false) => ["entry","terms","prerequisites","structure","objects","reasoning","questions"].map(criterion => ({
-      criterion, evidence: `正文已经逐项说明${criterion}对应的输入、过程与结果`, verdict: failed && criterion === "terms" ? "contradicted" : "supported"
+      criterion, evidence: `正文已经逐项说明${criterion}对应的输入、过程与结果`, verdict: failed && criterion === "terms" ? "contradicted" : "supported",
+      ...(failed && criterion === "terms" ? { field: "fullExplanationMarkdown", quote: "Input" } : {})
     }));
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
@@ -535,6 +536,29 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     await expect(client.auditTeachingPackage({ ...providerInput("ungrounded-audit"), blueprint: { resourcePackage: { pageKind: "concept" } } as ModelRouterInput["blueprint"], teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
       .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: expect.stringContaining("source_check_quote_not_found"), usage: { apiEquivalentUsd: 0.002 } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a negative teaching verdict that has no real field quotation", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const prompt = typeof body.input === "string" ? body.input : body.input[0].content[0].text;
+      const source = prompt.includes('"auditScope":"source"');
+      const payload = source ? {
+        findings: [], sourceChecks: [{ claim: "输入是起点", field: "fullExplanationMarkdown", quote: "输入是处理开始前已经知道的信息", evidence: "原图从输入指向输出", verdict: "supported" }]
+      } : {
+        findings: [{ field: "fullExplanationMarkdown", original: "输入是处理开始前已经知道的信息", replacement: "输入是规则开始处理前已经确定的信息", evidence: "声称正文重复" }],
+        teachingChecks: ["entry","terms","prerequisites","structure","objects","reasoning","questions"].map(criterion => ({
+          criterion, evidence: "审计声称这一项存在问题但没有给出真实原文位置", verdict: criterion === "structure" ? "contradicted" : "supported"
+        }))
+      };
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(payload), usage: { input_tokens: 100, output_tokens: 30, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: "synthetic-secret", model: "deepseek-flash", protocol: "responses" });
+    await expect(client.auditTeachingPackage({ ...providerInput("ungrounded-teaching"), blueprint: { resourcePackage: { pageKind: "concept" } } as ModelRouterInput["blueprint"],
+      teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: expect.stringContaining("teaching_check_quote_not_found") });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("rejects a patch with an invented quotation before another audit can act on it", async () => {

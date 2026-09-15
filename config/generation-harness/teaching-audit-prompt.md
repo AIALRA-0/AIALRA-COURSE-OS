@@ -33,3 +33,5 @@ findings 是可执行补丁，不是意见清单：同一字段中的 original �
 - questions：全部题干、选项、答案、解析的内容和数学
 
 evidence 必须指出实际检查的字段和正文片段，以及为何足够或缺少什么；没有表格或前页时据实指出对象不适用，并检查当前实际对象，不编造表格。任一不满足项必须为 contradicted 或 unverified，并在 findings 中提供可安全定位的修复；无法安全修复时保留失败，不把“规则存在”当成内容已遵守
+
+任何 contradicted 或 unverified 的 teachingChecks 必须同时提供实际 field 和该字段中的连续原文 quote；quote 逐字保留 Markdown、数学定界符、空格和标点。无法找到原文位置时不能给负面结论，必须重新读取完整字段；不得凭印象声称内容重复、缺失、截断或未翻译

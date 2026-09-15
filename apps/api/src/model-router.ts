@@ -108,7 +108,7 @@ function fieldContainsAuditQuote(field: string, quote: string): boolean {
 }
 
 export interface SemanticAuditResult {
-  teachingChecks?: Array<{ criterion: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
+  teachingChecks?: Array<{ criterion: string; evidence: string; verdict: "supported" | "contradicted" | "unverified"; field?: string; quote?: string }>;
   findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
   sourceChecks?: Array<{ claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified"; field?: string; quote?: string }>;
   provider: string;
@@ -607,6 +607,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       check.properties.quote = { type: "string", minLength: 1 };
       check.required.push("field", "quote");
     }
+    if (scope !== "source") {
+      const check = auditSchema.properties.teachingChecks.items;
+      check.properties.field = { type: "string", enum: allowedFields };
+      check.properties.quote = { type: "string", minLength: 1 };
+    }
     if (input.blueprint?.resourcePackage.pageKind === "diagram") auditSchema.properties.sourceChecks.minItems = 3;
     const minSourceChecks = auditSchema.properties.sourceChecks.minItems as number;
     if (scope !== "combined") {
@@ -695,6 +700,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         || new Set(teachingChecks.map(check => check.criterion)).size !== criteria.length
         || teachingChecks.some(check => !criteria.includes(check.criterion) || typeof check.evidence !== "string" || check.evidence.trim().length < 12
           || !["supported", "contradicted", "unverified"].includes(check.verdict))) return invalidAudit("teaching_checks_incomplete");
+      if (teachingChecks.some(check => check.verdict !== "supported" && (!allowedFields.includes(check.field || "")
+        || typeof check.quote !== "string" || !fieldContainsAuditQuote(fieldText(check.field || ""), check.quote)))) {
+        return invalidAudit("teaching_check_quote_not_found");
+      }
       if (teachingChecks.some(check => check.verdict !== "supported") && findings.length === 0) return invalidAudit("teaching_findings_missing");
     }
     return { findings, sourceChecks, teachingChecks, provider: this.connection.providerId, model, usage };
