@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.40", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.41", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -416,6 +416,13 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect.objectContaining({ field: "fullExplanationMarkdown", quote: "上一页列出了两个动作，本页继续计算更新" }),
       expect.objectContaining({ field: "learningObjectives:0", quote: "能指出哪些结论依赖只有一个状态、一个动作这一设定" })
     ]));
+  });
+
+  it("targets an unsupported progression inside a misconception array item", () => {
+    const content = providerTeachingContent() as TeachingPackage;
+    content.misconceptions = ["错误理解：后一种方法依次解决前一种方法；错因：把并列表格写成演进因果；正确判断：只能确认各行限制；核对方法：逐行核对"];
+    expect(teachingRepairTargets(content, ["misconceptions"], ["TEACHING_METHOD_PROGRESSION_OVERCLAIM:misconceptions"]))
+      .toEqual([expect.objectContaining({ field: "misconceptions:0", quote: content.misconceptions[0] })]);
   });
 
   it("rejects a supported source check whose formula contradicts its evidence", () => {

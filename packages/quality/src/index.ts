@@ -404,7 +404,11 @@ export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[]
 /** Locate learner-facing lines that narrate the source instead of teaching its objects directly. */
 export function sourceNarrationLines(markdown: string): string[] {
   const narration = /(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/u;
-  return markdown.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line && narration.test(stripProtectedMarkdown(line)));
+  const justifiedEvidenceBoundary = /(?:没有|未给出|未标出|未说明)[^\n]{0,120}(?:因此|所以|无法|不能|只能|尚不能|不代表|不支持)/u;
+  return markdown.split(/\r?\n/u).map((line) => line.trim()).filter((line) => {
+    const visible = stripProtectedMarkdown(line);
+    return line && narration.test(visible) && !justifiedEvidenceBoundary.test(visible);
+  });
 }
 
 /** Locate definitions that fail the same contract used by the narrative gate. */

@@ -184,6 +184,13 @@ describe("Course OS API", () => {
     expect(normalizeTeachingPackageMath(content).fullExplanationMarkdown).toBe("训练使用 10,000 个设计样本，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样");
   });
 
+  it("normalizes labelled design counts and removes lowercase dictionary glosses", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown = "使用 10K 个带标签设计 训练；拥塞程度（congestion）和密度（density）用于比较；原图“10K labelled designs（congestion）”保持原样";
+    expect(normalizeTeachingPackageMath(content).fullExplanationMarkdown)
+      .toBe("使用 10,000 个带标签设计样本训练；拥塞程度和密度用于比较；原图“10K labelled designs（congestion）”保持原样");
+  });
+
   it("normalizes abbreviation placement and repeated teaching terms", () => {
     const content = testTeachingResult(0).content;
     content.priorKnowledge = ["马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架；描述状态与动作；按转移产生结果；用于连续决策；不同于单步分类；补充说明适用边界"];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -265,6 +265,8 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n原图保留标签“Agent”，它表示负责选择动作的代理` }))
       .not.toContain("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+    expect(sourceNarrationLines("图中没有标出向量维度，因此无法确认拼接后的总维度"))
+      .toEqual([]);
   });
 
   it("rejects absolute optimality claims that are stronger than the stated trade-off evidence", () => {

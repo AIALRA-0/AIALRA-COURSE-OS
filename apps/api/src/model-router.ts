@@ -121,9 +121,11 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   }
   for (const field of fields) {
     const issue = `TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`;
-    if (!issues.includes(issue) || typeof content[field] !== "string") continue;
-    for (const line of (content[field] as string).split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:前一|依次|逐代|恰好对应)/u.test(item))) {
-      targets.push({ field, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
+    if (!issues.includes(issue)) continue;
+    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
+      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:前一|依次|逐代|恰好对应)/u.test(item))) {
+      targets.push({ field: path, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
     }
   }
   if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION")) {

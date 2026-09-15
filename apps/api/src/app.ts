@@ -3262,14 +3262,16 @@ function normalizeTeachingSummaryMarkdown(markdown: string): string {
 }
 
 function normalizeKnownTeachingTerms(markdown: string): string {
-  return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[^）\r\n]+）)/gu)
+  return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[A-Z][^）\r\n]+）)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\bsoftmax\b/gu, "软最大函数")
       .replace(/\b(\d+(?:\.\d+)?)K\s+designs\b/giu, "$1K 个设计样本")
-      .replace(/\b(\d+(?:\.\d+)?)K\s*个(带标注)?设计(?:样本)?/gu, (_match, count: string, labelled: string | undefined) => {
+      .replace(/\b(\d+(?:\.\d+)?)K\s*个(带标注|带标签)?设计(?:样本)?/gu, (_match, count: string, labelled: string | undefined) => {
         const expanded = Number(count) * 1_000;
         const number = Number.isInteger(expanded) ? String(expanded).replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(expanded);
         return `${number} 个${labelled ?? ""}设计样本`;
       })
+      .replace(/（[a-z][a-z -]{1,50}）/gu, "")
+      .replace(/([\p{Script=Han}])[ \t]+(?=[\p{Script=Han}])/gu, "$1")
       .replace(/([\p{Script=Han}])\s+软最大函数(?=\s*[\p{Script=Han}])/gu, "$1软最大函数")
       .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数")
       .replace(/软最大函数(?:函数)+/gu, "软最大函数")
