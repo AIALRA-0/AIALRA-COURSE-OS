@@ -102,17 +102,23 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/workspaces/:id/tree", async (request, response, next) => {
     try {
       const workspaceId = request.params.id;
-      const courses = formalWorkspaceCourses(await dependencies.readweave.listCourses(), workspaceId);
+      const [allCourses, projectedNodes, trashRecords] = await Promise.all([
+        dependencies.readweave.listCourses(),
+        dependencies.readweave.listTreeNodes(),
+        dependencies.readweave.listTrash()
+      ]);
+      const courses = formalWorkspaceCourses(allCourses, workspaceId);
       const courseIds = new Set(courses.map((course) => course.id));
-      const releases = await listWorkspaceReleases(dependencies.readweave, workspaceId);
-      const drafts = await dependencies.readweave.listDrafts();
-      const treeNodes = (await dependencies.readweave.listTreeNodes()).filter((node) => !isRegressionAsset(node.id, node.title, node.materialId ?? "") && (node.kind === "course"
+      const treeNodes = projectedNodes.filter((node) => !isRegressionAsset(node.id, node.title, node.materialId ?? "") && (node.kind === "course"
         ? courseIds.has(node.id)
         : node.kind === "material"
           ? (node.parentId ? courseIds.has(node.parentId) : node.materialId?.split(":")[1] ? courseIds.has(node.materialId.split(":")[1]!) : false)
           : false));
-      const trash = (await dependencies.readweave.listTrash()).filter((record) => record.workspaceId === workspaceId);
-      const rootNodes = buildCourseTree(courses, releases, drafts, treeNodes, trash);
+      const trash = trashRecords.filter((record) => record.workspaceId === workspaceId);
+      // ReadWeave already projects each current material into a lightweight tree
+      // node. Reusing that projection avoids cloning every page and draft merely
+      // to render the sidebar.
+      const rootNodes = buildCourseTree(courses, [], [], treeNodes, trash);
       response.json({
         workspaceId,
         title: "Course OS 课程空间",

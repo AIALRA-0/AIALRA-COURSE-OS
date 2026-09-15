@@ -1070,6 +1070,20 @@ describe("Course OS API", () => {
     expect(tree.body.courses[0].children.some((node: { title: string }) => node.title === "当前材料")).toBe(false);
   });
 
+  it("builds the sidebar tree from lightweight projections without loading release pages or drafts", async () => {
+    const { app, readweave, release } = await seededApp();
+    const listReleases = vi.spyOn(readweave, "listReleases").mockRejectedValue(new Error("HEAVY_RELEASE_READ_MUST_NOT_RUN"));
+    const listDrafts = vi.spyOn(readweave, "listDrafts").mockRejectedValue(new Error("HEAVY_DRAFT_READ_MUST_NOT_RUN"));
+    const tree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    expect(tree.body.courses[0].children[0]).toMatchObject({
+      kind: "material",
+      currentReleaseId: release.id,
+      pageCount: 1
+    });
+    expect(listReleases).not.toHaveBeenCalled();
+    expect(listDrafts).not.toHaveBeenCalled();
+  });
+
   it("supports revision-checked course-tree CRUD, trash recovery and exact ReadWeave links", async () => {
     const { app, release, readweave } = await seededApp();
     const firstTree = await request(app).get("/api/v1/workspaces/personal/tree?view=library").expect(200);

@@ -168,7 +168,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listCourses(): Promise<CourseProject[]> {
-    const state = await this.readState();
+    const state = await this.readStateReference();
     return mergeReleaseCourses(state.courses, state.releases, this.workspaceId);
   }
 
@@ -237,8 +237,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listReleases(courseId?: string): Promise<CourseRelease[]> {
-    const releases = (await this.readState()).releases;
-    return courseId ? releases.filter((release) => release.courseId === courseId) : releases;
+    const releases = (await this.readStateReference()).releases;
+    return structuredClone(courseId ? releases.filter((release) => release.courseId === courseId) : releases);
   }
 
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {
@@ -585,7 +585,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // where only ownership/counts are needed. Re-reading every explanation
     // block from ReadWeave here turned one refresh into hundreds of ETAPI
     // requests. Reconcile the single page when it is opened instead.
-    return (await this.readState()).drafts;
+    return structuredClone((await this.readStateReference()).drafts);
   }
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
@@ -701,7 +701,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listTreeNodes(): Promise<CourseTreeNode[]> {
-    const state = await this.readState();
+    const state = await this.readStateReference();
     const courses = mergeReleaseCourses(state.courses, state.releases, this.workspaceId).filter((course) => course.status !== "archived");
     const stableMaterialIds = new Set(materialGroups(state.releases).map((group) => stableMaterialId(group.courseId, group.moduleId)));
     const archivedMaterialIds = new Set(state.treeNodes
@@ -902,7 +902,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return readBack;
   }
 
-  async listTrash(): Promise<TrashRecord[]> { return (await this.readState()).trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId); }
+  async listTrash(): Promise<TrashRecord[]> {
+    return structuredClone((await this.readStateReference()).trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId));
+  }
 
   async restoreTrash(trashId: string, context: IdempotentWriteContext, options: { restoreMode?: "original" | "root" } = {}): Promise<CourseTreeNode> {
     const saved = await this.mutate(async (state) => {
