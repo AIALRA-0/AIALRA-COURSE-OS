@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
-import { unpairedEnglishTeachingFields } from "@course-os/quality";
+import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
@@ -155,6 +155,14 @@ describe("Course OS API", () => {
     content.questions[0]!.explanation = "把 e^0 = 1 代入，再比较 x_1 与 x_2";
     const normalized = normalizeTeachingPackageMath(content);
     expect(normalized.questions[0]!.explanation).toBe("把 $e^0$ = 1 代入，再比较 $x_1$ 与 $x_2$");
+  });
+
+  it("removes page-number commentary while preserving the surrounding lesson", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown = "先解释宏单元怎样进入放置流程\n\n页面右下角的“12/27”是页码，不属于讲解对象\n\n再解释布线结果怎样产生";
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.fullExplanationMarkdown).toBe("先解释宏单元怎样进入放置流程\n\n\n再解释布线结果怎样产生");
+    expect(validateTeachingNarrative({ ...normalized, strictWritingStyle: true })).not.toContain("TEACHING_LAYOUT_COMMENTARY");
   });
 
   it("caps an already structured teaching summary without rewriting its items", () => {

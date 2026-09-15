@@ -17,6 +17,10 @@
 
 上述缺口在 findings 中给出原文精确片段和最小必要替换，evidence 说明规则与该段的具体缺失，禁止以“清晰”“已覆盖”等自评词代替定位；原来正确的数字与限定条件必须完整保留
 
+findings 是可执行补丁，不是意见清单：同一字段中的 original 不能彼此重叠，replacement 必须一次修完该片段内指出的问题；英文原图标签需要保留时，replacement 同时保留原标签并紧接中文含义，不能只删标签或只加引号；已经满足规则的字段不得为了统一措辞重写
+
+如果本次是 TEACHING_STYLE_RECHECK，只检查当前修复后的字段；已经补齐中英文、分段、对象关系或题目解析的项目必须判为 supported，不能沿用上一次审计的旧结论
+
 
 另返回 teachingChecks，按 entry、terms、prerequisites、structure、objects、reasoning、questions 七项逐项给出 verdict 和 evidence，不得遗漏或重复：
 

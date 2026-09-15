@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.34", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.35", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -491,6 +491,34 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.teachingChecks).toHaveLength(7);
     expect(result.usage.apiEquivalentUsd).toBe(0.004);
+  });
+
+  it("applies an exact teaching repair once and verifies the corrected revision", async () => {
+    const checks = (failed = false) => ["entry","terms","prerequisites","structure","objects","reasoning","questions"].map(criterion => ({
+      criterion, evidence: `正文已经逐项说明${criterion}对应的输入、过程与结果`, verdict: failed && criterion === "terms" ? "contradicted" : "supported"
+    }));
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const prompt = body.input[0].content[0].text as string;
+      const source = prompt.includes('"auditScope":"source"');
+      const verification = prompt.includes('"detectedIssues":["TEACHING_STYLE_RECHECK"]');
+      const payload = source ? {
+        findings: [], sourceChecks: [{ claim: "输入是起点", field: "fullExplanationMarkdown", quote: "`Input is`", evidence: "原图从输入指向输出", verdict: "supported" }]
+      } : verification ? { findings: [], teachingChecks: checks() } : {
+        findings: [{ field: "fullExplanationMarkdown", original: "Input", replacement: "输入", evidence: "学习正文应使用中文名称" }],
+        teachingChecks: checks(true)
+      };
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(payload), usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.002 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: "synthetic-secret", model: "deepseek-flash", protocol: "responses" });
+    const content = { ...providerTeachingContent(), fullExplanationMarkdown: "Input is the first object described in this synthetic lesson" } as TeachingPackage;
+    const result = await client.auditTeachingPackage({ ...providerInput("teaching-repair", true), blueprint: { resourcePackage: { pageKind: "concept" } } as ModelRouterInput["blueprint"],
+      teachingPackage: content, maxCostUsd: 0.01 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.correctedTeachingPackage?.fullExplanationMarkdown).toContain("输入 is the first object");
+    expect(result.teachingChecks?.every(check => check.verdict === "supported")).toBe(true);
+    expect(result.usage.apiEquivalentUsd).toBe(0.006);
   });
 
   it("rejects source verdicts that cannot be located in the lesson instead of turning them into content defects", async () => {

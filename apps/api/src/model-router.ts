@@ -94,6 +94,19 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   return targets;
 }
 
+/** Accept only presentation differences in an audit quote, never a paraphrase. */
+function fieldContainsAuditQuote(field: string, quote: string): boolean {
+  const comparable = (value: string) => value.normalize("NFKC")
+    .replace(/[`*_#>]/gu, "")
+    .replace(/[“”]/gu, '"')
+    .replace(/[‘’]/gu, "'")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const exactField = comparable(field);
+  const exactQuote = comparable(quote);
+  return exactQuote.length >= 3 && exactField.includes(exactQuote);
+}
+
 export interface SemanticAuditResult {
   teachingChecks?: Array<{ criterion: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
   findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
@@ -101,6 +114,8 @@ export interface SemanticAuditResult {
   provider: string;
   model: string;
   usage: ModelRouterUsage;
+  /** Exact-patch result produced inside the router; callers must not replay the findings on another revision. */
+  correctedTeachingPackage?: TeachingPackage;
 }
 
 export function teachingOutputTokenLimit(qualityMode: string): number {
@@ -509,11 +524,46 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       let corrected: TeachingPackage;
       try { corrected = applySemanticAuditFindings(input.teachingPackage, source.findings).content; }
       catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_PATCH_INVALID", source.model, emptyUsage(Date.now()), source.provider); }
-      const teaching = await this.auditTeachingWithRetry({ ...input, teachingPackage: corrected, idempotencyKey: `${input.idempotencyKey}:writing`,
+      let teaching = await this.auditTeachingWithRetry({ ...input, teachingPackage: corrected, idempotencyKey: `${input.idempotencyKey}:writing`,
         maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0)
       }, "teaching");
-      const findings = [...new Map([...source.findings, ...teaching.findings].map(finding => [JSON.stringify(finding), finding])).values()];
-      return { ...source, findings, teachingChecks: teaching.teachingChecks, usage: sumProviderUsage(source.usage, teaching.usage) };
+      try { corrected = applySemanticAuditFindings(corrected, teaching.findings).content; }
+      catch {
+        const spentAfterInvalidPatch = this.usageCostUsd(sumProviderUsage(source.usage, teaching.usage));
+        if (input.maxCostUsd !== undefined && (spentAfterInvalidPatch === undefined || spentAfterInvalidPatch >= input.maxCostUsd)) {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", teaching.model, teaching.usage, teaching.provider);
+        }
+        const validPatch = await this.auditTeachingWithRetry({ ...input, teachingPackage: corrected,
+          idempotencyKey: `${input.idempotencyKey}:writing-patch-retry`,
+          maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spentAfterInvalidPatch ?? 0),
+          repair: { issues: ["TEACHING_SEMANTIC_AUDIT_FINDING_INVALID"],
+            maximumExplanationCharacters: input.repair?.maximumExplanationCharacters ?? 5_000,
+            previousTeachingPackage: corrected }
+        }, "teaching");
+        try { corrected = applySemanticAuditFindings(corrected, validPatch.findings).content; }
+        catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_PATCH_INVALID", validPatch.model,
+          sumProviderUsage(teaching.usage, validPatch.usage), validPatch.provider); }
+        teaching = { ...validPatch, usage: sumProviderUsage(teaching.usage, validPatch.usage) };
+      }
+      let teachingVerification: SemanticAuditResult | undefined;
+      const usageAfterTeaching = sumProviderUsage(source.usage, teaching.usage);
+      if (teaching.findings.length > 0) {
+        const totalSpent = this.usageCostUsd(usageAfterTeaching);
+        if (input.maxCostUsd !== undefined && (totalSpent === undefined || totalSpent >= input.maxCostUsd)) {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", teaching.model, usageAfterTeaching, teaching.provider);
+        }
+        teachingVerification = await this.auditTeachingWithRetry({ ...input, teachingPackage: corrected,
+          idempotencyKey: `${input.idempotencyKey}:writing-verification`,
+          maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (totalSpent ?? 0),
+          repair: { issues: ["TEACHING_STYLE_RECHECK"], maximumExplanationCharacters: input.repair?.maximumExplanationCharacters ?? 5_000,
+            previousTeachingPackage: corrected }
+        }, "teaching");
+      }
+      const findings = [...new Map([...source.findings, ...teaching.findings, ...(teachingVerification?.findings ?? [])]
+        .map(finding => [JSON.stringify(finding), finding])).values()];
+      return { ...source, findings, teachingChecks: teachingVerification?.teachingChecks ?? teaching.teachingChecks,
+        correctedTeachingPackage: corrected, usage: teachingVerification
+          ? sumProviderUsage(usageAfterTeaching, teachingVerification.usage) : usageAfterTeaching };
     } catch (error) {
       if (!(error instanceof ModelRouterGenerationError)) throw error;
       throw new ModelRouterGenerationError(error.code, error.model, sumProviderUsage(source.usage, error.usage), error.provider, error.responseShape);
@@ -637,7 +687,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
     if (scope === "source" && sourceChecks.some(item => !allowedFields.includes(item.field)
-      || typeof item.quote !== "string" || !item.quote.trim() || !fieldText(item.field).includes(item.quote))) return invalidAudit("source_check_quote_not_found");
+      || typeof item.quote !== "string" || !item.quote.trim() || !fieldContainsAuditQuote(fieldText(item.field), item.quote))) return invalidAudit("source_check_quote_not_found");
     const teachingChecks = scope === "source" ? undefined : (parsed as SemanticAuditResult).teachingChecks;
     const criteria = ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"];
     if (scope !== "source" && (input.blueprint || teachingChecks !== undefined)) {

@@ -2605,7 +2605,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             let auditIssues: string[] = [];
             let correctedFields: string[] = [];
             try {
-              const applied = applySemanticAuditFindings(beforeAudit.content, audit.findings);
+              const applied = applySemanticAuditResult(beforeAudit.content, audit);
               corrected = normalizeTeachingPackageMath(applied.content, sourceText, page.title);
               correctedFields = applied.fields;
               auditIssues = [...new Set([
@@ -2637,7 +2637,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                   sourceDensity: blueprint.resourcePackage.sourceDensity }), previousTeachingPackage: corrected }
               });
               try {
-                const applied = applySemanticAuditFindings(corrected, recheck.findings);
+                const applied = applySemanticAuditResult(corrected, recheck);
                 corrected = normalizeTeachingPackageMath(applied.content, sourceText, page.title);
                 correctedFields.push(...applied.fields);
                 auditIssues = [...new Set([
@@ -2789,7 +2789,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 let decisiveAudit = finalAudit;
                 if (finalAudit.findings.length > 0) {
                   try {
-                    const patched = normalizeTeachingPackageMath(applySemanticAuditFindings(sourceRepair.content, finalAudit.findings).content, sourceText, page.title);
+                    const patched = normalizeTeachingPackageMath(applySemanticAuditResult(sourceRepair.content, finalAudit).content, sourceText, page.title);
                     const patchIssues = [...new Set([
                       ...validateTeachingCoverageEvidence(page, patched),
                       ...validateTeachingNarrative({ ...patched, lessonFlowVersion: 2, strictWritingStyle: true,
@@ -3069,6 +3069,15 @@ function combineTeachingGenerations(initial: TeachingGenerationResult, repaired:
   };
 }
 
+/** Use the router's exact revision when available; findings are audit evidence, not a patch stream to replay. */
+function applySemanticAuditResult(content: TeachingPackage, audit: SemanticAuditResult): { content: TeachingPackage; fields: string[] } {
+  if (!audit.correctedTeachingPackage) return applySemanticAuditFindings(content, audit.findings);
+  return {
+    content: structuredClone(audit.correctedTeachingPackage),
+    fields: [...new Set(audit.findings.map((finding) => finding.field))]
+  };
+}
+
 export function focusedTeachingRepairFields(issues: string[], englishFields: TeachingNarrativeField[] = []): Array<keyof TeachingPackage> | undefined {
   const fields = new Set<keyof TeachingPackage>();
   for (const issue of issues) {
@@ -3213,7 +3222,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
   });
   const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)
     .split(/\r?\n/)
-    .filter((line) => !/^(?:\s*[-*+]\s*)?[^\n]{0,60}(?:\d+\s*\/\s*\d+\s*[”"']?\s*为页码|页码[：:]\s*\d+\s*\/\s*\d+)[^\n]{0,30}$/u.test(line.trim()))
+    .filter((line) => !isTeachingLayoutCommentaryLine(line))
     .join("\n"));
   const quoteExplainedSourceLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   return {
@@ -3228,6 +3237,12 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
   };
+}
+
+function isTeachingLayoutCommentaryLine(line: string): boolean {
+  const value = line.trim();
+  if (/^(?:\s*[-*+]\s*)?[^\n]{0,60}(?:\d+\s*\/\s*\d+\s*[”"']?\s*为页码|页码[：:]\s*\d+\s*\/\s*\d+)[^\n]{0,30}$/u.test(value)) return true;
+  return /(?:页面|图中|材料)?[^\n]{0,30}(?:页码|页脚|版式信息)[^\n]{0,80}(?:不属于|不是|无需|不需要)[^\n]{0,30}(?:讲解|教学|内容|对象)/u.test(value);
 }
 
 /** Keep the high-level recap within its contract without rewriting facts. */
