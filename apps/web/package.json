@@ -13,14 +13,15 @@
     "@course-os/contracts": "workspace:*",
     "@course-os/quality": "workspace:*",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "katex": "latest",
     "react": "latest",
     "react-dom": "latest",
     "react-markdown": "latest",
-    "remark-math": "latest",
     "rehype-katex": "latest",
-    "katex": "latest"
+    "remark-gfm": "^4.0.1",
+    "remark-math": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",

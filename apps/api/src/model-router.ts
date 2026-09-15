@@ -68,6 +68,7 @@ export interface ModelRouterClient {
 }
 
 export interface SemanticAuditResult {
+  teachingChecks?: Array<{ criterion: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
   findings: Array<{ field: string; original: string; replacement: string; evidence: string }>;
   sourceChecks?: Array<{ claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }>;
   provider: string;
@@ -346,7 +347,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
-    if (this.connection.protocol !== "responses" || !input.repair?.previousTeachingPackage || fields.length === 0) {
+    if (!["responses", "chat_completions"].includes(this.connection.protocol || "") || !input.repair?.previousTeachingPackage || fields.length === 0) {
       return this.generateTeachingPackage(input);
     }
     const started = Date.now();
@@ -371,19 +372,31 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const content = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
-    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
-        method: "POST",
-        headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:fields`),
-        body: JSON.stringify({ model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
+    const responseRequest = { model: this.connection.model,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文优先使用中文，英文或缩写每次出现仍需中英文配对。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
             : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
           metadata: { product: "course-os", stage: "repair", writing_policy_snapshot_id: input.writingPolicySnapshotId }
-        })
-      }, started);
+        };
+    const chat = this.connection.protocol === "chat_completions";
+    const requestBody = chat ? {
+      model: this.connection.model,
+      max_tokens: providerTeachingOutputTokenLimit(this.connection, input.qualityMode),
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: `${responseRequest.instructions}\n只返回这些字段，输出结构：${JSON.stringify(schema)}` },
+        { role: "user", content: input.sourceImageDataUrl
+          ? [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: input.sourceImageDataUrl } }]
+          : prompt }
+      ]
+    } : responseRequest;
+    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/${chat ? "chat/completions" : "responses"}`, {
+      method: "POST", headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:fields`),
+      body: JSON.stringify(requestBody)
+    }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
     if (!response.ok || providerBodyFailed(body)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(body)), model, usage, this.connection.providerId);
@@ -426,7 +439,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
 
   private async auditTeachingOnce(input: ModelRouterInput & { teachingPackage: TeachingPackage }, unresolvedRetry = false): Promise<SemanticAuditResult> {
     const started = Date.now();
-    const prompt = `${semanticAuditPrompt.trim()}${unresolvedRetry ? "\n\n上次核验标记了矛盾或无法确认，却没有给出可执行的最小修正。这次须逐项重新核对原图；能证实错误时给出确实存在于教学字段中的 original 和有来源依据的 replacement，无法确认时保持 unverified，绝不能为通过检查编造修正。" : ""}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
+    const prompt = `${semanticAuditPrompt.trim()}\n输出结构：${JSON.stringify(semanticAuditSchema)}${unresolvedRetry ? "\n\n上次核验标记了矛盾或无法确认，却没有给出可执行的最小修正。这次须逐项重新核对原图；能证实错误时给出确实存在于教学字段中的 original 和有来源依据的 replacement，无法确认时保持 unverified，绝不能为通过检查编造修正。" : ""}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
       sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
       detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage })}`;
     const auditSchema = structuredClone(semanticAuditSchema) as { properties: { sourceChecks: { minItems: number } } };
@@ -489,7 +502,16 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (sourceChecks.length > 24 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
-    return { findings, sourceChecks, provider: this.connection.providerId, model, usage };
+    const teachingChecks = (parsed as SemanticAuditResult).teachingChecks;
+    const criteria = ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"];
+    if (input.blueprint || teachingChecks !== undefined) {
+      if (!Array.isArray(teachingChecks) || teachingChecks.length !== criteria.length
+        || new Set(teachingChecks.map(check => check.criterion)).size !== criteria.length
+        || teachingChecks.some(check => !criteria.includes(check.criterion) || typeof check.evidence !== "string" || check.evidence.trim().length < 12
+          || !["supported", "contradicted", "unverified"].includes(check.verdict))) return invalidAudit("teaching_checks_incomplete");
+      if (teachingChecks.some(check => check.verdict !== "supported") && findings.length === 0) return invalidAudit("teaching_findings_missing");
+    }
+    return { findings, sourceChecks, teachingChecks, provider: this.connection.providerId, model, usage };
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
@@ -647,7 +669,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const chatRequiresLocalSchemaValidation = this.connection.providerId === "opencode-go";
     const messages = [
       { role: "system", content: chatRequiresLocalSchemaValidation
-        ? `${instruction}\n\n只输出一个合法 JSON 对象，不使用 Markdown 代码围栏或额外说明。返回结果仍会由 Course OS 按 JSON Schema 严格校验。`
+        ? `${instruction}\n\n只输出一个合法 JSON 对象，不使用 Markdown 代码围栏或额外说明。输出结构：${JSON.stringify(teachingPackageSchema)}`
         : instruction },
       { role: "user", content: Array.isArray(text) ? text[0]?.content.map((part) => part.type === "input_text" ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: part.image_url } }) : text }
     ];
@@ -801,7 +823,7 @@ export function providerRouterFromEnvironment(): ModelRouterClient | undefined {
   const deepSeekKey = process.env.DEEPSEEK_API_KEY;
   const connections: ProviderConnection[] = [];
   if (openCodeKey) {
-    const model = process.env.OPENCODE_GO_MODEL || "gpt-5.6-luna";
+    const model = process.env.OPENCODE_GO_MODEL || "deepseek-v4-flash-vision-exp";
     connections.push({ providerId: "opencode-go", baseUrl: process.env.OPENCODE_GO_BASE_URL || "https://opencode.ai/zen/go/v1", apiKey: openCodeKey, model, protocol: openCodeProtocol(model), supportsVision: openCodeSupportsVision(model), billingMode: "subscription_quota" });
   }
   if (deepSeekKey) {

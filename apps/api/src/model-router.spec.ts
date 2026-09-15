@@ -4,11 +4,11 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.30", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.31", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("b15dcd70817c1dc88a925a935355059c2dc6eb3ae280775dc09faae1f51a1a7b");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
@@ -165,7 +165,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.response_format).toBeUndefined();
       expect(body.max_tokens).toBe(12_000);
       expect(body.messages[0]?.content).toContain("只输出一个合法 JSON 对象");
-      expect(body.messages[0]?.content).toContain("按 JSON Schema 严格校验");
+      expect(body.messages[0]?.content).toContain("输出结构：");
       return Response.json({ model: "deepseek-v4-pro", choices: [{ message: { content: JSON.stringify(providerTeachingContent()) } }], usage: { prompt_tokens: 90, completion_tokens: 210, cached_tokens: 10 } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -316,6 +316,21 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.usage.apiEquivalentUsd).toBe(0.002);
   });
 
+  it("repairs only requested fields through OpenCode chat without regenerating the page", async () => {
+    const before = providerTeachingContent() as TeachingPackage;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://opencode.test/chat/completions");
+      const body = JSON.parse(String(init?.body));
+      expect(body.messages[0].content).toContain('"required":["priorKnowledge"]');
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ priorKnowledge: ["输入是计算的起点"] }) } }], usage: { prompt_tokens: 50, completion_tokens: 20 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-token", model: "deepseek-v4-flash", protocol: "chat_completions", supportsVision: false, billingMode: "subscription_quota" });
+    const result = await client.repairTeachingFields({ ...providerInput("chat-fields"), repair: { issues: ["TEACHING_PRIOR_DEFINITION_INCOMPLETE"], maximumExplanationCharacters: 3500, previousTeachingPackage: before } }, ["priorKnowledge"]);
+    expect(result.content).toEqual({ ...before, priorKnowledge: ["输入是计算的起点"] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {
     const before = providerTeachingContent() as TeachingPackage;
     const replacement = ["输入：这是处理开始前已知的对象；它决定规则作用于什么；处理时按规则逐步检查；没有输入就不能确定输出"];
@@ -404,6 +419,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       const body = JSON.parse(String(init?.body)) as { text: { format: { schema: { properties: { sourceChecks: { minItems: number } } } } } };
       expect(body.text.format.schema.properties.sourceChecks.minItems).toBe(3);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", output_text: JSON.stringify({ findings: [],
+        teachingChecks: ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"].map(criterion => ({ criterion, evidence: "正文中的输入、处理步骤和输出都有对应解释", verdict: "supported" })),
         sourceChecks: ["起点", "动作", "结果"].map((claim) => ({ claim, evidence: `图中标记${claim}`, verdict: "supported" })) }),
         usage: { input_tokens: 120, output_tokens: 100, total_cost: 0.001 } });
     }));

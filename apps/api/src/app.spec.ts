@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields } from "@course-os/quality";
-import { applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
+import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -146,7 +146,7 @@ describe("Course OS API", () => {
     const content = testTeachingResult(0).content;
     content.mainContentMarkdown = ["第一项", "第二项", "第三项", "第四项", "第五项", "第六项"].map((item) => `- ${item}`).join("\n");
     const normalized = normalizeTeachingPackageMath(content);
-    expect(normalized.mainContentMarkdown.split("\n")).toEqual(["- 第一项", "- 第二项", "- 第三项", "- 第四项", "- 第五项"]);
+    expect(normalized.mainContentMarkdown.split("\n")).toEqual(["- 第一项", "- 第二项", "- 第三项", "- 第四项", "- 第五项", "- 第六项"]);
   });
 
   it("normalizes abbreviation placement and repeated teaching terms", () => {
@@ -183,7 +183,17 @@ describe("Course OS API", () => {
     await request(app).get(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`).set("X-Workspace-Id", "other-workspace").expect(404);
   });
 
-  it("accepts a sourced excerpt inside a coverage explanation without requiring the whole sentence verbatim", () => {
+  it("keeps generated paragraph and list boundaries after page compilation", () => {
+    const content = testTeachingResult(0).content;
+    content.misconceptions = ["错误理解：差值就是平方；错因：两步运算被混为一谈；正确判断：先相减再平方；核对方法：分别计算两步"];
+    content.learningObjectives = ["核对两个结果：\n\n- 先核对差值\n- 再核对平方"];
+    const page = applyTeachingPackage(testRelease().pages[0]!, content, true);
+    const restored = JSON.parse(JSON.stringify(page));
+    expect(restored.lessonSections.find((s: {kind: string}) => s.kind === "learning_objectives").items[0].text).toBe(content.learningObjectives[0]);
+    expect(restored.lessonSections.find((s: {kind: string}) => s.kind === "misconceptions").items[0].text.split("\n\n")).toHaveLength(4);
+  });
+
+  it("requires the actual coverage excerpt rather than an overlapping phrase", () => {
     const page = {
       ...testRelease().pages[0]!,
       atoms: [{ kind: "text_region" as const, id: "source-1", label: "原文片段", observation: "每条边先拼接两个端点再投影" }],
@@ -192,11 +202,11 @@ describe("Course OS API", () => {
     const fullExplanationMarkdown = "先把两个端点和边本身的信息放在一起。接着用同一组权重计算边表示，维度必须与输入长度相容。";
     const content = {
       fullExplanationMarkdown,
-      coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "正文写明：接着用同一组权重计算边表示，并说明维度条件。" }]
+      coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "接着用同一组权重计算边表示，维度必须与输入长度相容。" }]
     } as TeachingPackage;
     expect(validateTeachingCoverageEvidence(page, content)).toEqual([]);
     const paraphrasedPage = { ...page, atoms: [{ ...page.atoms[0]!, observation: "Remove the value prediction layer" }] };
-    expect(validateTeachingCoverageEvidence(paraphrasedPage, { ...content, fullExplanationMarkdown: "先去掉价值预测层，再把编码器接入策略网络", coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "先移除价值预测层，然后连接策略网络" }] })).toEqual([]);
+    expect(validateTeachingCoverageEvidence(paraphrasedPage, { ...content, fullExplanationMarkdown: "先去掉价值预测层，再把编码器接入策略网络", coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "先移除价值预测层，然后连接策略网络" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
     expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "只声称已经覆盖这个片段，但正文没有对应的连续讲解。" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
     expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [content.coverageEvidence[0]!, content.coverageEvidence[0]!] }))
       .toContain("TEACHING_COVERAGE_DUPLICATE_ATOM");
@@ -634,7 +644,7 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
-  it("omits an unsupported optional bridge while preserving the generated lesson", async () => {
+  it("does not hide a rejected bridge to manufacture a successful lesson", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
@@ -642,13 +652,10 @@ describe("Course OS API", () => {
         return result;
       }
     };
-    const { app, readweave, release, operations } = await seededApp(modelRouter);
+    const { app, operations, release } = await seededApp(modelRouter);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unsupported-bridge-test").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"] });
-    const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.page.lessonSections?.some((section) => section.kind === "chapter_bridge")).toBe(false);
-    expect(draft?.page.lessonSections?.some((section) => section.kind === "full_explanation")).toBe(true);
-    expect((await operations.read()).events.some((event) => event.streamId === created.body.id && event.type === "generation.bridge.omitted")).toBe(true);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [] });
+    expect((await operations.read()).events.some(event => event.type === "generation.bridge.omitted")).toBe(false);
   }, 60_000);
 
   it("cross-checks technical teaching after structural repair and records the bounded model pass", async () => {
@@ -710,30 +717,30 @@ describe("Course OS API", () => {
     const technicalRelease = testRelease();
     technicalRelease.pages[0]!.pageNumber = 2;
     technicalRelease.pages[0]!.anchors = [{ id: "source-sequence", pageId: "page-1", kind: "text", label: "提取文字",
-      text: "第一项不乘系数，第二项乘 lambda" }];
+      text: "第一项不乘系数，第二项乘 $\\lambda$" }];
     let audits = 0;
     let sourceRepairs = 0;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
         const result = testTeachingResult(0.001);
         if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) sourceRepairs += 1;
-        else result.content.fullExplanationMarkdown += "\n\n第一项乘 lambda，第二项不乘系数";
+        else result.content.fullExplanationMarkdown += "\n\n第一项乘 $\\lambda$，第二项不乘系数";
         return result;
       },
       auditTeachingPackage: async (input) => {
         audits += 1;
         if (audits === 2) expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数");
         if (audits === 3) {
-          expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数，第二项乘 lambda");
+          expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数，第二项乘 $\\lambda$");
           expect(input.repair?.issues).toContain("TEACHING_SOURCE_CLAIM_RECHECK");
         }
         return {
           provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
           sourceChecks: [{ claim: "系数位置", evidence: "来源写明第一项不乘，第二项乘", verdict: audits === 3 ? "supported" as const : "contradicted" as const }],
           findings: audits === 1
-            ? [{ field: "fullExplanationMarkdown", original: "第一项乘 lambda", replacement: "第一项不乘系数", evidence: "来源页" }]
+            ? [{ field: "fullExplanationMarkdown", original: "第一项乘 $\\lambda$", replacement: "第一项不乘系数", evidence: "来源页" }]
             : audits === 2
-              ? [{ field: "fullExplanationMarkdown", original: "第二项不乘系数", replacement: "第二项乘 lambda", evidence: "来源页" }]
+              ? [{ field: "fullExplanationMarkdown", original: "第二项不乘系数", replacement: "第二项乘 $\\lambda$", evidence: "来源页" }]
               : []
         };
       }
@@ -745,7 +752,7 @@ describe("Course OS API", () => {
     expect(audits).toBe(3);
     expect(sourceRepairs).toBe(0);
     expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
-      .toContain("第一项不乘系数，第二项乘 lambda");
+      .toContain("第一项不乘系数，第二项乘 $\\lambda$");
     expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
       .some((event) => (event.payload as { sourceRepairAttempted?: boolean; recheckCount?: number }).sourceRepairAttempted === false
         && (event.payload as { recheckCount?: number }).recheckCount === 2)).toBe(true);
@@ -1444,6 +1451,7 @@ function testTeachingResult(apiEquivalentUsd: number): TeachingGenerationResult 
       mainContentMarkdown: "- 先识别输入并检查前提\n- 再按照规则处理对象\n- 最后检查输出是否满足目标",
       priorKnowledge: ["输入与输出：输入是规则处理之前已经确认的对象和条件，输出是执行规则后得到的结果；先把两者分开，才能判断处理过程有没有达到目标；规则按照已经确认的输入改变对象的状态，不能拿结果代替处理过程；当需要核对处理结果时，先明确输入条件，再比较输出与目标是否一致"],
       fullExplanationMarkdown: [
+        "## 一次完整演算\n\n把输入设为 $2$，规则设为增加 $3$，这是用于说明步骤的教学示例\n\n1. 先确认输入是已经知道的 $2$\n2. 按规则计算 $2+3=5$，得到中间处理结果\n3. 检查输出 $5$ 与增加 $3$ 的目标是否一致\n\n如果输入没有给出，只能写出增加的规则，不能提前宣布输出已经确定",
         "## 输入、规则和输出\n这页要把输入、处理规则和输出连成一条可以检查的流程，读者最后要能说明每一步为什么发生\n输入是处理开始前已经知道的信息，规则限定允许执行的步骤，输出是处理结束后的结果",
         "## 状态怎样向前推进\n先确认输入，再按规则处理对象，处理过程会把状态推进到新的结果，最后必须把输出和目标重新比较\n假设输入已经满足前提，先记录初始状态，再执行规则并写出中间状态，最后检查结果是否满足目标",
         "## 不能跳过的检查\n如果输入条件缺失，规则就不能直接套用，输出看起来合理也不能替代前提检查；只看最后数字会漏掉过程中的错误\n下一步应回到具体输入，逐项核对对象、规则、状态变化和结果"

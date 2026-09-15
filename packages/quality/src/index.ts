@@ -1,3 +1,5 @@
+import { validateTeachingPresentation } from "./presentation.js";
+export { teachingCompositionContract, formatMisconception, validateTeachingPresentation } from "./presentation.js";
 import katex from "katex";
 import type { CoverageClaim, CoverageRequirement, MathExpression, PageLesson, PseudoCodeLine } from "@course-os/contracts";
 
@@ -40,13 +42,16 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   if (sections.length >= 5 && questions.length) {
     issues.push(...validateTeachingNarrative({
       lessonFlowVersion: page.lessonFlowVersion,
+      strictWritingStyle: page.lessonFlowVersion === 2,
+      sourceTitle: page.title,
+      sourceDensity: "dense",
       chapterBridgeMarkdown: sections.find((section) => section.kind === "chapter_bridge")?.markdown,
       learningObjectives: sections.find((section) => section.kind === "learning_objectives")?.items?.map((item) => item.text) ?? [],
       mainContentMarkdown: sections.find((section) => section.kind === "main_content")?.markdown ?? "",
       priorKnowledge: sections.find((section) => section.kind === "prior_knowledge")?.items?.map((item) => item.text) ?? [],
       fullExplanationMarkdown: explanation,
       misconceptions: sections.find((section) => section.kind === "misconceptions")?.items?.map((item) => item.text) ?? [],
-      questions: questions.map((question) => ({ prompt: question.prompt, explanation: question.explanation }))
+      questions: questions.map((question) => ({ prompt: question.prompt, explanation: question.explanation, expectedAnswer: question.expectedAnswer, options: question.options }))
     }));
   }
   const score = Math.max(0, Math.round((1 - Math.min(1, issues.length / 8)) * 100));
@@ -69,7 +74,7 @@ export interface TeachingNarrativeInput {
   priorKnowledge: string[];
   fullExplanationMarkdown: string;
   misconceptions: string[];
-  questions: Array<{ prompt: string; explanation: string; expectedAnswer?: string }>;
+  questions: Array<{ prompt: string; explanation: string; expectedAnswer?: string; options?: string[] }>;
   pageKind?: "cover" | "agenda" | "concept" | "formula" | "diagram" | "table" | "code" | "mixed";
   sourceDensity?: "sparse" | "normal" | "dense";
   sourceTitle?: string;
@@ -154,6 +159,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   }
 
   if (input.strictWritingStyle) {
+    issues.push(...validateTeachingPresentation(input));
     if (/(?:页码|页脚|版式信息|读者刚翻到|材料第\s*\d+\s*页)/u.test(explanation)
       || (input.pageKind === "agenda" && /\b\d+\s*\/\s*\d+\b/u.test(explanation))) {
       issues.push("TEACHING_LAYOUT_COMMENTARY");
@@ -171,7 +177,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       fullExplanationMarkdown: input.fullExplanationMarkdown,
       mainContentMarkdown: input.mainContentMarkdown,
       misconceptions: input.misconceptions.join("\n"),
-      questions: input.questions.map((question) => `${question.prompt}\n${question.expectedAnswer || ""}\n${question.explanation}`).join("\n")
+      questions: input.questions.map((question) => `${question.prompt}\n${question.expectedAnswer || ""}\n${(question.options || []).join("\n")}\n${question.explanation}`).join("\n")
     };
     for (const [field, markdown] of Object.entries(mathFields)) {
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
@@ -384,7 +390,7 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
     .replace(/「[A-Za-z][^」\n]{0,100}」/gu, "")
     .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
   const withoutSourceNames = sourceNames.reduce((text, name) => text.replace(new RegExp(`(?<![A-Za-z])${escapeRegExp(name)}(?![A-Za-z])`, "giu"), ""), visible);
-  return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Z][a-z]+(?:[- ][A-Za-z]+)+|[A-Z]{2,}|[a-z]+-[a-z]+\s+[a-z]+))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
+  return [...new Set([...withoutSourceNames.matchAll(/(?:^|[^\p{L}])((?:[A-Za-z]{3,}(?:[- ][A-Za-z]+)*|[A-Z]{2,}))(?=$|[^\p{L}])/gu)].map((match) => match[1]!).filter(Boolean))];
 }
 
 /** Keep a source label quoted when a question repeats it outside code or math. */
@@ -523,8 +529,12 @@ export function validateHumanReadableChinese(markdown: string): string[] {
   // Inspect the original visible line: removing inline math/code can turn
   // “这个回报是：$r_T=...$” into a fake empty colon heading.
   const headingLines = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "").replace(/^\s*>.*$/gm, "").replace(/`([^`\r\n]+)`/g, "$1");
-  if (headingLines.split(/\r?\n/).some((line) => /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
+  if (headingLines.split(/\r?\n/).some((line) => !isNaturalListIntroduction(line) && /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
   return issues;
+}
+
+function isNaturalListIntroduction(line: string): boolean {
+  return /^(?:本页|这里|下面|以下|需要|请|先|再|核对|检查|分别|可以|包括|例如|要回答)[^\n]{2,70}[：:]\s*$/u.test(line.trim());
 }
 
 /** Apply only lossless punctuation repairs outside code, quotes, URLs and math. */
@@ -540,19 +550,19 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
       else if (part.trimStart().startsWith(fenceMarker)) { inFence = false; fenceMarker = ""; }
       return part;
     }
-    if (inFence || /^\s*>/.test(part)) return part;
+    if (inFence || /^\s*[>|]/.test(part)) return part;
     const displayCount = part.match(/(?<!\\)\$\$/g)?.length ?? 0;
     if (inDisplayMath || displayCount > 0) {
       if (displayCount % 2 === 1) inDisplayMath = !inDisplayMath;
       return part;
     }
     const protectedValues: string[] = [];
-    const protectedLine = part.replace(/`[^`\r\n]+`|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
+    const protectedLine = part.replace(/“[^”\r\n]*”|「[^」\r\n]*」|`[^`\r\n]+`|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
       protectedValues.push(value);
       return `\u0000${protectedValues.length - 1}\u0000`;
     });
     const repaired = protectedLine.replace(/。(?=\s*$)/g, "").replace(/。/g, "；").replace(/；(?=\s*$)/g, "");
-    const pseudoHeading = repaired.match(/^(\s*)(?:[-*+]\s*)?([\p{Script=Han}A-Za-z0-9 _-]{1,18})[：:]\s*$/u);
+    const pseudoHeading = isNaturalListIntroduction(repaired) ? null : repaired.match(/^(\s*)(?:[-*+]\s*)?([\p{Script=Han}A-Za-z0-9 _-]{1,18})[：:]\s*$/u);
     const structured = pseudoHeading ? `${pseudoHeading[1]}## ${pseudoHeading[2]!.trim()}` : repaired;
     const restored = structured.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedValues[Number(index)]!);
     if (validateHumanReadableChinese(restored).includes("WRITING_COLON_PSEUDO_HEADING")) {
@@ -567,6 +577,7 @@ function stripProtectedMarkdown(markdown: string): string {
   return markdown
     .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "")
     .replace(/^\s*>.*$/gm, "")
+    .replace(/^\s*\|.*$/gm, "")
     .replace(/`[^`\r\n]+`/g, "")
     .replace(/\$\$[\s\S]*?\$\$/g, "")
     .replace(/(?<!\$)\$[^$\r\n]+\$(?!\$)/g, "")
@@ -880,7 +891,8 @@ export function validatePageForPublication(page: PageLesson): string[] {
     ...(page.lessonSections ?? []).flatMap((section) => [
       ...(section.markdown ? [{ id: section.id, markdown: section.markdown }] : []),
       ...(section.items ?? []).map((item) => ({ id: item.id, markdown: item.text }))
-    ])
+    ]),
+    ...(page.questionBank ?? []).flatMap(q => [q.prompt, ...(q.options ?? []), q.expectedAnswer, q.explanation].map((markdown, i) => ({ id: `${q.id}:${i}`, markdown })))
   ].flatMap((block) => validateMarkdownMath(block.markdown).map((issue) => `${block.id}:${issue}`));
   const sectionIssues = validateLessonStructure(page);
   const placeholderIssues = [
@@ -891,7 +903,8 @@ export function validatePageForPublication(page: PageLesson): string[] {
     ])
   ];
   const questionIssues = page.questionBank && page.questionBank.filter((item) => item.status === "approved").length < 4 ? ["QUESTION_BANK_MINIMUM_NOT_MET"] : [];
-  return [...page.quality.issues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverage.missing.map((item) => `${item.requirementId}:MISSING:${item.fields.join(",")}`), ...sectionIssues, ...placeholderIssues, ...questionIssues];
+  const narrativeIssues = page.teachingCompositionVersion === 1 ? evaluateTeachingPage(page).issues : [];
+  return [...narrativeIssues, ...page.quality.issues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverage.missing.map((item) => `${item.requirementId}:MISSING:${item.fields.join(",")}`), ...sectionIssues, ...placeholderIssues, ...questionIssues];
 }
 
 export function hasPlaceholderContent(markdown: string): boolean {

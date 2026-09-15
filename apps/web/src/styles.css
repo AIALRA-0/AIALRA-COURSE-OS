@@ -1390,3 +1390,11 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .review-objective-row { padding-inline: 8px; }
   .review-objective-copy h3 { font-size: 14px; }
 }
+
+/* Preserve authored soft line breaks and constrain tables to their own scroll area. */
+.lesson-block p { white-space: pre-line; }
+.lesson-table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem auto; }
+.lesson-table-scroll table { border-collapse: collapse; margin-inline: auto; }
+.lesson-table-scroll th, .lesson-table-scroll td { border: 1px solid var(--border); padding: .5rem .75rem; }
+.choice-copy { min-width: 0; overflow-wrap: anywhere; }
+.choice-copy .katex { font-size: 1em; }

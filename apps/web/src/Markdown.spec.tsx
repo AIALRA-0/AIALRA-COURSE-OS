@@ -10,6 +10,22 @@ describe("lesson math rendering", () => {
     expect(html).toContain("表示边的嵌入");
   });
 
+  it("renders mathematical answer options as inline content", () => {
+    const html = renderToStaticMarkup(createElement("label", null, createElement(Markdown, { inline: true, children: "结果是 $\\frac{1}{2}$" })));
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain("<p>");
+    expect(html).not.toContain("katex-error");
+  });
+
+  it("renders a table as original rows and cells in a local scroll container", () => {
+    const html = renderToStaticMarkup(createElement(Markdown, { children: "| Method | Value |\n| --- | --- |\n| A | $x_1$ |\n| B | 2 |" }));
+    expect(html).toContain('class="lesson-table-scroll"');
+    expect(html).toContain("<th>Method</th>");
+    expect(html.match(/<td>/g)).toHaveLength(4);
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain("katex-error");
+  });
+
   it("keeps teaching subheadings below the page and section headings", () => {
     const html = renderToStaticMarkup(createElement(Markdown, { nestedHeadings: true, children: "## 为什么先训练\n\n说明训练的作用\n\n### 何时使用\n\n说明适用条件" }));
     expect(html).toContain("<h4>为什么先训练</h4>");

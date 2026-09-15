@@ -1,3 +1,4 @@
+import { teachingCompositionContract } from "@course-os/quality";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -113,7 +114,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
     "不要新增来源没有提供的事实，不要删掉为理解公式、图形、表格或流程所必需的内容",
     JSON.stringify(input.repair.previousTeachingPackage)
   ].join("\n") : "";
-  const finalText = `${text}${blueprintText}${repairText}`;
+  const finalText = `${text}${blueprintText}\n\n## 分区成文合同\n${JSON.stringify(teachingCompositionContract)}${repairText}`;
   if (!input.sourceImageDataUrl) return finalText;
   return [{ role: "user", content: [{ type: "input_text", text: finalText }, { type: "input_image", image_url: input.sourceImageDataUrl, detail: "high" }] }];
 }
@@ -124,6 +125,7 @@ export function currentGenerationHarness(): GenerationHarnessSnapshot {
     files.push({ path: `apps/api/src/${name}`, sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, name))).digest("hex") });
   }
   files.push({ path: "packages/quality/src/index.ts", sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/index.ts"))).digest("hex") });
+  files.push({ path: "packages/quality/src/presentation.ts", sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/presentation.ts"))).digest("hex") });
   const aggregateSha256 = createHash("sha256").update(JSON.stringify({ version: harnessManifest.version, files })).digest("hex");
   return { id: harnessManifest.id, version: harnessManifest.version, taskContract: harnessManifest.taskContract, files, aggregateSha256 };
 }

@@ -200,6 +200,7 @@ export interface PageLesson {
   blocks: ExplanationBlock[];
   /** New lessons use the reader-first section order; omitted for immutable older lessons */
   lessonFlowVersion?: 2;
+  teachingCompositionVersion?: 1;
   lessonSections?: LessonSection[];
   questionBank?: QuestionBankItem[];
   coverageRequirements: CoverageRequirement[];

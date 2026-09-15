@@ -43,7 +43,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -2502,20 +2502,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       let generation = await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
-      const bridgeIsUnsafe = (content: TeachingPackage): boolean => validateTeachingNarrative({
-        ...content,
-        lessonFlowVersion: 2,
-        strictWritingStyle: true,
-        sourceTitle: page.title,
-        pageKind: blueprint.resourcePackage.pageKind,
-        sourceDensity: blueprint.resourcePackage.sourceDensity
-      }).some((issue) => issue.startsWith("TEACHING_BRIDGE_"));
-      if (generation.content.chapterBridgeMarkdown && bridgeIsUnsafe(generation.content)) {
-        generation.content.chapterBridgeMarkdown = "";
-        await dependencies.operations.mutate((state) => {
-          dependencies.operations.appendEvent(state, jobId, "generation.bridge.omitted", { pageId: page.id, reason: "OPTIONAL_BRIDGE_STYLE_INVALID" });
-        });
-      }
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
       let rejectedNarrativeIssues: string[] = [];
       if (runtimeModelRouter) {
@@ -2571,7 +2557,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             : await runtimeModelRouter.generateTeachingPackage(repairInput);
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content, sourceText, page.title);
-          if (repaired.content.chapterBridgeMarkdown && bridgeIsUnsafe(repaired.content)) repaired.content.chapterBridgeMarkdown = "";
           const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues, englishFields);
           if (focused) {
             repaired.content = focused;
@@ -2691,6 +2676,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             // Earlier unsupported checks are evidence that a repair was needed,
             // not evidence that the repaired text is still wrong.
             const decisiveSourceChecks = verification?.sourceChecks ?? recheck?.sourceChecks ?? audit.sourceChecks ?? [];
+            const decisiveTeachingChecks = verification?.teachingChecks ?? recheck?.teachingChecks ?? audit.teachingChecks ?? [];
+            if (decisiveTeachingChecks.some(check => check.verdict !== "supported")) auditIssues.push("TEACHING_SEMANTIC_STYLE_UNRESOLVED");
+            await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "completed", dependencies, {
+              provider: (verification ?? recheck ?? audit).provider, model: (verification ?? recheck ?? audit).model,
+              teachingChecks: decisiveTeachingChecks, sourceCheckCount: decisiveSourceChecks.length,
+              issueCount: auditIssues.length, artifact: "teaching-rubric"
+            });
             const unsupportedChecks = decisiveSourceChecks.filter((check) => check.verdict !== "supported");
             const sourceRepairTargets = [...new Set(unsupportedChecks.map((check) =>
               check.verdict + "：" + check.claim.slice(0, 180) + "；原图证据：" + check.evidence.slice(0, 220)))].slice(0, 6);
@@ -3069,13 +3061,14 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
       || finding.original.length > 1200 || finding.replacement.length > 1200 || finding.evidence.length > 500) throw new Error("TEACHING_SEMANTIC_AUDIT_INVALID");
     let value: string;
     let set: (text: string) => void;
-    if (finding.field === "fullExplanationMarkdown" || finding.field === "mainContentMarkdown") {
-      value = corrected[finding.field];
-      set = (text) => { corrected[finding.field as "fullExplanationMarkdown" | "mainContentMarkdown"] = text; };
-    } else if (/^misconceptions:[0-9]+$/.test(finding.field)) {
+    if (finding.field === "fullExplanationMarkdown" || finding.field === "mainContentMarkdown" || finding.field === "chapterBridgeMarkdown") {
+      value = corrected[finding.field] || "";
+      set = (text) => { corrected[finding.field as "fullExplanationMarkdown" | "mainContentMarkdown" | "chapterBridgeMarkdown"] = text; };
+    } else if (/^(?:misconceptions|priorKnowledge|learningObjectives):[0-9]+$/.test(finding.field)) {
+      const field = finding.field.split(":")[0] as "misconceptions" | "priorKnowledge" | "learningObjectives";
       const index = Number(finding.field.split(":")[1]);
-      value = corrected.misconceptions[index] ?? "";
-      set = (text) => { corrected.misconceptions[index] = text; };
+      value = corrected[field][index] ?? "";
+      set = (text) => { corrected[field][index] = text; };
     } else if (/^questions:[0-9]+:(?:prompt|expectedAnswer|explanation)$/.test(finding.field)) {
       const [, position, field] = finding.field.split(":");
       const question = corrected.questions[Number(position)];
@@ -3110,7 +3103,8 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
 export function focusedTeachingRepairFields(issues: string[], englishFields: TeachingNarrativeField[] = []): Array<keyof TeachingPackage> | undefined {
   const fields = new Set<keyof TeachingPackage>();
   for (const issue of issues) {
-    if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
+    if (issue.startsWith("TEACHING_PRESENTATION:")) fields.add(issue.split(":")[1] as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
     else if (issue.startsWith("TEACHING_MATH_INVALID:")) fields.add(issue.slice("TEACHING_MATH_INVALID:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:")) fields.add(issue.slice("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_REWARD_DIRECTION_REVERSED:")) fields.add(issue.slice("TEACHING_REWARD_DIRECTION_REVERSED:".length) as keyof TeachingPackage);
@@ -3157,11 +3151,11 @@ function deterministicTeachingPackage(page: CourseRelease["pages"][number]): Tea
   return { content, provider: "local-deterministic", model: "deterministic-local-fallback", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 0 } };
 }
 
-function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only"): CourseRelease["pages"][number] {
+export function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only"): CourseRelease["pages"][number] {
   const normalizedContent = normalizeTeachingPackageMath(content);
   const anchorIds = page.anchors.map((item) => item.id);
   const atomIds = page.atoms.map((item) => item.id);
-  const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: oneSentence(text), sourceAnchorIds: anchorIds }));
+  const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: text.replace(/^[-*]\s*/, "").trim(), sourceAnchorIds: anchorIds }));
   // Coverage evidence is operational metadata. Appending it to the lesson
   // made the learner-facing explanation read like an internal audit log.
   const fullExplanationMarkdown = removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
@@ -3185,7 +3179,7 @@ function applyTeachingPackage(page: CourseRelease["pages"][number], content: Tea
     const status = coveredFields.length === 0 ? "missing" as const : requirement.requiredFields.every((field) => coveredFields.includes(field)) ? "covered" as const : "partial" as const;
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
-  return { ...page, blocks, lessonFlowVersion: 2, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+  return { ...page, blocks, lessonFlowVersion: 2, teachingCompositionVersion: modelBacked ? 1 : undefined, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
 }
 
 function isPlaceholderTeachingBlock(markdown: string): boolean {
@@ -3223,13 +3217,7 @@ export function validateTeachingCoverageEvidence(page: CourseRelease["pages"][nu
 }
 
 function hasSharedEvidenceFragment(evidence: string, explanation: string): boolean {
-  // Short technical terms and Chinese object names can be complete evidence
-  // even when the surrounding sentence is paraphrased.
-  const minimumLength = 5;
-  for (let offset = 0; offset <= evidence.length - minimumLength; offset += 1) {
-    if (explanation.includes(evidence.slice(offset, offset + minimumLength))) return true;
-  }
-  return false;
+  return evidence.length >= 12 && explanation.includes(evidence);
 }
 
 export function normalizeTeachingPackageMath(content: TeachingPackage, sourceText = "", sourceTitle = ""): TeachingPackage {
@@ -3267,7 +3255,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     mainContentMarkdown: normalizeTeachingSummaryMarkdown(quoteExplainedSourceLabel(content.mainContentMarkdown)),
     priorKnowledge: priorKnowledge.map((value) => quoteRepeatedSourceLabels(value, fullExplanationMarkdown)),
     fullExplanationMarkdown,
-    misconceptions: content.misconceptions.map(quoteExplainedSourceLabel),
+    misconceptions: content.misconceptions.map(value => formatMisconception(quoteExplainedSourceLabel(value))),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
   };
@@ -3275,9 +3263,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
 
 /** Keep the high-level recap within its contract without rewriting facts. */
 function normalizeTeachingSummaryMarkdown(markdown: string): string {
-  const lines = markdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length <= 5 || !lines.every((line) => /^[-*+]\s+\S/u.test(line))) return markdown;
-  return lines.slice(0, 5).join("\n");
+  return markdown;
 }
 
 function normalizeKnownTeachingTerms(markdown: string): string {
