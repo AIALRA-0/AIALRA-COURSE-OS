@@ -1,8 +1,18 @@
 {
   "id": "course-os-teaching",
-  "version": "2.4.31",
+  "version": "2.4.32",
   "taskContract": "GENERATE + TEACHING",
-  "promptFiles": ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "semantic-audit-prompt.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"],
+  "promptFiles": [
+    "teaching-system-prompt.md",
+    "teaching-user-prompt.md",
+    "teaching-blueprint.md",
+    "semantic-audit-prompt.md",
+    "policy-format-rules.md",
+    "policy-explanation-framework.md",
+    "policy-formula-explanation.md",
+    "source-audit-prompt.md",
+    "teaching-audit-prompt.md"
+  ],
   "blueprintFile": "teaching-blueprint.md",
   "schemaFile": "teaching-package.schema.json",
   "semanticAuditSchemaFile": "semantic-audit.schema.json",

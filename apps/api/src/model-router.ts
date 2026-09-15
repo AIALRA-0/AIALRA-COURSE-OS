@@ -1,7 +1,7 @@
 import { teachingCompositionContract } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
-import { modelInput, professorInstructions, semanticAuditPrompt, semanticAuditSchema, teachingPackageSchema } from "./generation-harness.js";
+import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
@@ -471,15 +471,35 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
+    // Older callers without a blueprint retain the combined response contract.
+    if (!input.blueprint) return this.auditTeachingWithRetry(input, "combined");
+    const source = await this.auditTeachingWithRetry({ ...input, idempotencyKey: `${input.idempotencyKey}:facts` }, "source");
+    const spent = this.usageCostUsd(source.usage);
+    if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", source.model, source.usage, source.provider);
+    }
     try {
-      return await this.auditTeachingOnce(input);
+      const teaching = await this.auditTeachingWithRetry({ ...input, idempotencyKey: `${input.idempotencyKey}:writing`,
+        maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0)
+      }, "teaching");
+      const findings = [...new Map([...source.findings, ...teaching.findings].map(finding => [JSON.stringify(finding), finding])).values()];
+      return { ...source, findings, teachingChecks: teaching.teachingChecks, usage: sumProviderUsage(source.usage, teaching.usage) };
+    } catch (error) {
+      if (!(error instanceof ModelRouterGenerationError)) throw error;
+      throw new ModelRouterGenerationError(error.code, error.model, sumProviderUsage(source.usage, error.usage), error.provider, error.responseShape);
+    }
+  }
+
+  private async auditTeachingWithRetry(input: ModelRouterInput & { teachingPackage: TeachingPackage }, scope: "combined" | "source" | "teaching"): Promise<SemanticAuditResult> {
+    try {
+      return await this.auditTeachingOnce(input, false, scope);
     } catch (error) {
       if (!(error instanceof ModelRouterGenerationError) || error.code !== "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID") throw error;
       const spent = this.usageCostUsd(error.usage);
       if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) throw error;
       try {
         const retry = await this.auditTeachingOnce({ ...input, idempotencyKey: `${input.idempotencyKey}:invalid-retry`,
-          maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0) }, true);
+          maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0) }, true, scope);
         return { ...retry, usage: sumProviderUsage(error.usage, retry.usage) };
       } catch (retryError) {
         if (!(retryError instanceof ModelRouterGenerationError)) throw retryError;
@@ -489,13 +509,29 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     }
   }
 
-  private async auditTeachingOnce(input: ModelRouterInput & { teachingPackage: TeachingPackage }, unresolvedRetry = false): Promise<SemanticAuditResult> {
+  private async auditTeachingOnce(input: ModelRouterInput & { teachingPackage: TeachingPackage }, unresolvedRetry = false, scope: "combined" | "source" | "teaching" = "combined"): Promise<SemanticAuditResult> {
     const started = Date.now();
-    const prompt = `${semanticAuditPrompt.trim()}\n输出结构：${JSON.stringify(semanticAuditSchema)}${unresolvedRetry ? "\n\n上次核验标记了矛盾或无法确认，却没有给出可执行的最小修正。这次须逐项重新核对原图；能证实错误时给出确实存在于教学字段中的 original 和有来源依据的 replacement，无法确认时保持 unverified，绝不能为通过检查编造修正。" : ""}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
-      sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
-      detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage })}`;
-    const auditSchema = structuredClone(semanticAuditSchema) as { properties: { sourceChecks: { minItems: number } } };
+    const allowedFields = ["chapterBridgeMarkdown", "fullExplanationMarkdown", "mainContentMarkdown",
+      ...(["learningObjectives", "priorKnowledge", "misconceptions"] as const).flatMap(field => input.teachingPackage[field].map((_, i) => `${field}:${i}`)),
+      ...input.teachingPackage.questions.flatMap((q, i) => [...["prompt", "expectedAnswer", "explanation"].map(field => `questions:${i}:${field}`), ...(q.options || []).map((_, n) => `questions:${i}:options:${n}`)])];
+    const auditSchema = structuredClone(semanticAuditSchema) as { required: string[]; properties: Record<string, any> };
+    auditSchema.properties.findings.items.properties.field.enum = allowedFields;
     if (input.blueprint?.resourcePackage.pageKind === "diagram") auditSchema.properties.sourceChecks.minItems = 3;
+    const minSourceChecks = auditSchema.properties.sourceChecks.minItems as number;
+    if (scope !== "combined") {
+      const excluded = scope === "source" ? "teachingChecks" : "sourceChecks";
+      delete auditSchema.properties[excluded];
+      auditSchema.required = auditSchema.required.filter(name => name !== excluded);
+    }
+    const instructions = scope === "source" ? sourceAuditPrompt : scope === "teaching" ? teachingAuditPrompt : semanticAuditPrompt;
+    const prompt = `${instructions.trim()}\n输出结构：${JSON.stringify(auditSchema)}${unresolvedRetry ? "\n上次输出无法执行。仅使用列出的 field 路径和该字段中实际存在的原文；无法确认时保留 unverified，不编造修正。" : ""}\n\n${JSON.stringify({
+      auditScope: scope, pageTitle: input.pageTitle, pageNumber: input.pageNumber,
+      sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
+      previousPageContext: input.previousPageContext?.slice(0, 2_000),
+      writingRules: scope === "source" ? undefined : { format: policyFormatRules, explanation: policyExplanationFramework, formula: policyFormulaExplanation },
+      compositionContract: scope === "source" ? undefined : teachingCompositionContract,
+      detectedIssues: input.repair?.issues, teachingPackage: input.teachingPackage
+    })}`;
     const userInput = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
@@ -545,18 +581,19 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try { const output = extractProviderOutput(body); parsed = typeof output === "string" ? parseProviderJson(output) : output; }
     catch { return invalidAudit("json_unparseable"); }
     const findings = (parsed as { findings?: unknown } | null)?.findings;
-    const sourceChecks = (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
+    const sourceChecks = scope === "teaching" ? [] : (parsed as { sourceChecks?: unknown } | null)?.sourceChecks;
     if (!Array.isArray(findings)) return invalidAudit("findings_missing");
     if (findings.length > 12 || findings.some((item) => !item || typeof item !== "object" ||
       ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit(`findings_shape:${findings.length}`);
+    if (findings.some(item => !allowedFields.includes(item.field))) return invalidAudit("finding_field_invalid");
     if (!Array.isArray(sourceChecks)) return invalidAudit("source_checks_missing");
-    if (sourceChecks.length < auditSchema.properties.sourceChecks.minItems) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
+    if (scope !== "teaching" && sourceChecks.length < minSourceChecks) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
     if (sourceChecks.length > 24 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
-    const teachingChecks = (parsed as SemanticAuditResult).teachingChecks;
+    const teachingChecks = scope === "source" ? undefined : (parsed as SemanticAuditResult).teachingChecks;
     const criteria = ["entry", "terms", "prerequisites", "structure", "objects", "reasoning", "questions"];
-    if (input.blueprint || teachingChecks !== undefined) {
+    if (scope !== "source" && (input.blueprint || teachingChecks !== undefined)) {
       if (!Array.isArray(teachingChecks) || teachingChecks.length !== criteria.length
         || new Set(teachingChecks.map(check => check.criterion)).size !== criteria.length
         || teachingChecks.some(check => !criteria.includes(check.criterion) || typeof check.evidence !== "string" || check.evidence.trim().length < 12

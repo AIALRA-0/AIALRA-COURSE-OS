@@ -11,6 +11,8 @@ const readHarnessFile = (name: string): string => readFileSync(resolve(harnessDi
 export const teachingSystemPromptTemplate = readHarnessFile("teaching-system-prompt.md");
 export const teachingUserPromptTemplate = readHarnessFile("teaching-user-prompt.md");
 export const teachingBlueprint = readHarnessFile("teaching-blueprint.md");
+export const sourceAuditPrompt = readHarnessFile("source-audit-prompt.md");
+export const teachingAuditPrompt = readHarnessFile("teaching-audit-prompt.md");
 export const semanticAuditPrompt = readHarnessFile("semantic-audit-prompt.md");
 export const policyFormatRules = readHarnessFile("policy-format-rules.md");
 export const policyExplanationFramework = readHarnessFile("policy-explanation-framework.md");
@@ -120,7 +122,7 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
-  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
+  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
   for (const name of ["app.ts", "generation-harness.ts", "teaching-blueprint.ts", "model-router.ts"]) {
     files.push({ path: `apps/api/src/${name}`, sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, name))).digest("hex") });
   }

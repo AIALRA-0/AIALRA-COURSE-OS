@@ -87,6 +87,21 @@ describe("Course OS API", () => {
     expect(() => applySemanticAuditFindings(before, [{ field: "questions:0:expectedAnswer", original: "答案", replacement: "改写", evidence: "来源" }])).toThrow();
   });
 
+  it("updates only evidence excerpts containing an exact corrected fact", () => {
+    const before = testTeachingResult(0).content;
+    before.fullExplanationMarkdown = "这里的原始比值是 1.2，用于比较这两个输入\n另外一个对象的解释保持原样且不参与本次修正";
+    before.coverageEvidence = [
+      { atomId: "ratio", coveredFields: ["observation"], explanation: "这里的原始比值是 1.2，用于比较这两个输入" },
+      { atomId: "other", coveredFields: ["observation"], explanation: "另外一个对象的解释保持原样且不参与本次修正" }
+    ];
+    const applied = applySemanticAuditFindings(before, [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 除以 0.20 得到 1.5" }]);
+    expect(applied.content.coverageEvidence[0]!.explanation).toContain("原始比值是 1.5");
+    expect(applied.content.fullExplanationMarkdown).toContain(applied.content.coverageEvidence[0]!.explanation);
+    expect(applied.content.coverageEvidence[1]).toEqual(before.coverageEvidence[1]);
+    expect(before.coverageEvidence[0]!.explanation).toContain("1.2");
+    expect(applied.content.questions).toEqual(before.questions);
+  });
+
   it("keeps verified teaching fields when repairing only coverage or a prior definition", () => {
     const previous: TeachingPackage = { chapterBridgeMarkdown: "", learningObjectives: ["解释作用"], mainContentMarkdown: "- 已知关系", priorKnowledge: ["原定义"], fullExplanationMarkdown: "这里已经解释了原图中两个对象的关系，以及它们怎样共同产生结果".repeat(3), misconceptions: ["原易错点"], coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "旧引用" }], questions: [] };
     const repaired: TeachingPackage = { ...previous, priorKnowledge: ["新定义"], fullExplanationMarkdown: "模型意外重写了讲解".repeat(6), coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "新的真实引用" }] };

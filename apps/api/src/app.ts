@@ -3095,7 +3095,17 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
       throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
     }
     if (value.lastIndexOf(finding.original) !== at) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
-    set(value.slice(0, at) + finding.replacement + value.slice(at + finding.original.length));
+    const updated = value.slice(0, at) + finding.replacement + value.slice(at + finding.original.length);
+    set(updated);
+    if (finding.field === "fullExplanationMarkdown") {
+      for (const evidence of corrected.coverageEvidence) {
+        // An excerpt containing the exact corrected words changes in the same
+        // transaction. Never replace an unrelated excerpt with an entire paragraph.
+        if (!evidence.explanation.includes(finding.original)) continue;
+        const excerpt = evidence.explanation.replace(finding.original, finding.replacement);
+        if (updated.includes(excerpt)) evidence.explanation = excerpt;
+      }
+    }
     fields.push(finding.field);
   }
   return { content: corrected, fields };
