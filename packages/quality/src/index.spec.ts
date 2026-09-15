@@ -225,6 +225,40 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...valid, sourceTitle: "EDGE-GNN: WHY?", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n上一页把 EDGE-GNN 定位成处理边关系的图编码器`, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
   });
 
+  it("rejects lowercase English glosses while accepting a verified formal English name", () => {
+    expect(hasUnpairedEnglishPhrase("功耗（power）表示单位时间内消耗或转换的能量")).toBe(true);
+    expect(hasUnpairedEnglishPhrase("功耗（Power Consumption）表示单位时间内消耗或转换的能量")).toBe(false);
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n功耗（power）表示单位时间内消耗或转换的能量` }))
+      .toContain("TEACHING_UNPAIRED_ENGLISH");
+  });
+
+  it("rejects source narration as the dominant explanation voice", () => {
+    const commentary = [
+      "页面给出输入对象和输出对象",
+      "本页列出三个处理阶段",
+      "原图显示输入进入第一步",
+      "课件给出转换公式",
+      "表中写着每种方法的名称",
+      "原表列出方法的年代"
+    ].join("\n\n");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n${commentary}` }))
+      .toContain("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n原图保留标签“Agent”，它表示负责选择动作的代理` }))
+      .not.toContain("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+  });
+
+  it("rejects absolute optimality claims that are stronger than the stated trade-off evidence", () => {
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 多个目标怎样权衡\n功耗、时序与面积相互竞争，所以不存在唯一最优解` }))
+      .toContain("TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 多个目标怎样权衡\n功耗、时序与面积相互竞争，仅凭这些信息不能确定唯一最优解` }))
+      .not.toContain("TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown");
+  });
+
   it("recognizes a source-backed correction without requiring fixed cue words", () => {
     const input = {
       ...valid,

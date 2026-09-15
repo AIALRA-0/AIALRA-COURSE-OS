@@ -170,6 +170,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       && !/(?:因此|所以|无法|不能|需要|难以|难以确认)/u.test(clause))) {
       issues.push("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
     }
+    const sourceNarrationCount = (explanation.match(/(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/gu) || []).length;
+    if (sourceNarrationCount >= 6) issues.push("TEACHING_SOURCE_COMMENTARY_OVERUSE");
     const mathFields = {
       chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
       learningObjectives: input.learningObjectives.join("\n"),
@@ -187,6 +189,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (/[\p{Script=Han}]{2,20}（[A-Za-z][A-Za-z .&/-]{1,80}[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(markdown)) {
         issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
       }
+      const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(markdown);
+      const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(markdown);
+      if (directLogicalOverclaim && !explicitlyLimitedClaim) issues.push(`TEACHING_LOGICAL_OVERCLAIM:${field}`);
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));
@@ -384,7 +389,10 @@ export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[]
 
 export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] = []): string[] {
   const visible = stripProtectedMarkdown(markdown)
-    .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, "")
+    .replace(/(?:[A-Za-z][A-Za-z0-9-]*\s+)?[\p{Script=Han}]{2,25}（[^）]*[A-Za-z][^）]*）/gu, (whole) => {
+      const parenthetical = whole.slice(whole.indexOf("（") + 1, -1).trim();
+      return /^[A-Z]/u.test(parenthetical) ? "" : whole;
+    })
     .replace(/\b[A-Z]{2,5}\s+\d{2,5}\b/gu, "")
     .replace(/\b[A-Z]{2,8}\s*即[\p{Script=Han}]{2,20}/gu, "")
     .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")

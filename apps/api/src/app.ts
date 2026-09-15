@@ -3089,12 +3089,13 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_ABBREVIATION_PLACEMENT:")) fields.add(issue.slice("TEACHING_ABBREVIATION_PLACEMENT:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
     else if (issue === "TEACHING_BRIDGE_UNPAIRED_ENGLISH" || issue === "TEACHING_BRIDGE_NEEDS_BLOCKS") fields.add("chapterBridgeMarkdown");
     else if (issue === "TEACHING_SUMMARY_MUST_BE_BULLETS") fields.add("mainContentMarkdown");
-    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION", "TEACHING_LAYOUT_COMMENTARY", "TEACHING_IRRELEVANT_ABSENCE_CHECKLIST"].includes(issue)) fields.add("fullExplanationMarkdown");
+    else if (["TEACHING_EXPLANATION_TOO_LONG", "TEACHING_COMPLEX_CONTENT_UNSTRUCTURED", "TEACHING_HEADING_DUPLICATE", "TEACHING_ADJACENT_HEADINGS", "TEACHING_MAIN_EXPLANATION_DUPLICATION", "TEACHING_LAYOUT_COMMENTARY", "TEACHING_IRRELEVANT_ABSENCE_CHECKLIST", "TEACHING_SOURCE_COMMENTARY_OVERUSE"].includes(issue)) fields.add("fullExplanationMarkdown");
     else if (issue === "TEACHING_QUESTION_EXPLANATION_TOO_SHORT") fields.add("questions");
     else return undefined;
   }
