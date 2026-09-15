@@ -209,6 +209,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
   });
 
+  it("uses OpenCode Go Luna Responses with session identity and structured output", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://opencode.test/responses");
+      expect(new Headers(init?.headers).get("x-opencode-session")).toBe("luna-responses-test");
+      const body = JSON.parse(String(init?.body)) as { reasoning?: { effort?: string }; temperature?: number; text?: { format?: { type?: string } }; input: Array<{ content: Array<{ type: string }> }> };
+      expect(body.reasoning?.effort).toBe("medium");
+      expect(body.temperature).toBeUndefined();
+      expect(body.text?.format?.type).toBe("json_schema");
+      expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
+      return Response.json({ model: "gpt-5.6-luna", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 300, output_tokens: 400, input_tokens_details: { cached_tokens: 50 } } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-opencode-token", model: "gpt-5.6-luna", protocol: "responses", supportsVision: true, billingMode: "subscription_quota" }).generateTeachingPackage(providerInput("luna-responses-test", true));
+    expect(result).toMatchObject({ provider: "opencode-go", model: "gpt-5.6-luna", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400 } });
+  });
+
   it("keeps the provider timeout active while reading the response body", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => ({
       ok: true,
@@ -633,11 +649,16 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("uses the current DeepSeek visual route even when persisted model settings are older", async () => {
-    const providers = [{ id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true,
-      credential: { configured: true }, models: [{ id: "deepseek-v4-pro", displayName: "Pro", protocol: "responses" as const,
-        supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const }] }];
+  it("uses current provider routes even when persisted model settings are older", async () => {
+    const providers = [
+      { id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true,
+        credential: { configured: true }, models: [{ id: "deepseek-v4-pro", displayName: "Pro", protocol: "responses" as const,
+          supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const }] },
+      { id: "opencode-go", displayName: "OpenCode", baseUrl: "https://opencode.test", enabled: true,
+        credential: { configured: true }, models: [] }
+    ];
     expect(withCurrentDeepSeekModels(providers).find((provider) => provider.id === "deepseek")?.models.some((model) => model.id === "deepseek-flash" && model.supportsVision)).toBe(true);
+    expect(withCurrentDeepSeekModels(providers).find((provider) => provider.id === "opencode-go")?.models).toContainEqual(expect.objectContaining({ id: "gpt-5.6-luna", protocol: "responses", supportsVision: true }));
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { model: string; input: Array<{ content: Array<{ type: string }> }> };
       expect(body.model).toBe("deepseek-flash");

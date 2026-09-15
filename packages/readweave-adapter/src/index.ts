@@ -142,6 +142,7 @@ export function defaultWorkspaceSettings(workspaceId: string): WorkspaceSettings
 export function defaultModelProviders(): ModelProviderConfig[] {
   return [
     { id: "opencode-go", displayName: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1", enabled: true, credential: { configured: false }, models: [
+      { id: "gpt-5.6-luna", displayName: "GPT 5.6 Luna", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" },
       { id: "qwen3.8-flash", displayName: "Qwen 3.8 Flash", protocol: "messages", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },
       { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },
       { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },

@@ -309,7 +309,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     };
     try {
       const rawBody = init.body;
-      const useResponsesStream = this.connection.providerId === "deepseek" && this.connection.protocol === "responses"
+      const useResponsesStream = ["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
       const requestBody = useResponsesStream
         ? JSON.stringify({ ...(JSON.parse(rawBody as string) as Record<string, unknown>), stream: true })
@@ -377,7 +377,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         body: JSON.stringify({ model: this.connection.model,
           instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
-          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+            : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
+            : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
           metadata: { product: "course-os", stage: "repair", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
@@ -437,7 +439,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const request = this.connection.protocol === "responses" ? {
       url: `${baseUrl}/responses`,
       body: { model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-        max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
+        max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+          : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "low" } }
+          : { temperature: 0 }),
         text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
         metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
       }
@@ -574,7 +578,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           instructions: professorInstructions(input.language),
           input: `第 ${input.pageNumber} 页的讲解已经写好，只补齐缺失的 ${missing.join("、")} 字段，不重写已有字段，不引入讲解或来源没有解释的事实。题目须恰好两道理解题和两道四选一选择题；覆盖证据只能使用给定 atomId，且必须摘录已有讲解中的连续原文。只返回包含这些缺失字段的 JSON 对象。\n\n${JSON.stringify(refillContext)}`,
           max_output_tokens: onlyQuestions ? 2_000 : 4_000,
-          reasoning: { effort: "none" },
+          reasoning: { effort: this.connection.providerId === "opencode-go" ? "low" : "none" },
           text: { format: { type: "json_schema", name: `course_os_${stage}`, schema: refillSchema, strict: true } },
           metadata: { product: "course-os", stage, writing_policy_snapshot_id: input.writingPolicySnapshotId }
         })
@@ -616,7 +620,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           instructions: instruction,
           input: text,
           max_output_tokens: teachingOutputTokenLimit(input.qualityMode),
-          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+            : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
+            : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
           metadata: { product: "course-os", stage: input.stage || "teach", writing_policy_snapshot_id: input.writingPolicySnapshotId }
         }
@@ -703,14 +709,23 @@ export interface SettingsProviderSource {
   }>;
 }
 
-/** DeepSeek's live model catalog includes this visual Responses route, while older ReadWeave settings may not. */
+/** Add current provider routes that older persisted ReadWeave settings may not contain yet. */
 export function withCurrentDeepSeekModels(providers: ModelProviderConfig[]): ModelProviderConfig[] {
-  return providers.map((provider) => provider.id !== "deepseek" || provider.models.some((model) => model.id === "deepseek-flash")
-    ? provider
-    : { ...provider, models: [...provider.models, {
-      id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses" as const,
-      supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const
-    }] });
+  return providers.map((provider) => {
+    if (provider.id === "deepseek" && !provider.models.some((model) => model.id === "deepseek-flash")) {
+      return { ...provider, models: [...provider.models, {
+        id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses" as const,
+        supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const
+      }] };
+    }
+    if (provider.id === "opencode-go" && !provider.models.some((model) => model.id === "gpt-5.6-luna")) {
+      return { ...provider, models: [{
+        id: "gpt-5.6-luna", displayName: "GPT 5.6 Luna", protocol: "responses" as const,
+        supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" as const
+      }, ...provider.models] };
+    }
+    return provider;
+  });
 }
 
 /**
@@ -786,8 +801,8 @@ export function providerRouterFromEnvironment(): ModelRouterClient | undefined {
   const deepSeekKey = process.env.DEEPSEEK_API_KEY;
   const connections: ProviderConnection[] = [];
   if (openCodeKey) {
-    const model = process.env.OPENCODE_GO_MODEL || "qwen3.8-flash";
-    connections.push({ providerId: "opencode-go", baseUrl: process.env.OPENCODE_GO_BASE_URL || "https://opencode.ai/zen/go/v1", apiKey: openCodeKey, model, protocol: openCodeProtocol(model), supportsVision: model.includes("vision"), billingMode: "subscription_quota" });
+    const model = process.env.OPENCODE_GO_MODEL || "gpt-5.6-luna";
+    connections.push({ providerId: "opencode-go", baseUrl: process.env.OPENCODE_GO_BASE_URL || "https://opencode.ai/zen/go/v1", apiKey: openCodeKey, model, protocol: openCodeProtocol(model), supportsVision: openCodeSupportsVision(model), billingMode: "subscription_quota" });
   }
   if (deepSeekKey) {
     const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash-vision-exp";
@@ -911,7 +926,12 @@ function normalizeProviderUsage(usage: ProviderResponseBody["usage"], cost: numb
 }
 
 function openCodeProtocol(model: string): ProviderConnection["protocol"] {
+  if (model === "gpt-5.6-luna") return "responses";
   return model === "qwen3.8-flash" ? "messages" : "chat_completions";
+}
+
+function openCodeSupportsVision(model: string): boolean {
+  return model === "gpt-5.6-luna" || model.includes("vision");
 }
 
 function stripJsonFences(value: string): string {

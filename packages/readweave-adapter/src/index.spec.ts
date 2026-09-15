@@ -29,6 +29,8 @@ it("reopens a large published release through the compressed ETAPI index", async
 });
 
 it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
+  const openCode = defaultModelProviders().find((item) => item.id === "opencode-go");
+  expect(openCode?.models.find((model) => model.id === "gpt-5.6-luna")).toMatchObject({ protocol: "responses", supportsVision: true, supportsJsonSchema: true, billingMode: "subscription_quota" });
   const provider = defaultModelProviders().find((item) => item.id === "deepseek");
   expect(provider?.models.find((model) => model.id === "deepseek-flash")).toMatchObject({ protocol: "responses", supportsVision: true, supportsJsonSchema: true });
   const policy = defaultModelRoutePolicy("personal");
