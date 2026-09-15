@@ -87,6 +87,10 @@ describe("Course OS API", () => {
       .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
     expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions"]))
       .toEqual({ ...previous, misconceptions: repaired.misconceptions });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_ABBREVIATION_PLACEMENT:chapterBridgeMarkdown"]))
+      .toEqual({ ...previous, chapterBridgeMarkdown: repaired.chapterBridgeMarkdown });
+    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_CONCAT_DIMENSION_CONTRADICTION:mainContentMarkdown"]))
+      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
   });
 
   it("quotes exact source headings and translates a formula-heading reference without changing its symbol", () => {
@@ -184,6 +188,7 @@ describe("Course OS API", () => {
     expect(normalizeGeneratedMathPunctuation("换算 $1000\\text{ μm}=1\\text{ mm}$")).toBe("换算 $1000\\,\\mu\\mathrm{m}=1\\text{ mm}$");
     expect(normalizeGeneratedMathPunctuation("$$\\frac12+\u000crac12=1。$$")).toBe("$$\\frac12+\\frac12=1$$。");
     expect(normalizeGeneratedMathPunctuation("系数 $\u0009ext{Wirelength}$ 与 $\\gamma$")).toBe("系数 $\\text{Wirelength}$ 与 $\\gamma$");
+    expect(normalizeGeneratedMathPunctuation("参数 $\u0009heta_1=0.1$ 与 $\u0008eta_1=0.2$")).toBe("参数 $\\theta_1=0.1$ 与 $\\beta_1=0.2$");
   });
   it("corrects a near-miss technical term only when the page's own formula supplies one unambiguous spelling", () => {
     const content = {

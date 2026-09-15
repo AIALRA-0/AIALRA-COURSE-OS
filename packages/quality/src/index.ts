@@ -177,6 +177,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (validateMarkdownMath(markdown).length > 0) issues.push(`TEACHING_MATH_INVALID:${field}`);
       if (hasMathFormattedAsCode(markdown)) issues.push(`TEACHING_MATH_AS_CODE:${field}`);
       if (hasUnqualifiedWeightedTrend(markdown)) issues.push(`TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`);
+      if (/[\p{Script=Han}]{2,20}（[A-Za-z][A-Za-z .&/-]{1,80}[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(markdown)) {
+        issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
+      }
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));
@@ -187,6 +190,11 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     const explanationDeniesRoutingMethod = /布线[^。；\n]{0,30}(?:实现方式|方法|细节)[^。；\n]{0,18}(?:无法|不能|未给出|未说明|不能确认)|(?:无法|不能|未给出|未说明|不能确认)[^。；\n]{0,24}布线[^。；\n]{0,20}(?:实现方式|方法|细节)/u.test(learnerText);
     const objectivePromisesKnownConcatDimension = input.learningObjectives.some((objective) => /(?:输入|拼接)[^。；\n]{0,45}(?:边权|权重|w_?\{?ij\}?)[^。；\n]{0,55}(?:维度|64)/iu.test(objective));
     const explanationDeniesConcatDimension = /(?:边权|w_?\{?ij\}?)[^。；\n]{0,36}(?:维度|形状)[^。；\n]{0,18}(?:没有|未给出|未说明|无法|不能)|(?:没有|未给出|未说明|无法|不能)[^。；\n]{0,30}(?:边权|w_?\{?ij\}?)[^。；\n]{0,18}(?:维度|形状)/iu.test(learnerText);
+    if (explanationDeniesConcatDimension) {
+      for (const [field, markdown] of Object.entries(mathFields)) {
+        if (hasUnsupportedConcatDimensionClaim(markdown)) issues.push(`TEACHING_CONCAT_DIMENSION_CONTRADICTION:${field}`);
+      }
+    }
     if ((objectivePromisesCalculation && explanationDeniesCalculation)
       || (objectiveClaimsFormulaEquivalence && explanationDeniesFormulaEquivalence)
       || (objectivePromisesRoutingMethod && explanationDeniesRoutingMethod)
@@ -273,7 +281,7 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   const describesWeightedPenalty = /(?:加权|带负号|负向)[^。；;\n]{0,45}(?:回报|奖励|得分|损失|目标函数|评分|结果|组成|分项)|(?:回报|奖励|得分|损失|目标函数|评分|结果)[^。；;\n]{0,45}(?:加权|带负号|负向)/u.test(markdown);
   if (!hasSymbolicWeightedScore && !(admitsMissingWeights && describesWeightedPenalty)) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
-    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升|越大).{0,60}(?:下降|降低|减少|减小|变小|越低)|(?:增大|增加|提高|上升|越大).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小|越低)/u);
+    const trend = clause.match(/(?:回报|奖励|得分|损失|目标函数|评分|结果).{0,100}(?:增大|增加|提高|上升|越大).{0,60}(?:下降|降低|减少|减小|变小|越小|越低)|(?:增大|增加|提高|上升|越大).{0,75}(?:回报|奖励|得分|损失|目标函数|评分|结果|(?:该|此|这个)?(?:量|数值|值|整体)|\$?r(?:_[A-Za-z0-9{}]+)?\$?).{0,60}(?:下降|降低|减少|减小|变小|越小|越低)/u);
     if (!trend) return false;
     // A warning that explicitly rejects the trend is not an assertion of it.
     const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升|越大)/u)));
@@ -283,6 +291,14 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
     const otherInputsControlled = /(?:其他|其余|别的)[^，]{0,20}(?:不变|固定|保持)|(?:同时|一起)[^，]{0,12}(?:增大|增加)/u.test(clause);
     return !(explicitlyConditional && weightsQualified && otherInputsControlled);
   });
+}
+
+/** Do not fold an extra edge-weight term into a known 64-D node-pair vector. */
+function hasUnsupportedConcatDimensionClaim(markdown: string): boolean {
+  return markdown.split(/\r?\n|。/u).some((line) =>
+    /(?:边权|边的[^，；]{0,16}权重|w_?\{?ij\}?)/iu.test(line)
+    && /64\s*维/u.test(line)
+    && /(?:拼成|拼接(?:成|为)?|一并进入|共同进入|合成|构成)/u.test(line));
 }
 
 /** Compare only explicit totals for the same source scope, not incidental counts. */

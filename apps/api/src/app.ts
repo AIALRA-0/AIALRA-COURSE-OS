@@ -3072,6 +3072,8 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     if (issue.startsWith("TEACHING_COVERAGE_")) fields.add("coverageEvidence");
     else if (issue.startsWith("TEACHING_MATH_INVALID:")) fields.add(issue.slice("TEACHING_MATH_INVALID:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:")) fields.add(issue.slice("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_ABBREVIATION_PLACEMENT:")) fields.add(issue.slice("TEACHING_ABBREVIATION_PLACEMENT:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
@@ -3270,6 +3272,13 @@ export function normalizeGeneratedMathPunctuation(value: string): string {
   const repairedEscapes = normalizeLegacyMathDelimiters(value)
     .replace(/\u000crac/g, "\\frac")
     .replace(/\u0009ext(?=\{)/g, "\\text")
+    .replace(/\u0009heta(?=(?:\b|[_^{]))/gu, "\\theta")
+    .replace(/\u0008eta(?=(?:\b|[_^{]))/gu, "\\beta")
+    .replace(/\u0008egin(?=\{)/gu, "\\begin")
+    .replace(/\u000dho(?=(?:\b|[_^{]))/gu, "\\rho")
+    .replace(/\u000dight\b/gu, "\\right")
+    .replace(/\nabla(?=(?:\b|[_^{]))/gu, "\\nabla")
+    .replace(/\neq\b/gu, "\\neq")
     .replace(/\u0000(?=(?:alpha|beta|gamma|lambda|mu|pi|sigma|theta)\b)/gu, "\\")
     .replace(/\\text\{\s*μm\s*\}/g, "\\,\\mu\\mathrm{m}");
   const displaysNormalized = repairedEscapes.replace(/\$\$([\s\S]*?)\$\$/g, (match, source: string) => normalizeMathSpan(match, source, "$$"));

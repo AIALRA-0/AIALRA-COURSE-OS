@@ -363,6 +363,8 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(symbolicResult)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
     const formulaOnlyInSource = { ...weighted, fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n末端回报由三个带负号的加权分项组成，三项前面的负号说明每个指标越大，回报越低；各项权重没有给出` };
     expect(validateTeachingNarrative(formulaOnlyInSource)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const vagueResultName = { ...weighted, mainContentMarkdown: "- 末态式为 $r_T=-x-\\lambda y-\\gamma z$\n- 线长、拥挤和密度越大，该量越小" };
+    expect(validateTeachingNarrative(vagueResultName)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:mainContentMarkdown");
   });
 
   it("rejects cross-field teaching contradictions and mathematical expressions rendered as code", () => {
@@ -384,6 +386,14 @@ describe("learner-facing teaching narrative", () => {
       learningObjectives: ["说出由哪些方法分别承担放置与布线"],
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n本页未给出布线的实现方式` };
     expect(validateTeachingNarrative(unknownRouting)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+    const unknownEdgeWeightDimension = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["解释两端节点和边权的作用"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n边权 $w_{ij}^e$ 的维度没有给出，两个 32 维节点向量拼接后是 64 维`,
+      mainContentMarkdown: "- 两个节点向量和边权共同拼成 64 维输入\n- 输出为 32 维" };
+    expect(validateTeachingNarrative(unknownEdgeWeightDimension)).toContain("TEACHING_CONCAT_DIMENSION_CONTRADICTION:mainContentMarkdown");
+    const misplacedBridgeAbbreviation = { ...valid, strictWritingStyle: true,
+      chapterBridgeMarkdown: "上一页介绍了马尔可夫决策过程（Markov Decision Process, MDP）的基本循环\n\n本页继续完成一次更新" };
+    expect(validateTeachingNarrative(misplacedBridgeAbbreviation)).toContain("TEACHING_ABBREVIATION_PLACEMENT:chapterBridgeMarkdown");
   });
 
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
