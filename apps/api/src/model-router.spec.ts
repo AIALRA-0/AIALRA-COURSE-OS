@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.37", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.38", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -347,6 +347,32 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(targets.some(target => target.field === "questions:0:options:0" && target.quote === "batch")).toBe(true);
     expect(targets.some(target => target.quote === "$e^x$" || target.quote === "$w_i$" || target.field === "questions:0:prompt")).toBe(false);
     expect(teachingRepairTargets(content, ["coverageEvidence"], ["TEACHING_UNPAIRED_ENGLISH"])).toEqual([]);
+  });
+
+  it("gives source-commentary repair every actual learner-facing line", () => {
+    const content = { ...providerTeachingContent(), fullExplanationMarkdown: [
+      "页面给出两个对象",
+      "本页列出三步处理",
+      "原图显示输入连接输出",
+      "课件给出计算公式",
+      "表中写着方法名称",
+      "原表列出年代"
+    ].join("\n\n") } as TeachingPackage;
+    const targets = teachingRepairTargets(content, ["fullExplanationMarkdown"], ["TEACHING_SOURCE_COMMENTARY_OVERUSE"]);
+    expect(targets).toHaveLength(6);
+    expect(targets.every((target) => target.field === "fullExplanationMarkdown" && target.instruction.includes("直接讲"))).toBe(true);
+  });
+
+  it("locates the exact question whose weighted trend lacks its conditions", () => {
+    const content = { ...providerTeachingContent(), questions: [{
+      kind: "multiple_choice",
+      prompt: "给定 $R=-x-\\lambda y$，怎样解释结果变化",
+      options: ["指标越小越好", "指标越大越好", "无法判断", "结果不变"],
+      expectedAnswer: "指标越小越好",
+      explanation: "两个指标越小，回报就越大"
+    }] } as TeachingPackage;
+    const targets = teachingRepairTargets(content, ["questions"], ["TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions"]);
+    expect(targets).toEqual([expect.objectContaining({ field: "questions:0", quote: "两个指标越小，回报就越大" })]);
   });
 
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {

@@ -1,5 +1,5 @@
 import { applySemanticAuditFindings } from "./teaching-patches.js";
-import { teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
+import { hasUnqualifiedWeightedTrend, sourceNarrationLines, teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
@@ -90,6 +90,18 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
         if (words.length) targets.push({ field: path, quote: line, instruction: `这行普通英文未配中文：${words.join("、")}；在这里改用准确中文或已核实的双语名称，保留数字和语义；不能只加引号隐藏未翻译的解释` });
       }
     }
+  }
+  if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_SOURCE_COMMENTARY_OVERUSE")) {
+    for (const line of sourceNarrationLines(content.fullExplanationMarkdown)) {
+      targets.push({ field: "fullExplanationMarkdown", quote: line, instruction: "这行把来源当成叙述主语；改成直接讲对象、关系或结论。只有本行用于保留原始标签、解释来源冲突或限定证据时才保留一次来源说明" });
+    }
+  }
+  if (fields.includes("questions") && issues.includes("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions")) {
+    content.questions.forEach((question, index) => {
+      const completeQuestion = [question.prompt, ...(question.options || []), question.expectedAnswer, question.explanation].join("\n");
+      if (!hasUnqualifiedWeightedTrend(completeQuestion)) return;
+      targets.push({ field: `questions:${index}`, quote: question.explanation, instruction: "这道题对带符号权重的结果变化给出了无条件结论；在题干、答案与解析的实际断言位置同时写明权重为正或非负以及其他输入保持不变，若来源没有权重符号就改成不能确定变化方向" });
+    });
   }
   return targets;
 }

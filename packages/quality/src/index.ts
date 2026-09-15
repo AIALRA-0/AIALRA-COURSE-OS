@@ -113,6 +113,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   if (explanation.length >= 500 && headings.length < 2) issues.push("TEACHING_COMPLEX_CONTENT_UNSTRUCTURED");
   if (new Set(headings).size !== headings.length) issues.push("TEACHING_HEADING_DUPLICATE");
   if (/^#{2,4}\s+[^\n]+\n(?:\s*\n)*#{2,4}\s+/m.test(explanation)) issues.push("TEACHING_ADJACENT_HEADINGS");
+  if (headings.some((heading) => /^(?:页面上的对象|本页对象|原图对象)$/u.test(heading))) issues.push("TEACHING_SOURCE_COMMENTARY_HEADING");
+  if (input.chapterBridgeMarkdown?.trim() && /(?:上一页|前一页)/u.test(explanation.slice(0, 700))) issues.push("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION");
 
   const learnerText = [
     input.chapterBridgeMarkdown || "",
@@ -170,8 +172,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       && !/(?:因此|所以|无法|不能|需要|难以|难以确认)/u.test(clause))) {
       issues.push("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
     }
-    const sourceNarrationCount = (explanation.match(/(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/gu) || []).length;
-    if (sourceNarrationCount >= 6) issues.push("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+    if (sourceNarrationLines(explanation).length >= 6) issues.push("TEACHING_SOURCE_COMMENTARY_OVERUSE");
     const mathFields = {
       chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
       learningObjectives: input.learningObjectives.join("\n"),
@@ -203,7 +204,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     const objectivePromisesKnownConcatDimension = input.learningObjectives.some((objective) => /(?:输入|拼接)[^。；\n]{0,45}(?:边权|权重|w_?\{?ij\}?)[^。；\n]{0,55}(?:维度|64)/iu.test(objective));
     const explanationDeniesConcatDimension = /(?:边权|w_?\{?ij\}?)[^。；\n]{0,36}(?:维度|形状)[^。；\n]{0,18}(?:没有|未给出|未说明|无法|不能)|(?:没有|未给出|未说明|无法|不能)[^。；\n]{0,30}(?:边权|w_?\{?ij\}?)[^。；\n]{0,18}(?:维度|形状)/iu.test(learnerText);
     const objectiveClaimsOnlySelectedParameterChanges = input.learningObjectives.some((objective) =>
-      /(?:只|仅)[^。；\n]{0,24}(?:改变|改动|更新)[^。；\n]{0,30}(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)|(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)[^。；\n]{0,24}(?:只|仅)[^。；\n]{0,16}(?:改变|改动|更新)/u.test(objective));
+      /(?:只|仅)[^。；\n]{0,24}(?:改变|改动|更新)[^。；\n]{0,30}(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)|(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)[^。；\n]{0,24}(?:只|仅)[^。；\n]{0,16}(?:改变|改动|更新)|(?:另一个|另一项|其余|未选(?:中)?动作(?:对应的)?)[^。；\n]{0,22}(?:参数|权重)?[^。；\n]{0,12}(?:为何|为什么)?(?:保持)?不变/u.test(objective));
     const explanationSaysMultiplePolicyParametersChange = /(?:同时|都|两个|两项|两个分量)[^。；\n]{0,30}(?:改变|改动|更新)[^。；\n]{0,30}(?:参数|权重)|(?:参数|权重)[^。；\n]{0,30}(?:同时|都|两个|两项|两个分量)[^。；\n]{0,20}(?:改变|改动|更新)/u.test(learnerText);
     if (explanationDeniesConcatDimension) {
       for (const [field, markdown] of Object.entries(mathFields)) {
@@ -288,7 +289,7 @@ function hasMathFormattedAsCode(markdown: string): boolean {
 }
 
 /** A symbolic weight has no guaranteed sign, so a trend conclusion needs its condition beside the claim. */
-function hasUnqualifiedWeightedTrend(markdown: string): boolean {
+export function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   // This rule concerns a weighted score, not every use of a learning-rate symbol.
   const formulas = [...markdown.matchAll(/\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\r\n]+)\$(?!\$)/gu)]
     .map((match) => match[1] || match[2] || "");
@@ -385,6 +386,12 @@ export function normalizeAdjacentTeachingHeadings(markdown: string): string {
 
 export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[] = []): boolean {
   return unpairedEnglishPhrases(markdown, sourceNames).length > 0;
+}
+
+/** Locate learner-facing lines that narrate the source instead of teaching its objects directly. */
+export function sourceNarrationLines(markdown: string): string[] {
+  const narration = /(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/u;
+  return markdown.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line && narration.test(stripProtectedMarkdown(line)));
 }
 
 export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] = []): string[] {

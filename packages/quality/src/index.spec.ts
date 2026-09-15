@@ -259,6 +259,23 @@ describe("learner-facing teaching narrative", () => {
       .not.toContain("TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown");
   });
 
+  it("rejects an audit-style object heading and a second copy of the previous-page bridge", () => {
+    const bridge = "上一页解释了输入怎样进入处理规则\n\n本页继续计算规则怎样改变结果";
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, chapterBridgeMarkdown: bridge,
+      fullExplanationMarkdown: `## 页面上的对象\n上一页给出了输入和处理规则，本页继续计算结果\n\n${valid.fullExplanationMarkdown}` }))
+      .toEqual(expect.arrayContaining(["TEACHING_SOURCE_COMMENTARY_HEADING", "TEACHING_BRIDGE_REPEATED_IN_EXPLANATION"]));
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, chapterBridgeMarkdown: bridge,
+      fullExplanationMarkdown: `## 输入怎样进入结果\n先读取当前输入，再执行转换规则\n\n${valid.fullExplanationMarkdown}` }))
+      .not.toEqual(expect.arrayContaining(["TEACHING_SOURCE_COMMENTARY_HEADING", "TEACHING_BRIDGE_REPEATED_IN_EXPLANATION"]));
+  });
+
+  it("rejects a learning objective that says another parameter stays unchanged after both are updated", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["能说明被选动作对应参数怎样更新，以及另一个参数为何保持不变"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n两个参数同时更新，第一个增加 0.1，第二个减少 0.1` };
+    expect(validateTeachingNarrative(input)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+  });
+
   it("recognizes a source-backed correction without requiring fixed cue words", () => {
     const input = {
       ...valid,
