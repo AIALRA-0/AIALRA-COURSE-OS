@@ -183,10 +183,17 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     const untranslatedIssue = `TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`;
     const englishTableIssue = `TEACHING_ENGLISH_ONLY_TABLE:${field}`;
     const factorialIssue = issues.find((issue) => issue.startsWith(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:`));
+    const magnitudeIssue = `TEACHING_MAGNITUDE_COMPARISON_FALSE:${field}`;
+    const softmaxIssue = `TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:${field}`;
     const powerIssue = `TEACHING_POWER_ENERGY_CONFUSION:${field}`;
     const colorIssue = `TEACHING_UNLABELED_COLOR_MEANING:${field}`;
     const actorIssue = `TEACHING_STAGE_ACTOR_CONTRADICTION:${field}`;
     const terminalActionIssue = `TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:${field}`;
+    const standardCellAgentIssue = `TEACHING_STANDARD_CELL_AGENT_INVENTED:${field}`;
+    const zeroRewardIssue = `TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:${field}`;
+    const listOrderIssue = `TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:${field}`;
+    const coefficientIssue = `TEACHING_UNWEIGHTED_TERM_COEFFICIENT_MISSTATED:${field}`;
+    const unweightedTrendIssue = `TEACHING_UNWEIGHTED_TERM_TREND_DENIED:${field}`;
     const entries = fieldEntries(field);
     if (issues.includes(untranslatedIssue)) {
       for (const [path, value] of entries) {
@@ -205,8 +212,19 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     }
     if (factorialIssue) {
       const [, , n, expectedExponent] = factorialIssue.split(":");
-      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => new RegExp(`${n}!\\s*[,，；;:]?\\s*(?:=|≈|约等于|即|约有).*10\\^\\{\\d+\\}`).test(item.replace(/\$/gu, "")))) {
-        targets.push({ field: path, quote: line, instruction: `保留课件把 ${n}! 写成该等式的原始事实，但明确它只是粗略写法；实际十进制数量级更接近 10^{${expectedExponent}}，不能继续把两个指数写成精确相等` });
+      let logarithm = 0;
+      for (let value = 2; value <= Number(n); value += 1) logarithm += Math.log10(value);
+      const coefficient = Math.pow(10, logarithm - Math.floor(logarithm)).toFixed(2);
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => item.includes(`${n}!`) && /10\^\{\d+\}/u.test(item.replace(/\$/gu, "")))) {
+        targets.push({ field: path, quote: line, instruction: `保留课件把 ${n}! 写成该等式的原始事实，但明确它是来源中的错误或粗略写法；用完整斯特林修正项复算为约 ${coefficient}\\times10^{${expectedExponent}}，不能继续把两个指数写成精确相等或同一量级` });
+      }
+    }
+    if (issues.includes(magnitudeIssue) || issues.includes(softmaxIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) =>
+        issues.includes(magnitudeIssue) ? /(?:同一|相同|相近)(?:个)?(?:数量级|量级)/u.test(item) : /(?:更新后|重新代入)[^\n]{0,180}(?:\\pi|概率)/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: issues.includes(magnitudeIssue)
+          ? "指数相差超过 1，不能称为同一数量级；保留来源粗略值，给出准确科学计数法并计算指数差"
+          : "用本行最终参数重新代入软最大函数，复算两个概率，并让所有字段使用同一结果" });
       }
     }
     if (issues.includes(powerIssue)) {
@@ -226,6 +244,26 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
         targets.push({ field: path, quote: line, instruction: issues.includes(actorIssue)
           ? "宏单元由强化学习逐步放置，标准单元改用基于力的方法放置；修正总结中的执行者归属"
           : "$a_{T-1}$ 属于进入 $s_T$ 前的最后一个宏单元时间步，不是标准单元放置动作；按阶段边界修正" });
+      }
+    }
+    if (issues.includes(standardCellAgentIssue) || issues.includes(zeroRewardIssue) || issues.includes(listOrderIssue)
+      || issues.includes(coefficientIssue) || issues.includes(unweightedTrendIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) =>
+        issues.includes(standardCellAgentIssue) ? /(?:标准单元|基于力|力导向)[^。！？\n]{0,110}(?:智能体|时间步)/u.test(item)
+          : issues.includes(zeroRewardIssue) ? /为什么[^。！？\n]{0,35}(?:回报|奖励)[^。！？\n]{0,18}(?:为|等于|都是)\s*0/u.test(item)
+            : issues.includes(listOrderIssue) ? /(?:构成|形成)[^。！？\n]{0,16}(?:先后|因果|递进)关系/u.test(item)
+              : issues.includes(coefficientIssue) ? /(?:三项|线长、拥塞(?:程度)?(?:和|与)密度)[^。！？\n]{0,80}(?:\\lambda|\\gamma)/u.test(item)
+                : /(?:线长|Wirelength)[^。！？\n]{0,80}(?:不能|无法)[^。！？\n]{0,30}(?:判断|断言|确认)/iu.test(item))) {
+        const instruction = issues.includes(standardCellAgentIssue)
+          ? "智能体时间步属于宏单元逐个放置；标准单元由基于力的方法补入终止布局，删除标准单元也经历智能体时间步的说法"
+          : issues.includes(zeroRewardIssue)
+            ? "来源只显示回报为 0，没有说明原因；把目标改成识别数值和阶段，不要求解释未知原因"
+            : issues.includes(listOrderIssue)
+              ? "项目符号没有编号、箭头或时序词，删除自行补出的先后或因果关系"
+              : issues.includes(coefficientIssue)
+                ? "线长项系数是 -1，只有拥塞和密度分别带 lambda 与 gamma；按原式逐项修正"
+                : "其他量固定时线长项的方向由固定系数 -1 确定；未知权重只限制拥塞和密度两项";
+        targets.push({ field: path, quote: line, instruction });
       }
     }
   }
@@ -279,6 +317,16 @@ export function supportedSourceCheckFormulaConsistent(check: { claim: string; ev
     if (weightedObjective && sameLeft.length > 0 && !sameLeft.some((item) => item.rhs === claim.rhs)) return false;
   }
   return true;
+}
+
+/** A lesson may faithfully quote a bad source equation and then correct it. */
+export function resolvedSourceConflictVerdict(check: { claim: string; evidence: string; verdict: "supported" | "contradicted" | "unverified" }, fieldValue: string): "supported" | "contradicted" | "unverified" {
+  if (check.verdict === "supported") return check.verdict;
+  const reportsSource = /(?:页面|原图|材料|课件)[^。；\n]{0,45}(?:写成|写为|写着|标为|给出|等式)/u.test(check.claim);
+  const explicitlySeparatesCorrection = /(?:页面|原图|材料|课件)[^。；\n]{0,80}(?:写成|写为|标为|给出)[^。；\n]{0,120}(?:但|而|不过|实际|准确|核算|不成立|并非|相差|冲突)/u.test(fieldValue)
+    || /(?:实际|准确|独立核算|重新计算)[^。；\n]{0,120}(?:而非|不是|不等于|相差|冲突)/u.test(fieldValue);
+  const auditConfirmsSourceConflict = /(?:不成立|错误|有误|相差|而非|不是)[^。；\n]{0,100}(?:来源|原页|页面|原图|课件)|(?:来源|原页|页面|原图|课件)[^。；\n]{0,100}(?:不成立|错误|有误|相差|而非|不是)/u.test(check.evidence);
+  return reportsSource && explicitlySeparatesCorrection && auditConfirmsSourceConflict ? "supported" : check.verdict;
 }
 
 export interface SemanticAuditResult {
@@ -881,7 +929,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       }
       if (teachingChecks.some(check => check.verdict !== "supported") && findings.length === 0) return invalidAudit("teaching_findings_missing");
     }
-    return { findings, sourceChecks, teachingChecks, provider: this.connection.providerId, model, usage };
+    const resolvedSourceChecks = sourceChecks.map((check) => ({ ...check,
+      verdict: resolvedSourceConflictVerdict(check, typeof check.field === "string" ? fieldText(check.field) : "") }));
+    return { findings, sourceChecks: resolvedSourceChecks, teachingChecks, provider: this.connection.providerId, model, usage };
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {

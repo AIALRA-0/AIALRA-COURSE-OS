@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, resolvedSourceConflictVerdict, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.44", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.45", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -677,6 +677,12 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     await expect(client.auditTeachingPackage({ ...providerInput("ungrounded-audit"), blueprint: { resourcePackage: { pageKind: "concept" } } as ModelRouterInput["blueprint"], teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 }))
       .rejects.toMatchObject({ code: "MODEL_PROVIDER_SEMANTIC_AUDIT_INVALID", responseShape: expect.stringContaining("source_check_quote_not_found"), usage: { apiEquivalentUsd: 0.002 } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a source conflict only when the lesson explicitly preserves and corrects it", () => {
+    const check = { claim: "页面把 $1000!$ 写成 $10^{2500}$ 的等式", evidence: "页面原式不成立，两个指数相差 67", verdict: "contradicted" as const };
+    expect(resolvedSourceConflictVerdict(check, "页面把 $1000!$ 写成 $10^{2500}$，但独立核算得到 $4.02\\times10^{2567}$，两者相差约 67 个数量级")).toBe("supported");
+    expect(resolvedSourceConflictVerdict(check, "页面把 $1000!$ 写成 $10^{2500}$，所以两者相等")).toBe("contradicted");
   });
 
   it("rejects a negative teaching verdict that has no real field quotation", async () => {

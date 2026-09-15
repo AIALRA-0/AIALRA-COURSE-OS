@@ -3090,10 +3090,17 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_UNTRANSLATED_SOURCE_LABEL:")) fields.add(issue.slice("TEACHING_UNTRANSLATED_SOURCE_LABEL:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_ENGLISH_ONLY_TABLE:")) fields.add(issue.slice("TEACHING_ENGLISH_ONLY_TABLE:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:")) fields.add(issue.split(":")[1] as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_MAGNITUDE_COMPARISON_FALSE:")) fields.add(issue.slice("TEACHING_MAGNITUDE_COMPARISON_FALSE:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:")) fields.add(issue.slice("TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_POWER_ENERGY_CONFUSION:")) fields.add(issue.slice("TEACHING_POWER_ENERGY_CONFUSION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_UNLABELED_COLOR_MEANING:")) fields.add(issue.slice("TEACHING_UNLABELED_COLOR_MEANING:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_STAGE_ACTOR_CONTRADICTION:")) fields.add(issue.slice("TEACHING_STAGE_ACTOR_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:")) fields.add(issue.slice("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_STANDARD_CELL_AGENT_INVENTED:")) fields.add(issue.slice("TEACHING_STANDARD_CELL_AGENT_INVENTED:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:")) fields.add(issue.slice("TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_UNWEIGHTED_TERM_COEFFICIENT_MISSTATED:")) fields.add(issue.slice("TEACHING_UNWEIGHTED_TERM_COEFFICIENT_MISSTATED:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_UNWEIGHTED_TERM_TREND_DENIED:")) fields.add(issue.slice("TEACHING_UNWEIGHTED_TERM_TREND_DENIED:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);
@@ -3212,6 +3219,57 @@ function hasSharedEvidenceFragment(evidence: string, explanation: string): boole
   return evidence.length >= 12 && explanation.includes(evidence);
 }
 
+function compactEvidenceText(value: string): string {
+  return value.replace(/[`*_#\s\p{P}\p{S}]/gu, "").toLowerCase();
+}
+
+function evidenceBigrams(value: string): Set<string> {
+  const result = new Set<string>();
+  for (let index = 0; index + 1 < value.length; index += 1) result.add(value.slice(index, index + 2));
+  return result;
+}
+
+function longestSharedEvidenceRun(left: string, right: string): number {
+  const previous = new Uint16Array(right.length + 1);
+  let longest = 0;
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = new Uint16Array(right.length + 1);
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      if (left[leftIndex - 1] === right[rightIndex - 1]) {
+        current[rightIndex] = previous[rightIndex - 1]! + 1;
+        if (current[rightIndex]! > longest) longest = current[rightIndex]!;
+      }
+    }
+    previous.set(current);
+  }
+  return longest;
+}
+
+/**
+ * Semantic patches may change a few words in a line after coverage evidence was
+ * selected. Rebind only to a near-identical current line; never invent a quote
+ * or attach evidence to an unrelated paragraph.
+ */
+function rebindCoverageEvidenceQuotes(content: TeachingPackage, fullExplanationMarkdown: string): TeachingPackage["coverageEvidence"] {
+  const candidates = fullExplanationMarkdown.split(/\r?\n/u).map((line) => line.trim())
+    .filter((line) => !/^#{1,6}\s/u.test(line) && compactEvidenceText(line).length >= 12);
+  return content.coverageEvidence.map((evidence) => {
+    const compact = compactEvidenceText(evidence.explanation);
+    if (compact.length >= 12 && compactEvidenceText(fullExplanationMarkdown).includes(compact)) return evidence;
+    const sourceBigrams = evidenceBigrams(compact);
+    const matches = candidates.map((candidate) => {
+      const normalized = compactEvidenceText(candidate);
+      const candidateBigrams = evidenceBigrams(normalized);
+      const overlap = [...sourceBigrams].filter((value) => candidateBigrams.has(value)).length;
+      const dice = sourceBigrams.size + candidateBigrams.size === 0 ? 0 : (2 * overlap) / (sourceBigrams.size + candidateBigrams.size);
+      return { candidate, normalized, dice, sharedRun: longestSharedEvidenceRun(compact, normalized) };
+    }).filter((match) => match.dice >= 0.72 && match.sharedRun >= 12)
+      .sort((left, right) => right.dice - left.dice || right.sharedRun - left.sharedRun);
+    if (matches.length === 0 || (matches[1] && matches[0]!.dice - matches[1].dice < 0.04)) return evidence;
+    return { ...evidence, explanation: matches[0]!.candidate.slice(0, 400) };
+  });
+}
+
 export function normalizeTeachingPackageMath(content: TeachingPackage, sourceText = "", sourceTitle = ""): TeachingPackage {
   const mathTerms = [...new Set([...content.fullExplanationMarkdown.matchAll(/\\text\{\s*([A-Za-z]{8,})\s*\}/gu)].map((match) => match[1]!))];
   const sourceQuestionLabels = [...new Set([...sourceText.matchAll(/\b(?:What|How|Why|Where|When)\s+[A-Za-z][A-Za-z ]{2,65}\?/gu)]
@@ -3239,6 +3297,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .filter((line) => !isTeachingLayoutCommentaryLine(line))
     .join("\n"));
   const quoteExplainedSourceLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
+  const normalizedCoverageEvidence = content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) }));
   return {
     ...content,
     chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalizeTeachingBridgeBlocks(quoteRepeatedSourceLabels(
@@ -3248,7 +3307,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     priorKnowledge: priorKnowledge.map((value) => quoteRepeatedSourceLabels(value, fullExplanationMarkdown)),
     fullExplanationMarkdown,
     misconceptions: content.misconceptions.map(value => formatMisconception(quoteExplainedSourceLabel(value))),
-    coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
+    coverageEvidence: rebindCoverageEvidenceQuotes({ ...content, coverageEvidence: normalizedCoverageEvidence }, fullExplanationMarkdown),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
   };
 }

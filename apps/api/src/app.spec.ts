@@ -257,6 +257,17 @@ describe("Course OS API", () => {
     expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [content.coverageEvidence[0]!, content.coverageEvidence[0]!] }))
       .toContain("TEACHING_COVERAGE_DUPLICATE_ATOM");
   });
+  it("rebinds a coverage quote after a small semantic patch but rejects unrelated text", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown = "先去掉价值预测层，再把编码器接入策略网络，并继续训练策略。";
+    content.coverageEvidence = [
+      { atomId: "source-1", coveredFields: ["observation"], explanation: "先去掉价值预测层，再将编码器接入策略网络，并继续训练策略。" },
+      { atomId: "source-2", coveredFields: ["observation"], explanation: "这段无关说明不能被自动伪装成正文证据。" }
+    ];
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.coverageEvidence[0]!.explanation).toBe("先去掉价值预测层，再把编码器接入策略网络，并继续训练策略");
+    expect(normalized.coverageEvidence[1]!.explanation).toBe("这段无关说明不能被自动伪装成正文证据");
+  });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
     expect(normalizeGeneratedMathPunctuation("权重 $\u0000lambda$ 与 $\\gamma$"))
       .toBe("权重 $\\lambda$ 与 $\\gamma$");

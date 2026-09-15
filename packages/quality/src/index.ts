@@ -83,18 +83,23 @@ export interface TeachingNarrativeInput {
 function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expectedExponent: number }> {
   const mismatches: Array<{ n: number; expectedExponent: number }> = [];
   const visibleMath = markdown.replace(/\$/gu, "");
-  for (const match of visibleMath.matchAll(/(\d{2,5})!\s*[,，；;:]?\s*(?:=|≈|约等于|即|约有)\s*10\^\{(\d+)\}/gu)) {
-    const n = Number(match[1]);
-    const statedExponent = Number(match[2]);
-    if (!Number.isInteger(n) || n > 10_000 || !Number.isInteger(statedExponent)) continue;
+  const claims = visibleMath.split(/[。！？\n]/u).filter((clause) => /(\d{2,5})!/.test(clause) && /10\^\{\d+\}/u.test(clause));
+  for (const clause of claims) {
+    const factorial = /(\d{2,5})!/.exec(clause);
+    if (!factorial || !/(?:=|≈|约|估算|数量|规模|量级|达到|更接近)/u.test(clause)) continue;
+    const n = Number(factorial[1]);
+    if (!Number.isInteger(n) || n > 10_000) continue;
     let logarithm = 0;
     for (let value = 2; value <= n; value += 1) logarithm += Math.log10(value);
     const expectedExponent = Math.floor(logarithm);
     const hasCorrection = new RegExp(`10\\^\\{${expectedExponent}\\}`).test(markdown)
       && /(?:原文|材料|页面)[^\n]{0,120}(?:粗略|近似|写成|标为)[^\n]{0,180}(?:实际|准确|严格|更接近|约为)/u.test(markdown);
-    if (Math.abs(statedExponent - expectedExponent) > 1 && !hasCorrection) mismatches.push({ n, expectedExponent });
+    for (const exponent of clause.matchAll(/10\^\{(\d+)\}/gu)) {
+      const statedExponent = Number(exponent[1]);
+      if (Number.isInteger(statedExponent) && statedExponent !== expectedExponent && !hasCorrection) mismatches.push({ n, expectedExponent });
+    }
   }
-  return mismatches;
+  return mismatches.filter((value, index, values) => values.findIndex((candidate) => candidate.n === value.n && candidate.expectedExponent === value.expectedExponent) === index);
 }
 
 export function untranslatedSourceLabels(markdown: string): string[] {
@@ -118,6 +123,49 @@ function hasEnglishOnlyMarkdownTable(markdown: string): boolean {
     .filter((cell) => cell && !/^:?-{3,}:?$/u.test(cell));
   const englishCells = cells.filter((cell) => /[A-Za-z]{3}/u.test(cell) && !/[\p{Script=Han}]/u.test(cell));
   return cells.length >= 8 && englishCells.length / cells.length >= 0.6;
+}
+
+function hasFalseSameMagnitudeClaim(markdown: string): boolean {
+  return markdown.split(/[；。！？\n]/u).some((clause) => {
+    if (!/(?:同一|相同|相近)(?:个)?(?:数量级|量级)/u.test(clause)) return false;
+    const exponents = [...clause.matchAll(/10\^\{(\d+)\}/gu)].map((match) => Number(match[1]));
+    return exponents.some((left, index) => exponents.slice(index + 1).some((right) => Math.abs(left - right) > 1));
+  });
+}
+
+function hasSoftmaxUpdateMismatch(markdown: string, referenceMarkdown = markdown): boolean {
+  const compact = markdown.replace(/\s+/gu, " ");
+  const reference = referenceMarkdown.replace(/\s+/gu, " ");
+  const finalAssignedValue = (parameter: 1 | 2): number | undefined => {
+    const assignments = [...referenceMarkdown.matchAll(new RegExp(`\\\\theta_${parameter}[^\\n。；]{0,180}`, "gu"))]
+      .map((match) => match[0])
+      .filter((value) => /\\leftarrow/u.test(value))
+      .map((value) => [...value.slice(value.indexOf(`\\theta_${parameter}`) + `\\theta_${parameter}`.length).matchAll(/-?\d+(?:\.\d+)?/gu)].map((match) => Number(match[0])).at(-1))
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return assignments.at(-1);
+  };
+  const parameterPairs = [...reference.matchAll(/\\theta_1\s*(?:\\leftarrow|=)[^\d-]*(-?\d+(?:\.\d+)?)[^。；]{0,180}\\theta_2\s*(?:\\leftarrow|=)[^\d-]*(-?\d+(?:\.\d+)?)/gu)]
+    .map((match) => [Number(match[1]), Number(match[2])] as const)
+    .filter(([left, right]) => Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) >= 1e-9);
+  const assignedTheta1 = finalAssignedValue(1);
+  const assignedTheta2 = finalAssignedValue(2);
+  const parameterPair = assignedTheta1 !== undefined && assignedTheta2 !== undefined && Math.abs(assignedTheta1 - assignedTheta2) >= 1e-9
+    ? [assignedTheta1, assignedTheta2] as const
+    : parameterPairs.at(-1);
+  if (!parameterPair) return false;
+  const [theta1, theta2] = parameterPair;
+  const expected1 = Math.exp(theta1) / (Math.exp(theta1) + Math.exp(theta2));
+  const probabilityPairs = [
+    ...compact.matchAll(/(?:更新后[^。；]{0,180})?\\pi\s*\(\s*a_1[^)]*\)\s*(?:\\approx|≈|=)\s*(\d+(?:\.\d+)?)[^。；]{0,120}\\pi\s*\(\s*a_2[^)]*\)\s*(?:\\approx|≈|=)\s*(\d+(?:\.\d+)?)/gu),
+    ...compact.matchAll(/更新后[^。；]{0,100}概率[^。；]{0,30}(\d(?:\.\d+)?)[^。；]{0,35}(?:与|和)[^。；]{0,20}(\d(?:\.\d+)?)/gu)
+  ];
+  return probabilityPairs.some((match) => {
+    const probability1 = Number(match[1]);
+    const probability2 = Number(match[2]);
+    if (!Number.isFinite(probability1) || !Number.isFinite(probability2)) return false;
+    const describesUpdatedResult = /更新后|重新代入|更新规则/u.test(match[0]);
+    return describesUpdatedResult && (Math.abs(probability1 - expected1) > 0.012 || Math.abs(probability2 - (1 - expected1)) > 0.012);
+  });
 }
 
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
@@ -240,6 +288,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       for (const mismatch of factorialMagnitudeMismatches(markdown)) {
         issues.push(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:${mismatch.n}:${mismatch.expectedExponent}`);
       }
+      if (hasFalseSameMagnitudeClaim(markdown)) issues.push(`TEACHING_MAGNITUDE_COMPARISON_FALSE:${field}`);
+      if (hasSoftmaxUpdateMismatch(markdown, learnerText)) issues.push(`TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:${field}`);
       if (/功耗[^；。！？\n]{0,35}(?:是|指|表示)?[^；。！？\n]{0,12}(?:芯片工作时)?消耗的能量/u.test(semanticMarkdown)
         && !/单位时间|能量消耗(?:速率|速度)|功率/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_POWER_ENERGY_CONFUSION:${field}`);
@@ -283,6 +333,21 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (/不同颜色[^；。！？\n]{0,35}(?:表示|对应)[^；。！？\n]{0,45}(?:指标|数值|程度|高低)/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_UNLABELED_COLOR_MEANING:${field}`);
       }
+      if (/(?:三|四|五|这些|上述)条(?:要点|说明|内容)?[^；。！？\n]{0,18}(?:构成|形成)[^；。！？\n]{0,16}(?:先后|因果|递进)关系/u.test(semanticMarkdown)) {
+        issues.push(`TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:${field}`);
+      }
+      if (/(?:三项|线长、拥塞(?:程度)?(?:和|与)密度)[^；。！？\n]{0,35}(?:分别)?(?:乘|带有)[^；。！？\n]{0,24}(?:\\lambda|lambda)[^；。！？\n]{0,24}(?:\\gamma|gamma)/u.test(semanticMarkdown)) {
+        issues.push(`TEACHING_UNWEIGHTED_TERM_COEFFICIENT_MISSTATED:${field}`);
+      }
+      if (semanticMarkdown.split(/[；。！？\n]/u).some((clause) =>
+        /(?:权重|\\lambda|\\gamma)/iu.test(clause)
+        && /(?:未给出|未知)/u.test(clause)
+        && /(?:线长|Wirelength)/iu.test(clause)
+        && /(?:不能|无法)/u.test(clause)
+        && /(?:判断|断言|确认)/u.test(clause)
+        && /(?:下降|减小|变化方向)/u.test(clause))) {
+        issues.push(`TEACHING_UNWEIGHTED_TERM_TREND_DENIED:${field}`);
+      }
     }
     const forceDirectedStandardCells = /(?:标准单元|第二阶段)[^。！？\n]{0,90}(?:基于力|力导向)/u.test(explanation);
     if (forceDirectedStandardCells && /(?:前两个阶段|宏单元(?:放置)?和标准单元(?:放置)?)[^。！？\n]{0,55}(?:都|均)?由强化学习(?:智能体)?/u.test(input.mainContentMarkdown)) {
@@ -290,6 +355,17 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     }
     if (/(?:第二阶段|标准单元放置)[^。！？\n]{0,150}(?:动作记为|动作是)[^。！？\n]{0,20}\$a_\{?T-1\}?\$/u.test(explanation)) {
       issues.push("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
+    }
+    const standardCellSection = /##\s+[^\n]*(?:标准单元|力导向|基于力)[^\n]*\n([\s\S]{0,900}?)(?=\n##\s|$)/u.exec(explanation)?.[1] || "";
+    if (/\$a_\{?T-1\}?\$/u.test(standardCellSection)
+      && !/(?:宏单元阶段|最后一个宏单元)[^。！？\n]{0,40}\$a_\{?T-1\}?\$|\$a_\{?T-1\}?\$[^。！？\n]{0,45}(?:宏单元阶段|最后一个宏单元)/u.test(standardCellSection)) {
+      issues.push("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
+    }
+    if (/(?:标准单元|基于力|力导向)[^。！？\n]{0,80}(?:同样|继续)?[^。！？\n]{0,30}(?:画出|包含|经过)[^。！？\n]{0,25}(?:智能体与时间步|多个时间步)/u.test(explanation)) {
+      issues.push("TEACHING_STANDARD_CELL_AGENT_INVENTED:fullExplanationMarkdown");
+    }
+    if (input.learningObjectives.some((objective) => /(?:解释|说明)[^。；\n]{0,35}为什么[^。；\n]{0,35}(?:回报|奖励)[^。；\n]{0,18}(?:为|等于|都是)\s*0/u.test(objective))) {
+      issues.push("TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:learningObjectives");
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));

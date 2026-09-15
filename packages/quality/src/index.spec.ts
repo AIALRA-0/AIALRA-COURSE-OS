@@ -381,6 +381,39 @@ describe("learner-facing teaching narrative", () => {
       .toContain("TEACHING_UNLABELED_COLOR_MEANING:fullExplanationMarkdown");
   });
 
+  it("rejects inconsistent recomputation, false magnitude equivalence, and invented list causality", () => {
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n更新后 $\\theta_1=0.1$、$\\theta_2=-0.1$，重新代入得到 $\\pi(a_1)\\approx0.525$、$\\pi(a_2)\\approx0.475$` }))
+      .toContain("TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$10^{2567}$ 与 $10^{2500}$ 处在同一数量级` }))
+      .toContain("TEACHING_MAGNITUDE_COMPARISON_FALSE:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n这三条要点构成先后关系` }))
+      .toContain("TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:fullExplanationMarkdown");
+  });
+
+  it("rejects a stale softmax summary when the detailed calculation has the final parameters", () => {
+    const issues = validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n- $\\theta_1 \\leftarrow 0 + 0.1 = 0.1$\n- $\\theta_2 \\leftarrow 0 - 0.1 = -0.1$\n\n更新后重新代入得到 $\\pi(a_1)\\approx0.550$、$\\pi(a_2)\\approx0.450$`,
+      mainContentMarkdown: "- 更新规则执行完成，更新后概率约为 $0.525$ 与 $0.475$" });
+    expect(issues).toContain("TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:mainContentMarkdown");
+  });
+
+  it("keeps the unweighted reward term separate and preserves the macro-to-cell boundary", () => {
+    const staged = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["解释为什么宏单元阶段的回报都是 0"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 标准单元放置\n标准单元阶段同样画出智能体与时间步，动作记为 $a_{T-1}$\n\n回报为 $r_T=-\\text{Wirelength}-\\lambda c-\\gamma d$；线长、拥塞和密度三项分别乘上 $\\lambda$ 和 $\\gamma$；由于权重未知，无法判断线长增大时回报是否下降` };
+    const issues = validateTeachingNarrative(staged);
+    expect(issues).toEqual(expect.arrayContaining([
+      "TEACHING_STANDARD_CELL_AGENT_INVENTED:fullExplanationMarkdown",
+      "TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown",
+      "TEACHING_UNWEIGHTED_TERM_COEFFICIENT_MISSTATED:fullExplanationMarkdown",
+      "TEACHING_UNWEIGHTED_TERM_TREND_DENIED:fullExplanationMarkdown",
+      "TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:learningObjectives"
+    ]));
+  });
+
   it("does not invent a fixed-length graph vector from multiple embedding outputs", () => {
     const input = { ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n原图“Edge embeddings”和“Macro embeddings”是两类输出，图编码器把它们汇总成固定长度向量` };
