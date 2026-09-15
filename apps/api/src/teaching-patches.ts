@@ -57,4 +57,3 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
   }
   return { content: corrected, fields };
 }
-
