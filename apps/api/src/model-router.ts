@@ -1,3 +1,4 @@
+import { applySemanticAuditFindings } from "./teaching-patches.js";
 import { teachingCompositionContract } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
@@ -479,7 +480,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", source.model, source.usage, source.provider);
     }
     try {
-      const teaching = await this.auditTeachingWithRetry({ ...input, idempotencyKey: `${input.idempotencyKey}:writing`,
+      let corrected: TeachingPackage;
+      try { corrected = applySemanticAuditFindings(input.teachingPackage, source.findings).content; }
+      catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_PATCH_INVALID", source.model, emptyUsage(Date.now()), source.provider); }
+      const teaching = await this.auditTeachingWithRetry({ ...input, teachingPackage: corrected, idempotencyKey: `${input.idempotencyKey}:writing`,
         maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0)
       }, "teaching");
       const findings = [...new Map([...source.findings, ...teaching.findings].map(finding => [JSON.stringify(finding), finding])).values()];

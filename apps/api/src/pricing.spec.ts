@@ -23,6 +23,20 @@ describe("cost price snapshots", () => {
     expect(estimateMicrousd(snapshot, 1_000, 200, 500)).toBe(764);
   });
 
+  it.each([
+    ["2026-09-15T00:59:59Z",150000], ["2026-09-15T01:00:00Z",300000],
+    ["2026-09-15T04:00:00Z",150000], ["2026-09-15T06:00:00Z",300000],
+    ["2026-09-15T10:00:00Z",150000], ["2026-09-19T06:00:00Z",150000]
+  ])("uses the published UTC price window at %s", (instant, expected) => {
+    const price = priceSnapshotFor("opencode-go","deepseek-v4-flash-vision-exp",new Date(instant));
+    expect(price?.inputMicrousdPerMillion).toBe(expected);
+    expect(price?.id).toContain(expected === 300000 ? ":peak" : ":offpeak");
+  });
+  it("does not discount an explicit custom OpenCode rate card", () => {
+    vi.stubEnv("COURSE_OS_PRICING_SNAPSHOT_JSON",JSON.stringify({prices:[{provider:"opencode-go",model:"deepseek-v4-flash",inputMicrousdPerMillion:123,outputMicrousdPerMillion:456,cachedInputMicrousdPerMillion:7}]}));
+    expect(priceSnapshotFor("opencode-go","deepseek-v4-flash",new Date("2026-09-19T06:00:00Z"))?.inputMicrousdPerMillion).toBe(123);
+  });
+
   it("records subscription quota as consumption instead of silently calling it free", () => {
     expect(billingBreakdown("opencode-go", "subscription_quota", 12_345)).toEqual({ cashCostMicrousd: 0, quotaConsumedMicrousd: 12_345 });
     expect(billingBreakdown("deepseek", "metered", 12_345)).toEqual({ cashCostMicrousd: 12_345, quotaConsumedMicrousd: 0 });

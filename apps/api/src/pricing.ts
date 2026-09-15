@@ -21,9 +21,9 @@ const DEFAULT_CAPTURED_AT = "2026-09-10T04:00:00.000Z";
 const DEFAULT_PRICES: PriceDefinition[] = [
   { provider: "opencode-go", model: "gpt-5.6-luna", inputMicrousdPerMillion: 200_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 20_000 },
   { provider: "opencode-go", model: "qwen3.8-flash", inputMicrousdPerMillion: 150_000, outputMicrousdPerMillion: 470_000, cachedInputMicrousdPerMillion: 16_000 },
-  { provider: "opencode-go", model: "deepseek-v4-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
-  { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
-  { provider: "opencode-go", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 },
+  { provider: "opencode-go", model: "deepseek-v4-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
+  { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
+  { provider: "opencode-go", model: "deepseek-v4-pro", inputMicrousdPerMillion: 1_320_000, outputMicrousdPerMillion: 3_960_000, cachedInputMicrousdPerMillion: 44_000 },
   // Conservative peak rates for V4.1 Flash; the legacy V4 Flash names now
   // route to this model. Runtime configuration may replace this snapshot.
   { provider: "deepseek", model: "deepseek-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
@@ -32,7 +32,7 @@ const DEFAULT_PRICES: PriceDefinition[] = [
   { provider: "deepseek", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 }
 ];
 
-export function priceSnapshotFor(provider: string, model: string): UnitPriceSnapshot | undefined {
+export function priceSnapshotFor(provider: string, model: string, at = new Date()): UnitPriceSnapshot | undefined {
   const configuration = readPricingConfiguration();
   // DeepSeek may report its V4 Flash response under this shorter name.
   // Flash and Flash Vision share the published token rates.
@@ -45,17 +45,24 @@ export function priceSnapshotFor(provider: string, model: string): UnitPriceSnap
   const definition = custom ?? defaultPrice;
   if (!definition) return undefined;
   const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");
-  const capturedAt = configuration.capturedAt || DEFAULT_CAPTURED_AT;
+  const capturedAt = configuration.capturedAt || (provider === "opencode-go" ? "2026-09-15T13:00:00.000Z" : DEFAULT_CAPTURED_AT);
+  // OpenCode's published DeepSeek schedule uses UTC, not the server timezone.
+  // Explicit deployment rate cards remain authoritative and are never discounted.
+  const scheduled = !custom && provider === "opencode-go" && model.startsWith("deepseek-");
+  const weekday = at.getUTCDay() >= 1 && at.getUTCDay() <= 5;
+  const hour = at.getUTCHours();
+  const peak = weekday && ((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10));
+  const multiplier = scheduled && !peak ? 0.5 : 1;
   return {
-    id: `price:${provider}:${model}:${capturedAt}`,
+    id: `price:${provider}:${model}:${capturedAt}${scheduled ? peak ? ":peak" : ":offpeak" : ""}`,
     provider,
     model,
     currency: "USD",
     capturedAt,
     source,
-    inputMicrousdPerMillion: definition.inputMicrousdPerMillion,
-    outputMicrousdPerMillion: definition.outputMicrousdPerMillion,
-    cachedInputMicrousdPerMillion: definition.cachedInputMicrousdPerMillion
+    inputMicrousdPerMillion: definition.inputMicrousdPerMillion * multiplier,
+    outputMicrousdPerMillion: definition.outputMicrousdPerMillion * multiplier,
+    cachedInputMicrousdPerMillion: definition.cachedInputMicrousdPerMillion * multiplier
   };
 }
 

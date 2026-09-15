@@ -659,6 +659,51 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
+  it("includes successful generation usage when a later field repair fails", async () => {
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        const result = testTeachingResult(0.005);
+        result.content.chapterBridgeMarkdown = "上一页使用 PDA 这个未解释的缩写讨论输入，本页继续沿用它来解释过程";
+        return result;
+      },
+      repairTeachingFields: async () => { throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:429", "gpt-5.6-sol", {inputTokens:50,cachedInputTokens:0,outputTokens:20,apiEquivalentUsd:0.003,durationMs:100}); }
+    };
+    const {app,release} = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key","paid-then-failed").send({materialVersionId:release.id,pageIds:["page-1"],budgetUsd:1}).expect(202);
+    const job = await waitForJob(app,created.body.id);
+    expect(job).toMatchObject({state:"failed",spentUsd:0.008});
+    const costs = await request(app).get(`/api/v1/costs?jobId=${job.id}`).expect(200);
+    expect(costs.body.entries.reduce((sum:number,item:{actualMicrousd:number})=>sum+item.actualMicrousd,0)).toBe(8000);
+  });
+
+  it("records already billed usage after cancellation without saving a stale draft", async () => {
+    const beforeEnv = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    let releaseModel!: (result: TeachingGenerationResult) => void;
+    let enteredModel!: () => void;
+    const entered = new Promise<void>(resolve => { enteredModel = resolve; });
+    const pending = new Promise<TeachingGenerationResult>(resolve => { releaseModel = resolve; });
+    try {
+      const {app,release,dependencies,readweave} = await seededApp({generateTeachingPackage:async()=>{enteredModel();return pending;}});
+      const save = vi.spyOn(readweave,"saveDraft");
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key","cancel-paid-job").send({materialVersionId:release.id,pageIds:["page-1"],budgetUsd:1}).expect(202);
+      const execution = executeGenerationJob(created.body.id,dependencies);
+      await entered;
+      await request(app).post(`/api/v1/generation-jobs/${created.body.id}:cancel`).set("Idempotency-Key","cancel-paid-request").send({}).expect(200);
+      releaseModel(testTeachingResult(0.005));
+      await execution;
+      const job = await request(app).get(`/api/v1/generation-jobs/${created.body.id}`).expect(200);
+      expect(job.body).toMatchObject({state:"cancelled",spentUsd:0.005});
+      expect(save).not.toHaveBeenCalled();
+      const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+      expect(costs.body.entries).toHaveLength(1);
+      expect(costs.body.entries[0].actualMicrousd).toBe(5000);
+    } finally {
+      releaseModel?.(testTeachingResult(0.005));
+      if(beforeEnv===undefined)delete process.env.COURSE_OS_EXTERNAL_WORKER;else process.env.COURSE_OS_EXTERNAL_WORKER=beforeEnv;
+    }
+  });
+
   it("does not hide a rejected bridge to manufacture a successful lesson", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {

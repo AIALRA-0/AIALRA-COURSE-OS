@@ -8,7 +8,7 @@ describe("generation harness", () => {
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "packages/quality/src/index.ts", "packages/quality/src/presentation.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "apps/api/src/teaching-patches.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "packages/quality/src/index.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("b15dcd70817c1dc88a925a935355059c2dc6eb3ae280775dc09faae1f51a1a7b");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
@@ -463,16 +463,17 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       scopes.push(source ? "source" : "teaching");
       expect(text).toContain('"previousPageContext":"前页输入定义"');
       expect(text.includes('"writingRules":')).toBe(!source);
+      if (!source) expect(text).toContain("Changed input");
       expect(body.text.format.schema.properties.findings.items.properties.field.enum).toContain("questions:0:expectedAnswer");
       return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(source ? {
         sourceChecks: [{ claim: "比例相等", evidence: "给定两组分子分母计算结果并不相等", verdict: "contradicted" }],
-        findings: [{ field: "fullExplanationMarkdown", original: "比例相等", replacement: "比例不同", evidence: "逐项相除得到不同结果" }]
+        findings: [{ field: "fullExplanationMarkdown", original: "Input", replacement: "Changed input", evidence: "逐项相除得到不同结果" }]
       } : { findings: [], teachingChecks: ["entry","terms","prerequisites","structure","objects","reasoning","questions"].map(criterion => ({ criterion, evidence: "对应字段已经分段说明输入、过程与结果", verdict: "supported" })) }),
         usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.002 } });
     });
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({providerId:"deepseek",baseUrl:"https://deepseek.test",apiKey:"synthetic-secret",model:"deepseek-flash",protocol:"responses"});
-    const result = await client.auditTeachingPackage({...providerInput("split-audit"),previousPageContext:"前页输入定义",blueprint:{resourcePackage:{pageKind:"concept"}} as ModelRouterInput["blueprint"],teachingPackage:providerTeachingContent() as TeachingPackage,maxCostUsd:0.01});
+    const result = await client.auditTeachingPackage({...providerInput("split-audit"),previousPageContext:"前页输入定义",blueprint:{resourcePackage:{pageKind:"concept"}} as ModelRouterInput["blueprint"],teachingPackage:{...providerTeachingContent(),fullExplanationMarkdown:"Input is the first object described in this synthetic lesson"} as TeachingPackage,maxCostUsd:0.01});
     expect(scopes).toEqual(["source","teaching"]);
     expect(result.sourceChecks?.[0]?.verdict).toBe("contradicted");
     expect(result.findings).toHaveLength(1);

@@ -1,3 +1,6 @@
+import { applySemanticAuditFindings } from "./teaching-patches.js";
+export { applySemanticAuditFindings } from "./teaching-patches.js";
+import { meterModelRouter } from "./model-usage-meter.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -2483,6 +2486,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       continue;
     }
     const page = preparePageForGeneration(sourcePage);
+    const meter = meterModelRouter(runtimeModelRouter);
+    const pageModelRouter = meter.client;
+    let finalizedCost: GenerationCostEntry | undefined;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
       await assertGenerationFence(jobId, fenceToken, dependencies);
@@ -2499,7 +2505,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
-      let generation = await runtimeModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
+      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
@@ -2552,9 +2558,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           const englishFields = repairIssues.includes("TEACHING_UNPAIRED_ENGLISH")
             ? unpairedEnglishTeachingFields({ ...previousGeneration.content, sourceTitle: page.title }) : [];
           const focusedFields = focusedTeachingRepairFields(repairIssues, englishFields);
-          const repaired = focusedFields && runtimeModelRouter.repairTeachingFields
-            ? await runtimeModelRouter.repairTeachingFields(repairInput, focusedFields)
-            : await runtimeModelRouter.generateTeachingPackage(repairInput);
+          const repaired = focusedFields && pageModelRouter.repairTeachingFields
+            ? await pageModelRouter.repairTeachingFields(repairInput, focusedFields)
+            : await pageModelRouter.generateTeachingPackage(repairInput);
           repaired.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(repaired.content.mainContentMarkdown, repaired.content.fullExplanationMarkdown);
           repaired.content = normalizeTeachingPackageMath(repaired.content, sourceText, page.title);
           const focused = mergeFocusedTeachingRepair(previousGeneration.content, repaired.content, repairIssues, englishFields);
@@ -2587,8 +2593,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           const spentOnPage = generationUsageCostUsd(beforeAudit);
           if (spentOnPage === undefined || spentOnPage >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
           await appendGenerationStageEvent(jobId, page.id, "semantic_audit", "started", dependencies);
-          if (runtimeModelRouter.auditTeachingPackage) {
-            const audit = await runtimeModelRouter.auditTeachingPackage({
+          if (pageModelRouter.auditTeachingPackage) {
+            const audit = await pageModelRouter.auditTeachingPackage({
               pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
               writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
               language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2621,7 +2627,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage
               }));
               if (spentAfterFirst === undefined || spentAfterFirst >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", audit.model, audit.usage, audit.provider);
-              recheck = await runtimeModelRouter.auditTeachingPackage({
+              recheck = await pageModelRouter.auditTeachingPackage({
                 pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                 writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                 language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2650,7 +2656,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                   combineTeachingGenerations(beforeAudit, { content: corrected, provider: audit.provider, model: audit.model, usage: audit.usage }),
                   { content: corrected, provider: recheck.provider, model: recheck.model, usage: recheck.usage }));
                 if (spentAfterRecheck === undefined || spentAfterRecheck >= pageCostLimitUsd) throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", recheck.model, recheck.usage, recheck.provider);
-                verification = await runtimeModelRouter.auditTeachingPackage({
+                verification = await pageModelRouter.auditTeachingPackage({
                   pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                   writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                   language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2703,7 +2709,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
               }
               sourceRepairAttempted = true;
-              let sourceRepair = await runtimeModelRouter.generateTeachingPackage({
+              let sourceRepair = await pageModelRouter.generateTeachingPackage({
                 pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                 writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                 language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2730,7 +2736,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                   sourceTitle: page.title, pageKind: blueprint.resourcePackage.pageKind, sourceDensity: blueprint.resourcePackage.sourceDensity })
               ])];
               if (sourceRepairIssues.length > 0 && sourceRepairIssues.every((issue) => issue.startsWith("TEACHING_MATH_INVALID:"))
-                && runtimeModelRouter.repairTeachingFields) {
+                && pageModelRouter.repairTeachingFields) {
                 sourceRepairMathIssueCodes = sourceRepairIssues.map((issue) => issue.split(":", 1)[0]!);
                 const spentBeforeLocalRepair = generationUsageCostUsd(combineTeachingGenerations(generation, sourceRepair));
                 if (spentBeforeLocalRepair === undefined || spentBeforeLocalRepair >= pageCostLimitUsd) {
@@ -2738,7 +2744,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 }
                 const fields = focusedTeachingRepairFields(sourceRepairIssues);
                 if (fields) {
-                  const mathRepair = await runtimeModelRouter.repairTeachingFields({
+                  const mathRepair = await pageModelRouter.repairTeachingFields({
                     pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                     writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                     language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2767,7 +2773,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 if (spentBeforeFinalAudit === undefined || spentBeforeFinalAudit >= pageCostLimitUsd) {
                   throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
                 }
-                const finalAudit = await runtimeModelRouter.auditTeachingPackage({
+                const finalAudit = await pageModelRouter.auditTeachingPackage({
                   pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                   writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                   language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2796,7 +2802,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                       if (spentBeforePatchCheck === undefined || spentBeforePatchCheck >= pageCostLimitUsd) {
                         throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", generation.model, generation.usage, generation.provider);
                       }
-                      decisiveAudit = await runtimeModelRouter.auditTeachingPackage({
+                      decisiveAudit = await pageModelRouter.auditTeachingPackage({
                         pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint,
                         writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
                         language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
@@ -2849,7 +2855,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
               correctedFields, issueCount: auditIssues.length, issueCodes: auditIssues.map((issue) => issue.split(":", 1)[0])
             });
           } else {
-          const audited = await runtimeModelRouter.generateTeachingPackage({
+          const audited = await pageModelRouter.generateTeachingPackage({
             pageTitle: page.title,
             pageNumber: page.pageNumber,
             sourceText,
@@ -2898,6 +2904,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
       const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
+      finalizedCost = cost;
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
         provider: cost.provider, model: cost.model, estimatedMicrousd: cost.estimatedMicrousd, actualMicrousd: cost.actualMicrousd, costBasis: cost.costBasis });
       persistenceStage = "load_draft";
@@ -2948,13 +2955,21 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
       });
     } catch (error) {
-      if (error instanceof ModelRouterGenerationError) {
-        const failedCost = failedGenerationCostEntry(jobId, currentJob, release, page.id, error);
-        await dependencies.readweave.appendCostEntry(failedCost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
+      const billedCalls = meter.groupedUsage();
+      if (finalizedCost || billedCalls.length > 0 || error instanceof ModelRouterGenerationError) {
+        const receipts = billedCalls.length ? billedCalls : [{ provider: (error as ModelRouterGenerationError).provider, model: (error as ModelRouterGenerationError).model, usage: (error as ModelRouterGenerationError).usage }];
+        for (const receipt of (finalizedCost ? receipts.slice(0, 1) : receipts)) {
+        const billedError = new ModelRouterGenerationError(safeGenerationIssue(error), receipt.model, receipt.usage, receipt.provider);
+        const failedCost = finalizedCost ?? failedGenerationCostEntry(jobId, currentJob, release, page.id, billedError);
+        if (!finalizedCost && receipts.length > 1) failedCost.id += `:provider:${receipt.provider}:model:${receipt.model}`;
+        await dependencies.readweave.appendCostEntry(failedCost, systemWriteContext(failedCost.id, currentJob.workspaceId));
         await dependencies.operations.mutate((state) => {
           const job = state.jobs.find((item) => item.id === jobId);
-          if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
+          if (!job) return;
+          // Billing records remain valid after cancellation; they must not revive
+          // the task or permit a stale worker to write a lesson draft.
           applyActualCost(job, failedCost, state, dependencies);
+          if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
           if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
           dependencies.operations.appendEvent(state, job.id, "generation.page.cost_recorded", { pageId, status: "failed", actualMicrousd: failedCost.actualMicrousd });
           if (job.spentUsd > job.budgetUsd) {
@@ -2962,6 +2977,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             dependencies.operations.appendEvent(state, job.id, "job.failed", { issue: "JOB_BUDGET_EXHAUSTED", spentUsd: job.spentUsd, budgetUsd: job.budgetUsd });
           }
         });
+        }
       }
       await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
         ...(error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}),
@@ -3051,64 +3067,6 @@ function combineTeachingGenerations(initial: TeachingGenerationResult, repaired:
       durationMs: initial.usage.durationMs + repaired.usage.durationMs
     }
   };
-}
-
-/** Apply only unambiguous minimal corrections; never accept a wholesale model rewrite. */
-export function applySemanticAuditFindings(content: TeachingPackage, findings: SemanticAuditResult["findings"]): { content: TeachingPackage; fields: string[] } {
-  const corrected = structuredClone(content);
-  const fields: string[] = [];
-  for (const finding of findings) {
-    if (!finding.original.trim() || !finding.replacement.trim() || !finding.evidence.trim()
-      || finding.original.length > 1200 || finding.replacement.length > 1200 || finding.evidence.length > 500) throw new Error("TEACHING_SEMANTIC_AUDIT_INVALID");
-    let value: string;
-    let set: (text: string) => void;
-    if (finding.field === "fullExplanationMarkdown" || finding.field === "mainContentMarkdown" || finding.field === "chapterBridgeMarkdown") {
-      value = corrected[finding.field] || "";
-      set = (text) => { corrected[finding.field as "fullExplanationMarkdown" | "mainContentMarkdown" | "chapterBridgeMarkdown"] = text; };
-    } else if (/^(?:misconceptions|priorKnowledge|learningObjectives):[0-9]+$/.test(finding.field)) {
-      const field = finding.field.split(":")[0] as "misconceptions" | "priorKnowledge" | "learningObjectives";
-      const index = Number(finding.field.split(":")[1]);
-      value = corrected[field][index] ?? "";
-      set = (text) => { corrected[field][index] = text; };
-    } else if (/^questions:[0-9]+:(?:prompt|expectedAnswer|explanation)$/.test(finding.field)) {
-      const [, position, field] = finding.field.split(":");
-      const question = corrected.questions[Number(position)];
-      if (!question) throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
-      const key = field as "prompt" | "expectedAnswer" | "explanation";
-      value = question[key];
-      set = (text) => { question[key] = text; };
-    } else if (/^questions:[0-9]+:options:[0-9]+$/.test(finding.field)) {
-      const [, position, , optionPosition] = finding.field.split(":");
-      const options = corrected.questions[Number(position)]?.options;
-      if (!options || options[Number(optionPosition)] === undefined) throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
-      value = options[Number(optionPosition)]!;
-      set = (text) => { options[Number(optionPosition)] = text; };
-    } else throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
-    const at = value.indexOf(finding.original);
-    if (finding.original === finding.replacement) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
-    if (at < 0) {
-      // A later audit can repeat a correction already applied by the first
-      // source pass. Treat one exact replacement as an idempotent finding;
-      // every genuinely missing or ambiguous quote still fails closed.
-      const replacementAt = value.indexOf(finding.replacement);
-      if (replacementAt >= 0 && value.lastIndexOf(finding.replacement) === replacementAt) continue;
-      throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
-    }
-    if (value.lastIndexOf(finding.original) !== at) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
-    const updated = value.slice(0, at) + finding.replacement + value.slice(at + finding.original.length);
-    set(updated);
-    if (finding.field === "fullExplanationMarkdown") {
-      for (const evidence of corrected.coverageEvidence) {
-        // An excerpt containing the exact corrected words changes in the same
-        // transaction. Never replace an unrelated excerpt with an entire paragraph.
-        if (!evidence.explanation.includes(finding.original)) continue;
-        const excerpt = evidence.explanation.replace(finding.original, finding.replacement);
-        if (updated.includes(excerpt)) evidence.explanation = excerpt;
-      }
-    }
-    fields.push(finding.field);
-  }
-  return { content: corrected, fields };
 }
 
 export function focusedTeachingRepairFields(issues: string[], englishFields: TeachingNarrativeField[] = []): Array<keyof TeachingPackage> | undefined {
@@ -3444,6 +3402,12 @@ function generationUsageCostUsd(generation: TeachingGenerationResult): number | 
 }
 
 function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: OperationalState, dependencies: AppDependencies): void {
+  const receiptKey = `accounted-cost:${cost.id}`;
+  if (state.idempotency[receiptKey]) return;
+  if (state.events.some(event => event.streamId === job.id && event.type === "generation.cost.recorded" && (event.payload as { costEntryId?: string }).costEntryId === cost.id)) {
+    state.idempotency[receiptKey] = { kind: "cost_receipt", objectId: cost.id }; return;
+  }
+  state.idempotency[receiptKey] = { kind: "cost_receipt", objectId: cost.id };
   const accountedMicrousd = cost.costBasis === "provider_reported" ? cost.actualMicrousd : cost.estimatedMicrousd;
   job.spentUsd = Math.round((job.spentUsd + accountedMicrousd / 1_000_000) * 1_000_000) / 1_000_000;
   job.updatedAt = new Date().toISOString();
