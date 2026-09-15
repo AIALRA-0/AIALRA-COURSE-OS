@@ -1606,7 +1606,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     try {
       await this.putContent(state.projections.stateNoteId, encodeReadWeaveStateContent(state));
       this.lastWriteAt = new Date().toISOString();
-      this.stateCache = { state: structuredClone(state), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      // `mutate` owns this object and serializes every writer through
+      // `writeChain`, so the committed snapshot can become the cache directly.
+      // Public reads still clone the values they return.
+      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
     } catch (error) {
       this.invalidateStateCache();
       throw error;
@@ -1626,10 +1629,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         // ownership and revisions, so downloading the same multi-megabyte note
         // again only adds seconds of latency. An expired or missing snapshot is
         // still fetched from ReadWeave before the mutation.
-        const state = await this.readState();
+        const state = await this.readStateReference(true);
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
-        result = await change(state);
+        result = structuredClone(await change(state));
         if (!replay) await this.writeState(state);
+      } catch (error) {
+        // A callback can update its private state object after a remote
+        // projection call. If either step fails, discard the snapshot so no
+        // reader can observe an uncommitted local mutation.
+        this.invalidateStateCache();
+        throw error;
       } finally {
         this.activeWriteContext = previousContext;
       }
