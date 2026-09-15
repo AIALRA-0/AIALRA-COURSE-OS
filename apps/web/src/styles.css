@@ -529,6 +529,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .course-sidebar { display: none; }
   .product-body { grid-template-columns: 1fr; }
   .product-content { overflow: auto; }
+  .product-content:has(.learning-workspace) { overflow: hidden; }
   .workspace-header { position: sticky; top: 0; z-index: 20; min-height: auto; padding: 10px 12px; }
   .workspace-title .breadcrumbs, .draft-pill { display: none; }
   .title-line { margin: 0; }
@@ -543,21 +544,21 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .studio-slide { height: min(62vw, 450px); min-height: 300px; }
   .editor-block > header > div { grid-template-columns: 1fr; gap: 2px; }
   .editor-block header input { padding-left: 0; }
-  .learning-workspace { height: auto; min-height: 100%; display: block; }
+  .learning-workspace { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
   .learning-header { min-height: auto; padding: 10px 13px; }
   .learning-header h1 { font-size: 14px; }
   .learning-header-actions { gap: 6px; }
   .learning-header-actions .quiet-button { padding: 7px 8px; font-size: 9px; }
   .learning-progress { width: 82px; }
-  .page-dock { position: sticky; bottom: 0; }
+  .page-dock { position: relative; bottom: auto; }
   .page-dock .lesson-strip { max-height: 128px; }
   .mobile-tabs { position: sticky; top: 0; z-index: 15; display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--panel); }
   .mobile-tabs button { padding: 10px 5px 8px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 10px; }
   .mobile-tabs button.active { border-bottom-color: var(--brand); color: var(--brand-ink); font-weight: 600; }
-  .learning-grid { display: block; }
+  .learning-grid { min-height: 0; display: block; overflow: hidden; }
   .visual-column, .lesson-column { display: none; }
-  .mode-visual .visual-column { height: calc(100dvh - 171px); min-height: 480px; display: flex; padding: 8px; }
-  .mode-lesson .lesson-column, .mode-practice .lesson-column { display: block; overflow: visible; border-left: 0; }
+  .mode-visual .visual-column { height: 100%; min-height: 0; display: flex; padding: 8px; }
+  .mode-lesson .lesson-column, .mode-practice .lesson-column { height: 100%; display: block; overflow-y: auto; border-left: 0; }
   .mode-practice .lesson-block:not(.qa-records):not(.random-questions), .mode-practice .lesson-details, .mode-practice .lesson-header { display: none; }
   .explanation-panel { padding: 21px 16px 70px; }
   .code-line summary { grid-template-columns: 28px 1fr; }
