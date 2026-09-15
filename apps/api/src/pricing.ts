@@ -19,6 +19,7 @@ const OPENCODE_SOURCE = "https://opencode.ai/docs/go/";
 const DEFAULT_CAPTURED_AT = "2026-09-10T04:00:00.000Z";
 
 const DEFAULT_PRICES: PriceDefinition[] = [
+  { provider: "opencode-go", model: "gpt-5.6-luna", inputMicrousdPerMillion: 200_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 20_000 },
   { provider: "opencode-go", model: "qwen3.8-flash", inputMicrousdPerMillion: 150_000, outputMicrousdPerMillion: 470_000, cachedInputMicrousdPerMillion: 16_000 },
   { provider: "opencode-go", model: "deepseek-v4-flash", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },
   { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 220_000, outputMicrousdPerMillion: 660_000, cachedInputMicrousdPerMillion: 7_000 },

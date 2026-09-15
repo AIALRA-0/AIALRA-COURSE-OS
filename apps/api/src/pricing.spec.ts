@@ -17,6 +17,12 @@ describe("cost price snapshots", () => {
     expect(estimateMicrousd(snapshot, 1_000, 0, 500)).toBe(900);
   });
 
+  it("tracks Luna usage against the OpenCode Go subscription quota", () => {
+    const snapshot = priceSnapshotFor("opencode-go", "gpt-5.6-luna");
+    expect(snapshot).toMatchObject({ inputMicrousdPerMillion: 200_000, cachedInputMicrousdPerMillion: 20_000, outputMicrousdPerMillion: 1_200_000 });
+    expect(estimateMicrousd(snapshot, 1_000, 200, 500)).toBe(764);
+  });
+
   it("records subscription quota as consumption instead of silently calling it free", () => {
     expect(billingBreakdown("opencode-go", "subscription_quota", 12_345)).toEqual({ cashCostMicrousd: 0, quotaConsumedMicrousd: 12_345 });
     expect(billingBreakdown("deepseek", "metered", 12_345)).toEqual({ cashCostMicrousd: 12_345, quotaConsumedMicrousd: 0 });
