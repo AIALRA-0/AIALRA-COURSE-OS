@@ -1053,7 +1053,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   async getWorkspaceSettings(): Promise<WorkspaceSettings> { const state = await this.readState(); return structuredClone(state.settings ?? defaultWorkspaceSettings(this.workspaceId)); }
 
   async saveWorkspaceSettings(settings: WorkspaceSettings, context: IdempotentWriteContext): Promise<WorkspaceSettings> {
-    return this.mutate(async (state) => { state.settings = structuredClone({ ...settings, updatedAt: new Date().toISOString() }); state.idempotency[context.idempotencyKey] = { kind: "settings", objectId: settings.workspaceId }; return structuredClone(state.settings!); }, context);
+    return this.mutate(async (state) => {
+      if (state.idempotency[context.idempotencyKey]) return structuredClone(state.settings ?? defaultWorkspaceSettings(this.workspaceId));
+      state.settings = structuredClone({ ...settings, updatedAt: new Date().toISOString() });
+      state.idempotency[context.idempotencyKey] = { kind: "settings", objectId: settings.workspaceId };
+      return structuredClone(state.settings);
+    }, context);
   }
 
   async listModelProviders(): Promise<ModelProviderConfig[]> { const state = await this.readState(); return structuredClone(state.modelProviders.length ? state.modelProviders : defaultModelProviders()); }
@@ -1063,6 +1068,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const providers = state.modelProviders.length ? state.modelProviders : defaultModelProviders();
       const provider = providers.find((item) => item.id === providerId);
       if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+      if (state.idempotency[context.idempotencyKey]) return structuredClone(provider);
       if (patch.baseUrl !== undefined) provider.baseUrl = patch.baseUrl.trim();
       if (patch.enabled !== undefined) provider.enabled = patch.enabled;
       state.modelProviders = providers;
@@ -1073,14 +1079,30 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async saveModelProviderCredential(providerId: string, credential: CredentialStatus, context: IdempotentWriteContext): Promise<Pick<ModelProviderConfig, "id" | "credential">> {
     if (!credential.configured || !credential.maskedValue) throw new Error("MODEL_PROVIDER_CREDENTIAL_STATUS_REQUIRED");
-    return this.mutate(async (state) => { const providers = state.modelProviders.length ? state.modelProviders : defaultModelProviders(); const provider = providers.find((item) => item.id === providerId); if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND"); provider.credential = structuredClone(credential); state.modelProviders = providers; state.idempotency[context.idempotencyKey] = { kind: "provider_credential", objectId: providerId }; return { id: provider.id, credential: structuredClone(provider.credential) }; }, context);
+    return this.mutate(async (state) => {
+      const providers = state.modelProviders.length ? state.modelProviders : defaultModelProviders();
+      const provider = providers.find((item) => item.id === providerId);
+      if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+      if (state.idempotency[context.idempotencyKey]) return { id: provider.id, credential: structuredClone(provider.credential) };
+      provider.credential = structuredClone(credential);
+      state.modelProviders = providers;
+      state.idempotency[context.idempotencyKey] = { kind: "provider_credential", objectId: providerId };
+      return { id: provider.id, credential: structuredClone(provider.credential) };
+    }, context);
   }
 
   async testModelProvider(providerId: string): Promise<ModelProviderConfig> { const provider = (await this.listModelProviders()).find((item) => item.id === providerId); if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND"); return structuredClone({ ...provider, health: { providerId, state: provider.credential.configured ? "connected" as const : "unconfigured" as const, checkedAt: new Date().toISOString(), message: provider.credential.configured ? "供应商配置已就绪" : "请先保存接口密钥" } }); }
 
   async getModelRoutePolicy(): Promise<ModelRoutePolicy> { const state = await this.readState(); return structuredClone(state.modelRoutePolicy ?? defaultModelRoutePolicy(this.workspaceId)); }
 
-  async saveModelRoutePolicy(policy: ModelRoutePolicy, context: IdempotentWriteContext): Promise<ModelRoutePolicy> { return this.mutate(async (state) => { state.modelRoutePolicy = structuredClone({ ...policy, updatedAt: new Date().toISOString() }); state.idempotency[context.idempotencyKey] = { kind: "model_route_policy", objectId: policy.workspaceId }; return structuredClone(state.modelRoutePolicy!); }, context); }
+  async saveModelRoutePolicy(policy: ModelRoutePolicy, context: IdempotentWriteContext): Promise<ModelRoutePolicy> {
+    return this.mutate(async (state) => {
+      if (state.idempotency[context.idempotencyKey]) return structuredClone(state.modelRoutePolicy ?? defaultModelRoutePolicy(this.workspaceId));
+      state.modelRoutePolicy = structuredClone({ ...policy, updatedAt: new Date().toISOString() });
+      state.idempotency[context.idempotencyKey] = { kind: "model_route_policy", objectId: policy.workspaceId };
+      return structuredClone(state.modelRoutePolicy);
+    }, context);
+  }
 
   private async ensureStableMaterialNode(state: EtapiState, nodeId: string): Promise<CourseTreeNode | undefined> {
     const group = materialGroups(state.releases).find((item) => stableMaterialId(item.courseId, item.moduleId) === nodeId);
@@ -1601,8 +1623,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (pendingRead) await pendingRead.catch(() => undefined);
         this.invalidateStateCache();
         const state = await this.readState();
+        const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
         result = await change(state);
-        await this.writeState(state);
+        if (!replay) await this.writeState(state);
       } finally {
         this.activeWriteContext = previousContext;
       }

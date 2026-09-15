@@ -177,6 +177,21 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("returns an idempotent replay without creating another remote revision or state write", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const course = { id: "replay-course", workspaceId: "personal", title: "原始标题", status: "active" as const,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await api.createCourse(course, { ...context, idempotencyKey: "replay-course-create" });
+    const first = await api.updateTreeNode(course.id, { title: "新标题" }, 0, { ...context, idempotencyKey: "replay-tree-update" });
+    const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
+
+    const replay = await api.updateTreeNode(course.id, { title: "不应生效" }, 0, { ...context, idempotencyKey: "replay-tree-update" });
+
+    expect(replay).toMatchObject({ title: "新标题", revision: first.revision });
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
+  });
+
   it("reads native page questions without writing or importing another page's links", async () => {
     const remote = new FakeEtapi();
     let pageNoteId = "";
