@@ -435,7 +435,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ["field", "original", "replacement", "evidence"].some((field) => typeof item[field] !== "string"))) return invalidAudit(`findings_shape:${findings.length}`);
     if (!Array.isArray(sourceChecks)) return invalidAudit("source_checks_missing");
     if (sourceChecks.length < auditSchema.properties.sourceChecks.minItems) return invalidAudit(`source_checks_too_few:${sourceChecks.length}`);
-    if (sourceChecks.length > 16 || sourceChecks.some((item) => !item || typeof item !== "object"
+    if (sourceChecks.length > 24 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
     return { findings, sourceChecks, provider: this.connection.providerId, model, usage };

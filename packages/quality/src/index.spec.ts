@@ -173,13 +173,15 @@ describe("learner-facing teaching narrative", () => {
   });
 
   it("quotes contextual English labels only when they occur in the source", () => {
-    const source = "Setup\nOne episode with one action\nUpdate Rule";
+    const source = "Setup\nOne episode with one action\nUpdate Rule\nWhat is W_e";
     expect(quoteContextualSourceLabels("左栏是 Setup 部分，回到页面 Update Rule 一行核对", source))
       .toBe("左栏是 “Setup” 部分，回到页面 “Update Rule” 一行核对");
     expect(quoteContextualSourceLabels("回到页面 Hidden Rule 一行核对", source))
       .toBe("回到页面 Hidden Rule 一行核对");
     expect(quoteContextualSourceLabels("代码 `Update Rule` 与原文“Setup”保持不变", source))
       .toBe("代码 `Update Rule` 与原文“Setup”保持不变");
+    expect(quoteContextualSourceLabels("回到页面 What is $W_e$ 区域核对", source))
+      .toBe("回到页面 “What is $W_e$” 区域核对");
   });
 
   it("delimits narrow bare math symbols while protecting authored objects", () => {
@@ -209,6 +211,7 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(developed)).not.toContain("TEACHING_UNPAIRED_ENGLISH");
     expect(validateTeachingNarrative({ ...developed, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
     expect(validateTeachingNarrative({ ...developed, sourceTitle: "OTHER TOPIC", strictWritingStyle: true })).toContain("TEACHING_UNPAIRED_ENGLISH");
+    expect(validateTeachingNarrative({ ...valid, sourceTitle: "EDGE-GNN: WHY?", fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n上一页把 EDGE-GNN 定位成处理边关系的图编码器`, strictWritingStyle: true })).not.toContain("TEACHING_UNPAIRED_ENGLISH");
   });
 
   it("recognizes a source-backed correction without requiring fixed cue words", () => {

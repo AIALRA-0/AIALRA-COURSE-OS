@@ -353,7 +353,12 @@ export function quoteRepeatedSourceLabels(text: string, explanation: string): st
 /** Quote verbatim English labels when the surrounding Chinese identifies them as source UI or diagram text. */
 export function quoteContextualSourceLabels(text: string, sourceText: string): string {
   const appearsInSource = (label: string) => new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(label)}(?![A-Za-z0-9])`, "iu").test(sourceText);
-  return text.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
+  const withMathLabels = text.split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(
+      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z]*(?:[ -][A-Za-z]+){0,5})\s+(\$[^$\r\n]+\$)(?=\s*(?:区域|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
+      (whole, label: string, math: string) => appearsInSource(label.trim()) ? `“${label.trim()} ${math}”` : whole
+    )).join("");
+  return withMathLabels.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(
       /(?<![A-Za-z0-9“"])([A-Z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+){0,5})(?=\s*(?:部分|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
       (label) => appearsInSource(label.trim()) ? `“${label.trim()}”` : label
@@ -424,7 +429,7 @@ function softmaxNormalizationIssueFields(input: TeachingNarrativeInput): Teachin
 
 function definedSourceNames(title: string, learnerText: string): string[] {
   const names = [...title.matchAll(/\b(?:[A-Z][A-Za-z]+-[A-Z][A-Za-z]+|[A-Z]{2,8})\b/gu)].map((match) => match[0]);
-  const definedTitleNames = names.filter((name) => new RegExp(`${escapeRegExp(name)}[^\\n]{0,90}(?:(?:是|指|作为|用于|表示|即)[^\\n]{0,70}[\\p{Script=Han}]{2}|(?:算法|模型|方法|规则|框架)（[^）]{3,80}）：[^\\n]{2,})`, "iu").test(learnerText));
+  const definedTitleNames = names.filter((name) => new RegExp(`${escapeRegExp(name)}[^\\n]{0,90}(?:(?:是|指|作为|用于|表示|即|定位为|定位成)[^\\n]{0,70}[\\p{Script=Han}]{2}|(?:算法|模型|方法|规则|框架)（[^）]{3,80}）：[^\\n]{2,})`, "iu").test(learnerText));
   const explainedQuotes = [...learnerText.matchAll(/“([A-Z][A-Za-z ]{3,80})”[^\n]{0,80}(?:对应|表示|指|说明)[^\n]{0,60}[\p{Script=Han}]{2}/gu)].map((match) => match[1]!);
   return [...new Set([...definedTitleNames, ...explainedQuotes])];
 }

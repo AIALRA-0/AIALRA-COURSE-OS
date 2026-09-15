@@ -329,8 +329,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.content.coverageEvidence).toEqual(evidence);
   });
 
-  it("accepts source checks for a dense page without dropping verified objects", async () => {
-    const sourceChecks = Array.from({ length: 9 }, (_, index) => ({
+  it("accepts up to twenty-four source checks for a dense page without dropping verified objects", async () => {
+    const sourceChecks = Array.from({ length: 18 }, (_, index) => ({
       claim: `图中对象 ${index + 1} 的位置`,
       evidence: `原图第 ${index + 1} 个对象`,
       verdict: "supported" as const
@@ -342,7 +342,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
     const result = await client.auditTeachingPackage({ ...providerInput("dense-audit", true),
       teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
-    expect(result.sourceChecks).toHaveLength(9);
+    expect(result.sourceChecks).toHaveLength(18);
   });
 
   it("rejects an empty semantic audit instead of treating it as source verification", async () => {

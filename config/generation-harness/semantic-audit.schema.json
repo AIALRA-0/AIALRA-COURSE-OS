@@ -4,7 +4,7 @@
     "sourceChecks": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 16,
+      "maxItems": 24,
       "items": {
         "type": "object",
         "properties": {
