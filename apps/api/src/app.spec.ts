@@ -51,6 +51,17 @@ describe("Course OS API", () => {
     expect(listReleases).not.toHaveBeenCalled();
   });
 
+  it("returns a lightweight release index without sending lesson bodies", async () => {
+    const { app, release } = await seededApp();
+    const full = await request(app).get("/api/v1/releases").expect(200);
+    const index = await request(app).get("/api/v1/releases?view=index").expect(200);
+    const indexed = index.body.find((item: CourseRelease) => item.id === release.id) as CourseRelease;
+    expect(indexed.pages).toHaveLength(release.pages.length);
+    expect(indexed.pages[0]).toMatchObject({ id: release.pages[0]!.id, title: release.pages[0]!.title, blocks: [], atoms: [], anchors: [], questionBank: [] });
+    expect(indexed.pages[0]!.quality).toEqual(release.pages[0]!.quality);
+    expect(JSON.stringify(index.body).length).toBeLessThan(JSON.stringify(full.body).length);
+  });
+
   it("serves the learner lesson from a saved draft snapshot without waiting for block reconciliation", async () => {
     const { app, readweave } = await seededApp();
     const snapshot = await readweave.getDraftByPage("page-1");

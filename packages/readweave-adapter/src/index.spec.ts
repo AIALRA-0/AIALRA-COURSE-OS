@@ -76,7 +76,7 @@ it("serves a recent snapshot while a slow ReadWeave refresh is in flight", async
   try {
     await api.listCourses();
     delayContent = true;
-    clock.mockReturnValue(base + 6_000);
+    clock.mockReturnValue(base + 61_000);
     const result = await Promise.race([api.listCourses().then(() => "cached"), new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 100))]);
     expect(result).toBe("cached");
     expect(releaseRefresh).toBeTypeOf("function");

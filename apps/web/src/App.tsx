@@ -42,6 +42,7 @@ export function App() {
   const [pageIndex, setPageIndex] = useState(initialNavigation.current.pageIndex);
   const [mode, setMode] = useState<WorkspaceMode>(initialNavigation.current.mode);
   const [session, setSession] = useState<LearningSession>();
+  const [loadedPage, setLoadedPage] = useState<{ releaseId: string; page: PageLesson }>();
   const [view, setView] = useState<ViewState>({ zoom: 1, panX: 0, panY: 0 });
   const [mobileMode, setMobileMode] = useState<MobileMode>("visual");
   const [theme, setTheme] = useState<"light" | "dark">((localStorage.getItem("course-os-theme") as "light" | "dark") || "light");
@@ -151,7 +152,24 @@ export function App() {
   }, [mode]);
 
   const release = useMemo(() => releases.find((item) => item.id === releaseId), [releaseId, releases]);
-  const page = release?.pages[pageIndex];
+  const indexedPage = release?.pages[pageIndex];
+  const detailedPage = loadedPage && loadedPage.releaseId === release?.id && loadedPage.page.id === indexedPage?.id ? loadedPage.page : undefined;
+  const page = detailedPage ?? indexedPage;
+  const pageDetailReady = release?.lifecycle === "draft_source" || Boolean(detailedPage);
+  useEffect(() => {
+    if (!release || !indexedPage || release.lifecycle === "draft_source") {
+      setLoadedPage(undefined);
+      return;
+    }
+    let active = true;
+    setLoadedPage((current) => current?.releaseId === release.id && current.page.id === indexedPage.id ? current : undefined);
+    api.lesson(indexedPage.id).then((lesson) => {
+      if (active && lesson.page.id === indexedPage.id) setLoadedPage({ releaseId: release.id, page: lesson.page });
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : "无法载入当前课程页面");
+    });
+    return () => { active = false; };
+  }, [indexedPage?.id, release?.id, release?.lifecycle]);
   const [candidatePreview, setCandidatePreview] = useState<{ pageId: string; page?: PageLesson; error?: string }>();
   const [candidatePreviewReload, setCandidatePreviewReload] = useState(0);
   useEffect(() => {
@@ -168,9 +186,11 @@ export function App() {
     }).catch(() => { if (active) setCandidatePreview({ pageId: page.id, error: "候选讲解暂时无法读取，请重试" }); });
     return () => { active = false; };
   }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
-  const previewRelease = useMemo(() => release?.lifecycle === "draft_source"
+  const previewRelease = useMemo(() => release
     ? { ...release, pages: release.pages.map((item, index) => {
-      const source = page && candidatePreview?.pageId === page.id && candidatePreview.page && index === pageIndex ? candidatePreview.page : item;
+      const source = index === pageIndex
+        ? (release.lifecycle === "draft_source" && candidatePreview?.pageId === item.id && candidatePreview.page ? candidatePreview.page : page ?? item)
+        : item;
       const title = readablePageTitle(source.title);
       return title === source.title ? source : { ...source, title };
     }) }
@@ -404,10 +424,11 @@ export function App() {
         <CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className="product-content">
           <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
+            {!pageDetailReady && release.lifecycle !== "draft_source" && <WorkspaceLoader />}
+            {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
             {mode === "learn" && release.lifecycle === "draft_source" && !(candidatePreview?.pageId === page.id && candidatePreview.page)
               ? <div className="workspace-loader" role="status">{!candidatePreview?.error && <div className="loader" />}<span>{candidatePreview?.pageId === page.id && candidatePreview.error ? candidatePreview.error : "正在载入候选讲解"}</span>{candidatePreview?.pageId === page.id && candidatePreview.error && <button type="button" onClick={() => setCandidatePreviewReload((value) => value + 1)}>重试</button>}</div>
-              : mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
+              : pageDetailReady && mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>
         </section>

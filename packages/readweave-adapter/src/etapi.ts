@@ -157,8 +157,12 @@ const SECTION_DEFINITIONS = [
 ] as const;
 
 export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
-  private static readonly readCacheTtlMs = 5_000;
-  private static readonly maxStaleReadMs = 20_000;
+  // The authoritative workspace index is large. Writes replace this cache with
+  // the committed state immediately, so a one-minute read window keeps local
+  // mutations coherent while avoiding a full ReadWeave download on routine
+  // page navigation and status checks.
+  private static readonly readCacheTtlMs = 60_000;
+  private static readonly maxStaleReadMs = 300_000;
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;

@@ -539,7 +539,29 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/releases", async (request, response, next) => {
     try {
-      response.json(await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));
+      const releases = await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id));
+      if (request.query.view === "index") {
+        response.json(releases.map((release) => ({
+          ...release,
+          assessments: [],
+          pages: release.pages.map((page) => ({
+            id: page.id,
+            pageNumber: page.pageNumber,
+            title: page.title,
+            imageUrl: page.imageUrl,
+            anchors: [],
+            atoms: [],
+            blocks: [],
+            lessonSections: [],
+            questionBank: [],
+            coverageRequirements: [],
+            coverageClaims: [],
+            quality: page.quality
+          }))
+        })));
+        return;
+      }
+      response.json(releases);
     } catch (error) { next(error); }
   });
 

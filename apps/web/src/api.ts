@@ -157,7 +157,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(policy)
   }),
-  releases: () => request<CourseRelease[]>("/api/v1/releases"),
+  releases: () => request<CourseRelease[]>("/api/v1/releases?view=index"),
   lesson: (pageId: string) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`),
   readweaveQuestions: (pageId: string) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`),
   draft: (pageId: string) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`),
