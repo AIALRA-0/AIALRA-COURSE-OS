@@ -219,7 +219,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
       const id = stableMaterialId(group.courseId, group.moduleId);
       if (archivedMaterialIds.has(id)) continue;
       const persisted = persistedMaterials.get(id) ?? state.treeNodes.find((node) => node.kind === "material" && !node.archived && node.materialId === id);
-      if (!byId.has(id)) byId.set(id, { ...materialTreeNode(state.courses.find((item) => item.id === course.id) ?? {
+      byId.set(id, { ...materialTreeNode(state.courses.find((item) => item.id === course.id) ?? {
         id: course.id,
         workspaceId: "personal",
         title: course.title,

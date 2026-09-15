@@ -40,7 +40,6 @@ export function materialTreeNode(
   group: { courseId: string; moduleId: string; latest: CourseRelease; releases: CourseRelease[] },
   persisted?: CourseTreeNode
 ): CourseTreeNode {
-  const published = group.releases.filter((release) => release.lifecycle !== "draft_source");
   const current = group.latest;
   return {
     id: persisted?.id ?? stableMaterialId(group.courseId, group.moduleId),
@@ -50,7 +49,7 @@ export function materialTreeNode(
     subtitle: `${current.pages.length} 页 · ${current.lifecycle === "draft_source" ? "待审核" : "已就绪"}`,
     parentId: persisted ? persisted.parentId : course.id,
     releaseId: current.id,
-    currentReleaseId: published[0]?.id ?? current.id,
+    currentReleaseId: current.id,
     pageCount: current.pages.length,
     status: persisted?.archived ? "draft" : current.lifecycle === "draft_source" ? "draft" : current.pages.every((page) => page.quality.publishable) ? "published" : "needs_review",
     revision: persisted?.revision ?? current.version,

@@ -1084,6 +1084,31 @@ describe("Course OS API", () => {
     expect(listDrafts).not.toHaveBeenCalled();
   });
 
+  it("keeps persisted material properties while advancing its pointer to the latest release", async () => {
+    const { app, readweave, release } = await seededApp();
+    const firstTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    const material = firstTree.body.courses[0].children[0];
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "persist-material-title")
+      .send({ expectedRevision: material.revision, title: "保留的材料名称" })
+      .expect(200);
+    const nextRelease = { ...structuredClone(release), id: "test-release-v2", version: release.version + 1, publishedAt: new Date(Date.now() + 1_000).toISOString() };
+    await readweave.publishRelease(nextRelease, testManifest(nextRelease.id), {
+      idempotencyKey: "publish-next-release",
+      actor: "test",
+      workspaceId: "personal",
+      schemaVersion: "2.4.0",
+      requestId: "publish-next-release"
+    });
+    const nextTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    expect(nextTree.body.courses[0].children[0]).toMatchObject({
+      title: "保留的材料名称",
+      releaseId: nextRelease.id,
+      currentReleaseId: nextRelease.id,
+      pageCount: nextRelease.pages.length
+    });
+  });
+
   it("supports revision-checked course-tree CRUD, trash recovery and exact ReadWeave links", async () => {
     const { app, release, readweave } = await seededApp();
     const firstTree = await request(app).get("/api/v1/workspaces/personal/tree?view=library").expect(200);

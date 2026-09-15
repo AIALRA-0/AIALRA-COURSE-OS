@@ -733,9 +733,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const persisted = state.treeNodes.find((node) => node.kind === "material" && !node.archived && (node.id === id || node.materialId === id));
       const projection = state.projections.courses[group.courseId];
       const legacyNoteId = projection?.modules[group.moduleId];
-      if (!byId.has(id)) {
-        byId.set(id, { ...materialTreeNode(course, group, persisted), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId });
-      }
+      byId.set(id, { ...materialTreeNode(course, group, persisted), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId });
     }
     return [...byId.values()];
   }
