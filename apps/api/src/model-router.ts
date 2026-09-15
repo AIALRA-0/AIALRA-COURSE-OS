@@ -237,6 +237,23 @@ export interface ProviderConnection {
   billingMode?: "metered" | "subscription_quota" | "free" | "unknown";
 }
 
+function providerRequestHeaders(connection: ProviderConnection, input: ModelRouterInput, idempotencyKey = input.idempotencyKey || randomUUID()): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${connection.apiKey}`,
+    "Content-Type": "application/json",
+    "Idempotency-Key": idempotencyKey
+  };
+  if (connection.providerId === "opencode-go") {
+    // OpenCode Go 的直连接口要求每段对话带稳定会话编号。Course OS 的一次模型调用
+    // 就是一段无状态对话，同一个调用发生网络重试时会继续使用相同的幂等键。
+    headers["x-opencode-session"] = input.idempotencyKey || idempotencyKey;
+    headers["x-opencode-request"] = idempotencyKey;
+    headers["x-opencode-client"] = "course-os";
+    headers["User-Agent"] = "course-os/2.4.0";
+  }
+  return headers;
+}
+
 export async function probeProviderConnection(connection: ProviderConnection): Promise<ProviderHealth> {
   const checkedAt = new Date().toISOString();
   if (!connection.apiKey) return { providerId: connection.providerId, state: "unconfigured", checkedAt, message: "请先保存接口密钥" };
@@ -347,7 +364,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       : prompt;
     const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:fields` },
+        headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:fields`),
         body: JSON.stringify({ model: this.connection.model,
           instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文只用已定义缩写。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
@@ -397,7 +414,6 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   private async auditTeachingOnce(input: ModelRouterInput & { teachingPackage: TeachingPackage }, unresolvedRetry = false): Promise<SemanticAuditResult> {
-    if (this.connection.protocol !== "responses") throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(Date.now()), this.connection.providerId);
     const started = Date.now();
     const prompt = `${semanticAuditPrompt.trim()}${unresolvedRetry ? "\n\n上次核验标记了矛盾或无法确认，却没有给出可执行的最小修正。这次须逐项重新核对原图；能证实错误时给出确实存在于教学字段中的 original 和有来源依据的 replacement，无法确认时保持 unverified，绝不能为通过检查编造修正。" : ""}\n\n${JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
       sourceText: input.sourceText.slice(0, 14_000), sourceAtoms: input.blueprint?.resourcePackage,
@@ -407,14 +423,31 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const userInput = input.sourceImageDataUrl
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
-    const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
+    const baseUrl = this.connection.baseUrl.replace(/\/$/, "");
+    const request = this.connection.protocol === "responses" ? {
+      url: `${baseUrl}/responses`,
+      body: { model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
+        max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
+        text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
+        metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
+      }
+    } : this.connection.protocol === "chat_completions" ? {
+      url: `${baseUrl}/chat/completions`,
+      body: { model: this.connection.model, max_tokens: 4_500, temperature: 0,
+        messages: [
+          { role: "system", content: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。" },
+          { role: "user", content: input.sourceImageDataUrl
+            ? [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: input.sourceImageDataUrl } }]
+            : prompt }
+        ],
+        response_format: { type: "json_schema", json_schema: { name: "course_os_semantic_audit", schema: auditSchema, strict: true } }
+      }
+    } : undefined;
+    if (!request) throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(started), this.connection.providerId);
+    const { response, body } = await this.requestJson(request.url, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
-        body: JSON.stringify({ model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-          max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } } : { temperature: 0 }),
-          text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
-          metadata: { product: "course-os", stage: "semantic_audit", writing_policy_snapshot_id: input.writingPolicySnapshotId }
-        })
+        headers: providerRequestHeaders(this.connection, input),
+        body: JSON.stringify(request.body)
       }, started);
     const usage = normalizeProviderUsage(body.usage, body.usage?.cost ?? body.cost, started);
     const model = body.model || this.connection.model;
@@ -521,7 +554,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     };
     const { response, body } = await this.requestJson(`${this.connection.baseUrl.replace(/\/$/, "")}/responses`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `${input.idempotencyKey}:${stage}` },
+        headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:${stage}`),
         body: JSON.stringify({
           model: this.connection.model,
           instructions: professorInstructions(input.language),
@@ -559,7 +592,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const instruction = professorInstructions(input.language) + (previousShapeError
       ? `\n\n上一次输出未通过结构校验（${previousShapeError}）。请重新生成完整的单个 JSON 对象，不要包裹在外层对象中。必须逐项写出 chapterBridgeMarkdown、learningObjectives、priorKnowledge、fullExplanationMarkdown、mainContentMarkdown、misconceptions、coverageEvidence 和 questions；即使是封面或目录，也不能省略完整讲解和列表总结。learningObjectives、priorKnowledge 和 misconceptions 必须是字符串数组。`
       : "");
-    const headers = { Authorization: `Bearer ${this.connection.apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey || randomUUID() };
+    const headers = providerRequestHeaders(this.connection, input);
     if (this.connection.protocol === "responses") {
       return {
         url: `${baseUrl}/responses`,
@@ -669,39 +702,20 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly source: SettingsProviderSource) {}
 
   async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
-    const { providers: savedProviders, policy, credential } = await this.source.load();
-    const providers = withCurrentDeepSeekModels(savedProviders);
-    const rule = policy.rules.find((candidate) => candidate.stage === "repair" && candidate.enabled)
-      || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
-    if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
-    const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
-    const model = provider?.models.find((item) => item.id === rule.modelId);
-    const apiKey = provider ? await credential(provider.id) : undefined;
-    if (!provider || !model || !apiKey) throw new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", rule.modelId, emptyUsage(Date.now()), rule.providerId);
-    if (input.sourceImageDataUrl && !model.supportsVision) throw new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
-    return new HttpProviderTeachingClient({ providerId: provider.id, baseUrl: provider.baseUrl, apiKey, model: model.id,
-      protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode }).repairTeachingFields(input, fields);
+    return this.runWithFallback("repair", input, (client) => client.repairTeachingFields(input, fields));
   }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
-    const { providers: savedProviders, policy, credential } = await this.source.load();
-    const providers = withCurrentDeepSeekModels(savedProviders);
-    const rule = policy.rules.find((candidate) => candidate.stage === "semantic_audit" && candidate.enabled)
-      || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
-    if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
-    const provider = providers.find((item) => item.id === rule.providerId && item.enabled);
-    const model = provider?.models.find((item) => item.id === rule.modelId);
-    const apiKey = provider ? await credential(provider.id) : undefined;
-    if (!provider || !model || !apiKey) throw new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", rule.modelId, emptyUsage(Date.now()), rule.providerId);
-    if (input.sourceImageDataUrl && !model.supportsVision) throw new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
-    return new HttpProviderTeachingClient({ providerId: provider.id, baseUrl: provider.baseUrl, apiKey, model: model.id,
-      protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode }).auditTeachingPackage(input);
+    return this.runWithFallback("semantic_audit", input, (client) => client.auditTeachingPackage(input));
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
+    return this.runWithFallback(input.stage || "teach", input, (client) => client.generateTeachingPackage(input));
+  }
+
+  private async runWithFallback<T>(stage: GenerationStage | "qa", input: ModelRouterInput, execute: (client: HttpProviderTeachingClient) => Promise<T>): Promise<T> {
     const { providers: savedProviders, policy, credential } = await this.source.load();
     const providers = withCurrentDeepSeekModels(savedProviders);
-    const stage = input.stage || "teach";
     const rule = policy.rules.find((candidate) => candidate.stage === stage && candidate.enabled)
       || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
     if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
@@ -733,7 +747,7 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         billingMode: model.billingMode
       };
       try {
-        return await new HttpProviderTeachingClient(connection).generateTeachingPackage(input);
+        return await execute(new HttpProviderTeachingClient(connection));
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
         lastError = error;

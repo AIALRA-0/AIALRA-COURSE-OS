@@ -156,6 +156,11 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   it("uses JSON schema with OpenCode Go chat completions models", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/chat/completions");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-opencode-session")).toBe("chat-test");
+      expect(headers.get("x-opencode-request")).toBe("chat-test");
+      expect(headers.get("x-opencode-client")).toBe("course-os");
+      expect(headers.get("User-Agent")).toBe("course-os/2.4.0");
       const body = JSON.parse(String(init?.body)) as { response_format?: { type?: string; json_schema?: { schema?: unknown } } };
       expect(body.response_format?.type).toBe("json_schema");
       expect(body.response_format?.json_schema?.schema).toBeTruthy();
@@ -164,6 +169,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-opencode-token", model: "deepseek-v4-pro", protocol: "chat_completions", supportsVision: false, billingMode: "subscription_quota" }).generateTeachingPackage(providerInput("chat-test"));
     expect(result.usage).toMatchObject({ inputTokens: 90, cachedInputTokens: 10, outputTokens: 210 });
+  });
+
+  it("runs semantic audit through OpenCode Go chat completions", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://opencode.test/chat/completions");
+      expect(new Headers(init?.headers).get("x-opencode-session")).toBe("opencode-audit");
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }>; response_format: { type: string } };
+      expect(body.response_format.type).toBe("json_schema");
+      expect(Array.isArray(body.messages[1]?.content)).toBe(true);
+      return Response.json({ model: "deepseek-v4-flash-vision-exp", choices: [{ message: { content: JSON.stringify({
+        sourceChecks: [{ claim: "输入先于输出", evidence: "原图箭头从输入指向输出", verdict: "supported" }], findings: []
+      }) } }], usage: { prompt_tokens: 120, completion_tokens: 80, cached_tokens: 20 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-opencode-token", model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true, billingMode: "subscription_quota" });
+    const result = await client.auditTeachingPackage({ ...providerInput("opencode-audit", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(result).toMatchObject({ provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", sourceChecks: [{ verdict: "supported" }] });
   });
 
   it("uses DeepSeek Responses with structured output and image input", async () => {
@@ -584,6 +606,26 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const failure = await client.generateTeachingPackage(providerInput("no-fallback-test")).catch((error: unknown) => error);
     expect(failure).toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_FAILED:rate_limited" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back during semantic audit when the primary quota route fails", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: { code: "quota_exhausted", message: "quota exhausted" } }, { status: 429 }))
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify({
+        sourceChecks: [{ claim: "输入先于输出", evidence: "原图箭头从输入指向输出", verdict: "supported" }], findings: []
+      }), usage: { input_tokens: 100, output_tokens: 50, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: "opencode-go", displayName: "OpenCode", baseUrl: "https://opencode.test", enabled: true, credential: { configured: true }, models: [{ id: "deepseek-v4-flash-vision-exp", displayName: "OpenCode Vision", protocol: "chat_completions", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }] },
+        { id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true, credential: { configured: true }, models: [{ id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(), rules: [{ stage: "semantic_audit", providerId: "opencode-go", modelId: "deepseek-v4-flash-vision-exp", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-flash", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.auditTeachingPackage({ ...providerInput("audit-fallback", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
+    expect(result.provider).toBe("deepseek");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("uses the current DeepSeek visual route even when persisted model settings are older", async () => {
