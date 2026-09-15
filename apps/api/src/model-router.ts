@@ -1,5 +1,5 @@
 import { applySemanticAuditFindings } from "./teaching-patches.js";
-import { teachingCompositionContract } from "@course-os/quality";
+import { teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
@@ -67,6 +67,31 @@ export interface ModelRouterClient {
   generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult>;
   repairTeachingFields?(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult>;
   auditTeachingPackage?(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult>;
+}
+
+/** Give the repair call actual locations and readable instructions, not just internal error codes. */
+export function teachingRepairTargets(content: TeachingPackage, fields: Array<keyof TeachingPackage>, issues: string[]) {
+  const targets: Array<{ field: string; quote: string; instruction: string }> = [];
+  if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_HEADING_DUPLICATE")) {
+    const headings = [...content.fullExplanationMarkdown.matchAll(/^#{1,6}\s+(.+)$/gmu)];
+    for (const heading of headings) if (headings.filter(other => other[1]!.trim() === heading[1]!.trim()).length > 1) {
+      targets.push({ field: "fullExplanationMarkdown", quote: heading[0], instruction: "这个小标题重复且无法区分讲解对象，按所在公式、步骤或对象命名，父子标题逐级嵌套；只改标题与必要层级，保留公式、定义和推导正文" });
+    }
+  }
+  if (issues.some(issue => issue.includes("UNPAIRED_ENGLISH"))) {
+    for (const field of fields) {
+      const entries: Array<[string, string]> = field === "questions"
+        ? content.questions.flatMap((q, i) => (["prompt", "expectedAnswer", "explanation"] as const).map(key => [`questions:${i}:${key}`, q[key]] as [string, string])
+          .concat((q.options || []).map((text, n) => [`questions:${i}:options:${n}`, text] as [string, string])))
+        : typeof content[field] === "string" ? [[field, content[field] as string]]
+        : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((text, i) => typeof text === "string" ? [[`${field}:${i}`, text] as [string, string]] : []) : [];
+      for (const [path, text] of entries) for (const line of text.split(/\r?\n/u)) {
+        const words = unpairedEnglishPhrases(line);
+        if (words.length) targets.push({ field: path, quote: line, instruction: `这行普通英文未配中文：${words.join("、")}；在这里改用准确中文或已核实的双语名称，保留数字和语义；不能只加引号隐藏未翻译的解释` });
+      }
+    }
+  }
+  return targets;
 }
 
 export interface SemanticAuditResult {
@@ -403,6 +428,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       pageTitle: input.pageTitle, pageNumber: input.pageNumber, sourceText: input.sourceText.slice(0, 6_000),
       previousPageContext: input.previousPageContext?.slice(0, 800),
       issues: input.repair.issues, fields,
+      repairTargets: teachingRepairTargets(previous, fields, input.repair.issues),
       compositionContract: Object.fromEntries(fields.filter(field => field in teachingCompositionContract).map(field => [field, teachingCompositionContract[field as keyof typeof teachingCompositionContract]])),
       evidenceSpans: fields.includes("coverageEvidence") ? evidenceSpans : undefined,
       maximumExplanationCharacters: input.repair.maximumExplanationCharacters,

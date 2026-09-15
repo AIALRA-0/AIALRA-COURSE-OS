@@ -356,6 +356,16 @@ describe("learner-facing teaching narrative", () => {
     const conditional = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "若权重为正且其他量不变，三个量增大都会让回报下降") };
     expect(validateTeachingNarrative(conditional)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const onlyWhen = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
+      "三个量增大都会让回报下降", "只有在权重为正且其他量不变时，增大其中一个量才会让回报下降") };
+    expect(validateTeachingNarrative(onlyWhen)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    const misconception = { ...onlyWhen, misconceptions: [
+      "错误理解：这些指标越小越好\n\n错因：回报由加权分项组成，权重符号未知\n\n正确判断：只有在权重为正且其他量不变时，对应指标增大才会让回报下降\n\n核对方法：检查系数符号与其他输入"
+    ] };
+    expect(validateTeachingNarrative(misconception)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:misconceptions");
+    const wrongCorrection = { ...misconception, misconceptions: [misconception.misconceptions[0]!.replace(
+      "只有在权重为正且其他量不变时，对应指标增大才会让回报下降", "所有指标越小越好")] };
+    expect(validateTeachingNarrative(wrongCorrection)).toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:misconceptions");
     const rejectsUnqualifiedTrend = { ...weighted, fullExplanationMarkdown: weighted.fullExplanationMarkdown.replace(
       "三个量增大都会让回报下降", "不能把‘三个量增大都会让回报下降’当作已经证明的结论；只有当权重为正且其他量不变时，才能判断增大其中一个量会让回报下降") };
     expect(validateTeachingNarrative(rejectsUnqualifiedTrend)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");

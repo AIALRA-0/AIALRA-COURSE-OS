@@ -292,9 +292,12 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   const describesWeightedPenalty = /(?:加权|带负号|负向)[^。；;\n]{0,45}(?:回报|奖励|得分|损失|目标函数|评分|结果|组成|分项)|(?:回报|奖励|得分|损失|目标函数|评分|结果)[^。；;\n]{0,45}(?:加权|带负号|负向)/u.test(markdown);
   if (!hasSymbolicWeightedScore && !(admitsMissingWeights && describesWeightedPenalty)) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
+    // A labelled misconception is the claim being refuted. Its explanation
+    // and corrected judgement are checked separately below, not exempted.
+    if (/^\s*(?:[-*]\s*)?(?:错误理解|误解)\s*[:：]/u.test(clause)) return false;
     const unqualifiedSmallerIsBetter = /(?:这些|这[两三四几]项|各项|全部|所有|三个|两项|指标)[^，]{0,45}(?:越小越好|越低越好|越少越好)/u.test(clause);
     if (unqualifiedSmallerIsBetter) {
-      const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);
+      const explicitlyConditional = /(?:若|如果|当|假设|假定|只有在|仅在|在[^，；;\n]{0,50}(?:条件|前提)下)/u.test(clause);
       const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
       if (!(explicitlyConditional && weightsQualified)) return true;
     }
@@ -303,7 +306,7 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
     // A warning that explicitly rejects the trend is not an assertion of it.
     const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升|越大)/u)));
     if (/(?:不能|不可|不应|无法|并非|不是|错误)[^，；;。]{0,40}$/u.test(beforeTrend)) return false;
-    const explicitlyConditional = /(?:若|如果|当|假设|假定)/u.test(clause);
+    const explicitlyConditional = /(?:若|如果|当|假设|假定|只有在|仅在|在[^，；;\n]{0,50}(?:条件|前提)下)/u.test(clause);
     const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
     const otherInputsControlled = /(?:其他|其余|别的)[^，]{0,20}(?:不变|固定|保持)|(?:同时|一起)[^，]{0,12}(?:增大|增加)/u.test(clause);
     return !(explicitlyConditional && weightsQualified && otherInputsControlled);

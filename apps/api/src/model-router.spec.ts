@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.33", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.34", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -335,6 +335,18 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await client.repairTeachingFields({ ...providerInput("chat-fields"), repair: { issues: ["TEACHING_PRIOR_DEFINITION_INCOMPLETE"], maximumExplanationCharacters: 3500, previousTeachingPackage: before } }, ["priorKnowledge"]);
     expect(result.content).toEqual({ ...before, priorKnowledge: ["输入是计算的起点"] });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("locates repeated headings and untranslated question options without treating math as English prose", () => {
+    const content = { ...providerTeachingContent(), fullExplanationMarkdown: "## 概率计算\n\n### 符号说明\n\n$e^x$\n\n## 参数更新\n\n### 符号说明\n\n$w_i$",
+      misconceptions: ["错误理解：batch 就是一次任务\n\n正确判断：这里说的是一组输入"],
+      questions: [{ kind: "multiple_choice", prompt: "比较 $x_i$", options: ["batch", "一组输入", "两组输入", "三组输入"], expectedAnswer: "一组输入", explanation: "选项应区分输入组数" }] } as TeachingPackage;
+    const targets = teachingRepairTargets(content, ["fullExplanationMarkdown", "misconceptions", "questions"], ["TEACHING_HEADING_DUPLICATE", "TEACHING_UNPAIRED_ENGLISH"]);
+    expect(targets.filter(target => target.quote === "### 符号说明")).toHaveLength(2);
+    expect(targets.some(target => target.field === "misconceptions:0" && target.quote.includes("batch"))).toBe(true);
+    expect(targets.some(target => target.field === "questions:0:options:0" && target.quote === "batch")).toBe(true);
+    expect(targets.some(target => target.quote === "$e^x$" || target.quote === "$w_i$" || target.field === "questions:0:prompt")).toBe(false);
+    expect(teachingRepairTargets(content, ["coverageEvidence"], ["TEACHING_UNPAIRED_ENGLISH"])).toEqual([]);
   });
 
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {
