@@ -190,10 +190,13 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (/[\p{Script=Han}]{2,20}（[A-Za-z][A-Za-z .&/-]{1,80}[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(markdown)) {
         issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
       }
-      const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(markdown);
+      const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|(?:没有|不存在)[^；。！？\n]{0,60}(?:一个)?[^；。！？\n]{0,30}(?:同时|全部)[^；。！？\n]{0,24}(?:达到|实现)?最优|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(markdown);
       const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(markdown);
       if (directLogicalOverclaim && !explicitlyLimitedClaim) issues.push(`TEACHING_LOGICAL_OVERCLAIM:${field}`);
-      if (/(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(markdown)) {
+      const progressionText = field === "questions"
+        ? input.questions.map((question) => `${question.expectedAnswer || ""}\n${question.explanation}`).join("\n") : markdown;
+      const progressionDenied = /(?:不|不能|无法|未)(?:等于|代表|构成|足以|能推出)?[^；。！？\n]{0,50}(?:逐代|后一(?:种方法|代)|解决前一)|(?:没有|未给出)[^；。！？\n]{0,50}(?:演进关系|证据|论证)/u.test(progressionText);
+      if (!progressionDenied && /(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(progressionText)) {
         issues.push(`TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`);
       }
       const claimsOneAvailableAction = /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(markdown);
@@ -205,6 +208,19 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       const unboundedNetlistClaim = /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
       const explicitlyBoundedNetlistClaim = /(?:并非|不能|无法|不代表|不保证|不一定)[^；。！？\n]{0,30}(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
       if (unboundedNetlistClaim && !explicitlyBoundedNetlistClaim) issues.push(`TEACHING_UNBOUNDED_GENERALIZATION:${field}`);
+      const pageHasSequentialActions = /\$?a_(?:0|\{0\})\$?/u.test(learnerText) && /\$?a_(?:1|\{1\})\$?/u.test(learnerText);
+      if (pageHasSequentialActions && /每(?:个)?回合[^；。！？\n]{0,30}(?:只|仅)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(markdown)) {
+        issues.push(`TEACHING_EPISODE_STEP_CONFLATION:${field}`);
+      }
+      const negativeWeightedObjective = /=\s*-\s*(?:\\text\{)?(?:Wirelength|wirelength|线长|连线长度)/u.test(learnerText)
+        && /-\s*\\(?:lambda|alpha|beta|gamma)/u.test(learnerText);
+      if (negativeWeightedObjective && /后两项[^；。！？\n]{0,80}从(?:线长|连线长度)中减去/u.test(markdown)) {
+        issues.push(`TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:${field}`);
+      }
+      const sourceShowsMultipleEmbeddings = /Edge embeddings/u.test(learnerText) && /Macro embeddings/u.test(learnerText);
+      if (sourceShowsMultipleEmbeddings && /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(markdown)) {
+        issues.push(`TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:${field}`);
+      }
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));

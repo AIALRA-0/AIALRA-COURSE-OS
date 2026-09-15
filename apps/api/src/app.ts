@@ -3093,6 +3093,9 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_METHOD_PROGRESSION_OVERCLAIM:")) fields.add(issue.slice("TEACHING_METHOD_PROGRESSION_OVERCLAIM:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_ACTION_COUNT_CONFLATION:")) fields.add(issue.slice("TEACHING_ACTION_COUNT_CONFLATION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_UNBOUNDED_GENERALIZATION:")) fields.add(issue.slice("TEACHING_UNBOUNDED_GENERALIZATION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_EPISODE_STEP_CONFLATION:")) fields.add(issue.slice("TEACHING_EPISODE_STEP_CONFLATION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:")) fields.add(issue.slice("TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:")) fields.add(issue.slice("TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));

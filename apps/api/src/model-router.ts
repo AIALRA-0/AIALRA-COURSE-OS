@@ -128,6 +128,15 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
       targets.push({ field: path, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
     }
   }
+  for (const field of fields) {
+    const issue = `TEACHING_LOGICAL_OVERCLAIM:${field}`;
+    if (!issues.includes(issue)) continue;
+    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
+      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:不存在|没有)[^；。！？\n]{0,60}(?:唯一|同时)[^；。！？\n]{0,40}最优/u.test(item))) {
+      targets.push({ field: path, quote: line, instruction: "这行把目标竞争扩大成绝对不存在最优方案；只写材料能够证明的取舍关系。没有目标函数、权重、约束或比较证据时，改成仅凭当前材料不能断言能否同时达到最优" });
+    }
+  }
   if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION")) {
     for (const line of content.fullExplanationMarkdown.slice(0, 700).split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:上一页|前一页|前页)/u.test(item))) {
       targets.push({ field: "fullExplanationMarkdown", quote: line,
@@ -149,6 +158,24 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
       for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(item))) {
         targets.push({ field: path, quote: line,
           instruction: "这里把跨多个网表的证据扩大成无条件适用于任意网表；收窄为材料实际支持的训练分布、给定任务或不同网表示例，不保证未见分布和任意规模都成立" });
+      }
+    }
+    const episodeIssue = `TEACHING_EPISODE_STEP_CONFLATION:${field}`;
+    if (issues.includes(episodeIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /每(?:个)?回合[^；。！？\n]{0,30}(?:只|仅)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "这里把一个时间步误写成一个完整回合；来源连续给出 a_0、a_1 等多个动作时，改成每一步选择并执行一个动作，一个回合由这些连续步骤组成" });
+      }
+    }
+    const signIssue = `TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:${field}`;
+    if (issues.includes(signIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /后两项[^；。！？\n]{0,80}从(?:线长|连线长度)中减去/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "公式首项本身也带负号，不能说后两项从线长中减去；按原式准确写成线长取负，再减去两个带权项，并分别保留系数所在项" });
+      }
+    }
+    const representationIssue = `TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:${field}`;
+    if (issues.includes(representationIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "来源只显示边嵌入和宏单元嵌入，没有给出固定长度或整图汇总；删除固定长度断言，只说明图编码器把网表转换成后续网络使用的边与宏单元表示" });
       }
     }
   }
@@ -197,7 +224,9 @@ export function supportedSourceCheckFormulaConsistent(check: { claim: string; ev
   const evidence = auditedFormulaEquations(check.evidence);
   for (const claim of claims) {
     const sameLeft = evidence.filter((item) => item.lhs === claim.lhs);
-    if (sameLeft.length > 0 && !sameLeft.some((item) => item.rhs === claim.rhs)) return false;
+    const weightedObjective = /\\(?:alpha|beta|gamma|lambda)/u.test(claim.rhs)
+      && (claim.rhs.match(/[+-]/gu)?.length ?? 0) >= 2;
+    if (weightedObjective && sameLeft.length > 0 && !sameLeft.some((item) => item.rhs === claim.rhs)) return false;
   }
   return true;
 }

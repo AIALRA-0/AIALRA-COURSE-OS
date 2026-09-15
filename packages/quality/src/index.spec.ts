@@ -276,6 +276,9 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n## 多个目标怎样权衡\n功耗、时序与面积相互竞争，仅凭这些信息不能确定唯一最优解` }))
       .not.toContain("TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n不存在一个让五项目标同时达到最优的摆放方案` }))
+      .toContain("TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown");
   });
 
   it("rejects an audit-style object heading and a second copy of the previous-page bridge", () => {
@@ -298,6 +301,24 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...input,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n表格只分别列出各方法的思路、限制和年代，没有给出逐代替代关系` }))
       .not.toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      questions: [{ prompt: "后一种方法是否一定解决前一种方法的问题", expectedAnswer: "没有依据", explanation: "年代先后不构成逐代替代证据" }] }))
+      .not.toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:questions");
+  });
+
+  it("separates an episode from its steps and preserves negative objective signs", () => {
+    const sequential = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n从 $s_0$ 执行 $a_0$ 到 $s_1$，再执行 $a_1$ 到 $s_2$，每个回合只执行一个动作` };
+    expect(validateTeachingNarrative(sequential)).toContain("TEACHING_EPISODE_STEP_CONFLATION:fullExplanationMarkdown");
+    const sign = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$r_T = -\\text{Wirelength} - \\lambda \\text{congestion} - \\gamma \\text{density}$，后两项从线长中减去` };
+    expect(validateTeachingNarrative(sign)).toContain("TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:fullExplanationMarkdown");
+  });
+
+  it("does not invent a fixed-length graph vector from multiple embedding outputs", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n原图“Edge embeddings”和“Macro embeddings”是两类输出，图编码器把它们汇总成固定长度向量` };
+    expect(validateTeachingNarrative(input)).toContain("TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:fullExplanationMarkdown");
   });
 
   it("rejects nested quotation marks inside a bilingual term label", () => {

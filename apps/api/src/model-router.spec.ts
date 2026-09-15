@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.41", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.42", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -436,6 +436,26 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       evidence: "原图逐项写为 $r_T = - Wirelength - \\lambda congestion - \\gamma density$",
       verdict: "supported"
     })).toBe(true);
+    expect(supportedSourceCheckFormulaConsistent({
+      claim: "概率为 $p = \\frac{e^x}{e^x+e^y}$",
+      evidence: "原图写成 $p = e^x/(e^x+e^y)$",
+      verdict: "supported"
+    })).toBe(true);
+  });
+
+  it("targets episode-step, sign-description, graph-shape, and optimality claims", () => {
+    const content = providerTeachingContent() as TeachingPackage;
+    content.learningObjectives = ["说明每个回合只执行一个动作"];
+    content.fullExplanationMarkdown = "三项都为负，后两项从线长中减去\n\n图编码器输出固定长度向量\n\n不存在一个让五项同时达到最优的方案";
+    const targets = teachingRepairTargets(content, ["learningObjectives", "fullExplanationMarkdown"], [
+      "TEACHING_EPISODE_STEP_CONFLATION:learningObjectives",
+      "TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:fullExplanationMarkdown",
+      "TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:fullExplanationMarkdown",
+      "TEACHING_LOGICAL_OVERCLAIM:fullExplanationMarkdown"
+    ]);
+    expect(targets.map((target) => target.quote)).toEqual(expect.arrayContaining([
+      "说明每个回合只执行一个动作", "三项都为负，后两项从线长中减去", "图编码器输出固定长度向量", "不存在一个让五项同时达到最优的方案"
+    ]));
   });
 
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {
