@@ -99,15 +99,19 @@ describe("Course OS API", () => {
   it("quotes exact source headings and translates a formula-heading reference without changing its symbol", () => {
     const content = testTeachingResult(0).content;
     content.chapterBridgeMarkdown = "上一页把 EDGE-GNN 接入了网络";
-    content.fullExplanationMarkdown += "\n\n图中 What is happening 一栏列出计算顺序\n\n```txt\nWhat is $W_e$ 一栏\n```";
-    content.misconceptions = ["核对 What is $W_e$ 一栏的原图说明，不能把矩阵当成每条边各有一份"];
+    content.fullExplanationMarkdown += "\n\n页面的 Formula 区块给出公式，Where 区块列出维度，Intuition 一句话解释用途\n\n图中 What is happening 一栏列出计算顺序\n\n```txt\nWhat is $W_e$ 一栏\n```";
+    content.misconceptions = ["核对 What is $W_e$? 区块的原图说明，不能把矩阵当成每条边各有一份"];
     const normalized = normalizeTeachingPackageMath(content,
-      "EDGE-GNN: EDGE EMBEDDING\nWhat is happening?\nWhat is W_e?", "EDGE-GNN: EDGE EMBEDDING");
+      "EDGE-GNN: EDGE EMBEDDING\nFormula\nWhere\nIntuition\nWhat is happening?\nWhat is W_e?", "EDGE-GNN: EDGE EMBEDDING");
     expect(normalized.chapterBridgeMarkdown).toContain("“EDGE-GNN”");
+    expect(normalized.fullExplanationMarkdown).toContain("“Formula” 区块");
+    expect(normalized.fullExplanationMarkdown).toContain("“Where” 区块");
+    expect(normalized.fullExplanationMarkdown).toContain("“Intuition” 一句话");
     expect(normalized.fullExplanationMarkdown).toContain("“What is happening”");
     expect(normalized.fullExplanationMarkdown).toContain("```txt\nWhat is $W_e$ 一栏\n```");
-    expect(normalized.misconceptions[0]).toContain("解释 $W_e$ 的栏目");
+    expect(normalized.misconceptions[0]).toContain("解释 $W_e$ 的区块");
     expect(normalized.misconceptions[0]).not.toContain("What is");
+    expect(unpairedEnglishTeachingFields({ ...normalized, sourceTitle: "EDGE-GNN: EDGE EMBEDDING" })).toEqual([]);
   });
 
   it("keeps source labels quoted across the explanation and misconception fields", () => {

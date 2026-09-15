@@ -173,7 +173,7 @@ describe("learner-facing teaching narrative", () => {
   });
 
   it("quotes contextual English labels only when they occur in the source", () => {
-    const source = "Setup\nOne episode with one action\nUpdate Rule\nWhat is W_e";
+    const source = "Setup\nOne episode with one action\nUpdate Rule\nFormula\nWhere\nIntuition\nWhat is W_e";
     expect(quoteContextualSourceLabels("左栏是 Setup 部分，回到页面 Update Rule 一行核对", source))
       .toBe("左栏是 “Setup” 部分，回到页面 “Update Rule” 一行核对");
     expect(quoteContextualSourceLabels("回到页面 Hidden Rule 一行核对", source))
@@ -182,6 +182,8 @@ describe("learner-facing teaching narrative", () => {
       .toBe("代码 `Update Rule` 与原文“Setup”保持不变");
     expect(quoteContextualSourceLabels("回到页面 What is $W_e$ 区域核对", source))
       .toBe("回到页面 “What is $W_e$” 区域核对");
+    expect(quoteContextualSourceLabels("页面的 Formula 区块给出公式，Where 区块列出维度，Intuition 一句话解释用途", source))
+      .toBe("页面的 “Formula” 区块给出公式，“Where” 区块列出维度，“Intuition” 一句话解释用途");
   });
 
   it("delimits narrow bare math symbols while protecting authored objects", () => {

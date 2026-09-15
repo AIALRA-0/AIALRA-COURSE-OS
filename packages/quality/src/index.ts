@@ -405,12 +405,12 @@ export function quoteContextualSourceLabels(text: string, sourceText: string): s
   const appearsInSource = (label: string) => new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(label)}(?![A-Za-z0-9])`, "iu").test(sourceText);
   const withMathLabels = text.split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(
-      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z]*(?:[ -][A-Za-z]+){0,5})\s+(\$[^$\r\n]+\$)(?=\s*(?:区域|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
+      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z]*(?:[ -][A-Za-z]+){0,5})\s+(\$[^$\r\n]+\$)(?=\s*(?:区域|区块|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
       (whole, label: string, math: string) => appearsInSource(label.trim()) ? `“${label.trim()} ${math}”` : whole
     )).join("");
   return withMathLabels.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(
-      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+){0,5})(?=\s*(?:部分|栏目|一栏|一行|标签|节点|箭头|模块|步骤|阶段))/gu,
+      /(?<![A-Za-z0-9“"])([A-Z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+){0,5})(?=\s*(?:部分|区域|区块|栏目|一栏|一行|一句话|标签|节点|箭头|模块|步骤|阶段))/gu,
       (label) => appearsInSource(label.trim()) ? `“${label.trim()}”` : label
     )).join("");
 }

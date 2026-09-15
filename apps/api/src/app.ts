@@ -3214,12 +3214,12 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
   const mathTerms = [...new Set([...content.fullExplanationMarkdown.matchAll(/\\text\{\s*([A-Za-z]{8,})\s*\}/gu)].map((match) => match[1]!))];
   const sourceQuestionLabels = [...new Set([...sourceText.matchAll(/\b(?:What|How|Why|Where|When)\s+[A-Za-z][A-Za-z ]{2,65}\?/gu)]
     .map((match) => match[0].slice(0, -1).trim()))];
-  const quotedSourceLabels = sourceQuestionLabels.map((label) => `“${label}”`).join(" ");
   const titleAcronyms = [...new Set([...sourceTitle.matchAll(/\b[A-Z]{2,}(?:-[A-Z]{2,})+\b/gu)]
     .map((match) => match[0]))];
+  const quotedSourceLabels = [...sourceQuestionLabels, ...titleAcronyms].map((label) => `“${label}”`).join(" ");
   const translateMathHeadingReference = (value: string) => value
     .split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”)/gu)
-    .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\s+一栏/gu, "解释 $1 的栏目"))
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\??\s+(一栏|区域|区块|栏目)/gu, "解释 $1 的$2"))
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
