@@ -45,6 +45,7 @@ export function App() {
   const [loadedPage, setLoadedPage] = useState<{ releaseId: string; page: PageLesson }>();
   const [view, setView] = useState<ViewState>({ zoom: 1, panX: 0, panY: 0 });
   const [mobileMode, setMobileMode] = useState<MobileMode>("visual");
+  const [pageDockOpen, setPageDockOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">((localStorage.getItem("course-os-theme") as "light" | "dark") || "light");
   const [importOpen, setImportOpen] = useState(false);
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
@@ -428,7 +429,7 @@ export function App() {
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
             {mode === "learn" && release.lifecycle === "draft_source" && !(candidatePreview?.pageId === page.id && candidatePreview.page)
               ? <div className="workspace-loader" role="status">{!candidatePreview?.error && <div className="loader" />}<span>{candidatePreview?.pageId === page.id && candidatePreview.error ? candidatePreview.error : "正在载入候选讲解"}</span>{candidatePreview?.pageId === page.id && candidatePreview.error && <button type="button" onClick={() => setCandidatePreviewReload((value) => value + 1)}>重试</button>}</div>
-              : pageDetailReady && mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
+              : pageDetailReady && mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>
         </section>
@@ -469,7 +470,7 @@ function MobileTreeDrawer({ tree, selectedPageId, actions, open, onClose, onSele
   </div>;
 }
 
-function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, updateView, mobileMode, setMobileMode, rightCollapsed, onToggleRight, onEnterStudio }: {
+function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio }: {
   release: CourseRelease;
   pageIndex: number;
   setPageIndex: Dispatch<SetStateAction<number>>;
@@ -478,12 +479,13 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
   updateView: (next: ViewState) => void;
   mobileMode: MobileMode;
   setMobileMode: (mode: MobileMode) => void;
+  pageDockOpen: boolean;
+  setPageDockOpen: Dispatch<SetStateAction<boolean>>;
   rightCollapsed: boolean;
   onToggleRight: () => void;
   onEnterStudio: () => void;
 }) {
   const page = release.pages[pageIndex]!;
-  const [pageDockOpen, setPageDockOpen] = useState(false);
   const lessonColumnRef = useRef<HTMLDivElement>(null);
   const lessonStripRef = useRef<HTMLElement>(null);
 
