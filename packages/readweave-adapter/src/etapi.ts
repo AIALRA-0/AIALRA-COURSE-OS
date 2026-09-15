@@ -121,6 +121,7 @@ interface DraftProjection {
 interface ProjectionIndex {
   courseRootNoteId: string;
   stateNoteId: string;
+  activityStateNoteId?: string;
   rootMaterialsNoteId?: string;
   trashNoteId?: string;
   courses: Record<string, CourseProjection>;
@@ -131,6 +132,17 @@ interface ProjectionIndex {
 interface EtapiState extends ReadWeaveFileState {
   projections: ProjectionIndex;
 }
+
+interface EtapiActivityState {
+  schemaVersion: "1.0.0";
+  questionSelections: QuestionSelection[];
+  questionAttempts: QuestionAttempt[];
+  attempts: AssessmentAttempt[];
+  mastery: MasteryRecord[];
+  idempotency: ReadWeaveFileState["idempotency"];
+}
+
+const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
 
 const SECTION_DEFINITIONS = [
   ["source", "00 来源与原始截图"],
@@ -409,14 +421,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection> {
-    return this.mutate(async (state) => {
+    return this.mutateActivity(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) return state.questionSelections.find((item) => item.id === replay.objectId) ?? selection;
-      const draft = state.drafts.find((item) => item.pageId === selection.pageId);
-      const projection = draft ? state.projections.drafts[draft.id] : undefined;
-      if (projection) await this.createNote(projection.sectionNoteIds.assessment, `抽题记录 · ${selection.createdAt}`, `<pre>${escapeHtml(JSON.stringify(selection, null, 2))}</pre>`, "text", undefined, {
-        courseOsType: "question_selection", courseOsObjectId: selection.id, courseOsPageId: selection.pageId
-      });
+      // A selection is an internal reproducibility record, not learner work.
+      // Keep it in the compact activity index instead of creating a visible
+      // note and rewriting the multi-megabyte course index on every page open.
       state.questionSelections.push(structuredClone(selection));
       state.idempotency[context.idempotencyKey] = { kind: "question_selection", objectId: selection.id };
       return selection;
@@ -424,7 +434,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt> {
-    return this.mutate(async (state) => {
+    return this.mutateActivity(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) return state.questionAttempts.find((item) => item.id === replay.objectId) ?? attempt;
       const release = state.releases.find((item) => item.id === attempt.courseReleaseId);
@@ -443,7 +453,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult> {
-    return this.mutate(async (state) => {
+    return this.mutateActivity(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) return replayQuestionAttemptTransaction(state, replay.objectId);
       const mastery = reduceMastery(state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId));
@@ -531,7 +541,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveAttempt(attempt: AssessmentAttempt, mastery: MasteryRecord, context: IdempotentWriteContext): Promise<AssessmentAttempt> {
-    return this.mutate(async (state) => {
+    return this.mutateActivity(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
         const existing = state.attempts.find((item) => item.id === replay.objectId);
@@ -1603,8 +1613,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const projection = await this.ensureWorkspace();
     const content = await this.getContent(projection.stateNoteId);
     const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
+    const state = normalizeState(parsed, projection);
+    const activityStateNoteId = state.projections.activityStateNoteId;
+    if (activityStateNoteId) {
+      const activity = decodeReadWeaveStateContent(await this.getContent(activityStateNoteId)) as Partial<EtapiActivityState>;
+      state.questionSelections = activity.questionSelections ?? state.questionSelections;
+      state.questionAttempts = activity.questionAttempts ?? state.questionAttempts;
+      state.attempts = activity.attempts ?? state.attempts;
+      state.mastery = activity.mastery ?? state.mastery;
+      state.idempotency = { ...state.idempotency, ...(activity.idempotency ?? {}) };
+    }
     this.lastReadAt = new Date().toISOString();
-    return normalizeState(parsed, projection);
+    return state;
   }
 
   private async writeState(state: EtapiState): Promise<void> {
@@ -1619,6 +1639,71 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.invalidateStateCache();
       throw error;
     }
+  }
+
+  private activityState(state: EtapiState): EtapiActivityState {
+    return {
+      schemaVersion: "1.0.0",
+      questionSelections: state.questionSelections,
+      questionAttempts: state.questionAttempts,
+      attempts: state.attempts,
+      mastery: state.mastery,
+      idempotency: Object.fromEntries(Object.entries(state.idempotency).filter(([, entry]) => activityIdempotencyKinds.has(entry.kind)))
+    };
+  }
+
+  private async initializeActivityState(state: EtapiState): Promise<void> {
+    const note = await this.createNote(
+      state.projections.courseRootNoteId,
+      "01 Course OS 学习活动索引",
+      encodeReadWeaveStateContent(this.activityState(state)),
+      "code",
+      "application/json",
+      { courseOsActivityIndex: this.workspaceId, courseOsType: "activity_index" }
+    );
+    state.projections.activityStateNoteId = note.noteId;
+    // Persist the pointer once. Later selections and attempts update only the
+    // compact activity index, while the immutable course material stays put.
+    await this.writeState(state);
+  }
+
+  private async writeActivityState(state: EtapiState): Promise<void> {
+    const noteId = state.projections.activityStateNoteId;
+    if (!noteId) throw new Error("READWEAVE_ACTIVITY_INDEX_NOT_INITIALIZED");
+    try {
+      await this.putContent(noteId, encodeReadWeaveStateContent(this.activityState(state)));
+      this.lastWriteAt = new Date().toISOString();
+      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+    } catch (error) {
+      this.invalidateStateCache();
+      throw error;
+    }
+  }
+
+  private async mutateActivity<T>(change: (state: EtapiState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
+    let result!: T;
+    this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
+      const previousContext = this.activeWriteContext;
+      this.activeWriteContext = context;
+      try {
+        const pendingRead = this.stateReadInFlight;
+        if (pendingRead) await pendingRead.catch(() => undefined);
+        const state = await this.readStateReference(true);
+        const replay = Boolean(state.idempotency[context.idempotencyKey]);
+        result = structuredClone(await change(state));
+        if (!replay) {
+          if (state.projections.activityStateNoteId) await this.writeActivityState(state);
+          else await this.initializeActivityState(state);
+        }
+      } catch (error) {
+        this.invalidateStateCache();
+        throw error;
+      } finally {
+        this.activeWriteContext = previousContext;
+      }
+    });
+    await this.writeChain;
+    return result;
   }
 
   private async mutate<T>(change: (state: EtapiState) => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
@@ -1637,7 +1722,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const state = await this.readStateReference(true);
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
         result = structuredClone(await change(state));
-        if (!replay) await this.writeState(state);
+        if (!replay) {
+          if (state.projections.activityStateNoteId) await this.writeActivityState(state);
+          await this.writeState(state);
+        }
       } catch (error) {
         // A callback can update its private state object after a remote
         // projection call. If either step fails, discard the snapshot so no

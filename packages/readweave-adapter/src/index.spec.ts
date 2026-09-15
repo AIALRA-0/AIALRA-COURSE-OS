@@ -177,6 +177,54 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("partitions high-frequency learning activity and preserves it across restart", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, { ...context, idempotencyKey: "activity-release" });
+
+    const firstSelection = {
+      id: "selection-1", sessionId: "session-1", courseReleaseId: pageRelease.id, pageId: "page-1",
+      seed: "seed-1", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z"
+    };
+    await api.saveQuestionSelection(firstSelection, { ...context, idempotencyKey: "activity-selection-1" });
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const stateWritesAfterInitialization = remote.contentWriteCount(stateNoteId);
+    const activityWritesAfterInitialization = remote.contentWriteCount(activityNoteId);
+
+    await api.saveQuestionSelection({ ...firstSelection, id: "selection-2", seed: "seed-2" }, { ...context, idempotencyKey: "activity-selection-2" });
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
+    expect(remote.contentWriteCount(activityNoteId)).toBe(activityWritesAfterInitialization + 1);
+
+    const questionAttempt = {
+      id: "question-attempt-1", selectionId: firstSelection.id, sessionId: firstSelection.sessionId,
+      courseReleaseId: pageRelease.id, pageId: "page-1", questionId: "question-1", objectiveId: "objective-1",
+      answer: "正确答案", correct: true, usedHintLevel: 0, attemptedAt: "2026-09-15T00:01:00.000Z"
+    };
+    const assessmentAttempt = {
+      id: questionAttempt.id, itemId: questionAttempt.questionId, objectiveId: questionAttempt.objectiveId,
+      answer: questionAttempt.answer, correct: true, usedHintLevel: 0, attemptedAt: questionAttempt.attemptedAt
+    };
+    const mastery = {
+      objectiveId: questionAttempt.objectiveId, state: "practicing" as const, unaidedCorrect: true,
+      delayedOrTransferCorrect: false, intervalStep: 1, algorithmVersion: "review-ladder-v1" as const,
+      updatedAt: questionAttempt.attemptedAt
+    };
+    const attemptContext = { ...context, idempotencyKey: "activity-attempt-1" };
+    await api.saveQuestionAttemptTransaction(questionAttempt, assessmentAttempt, () => mastery, attemptContext);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
+
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    expect(await reopened.listQuestionAttempts("page-1")).toEqual([questionAttempt]);
+    expect(await reopened.listAssessmentAttempts("objective-1")).toEqual([assessmentAttempt]);
+    expect(await reopened.listMastery()).toEqual([mastery]);
+    const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
+    const replay = await reopened.saveQuestionAttemptTransaction({ ...questionAttempt, answer: "不应覆盖" }, assessmentAttempt, () => mastery, attemptContext);
+    expect(replay.attempt).toEqual(questionAttempt);
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
+  });
+
   it("returns an idempotent replay without creating another remote revision or state write", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -636,5 +684,15 @@ class FakeEtapi {
     const note = [...this.notes.values()].find((item) => item.title === title);
     if (!note) throw new Error(`missing note ${title}`);
     return note.content;
+  }
+
+  noteIdByTitle(title: string): string {
+    const entry = [...this.notes.entries()].find(([, note]) => note.title === title);
+    if (!entry) throw new Error(`missing note ${title}`);
+    return entry[0];
+  }
+
+  contentWriteCount(noteId: string): number {
+    return this.requests.filter((request) => request.method === "PUT" && request.path === `/notes/${noteId}/content`).length;
   }
 }
