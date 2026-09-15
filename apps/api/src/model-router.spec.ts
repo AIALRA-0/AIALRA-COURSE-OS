@@ -5,7 +5,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.47", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.48", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -471,6 +471,11 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(supportedSourceCheckFormulaConsistent({
       claim: "末端回报为 $r_T = -Wirelength - \\lambda congestion - \\gamma density$",
       evidence: "原图逐项写为 $r_T = - Wirelength - \\lambda congestion - \\gamma density$",
+      verdict: "supported"
+    })).toBe(true);
+    expect(supportedSourceCheckFormulaConsistent({
+      claim: "末端回报为 $r_T = -Wirelength - \\lambda \\times congestion - \\gamma \\times density$",
+      evidence: "原图逐项写为 $r_T = -Wirelength - \\lambda congestion - \\gamma density$",
       verdict: "supported"
     })).toBe(true);
     expect(supportedSourceCheckFormulaConsistent({

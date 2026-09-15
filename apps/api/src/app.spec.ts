@@ -268,6 +268,17 @@ describe("Course OS API", () => {
     expect(normalized.coverageEvidence[0]!.explanation).toBe("先去掉价值预测层，再把编码器接入策略网络，并继续训练策略");
     expect(normalized.coverageEvidence[1]!.explanation).toBe("这段无关说明不能被自动伪装成正文证据");
   });
+  it("matches a duplicated OCR math signature to one exact KaTeX line", () => {
+    const mathPage = { ...testRelease().pages[0]!,
+      atoms: [{ kind: "text_region" as const, id: "math-1", label: "公式", observation: "𝜋𝜋 𝑎𝑎1 = 𝜋𝜋 𝑎𝑎2 = 0.5" }],
+      coverageRequirements: [{ id: "math-r1", atomId: "math-1", requiredFields: ["observation"], risk: "high" as const }] };
+    const content = { ...testTeachingResult(0).content,
+      fullExplanationMarkdown: "初始概率满足 $\\pi(a_1)=\\pi(a_2)=\\frac{1}{2}=0.5$",
+      coverageEvidence: [{ atomId: "math-1", coveredFields: ["observation"], explanation: "两个动作的初始概率相等" }] };
+    expect(validateTeachingCoverageEvidence(mathPage, content)).toEqual([]);
+    expect(validateTeachingCoverageEvidence(mathPage, { ...content, fullExplanationMarkdown: "初始概率只有 $\\pi(a_1)=0.5$" }))
+      .toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:math-1");
+  });
   it("splits a long generated paragraph without touching Markdown objects", async () => {
     const { normalizePackedTeachingProse } = await import("./app.js");
     const long = `第一句${"用于解释关系".repeat(22)}。第二句${"用于解释条件".repeat(22)}。`;

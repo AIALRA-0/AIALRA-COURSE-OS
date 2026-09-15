@@ -295,6 +295,7 @@ function auditedFormulaEquations(text: string): Array<{ lhs: string; rhs: string
   const expression = /(?:\${1,2}\s*)?([A-Za-z\\][A-Za-z0-9_{}^\\]*)\s*=\s*([^$\n。；]+?)(?=\${1,2}|[。；\n]|$)/gu;
   const normalize = (value: string) => value.normalize("NFKC")
     .replace(/\\(?:left|right|,|;|!|quad|qquad)/gu, "")
+    .replace(/\\(?:times|cdot)|[×·*]/gu, "")
     .replace(/\\(?:mathrm|text|operatorname)\s*\{([^{}]*)\}/gu, "$1")
     .replace(/[{}\s]/gu, "")
     .replace(/λ/gu, "\\lambda")

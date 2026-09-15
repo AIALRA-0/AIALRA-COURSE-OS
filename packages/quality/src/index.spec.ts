@@ -405,6 +405,12 @@ describe("learner-facing teaching narrative", () => {
     expect(issues).not.toContain("TEACHING_SOURCE_COMMENTARY_OVERUSE");
   });
 
+  it("accepts a source-qualified factorial correction separated by a full derivation", () => {
+    const summary = "本页把 $1000!$ 写成 $10^{2500}$，这是来源中的粗略写法；用带修正项的斯特林近似复算，先计算一个较长的中间过程并解释每一项的来源，最后得到 $\\log_{10}(1000!)\\approx2567.6046$，即 $1000!\\approx4.02\\times10^{2567}$";
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, mainContentMarkdown: summary }))
+      .not.toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:mainContentMarkdown:1000:2567");
+  });
+
   it("accepts an English source label followed immediately by its Chinese translation", () => {
     const input = { ...valid, strictWritingStyle: true,
       questions: [{ prompt: "哪项正确", options: [], expectedAnswer: "牺牲全局质量", explanation: "原表写着“Sacrifices global solution quality”（牺牲全局解的质量），所以该项与来源一致" }] };

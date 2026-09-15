@@ -3209,10 +3209,47 @@ export function validateTeachingCoverageEvidence(page: CourseRelease["pages"][nu
     if (/^(已覆盖|覆盖|见上文|见讲解)[。！!：:]?$/.test(evidence.explanation.trim())) issues.push("TEACHING_COVERAGE_EXPLANATION_VAGUE");
     if (textRegionIds.has(requirement.atomId)) {
       const quote = evidence.explanation.replace(/[`*_#\s]/g, "");
-      if (!hasSharedEvidenceFragment(quote, compactExplanation)) issues.push(`TEACHING_COVERAGE_QUOTE_NOT_FOUND:${requirement.atomId}`);
+      const atom = page.atoms.find((item) => item.id === requirement.atomId);
+      const sourceObservation = atom && "observation" in atom && typeof atom.observation === "string" ? atom.observation : "";
+      if (!hasSharedEvidenceFragment(quote, compactExplanation)
+        && !sourceMathSignatureCovered(sourceObservation, content.fullExplanationMarkdown)) {
+        issues.push(`TEACHING_COVERAGE_QUOTE_NOT_FOUND:${requirement.atomId}`);
+      }
     }
   }
   return [...new Set(issues)];
+}
+
+/**
+ * OCR commonly duplicates mathematical glyphs, while the lesson correctly
+ * renders them as KaTeX. Accept that coverage only when one current line
+ * contains the complete variable-and-number signature from the source atom.
+ */
+function sourceMathSignatureCovered(source: string, explanation: string): boolean {
+  if (!/[=≈]|(?:π|𝜋|θ|𝜃|\d)\s*[_₀-₉0-9]/u.test(source)) return false;
+  const tokens = mathEvidenceTokens(source);
+  const hasIndexedVariable = tokens.some((token) => /^[a-z]+\d+$/u.test(token));
+  const hasNumericValue = tokens.some((token) => /^\d+(?:\.\d+)?$/u.test(token));
+  if (tokens.length < 3 || !hasIndexedVariable || !hasNumericValue) return false;
+  return explanation.split(/\r?\n/u).some((line) => {
+    const candidate = new Set(mathEvidenceTokens(line));
+    return tokens.every((token) => candidate.has(token));
+  });
+}
+
+function mathEvidenceTokens(value: string): string[] {
+  const normalized = value.normalize("NFKC")
+    .replace(/\\(?:left|right|mid|frac|text|mathrm|cdot|times|approx)\b/gu, " ")
+    .replace(/\\pi\b|π/gu, " pi ")
+    .replace(/\\theta\b|θ/gu, " theta ")
+    .replace(/\\alpha\b|α/gu, " alpha ")
+    .replace(/\\gamma\b|γ/gu, " gamma ")
+    .replace(/([A-Za-z])\1(?=\d)/gu, "$1")
+    .replace(/ππ/gu, "pi")
+    .replace(/([A-Za-z]+)_\{?(\d+)\}?/gu, "$1$2")
+    .toLowerCase();
+  return [...new Set(normalized.match(/[a-z]+\d*|\d+(?:\.\d+)?/gu) || [])]
+    .filter((token) => !["text", "frac", "left", "right"].includes(token));
 }
 
 function hasSharedEvidenceFragment(evidence: string, explanation: string): boolean {

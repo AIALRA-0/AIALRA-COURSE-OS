@@ -101,9 +101,9 @@ function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expe
         const statedExponent = Number(exponent[1]);
         if (!Number.isInteger(statedExponent) || statedExponent === expectedExponent) continue;
         const claimPrefix = clause.slice(0, (factorial.index ?? 0) + factorial[0].length + (exponent.index ?? 0));
-        const sourceQualified = /(?:原文|材料|页面|课件)[^\n]{0,180}(?:粗略|近似|错误|写成|标为)/u.test(claimPrefix);
+        const sourceQualified = /(?:原文|材料|页面|本页|课件)[^\n]{0,180}(?:粗略|近似|错误|写成|标为)/u.test(claimPrefix);
         const correctedElsewhere = new RegExp(`10\\^\\{${expectedExponent}\\}`).test(markdown)
-          && /(?:复算|实际|准确|严格|更接近|约为|得到)[^\n]{0,100}10\^\{\d+\}/u.test(markdown);
+          && /(?:复算|实际|准确|严格|更接近|约为|得到)/u.test(markdown);
         if (!(sourceQualified && correctedElsewhere)) mismatches.push({ n, expectedExponent });
       }
     }
