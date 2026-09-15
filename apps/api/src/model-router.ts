@@ -1,3 +1,4 @@
+import { teachingCompositionContract } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, semanticAuditSchema, teachingPackageSchema } from "./generation-harness.js";
@@ -255,9 +256,9 @@ function providerRequestHeaders(connection: ProviderConnection, input: ModelRout
     "Idempotency-Key": idempotencyKey
   };
   if (connection.providerId === "opencode-go") {
-    // OpenCode Go 的直连接口要求每段对话带稳定会话编号。Course OS 的一次模型调用
-    // 就是一段无状态对话，同一个调用发生网络重试时会继续使用相同的幂等键。
-    headers["x-opencode-session"] = input.idempotencyKey || idempotencyKey;
+    // Keep one provider session across a page job and its field repairs;
+    // each individual request still retains its own idempotency key.
+    headers["x-opencode-session"] = (input.idempotencyKey || idempotencyKey).split(":attempt:")[0]!.split(":field:")[0]!;
     headers["x-opencode-request"] = idempotencyKey;
     headers["x-opencode-client"] = "course-os";
     headers["User-Agent"] = "course-os/2.4.0";
@@ -354,9 +355,45 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (!["responses", "chat_completions"].includes(this.connection.protocol || "") || !input.repair?.previousTeachingPackage || fields.length === 0) {
       return this.generateTeachingPackage(input);
     }
+    if (fields.length > 1) {
+      // Finish the prose first; evidence must quote the final text, never a
+      // simultaneously rewritten explanation. Each call sees one field contract.
+      const ordered = [...fields.filter(field => field !== "coverageEvidence"), ...fields.filter(field => field === "coverageEvidence")];
+      let content = input.repair.previousTeachingPackage;
+      let usage = emptyUsage(Date.now());
+      let model = this.connection.model;
+      let completedCalls = 0;
+      for (const field of ordered) {
+        const spent = usage.inputTokens === 0 && usage.outputTokens === 0 ? 0 : this.usageCostUsd(usage);
+        if (input.maxCostUsd !== undefined && (spent === undefined || spent >= input.maxCostUsd)) {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId);
+        }
+        try {
+          const result = await this.repairTeachingFields({ ...input,
+            idempotencyKey: `${input.idempotencyKey}:field:${field}`,
+            maxCostUsd: input.maxCostUsd === undefined ? undefined : input.maxCostUsd - (spent ?? 0),
+            repair: { ...input.repair, previousTeachingPackage: content }
+          }, [field]);
+          content = result.content; model = result.model; usage = completedCalls++ === 0 ? result.usage : sumProviderUsage(usage, result.usage);
+        } catch (error) {
+          if (!(error instanceof ModelRouterGenerationError)) throw error;
+          throw new ModelRouterGenerationError(error.code, error.model, completedCalls === 0 ? error.usage : sumProviderUsage(usage, error.usage), error.provider, error.responseShape);
+        }
+      }
+      return { content, provider: this.connection.providerId, model, usage };
+    }
     const started = Date.now();
     const previous = input.repair.previousTeachingPackage;
-    const properties = teachingPackageSchema.properties as Record<string, unknown>;
+    const properties = structuredClone(teachingPackageSchema.properties) as Record<string, unknown>;
+    const evidenceSpans = fields.includes("coverageEvidence")
+      ? Object.fromEntries(previous.fullExplanationMarkdown.split(/\r?\n/).map(line => line.trim())
+        .filter(line => !/^#{1,6}\s/.test(line) && line.replace(/[`*_#\s]/g, "").length >= 12)
+        .map((text, index) => [`excerpt:${String(index + 1).padStart(5,"0")}`, text.slice(0,400)])) : {};
+    if (fields.includes("coverageEvidence")) {
+      if (!Object.keys(evidenceSpans).length) throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INVALID", this.connection.model, emptyUsage(started), this.connection.providerId);
+      const coverageSchema = properties.coverageEvidence as { items: { properties: Record<string,unknown> } };
+      coverageSchema.items.properties.explanation = { type: "string", enum: Object.keys(evidenceSpans) };
+    }
     const schema = { type: "object", properties: Object.fromEntries(fields.map((field) => [field, properties[field]])), required: fields, additionalProperties: false };
     const coverageQuoteInstruction = fields.includes("fullExplanationMarkdown")
       ? "修复 coverageEvidence 时，每条 explanation 必须逐字摘取本次同一 JSON 返回的 fullExplanationMarkdown 中连续至少 12 个字符；先写定完整讲解，再填写覆盖证据，不得引用旧草稿或自行改写摘录"
@@ -365,6 +402,8 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       pageTitle: input.pageTitle, pageNumber: input.pageNumber, sourceText: input.sourceText.slice(0, 6_000),
       previousPageContext: input.previousPageContext?.slice(0, 800),
       issues: input.repair.issues, fields,
+      compositionContract: Object.fromEntries(fields.filter(field => field in teachingCompositionContract).map(field => [field, teachingCompositionContract[field as keyof typeof teachingCompositionContract]])),
+      evidenceSpans: fields.includes("coverageEvidence") ? evidenceSpans : undefined,
       maximumExplanationCharacters: input.repair.maximumExplanationCharacters,
       existingFields: Object.fromEntries(fields.map((field) => [field, previous[field]])),
       explanationContext: fields.includes("fullExplanationMarkdown") ? undefined : previous.fullExplanationMarkdown.slice(0, fields.includes("coverageEvidence") ? 12_000 : 2_500),
@@ -377,7 +416,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
     const responseRequest = { model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文优先使用中文，英文或缩写每次出现仍需中英文配对。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。`,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${fields.includes("coverageEvidence") ? "从 evidenceSpans 选择真正解释对应来源对象的片段编号，explanation 只填 excerpt: 编号，不自行摘录、拼接或改写正文。" : coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文优先使用中文，英文或缩写每次出现仍需中英文配对。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。\n本次成文要求：${fields.map(field => teachingCompositionContract[field as keyof typeof teachingCompositionContract] || "只绑定真实来源对象与正文片段").join("\n")}\n${fields.includes("questions") ? "题库修复必须删除无助于理解的原文英文复述，改用准确中文表达；不要把已能准确用中文表达的原文标签再次作为题目解释中的普通英文。只有程序标识、数学变量或题目确实要求辨认的原始对象才保留原样，并在对象外用中文解释。理解题的 expectedAnswer 若含独立比较项，必须直接写成多行 Markdown 列表；不能只给 explanation 换行而漏掉标准答案。" : ""}`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
@@ -415,6 +454,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     } catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_JSON_INVALID", model, usage, this.connection.providerId); }
     if (!partial || typeof partial !== "object" || fields.some((field) => !(field in partial))) {
       throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INCOMPLETE", model, usage, this.connection.providerId);
+    }
+    if (fields.includes("coverageEvidence") && Array.isArray(partial.coverageEvidence)) {
+      partial.coverageEvidence = partial.coverageEvidence.map(item => {
+        const excerpt = evidenceSpans[item.explanation];
+        if (excerpt) return { ...item, explanation: excerpt };
+        // Accept an already exact quote for compatible providers, never fuzzy similarity.
+        if (item.explanation.replace(/[`*_#\s]/g," ").trim().length >= 12 && previous.fullExplanationMarkdown.includes(item.explanation)) return item;
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_FIELD_REPAIR_INVALID", model, usage, this.connection.providerId);
+      });
     }
     const repaired = normalizeTeachingPackageShape({ ...previous, ...Object.fromEntries(fields.map((field) => [field, partial[field]])) } as TeachingPackage);
     try { validateTeachingPackage(repaired); }

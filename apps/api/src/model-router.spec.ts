@@ -366,26 +366,41 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     await client.repairTeachingFields({ ...providerInput("coverage-repair", true), repair: { issues: ["TEACHING_COVERAGE_QUOTE_NOT_FOUND"], maximumExplanationCharacters: 8000, previousTeachingPackage: before } }, ["coverageEvidence"]);
   });
 
-  it("binds coverage excerpts to the newly repaired explanation when both fields change", async () => {
+  it("repairs prose before evidence and quotes the final explanation without changing other fields", async () => {
     const before = providerTeachingContent() as TeachingPackage;
-    const explanation = "先找出图上的输入，再说明计算怎样得到输出，同时逐项核对原图的箭头与符号。".repeat(5);
-    const evidence = [{ atomId: "atom-1", coveredFields: ["observation"], explanation: "正文逐字写明：先找出图上的输入，再说明计算怎样得到输出" }];
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { instructions: string; input: Array<{ content: Array<{ text?: string }> }> };
-      expect(body.instructions).toContain("本次同一 JSON 返回的 fullExplanationMarkdown");
-      expect(body.instructions).not.toContain("必须逐字摘取 explanationContext");
-      expect(body.input[0]?.content[0]?.text).toContain('"fullExplanationMarkdown"');
-      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ fullExplanationMarkdown: explanation, coverageEvidence: evidence }),
+    const explanation = "先找出图上的输入，再说明计算怎样得到输出，同时逐项核对原图的箭头与符号".repeat(5);
+    const evidence = [{ atomId: "atom-1", coveredFields: ["observation"], explanation }];
+    const requests: string[][] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const prompt = JSON.parse(body.input[0].content[0].text);
+      requests.push(prompt.fields);
+      expect(prompt.compositionContract).toBeDefined();
+      if (prompt.fields[0] === "coverageEvidence") expect(prompt.explanationContext).toBe(explanation);
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(prompt.fields[0] === "fullExplanationMarkdown"
+        ? { fullExplanationMarkdown: explanation } : { coverageEvidence: [{ ...evidence[0], explanation: Object.keys(prompt.evidenceSpans)[0] }] }),
         usage: { input_tokens: 200, output_tokens: 80, total_cost: 0.002 } });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
-      apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
-    const result = await client.repairTeachingFields({ ...providerInput("paired-coverage-repair", true),
-      repair: { issues: ["TEACHING_COVERAGE_QUOTE_NOT_FOUND", "TEACHING_EXPLANATION_TOO_LONG"],
-        maximumExplanationCharacters: 3500, previousTeachingPackage: before } }, ["fullExplanationMarkdown", "coverageEvidence"]);
+    }));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test", apiKey: "synthetic-secret",
+      model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" });
+    const result = await client.repairTeachingFields({ ...providerInput("sequential-fields",true), maxCostUsd:0.01,
+      repair:{issues:["TEACHING_COVERAGE_QUOTE_NOT_FOUND"], maximumExplanationCharacters:3500, previousTeachingPackage:before}
+    },["coverageEvidence","fullExplanationMarkdown"]);
+    expect(requests).toEqual([["fullExplanationMarkdown"],["coverageEvidence"]]);
     expect(result.content.fullExplanationMarkdown).toBe(explanation);
     expect(result.content.coverageEvidence).toEqual(evidence);
+    expect(result.content.questions).toEqual(before.questions);
+    expect(result.usage.apiEquivalentUsd).toBe(0.004);
+  });
+
+  it("rejects a coverage span that does not exist and preserves the input package", async () => {
+    const before = providerTeachingContent() as TeachingPackage;
+    const original = structuredClone(before);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ model:"deepseek-flash", output_text:JSON.stringify({coverageEvidence:[{atomId:"atom-1",coveredFields:["observation"],explanation:"excerpt:99999"}]}),usage:{input_tokens:100,output_tokens:50,total_cost:0.001} })));
+    const client = new HttpProviderTeachingClient({providerId:"deepseek",baseUrl:"https://deepseek.test",apiKey:"synthetic-secret",model:"deepseek-flash",protocol:"responses"});
+    await expect(client.repairTeachingFields({...providerInput("invalid-span"),repair:{issues:["TEACHING_COVERAGE_QUOTE_NOT_FOUND"],maximumExplanationCharacters:3500,previousTeachingPackage:before}},["coverageEvidence"]))
+      .rejects.toMatchObject({code:"MODEL_PROVIDER_FIELD_REPAIR_INVALID"});
+    expect(before).toEqual(original);
   });
 
   it("accepts up to twenty-four source checks for a dense page without dropping verified objects", async () => {

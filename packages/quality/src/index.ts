@@ -385,7 +385,7 @@ export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] =
     .replace(/\b[A-Z]{2,5}\s+\d{2,5}\b/gu, "")
     .replace(/\b[A-Z]{2,8}\s*即[\p{Script=Han}]{2,20}/gu, "")
     .replace(/(?<=发表于|刊于)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5}(?=\s+的(?:文章|论文|期刊))/gu, "")
-    .replace(/“[A-Za-z][^”\n]{0,100}”/gu, "")
+    .replace(/“[^”\n]{0,100}[A-Za-z][^”\n]{0,100}”/gu, "")
     .replace(/"[A-Za-z][^"\n]{0,100}"/gu, "")
     .replace(/「[A-Za-z][^」\n]{0,100}」/gu, "")
     .replace(/《[A-Za-z][^》\n]{2,100}》/gu, "");
@@ -471,7 +471,7 @@ export function unpairedEnglishTeachingFields(input: TeachingNarrativeInput): Te
     priorKnowledge: input.priorKnowledge.join("\n"),
     fullExplanationMarkdown: input.fullExplanationMarkdown,
     misconceptions: input.misconceptions.join("\n"),
-    questions: input.questions.map((question) => `${question.prompt}\n${question.explanation}`).join("\n")
+    questions: input.questions.map((question) => `${question.prompt}\n${(question.options || []).join("\n")}\n${question.expectedAnswer || ""}\n${question.explanation}`).join("\n")
   };
   const learnerText = Object.values(parts).join("\n");
   const sourceNames = definedSourceNames(input.sourceTitle || "", learnerText);

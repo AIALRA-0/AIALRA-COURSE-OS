@@ -14,7 +14,7 @@ describe("composition regressions independent of a course or page number", () =>
   it.each(["Block 与 Macro 不同", "计算 graph embedding", "表格列名是 Method 和 Era", "使用 Encoder 得到表示"])("rejects untranslated names: %s", text => {
     expect(hasUnpairedEnglishPhrase(text)).toBe(true);
   });
-  it.each(["编码器（Encoder）把输入变成表示", "矩阵元素 $a_{ij}$", "运行 `encode(input)`", "原表标签“Method”表示方法"])("protects paired terms, math and source objects: %s", text => {
+  it.each(["编码器（Encoder）把输入变成表示", "矩阵元素 $a_{ij}$", "运行 `encode(input)`", "原表标签“Method”表示方法", "原句“1000 macros on a 1000 grid”表示将宏单元放到网格位置"])("protects paired terms, math and source objects: %s", text => {
     expect(hasUnpairedEnglishPhrase(text)).toBe(false);
   });
   it("separates independent questions while preserving a single definition", () => {
