@@ -393,6 +393,24 @@ describe("learner-facing teaching narrative", () => {
       .toContain("TEACHING_LIST_ORDER_CAUSAL_OVERCLAIM:fullExplanationMarkdown");
   });
 
+  it("does not bind a comparison exponent to a corrected factorial claim", () => {
+    const corrected = `${valid.fullExplanationMarkdown}\n\n页面把 $1000!$ 粗略写成 $10^{2500}$，复算得到 $1000!\\approx4.02\\times10^{2567}$，两者相差约 67 个数量级，不能称为同一量级；$1000!$ 仍然远大于围棋的 $10^{360}$ 量级`;
+    const issues = validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      learningObjectives: ["用斯特林公式复算 $1000!\\approx4.02\\times10^{2567}$，再与围棋的 $10^{360}$ 量级比较"],
+      fullExplanationMarkdown: corrected,
+      questions: [{ prompt: "为什么不能穷举", options: [], expectedAnswer: "$1000!\\approx4.02\\times10^{2567}$，远大于 $10^{360}$", explanation: "页面原式是粗略值，复算后才用于比较" }] });
+    expect(issues).not.toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:learningObjectives:1000:2567");
+    expect(issues).not.toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:questions:1000:2567");
+    expect(issues).not.toContain("TEACHING_MAGNITUDE_COMPARISON_FALSE:fullExplanationMarkdown");
+    expect(issues).not.toContain("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+  });
+
+  it("accepts an English source label followed immediately by its Chinese translation", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      questions: [{ prompt: "哪项正确", options: [], expectedAnswer: "牺牲全局质量", explanation: "原表写着“Sacrifices global solution quality”（牺牲全局解的质量），所以该项与来源一致" }] };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_UNTRANSLATED_SOURCE_LABEL:questions");
+  });
+
   it("rejects a stale softmax summary when the detailed calculation has the final parameters", () => {
     const issues = validateTeachingNarrative({ ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n- $\\theta_1 \\leftarrow 0 + 0.1 = 0.1$\n- $\\theta_2 \\leftarrow 0 - 0.1 = -0.1$\n\n更新后重新代入得到 $\\pi(a_1)\\approx0.550$、$\\pi(a_2)\\approx0.450$`,
@@ -412,6 +430,54 @@ describe("learner-facing teaching narrative", () => {
       "TEACHING_UNWEIGHTED_TERM_TREND_DENIED:fullExplanationMarkdown",
       "TEACHING_ZERO_REWARD_CAUSE_UNSUPPORTED:learningObjectives"
     ]));
+  });
+
+  it("accepts an explicit episode-step distinction and an unweighted line-length penalty", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n一个回合包含从初始状态到终止状态的连续多个时间步，每个时间步只选择并执行一个动作\n\n## 标准单元与终止状态\n标准单元由基于力的方法放置。$a_{T-1}$ 位于 $s_T$ 之前，不属于标准单元阶段。\n\n$$r_T=-\\text{Wirelength}-\\lambda c-\\gamma d$$\n\n线长项系数固定为 $-1$，所以其他量不变时线长增大会使回报减小；拥塞和密度的方向取决于权重符号`,
+      misconceptions: ["错误理解：每个回合只有一个动作\n\n错因：混淆时间步和回合\n\n正确判断：一个回合包含连续多个时间步，每个时间步只执行一个动作\n\n核对方法：沿动作序列检查"] };
+    const issues = validateTeachingNarrative(input);
+    expect(issues).not.toContain("TEACHING_EPISODE_STEP_CONFLATION:fullExplanationMarkdown");
+    expect(issues).not.toContain("TEACHING_EPISODE_STEP_CONFLATION:misconceptions");
+    expect(issues).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+    expect(issues).not.toContain("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
+  });
+
+  it("accepts the same episode-step distinction when the time-step rule comes first", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n每一步只选择并执行一个动作，但一个完整回合由从初始状态到终止状态的连续多个时间步组成` };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_EPISODE_STEP_CONFLATION:fullExplanationMarkdown");
+  });
+
+  it("accepts the fixed unweighted line-length term when its label is in the formula", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$$r_T=-\\text{Wirelength}-\\lambda c-\\gamma d$$\n\n该项系数固定为 $-1$，所以其他量不变时线长增大会使回报减小` };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+  });
+
+  it("accepts a weighted trend when the positive-weight condition ends with 时", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$$r_T=-\\text{Wirelength}-\\lambda c-\\gamma d$$\n\n权重为正或非负且其他输入不变时，对应指标增大会使回报减小` };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown");
+  });
+
+  it("does not mistake a variable-length graph input for a fixed-length output claim", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n“Edge embeddings”表示边嵌入，“Macro embeddings”表示宏单元嵌入`,
+      priorKnowledge: ["图编码器（Graph Encoder）：把网表转换成后续网络可用的数值表示；它通过消息传递更新节点与边；输入不是固定长度向量，而是节点和边数量可变的图；输出是边嵌入与宏单元嵌入；它不同于直接预测回报的价值网络"] };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:priorKnowledge");
+  });
+
+  it("requires only the first occurrence of a repeated source label to carry its translation", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n“Force-directed method places standard cell”即基于力的方法放置标准单元。后面再次引用“Force-directed method places standard cell”时沿用这个中文含义` };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_UNTRANSLATED_SOURCE_LABEL:fullExplanationMarkdown");
+  });
+
+  it("recognizes a nearby Chinese rendering of a known diagram label", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n右侧写着“cell+macro placement”；上方图展示单元与宏单元放置后的版图` };
+    expect(validateTeachingNarrative(input)).not.toContain("TEACHING_UNTRANSLATED_SOURCE_LABEL:fullExplanationMarkdown");
   });
 
   it("does not invent a fixed-length graph vector from multiple embedding outputs", () => {

@@ -85,18 +85,27 @@ function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expe
   const visibleMath = markdown.replace(/\$/gu, "");
   const claims = visibleMath.split(/[。！？\n]/u).filter((clause) => /(\d{2,5})!/.test(clause) && /10\^\{\d+\}/u.test(clause));
   for (const clause of claims) {
-    const factorial = /(\d{2,5})!/.exec(clause);
-    if (!factorial || !/(?:=|≈|约|估算|数量|规模|量级|达到|更接近)/u.test(clause)) continue;
-    const n = Number(factorial[1]);
-    if (!Number.isInteger(n) || n > 10_000) continue;
-    let logarithm = 0;
-    for (let value = 2; value <= n; value += 1) logarithm += Math.log10(value);
-    const expectedExponent = Math.floor(logarithm);
-    const hasCorrection = new RegExp(`10\\^\\{${expectedExponent}\\}`).test(markdown)
-      && /(?:原文|材料|页面)[^\n]{0,120}(?:粗略|近似|写成|标为)[^\n]{0,180}(?:实际|准确|严格|更接近|约为)/u.test(markdown);
-    for (const exponent of clause.matchAll(/10\^\{(\d+)\}/gu)) {
-      const statedExponent = Number(exponent[1]);
-      if (Number.isInteger(statedExponent) && statedExponent !== expectedExponent && !hasCorrection) mismatches.push({ n, expectedExponent });
+    for (const factorial of clause.matchAll(/(\d{2,5})!/gu)) {
+      const n = Number(factorial[1]);
+      if (!Number.isInteger(n) || n > 10_000) continue;
+      let logarithm = 0;
+      for (let value = 2; value <= n; value += 1) logarithm += Math.log10(value);
+      const expectedExponent = Math.floor(logarithm);
+      const afterFactorial = clause.slice((factorial.index ?? 0) + factorial[0].length);
+      for (const exponent of afterFactorial.matchAll(/10\^\{(\d+)\}/gu)) {
+        const between = afterFactorial.slice(0, exponent.index ?? 0);
+        // Only bind an exponent to n! when the text actually states an
+        // equality or estimate. A comparison such as "n! 远大于 10^360"
+        // mentions two magnitudes but does not claim that 10^360 estimates n!.
+        if (between.length > 220 || !/(?:=|≈|约(?:等于|为)|估算(?:为)?|写成|标为|更接近(?:于)?|数量级[^；，,]{0,24}(?:是|为|达到))/u.test(between)) continue;
+        const statedExponent = Number(exponent[1]);
+        if (!Number.isInteger(statedExponent) || statedExponent === expectedExponent) continue;
+        const claimPrefix = clause.slice(0, (factorial.index ?? 0) + factorial[0].length + (exponent.index ?? 0));
+        const sourceQualified = /(?:原文|材料|页面|课件)[^\n]{0,180}(?:粗略|近似|错误|写成|标为)/u.test(claimPrefix);
+        const correctedElsewhere = new RegExp(`10\\^\\{${expectedExponent}\\}`).test(markdown)
+          && /(?:复算|实际|准确|严格|更接近|约为|得到)[^\n]{0,100}10\^\{\d+\}/u.test(markdown);
+        if (!(sourceQualified && correctedElsewhere)) mismatches.push({ n, expectedExponent });
+      }
     }
   }
   return mismatches.filter((value, index, values) => values.findIndex((candidate) => candidate.n === value.n && candidate.expectedExponent === value.expectedExponent) === index);
@@ -104,15 +113,28 @@ function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expe
 
 export function untranslatedSourceLabels(markdown: string): string[] {
   const labels: string[] = [];
+  const explained = new Set<string>();
+  const knownNearbyTranslations: Record<string, RegExp> = {
+    "cell+macro placement": /单元与宏单元(?:的)?(?:放置|布局)/u,
+    "edge embeddings": /边嵌入/u,
+    "macro embeddings": /宏单元嵌入/u,
+    "macro features": /宏单元特征/u,
+    "netlist graph": /网表图/u,
+    "graph conv.": /图卷积/u
+  };
   for (const match of markdown.matchAll(/“([A-Za-z][A-Za-z0-9 +,:?.()/_-]{2,100})”/gu)) {
     const label = match[1]!.trim();
     if (/^[A-Z][A-Z0-9-]{1,12}$/u.test(label)) continue;
+    if (explained.has(label)) continue;
     const start = match.index ?? 0;
     const after = markdown.slice(start + match[0].length, start + match[0].length + 160);
     const translated = /(?:即|意为|意思是|可译为|表示|对应|前者说明|后者说明)[^。！？\n]{0,70}[\p{Script=Han}]{2}/u.test(after)
+      || /^[，,：:]?\s*[（(][\p{Script=Han}][^）)\r\n]{1,80}[）)]/u.test(after)
       || /^的[\p{Script=Han}]{2,24}(?:模块|方法|步骤|阶段|栏目|标题|标签|对象|网络|层)/u.test(after)
-      || /^[^。！？\n]{0,100}[\p{Script=Han}]{2,20}(?:是|分别是)[^。！？\n]{0,55}/u.test(after);
-    if (!translated) labels.push(label);
+      || /^[^。！？\n]{0,100}[\p{Script=Han}]{2,20}(?:是|分别是)[^。！？\n]{0,55}/u.test(after)
+      || Boolean(knownNearbyTranslations[label.toLowerCase()]?.test(after));
+    if (translated) explained.add(label);
+    else labels.push(label);
   }
   return labels;
 }
@@ -128,6 +150,7 @@ function hasEnglishOnlyMarkdownTable(markdown: string): boolean {
 function hasFalseSameMagnitudeClaim(markdown: string): boolean {
   return markdown.split(/[；。！？\n]/u).some((clause) => {
     if (!/(?:同一|相同|相近)(?:个)?(?:数量级|量级)/u.test(clause)) return false;
+    if (/(?:不能|无法|不可|并非|不是|不在|不属于|不应)(?:称为|视为|算作|认为|当作)?[^；。！？\n]{0,18}(?:同一|相同|相近)(?:个)?(?:数量级|量级)/u.test(clause)) return false;
     const exponents = [...clause.matchAll(/10\^\{(\d+)\}/gu)].map((match) => Number(match[1]));
     return exponents.some((left, index) => exponents.slice(index + 1).some((right) => Math.abs(left - right) > 1));
   });
@@ -285,10 +308,10 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       }
       if (untranslatedSourceLabels(markdown).length > 0) issues.push(`TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`);
       if (hasEnglishOnlyMarkdownTable(markdown)) issues.push(`TEACHING_ENGLISH_ONLY_TABLE:${field}`);
-      for (const mismatch of factorialMagnitudeMismatches(markdown)) {
+      for (const mismatch of factorialMagnitudeMismatches(semanticMarkdown)) {
         issues.push(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:${mismatch.n}:${mismatch.expectedExponent}`);
       }
-      if (hasFalseSameMagnitudeClaim(markdown)) issues.push(`TEACHING_MAGNITUDE_COMPARISON_FALSE:${field}`);
+      if (hasFalseSameMagnitudeClaim(semanticMarkdown)) issues.push(`TEACHING_MAGNITUDE_COMPARISON_FALSE:${field}`);
       if (hasSoftmaxUpdateMismatch(markdown, learnerText)) issues.push(`TEACHING_SOFTMAX_UPDATE_RESULT_MISMATCH:${field}`);
       if (/功耗[^；。！？\n]{0,35}(?:是|指|表示)?[^；。！？\n]{0,12}(?:芯片工作时)?消耗的能量/u.test(semanticMarkdown)
         && !/单位时间|能量消耗(?:速率|速度)|功率/u.test(semanticMarkdown)) {
@@ -316,7 +339,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       const explicitlyBoundedNetlistClaim = /(?:并非|不能|无法|不代表|不保证|不一定)[^；。！？\n]{0,30}(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(semanticMarkdown);
       if (unboundedNetlistClaim && !explicitlyBoundedNetlistClaim) issues.push(`TEACHING_UNBOUNDED_GENERALIZATION:${field}`);
       const pageHasSequentialActions = /\$?a_(?:0|\{0\})\$?/u.test(learnerText) && /\$?a_(?:1|\{1\})\$?/u.test(learnerText);
-      if (pageHasSequentialActions && /每(?:个)?回合[^；。！？\n]{0,36}(?:只|仅)[^；。！？\n]{0,20}(?:(?:选择|执行)[^；。！？\n]{0,16})?(?:其中)?(?:一个|1\s*个)(?:动作)?/u.test(semanticMarkdown)) {
+      const explicitlySeparatesEpisodeAndStep = /(?:一个|每个)回合[^；。！？\n]{0,90}(?:连续)?多个时间步[^；。！？\n]{0,90}每(?:个)?时间步[^；。！？\n]{0,30}(?:只|仅)[^；。！？\n]{0,18}(?:选择|执行)[^；。！？\n]{0,16}(?:一个|1\s*个)动作/u.test(semanticMarkdown)
+        || /每(?:个)?(?:时间步|一步)[^；。！？\n]{0,35}(?:只|仅)[^；。！？\n]{0,18}(?:选择|执行)[^；。！？\n]{0,16}(?:一个|1\s*个)动作[^；。！？\n]{0,90}(?:但|而|同时)[^；。！？\n]{0,40}(?:一个|完整)回合[^；。！？\n]{0,70}(?:连续)?多个时间步/u.test(semanticMarkdown);
+      if (pageHasSequentialActions && !explicitlySeparatesEpisodeAndStep && /每(?:个)?回合[^；。！？\n]{0,36}(?:只|仅)[^；。！？\n]{0,20}(?:(?:选择|执行)[^；。！？\n]{0,16})?(?:其中)?(?:一个|1\s*个)(?:动作)?/u.test(semanticMarkdown)) {
         issues.push(`TEACHING_EPISODE_STEP_CONFLATION:${field}`);
       }
       const negativeWeightedObjective = /=\s*-\s*(?:\\text\{)?(?:Wirelength|wirelength|线长|连线长度)/u.test(learnerText)
@@ -326,7 +351,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       }
       const sourceShowsMultipleEmbeddings = /Edge embeddings/u.test(learnerText) && /Macro embeddings/u.test(learnerText);
       const fixedLengthClaim = /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(semanticMarkdown);
-      const fixedLengthDenied = /(?:没有|未)(?:给出|说明|显示)?[^；。！？\n]{0,35}固定长度|(?:不能|无法|不应|不得)[^；。！？\n]{0,35}(?:当成|视为|称为)?[^；。！？\n]{0,20}固定长度/u.test(semanticMarkdown);
+      const fixedLengthDenied = /(?:没有|未)(?:给出|说明|显示)?[^；。！？\n]{0,35}固定长度|(?:不能|无法|不应|不得|不是|并非)[^；。！？\n]{0,35}(?:当成|视为|称为)?[^；。！？\n]{0,20}固定长度/u.test(semanticMarkdown);
       if (sourceShowsMultipleEmbeddings && fixedLengthClaim && !fixedLengthDenied) {
         issues.push(`TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:${field}`);
       }
@@ -357,7 +382,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       issues.push("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
     }
     const standardCellSection = /##\s+[^\n]*(?:标准单元|力导向|基于力)[^\n]*\n([\s\S]{0,900}?)(?=\n##\s|$)/u.exec(explanation)?.[1] || "";
-    if (/\$a_\{?T-1\}?\$/u.test(standardCellSection)
+    const assignsTerminalActionToStandardCells = /(?:标准单元|基于力|力导向)[^。！？\n]{0,100}\$a_\{?T-1\}?\$|\$a_\{?T-1\}?\$[^。！？\n]{0,100}(?:标准单元|基于力|力导向)/u.test(standardCellSection);
+    const deniesTerminalMisassignment = /\$a_\{?T-1\}?\$[^。！？\n]{0,80}(?:不是|不属于)[^。！？\n]{0,45}(?:标准单元|基于力|力导向)|(?:标准单元|基于力|力导向)[^。！？\n]{0,80}(?:不包含|没有)[^。！？\n]{0,30}\$a_\{?T-1\}?\$/u.test(standardCellSection);
+    if (assignsTerminalActionToStandardCells && !deniesTerminalMisassignment
       && !/(?:宏单元阶段|最后一个宏单元)[^。！？\n]{0,40}\$a_\{?T-1\}?\$|\$a_\{?T-1\}?\$[^。！？\n]{0,45}(?:宏单元阶段|最后一个宏单元)/u.test(standardCellSection)) {
       issues.push("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
     }
@@ -470,6 +497,7 @@ export function hasUnqualifiedWeightedTrend(markdown: string): boolean {
   const hasSymbolicWeightedScore = formulas.some((formula) => /(?:^|\s)(?:r|R|J)(?:_[A-Za-z0-9{}]+)?\s*=[\s\S]{0,150}[-−]\s*\\(?:lambda|gamma|alpha|beta|mu|eta)\b/u.test(formula));
   const admitsMissingWeights = /(?:权重|系数)[^。；;\n]{0,36}(?:没有给出|未给出|没有说明|未说明|未知|无法确定)/u.test(markdown);
   const describesWeightedPenalty = /(?:加权|带负号|负向)[^。；;\n]{0,45}(?:回报|奖励|得分|损失|目标函数|评分|结果|组成|分项)|(?:回报|奖励|得分|损失|目标函数|评分|结果)[^。；;\n]{0,45}(?:加权|带负号|负向)/u.test(markdown);
+  const hasUnweightedLinePenalty = formulas.some((formula) => /(?:^|[=+\-])\s*-\s*(?:\\text\{)?(?:Wirelength|wirelength|线长|连线长度)/u.test(formula));
   if (!hasSymbolicWeightedScore && !(admitsMissingWeights && describesWeightedPenalty)) return false;
   return markdown.split(/[；;。\n]/u).some((clause) => {
     // A labelled misconception is the claim being refuted. Its explanation
@@ -486,9 +514,12 @@ export function hasUnqualifiedWeightedTrend(markdown: string): boolean {
     // A warning that explicitly rejects the trend is not an assertion of it.
     const beforeTrend = clause.slice(0, (trend.index ?? 0) + Math.max(0, trend[0].search(/(?:增大|增加|提高|上升|越大)/u)));
     if (/(?:不能|不可|不应|无法|并非|不是|错误)[^，；;。]{0,40}$/u.test(beforeTrend)) return false;
-    const explicitlyConditional = /(?:若|如果|当|假设|假定|只有在|仅在|在[^，；;\n]{0,50}(?:条件|前提)下)/u.test(clause);
+    const explicitlyConditional = /(?:若|如果|当|假设|假定|只有在|仅在|在[^，；;\n]{0,50}(?:条件|前提)下|(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，；;\n]{0,60}(?:时|情况下))/u.test(clause);
     const weightsQualified = /(?:权重|系数|\\(?:lambda|gamma|alpha|beta|mu|eta))[^，]{0,45}(?:非负|为正|正数|正值|大于零|不小于零|>\s*0|≥\s*0|\\geq?\s*0)/u.test(clause);
     const otherInputsControlled = /(?:其他|其余|别的)[^，]{0,20}(?:不变|固定|保持)|(?:同时|一起)[^，]{0,12}(?:增大|增加)/u.test(clause);
+    const lineLengthTrend = /(?:线长|Wirelength)[^，；;\n]{0,80}(?:增大|增加|变长)[^，；;\n]{0,45}(?:回报|奖励|得分|结果|数值)[^，；;\n]{0,30}(?:下降|降低|减少|减小|变小|越低)/iu.test(clause);
+    const fixedMinusOne = /(?:线长|Wirelength)[^，；;\n]{0,45}系数[^，；;\n]{0,18}(?:固定为|就是)?\s*\$?-?1\$?|(?:该项|线长项)[^，；;\n]{0,24}系数[^，；;\n]{0,18}(?:固定为|就是)?\s*\$?-?1\$?/iu.test(clause);
+    if (lineLengthTrend && otherInputsControlled && (fixedMinusOne || hasUnweightedLinePenalty)) return false;
     return !(explicitlyConditional && weightsQualified && otherInputsControlled);
   });
 }
@@ -565,10 +596,11 @@ export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[]
 /** Locate learner-facing lines that narrate the source instead of teaching its objects directly. */
 export function sourceNarrationLines(markdown: string): string[] {
   const narration = /(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/u;
-  const justifiedEvidenceBoundary = /(?:没有|未给出|未标出|未说明)[^\n]{0,120}(?:因此|所以|无法|不能|只能|尚不能|不代表|不支持)/u;
+  const justifiedEvidenceBoundary = /(?:没有|未给出|未标出|未说明)[^\n]{0,120}(?:因此|所以|无法|不能|只能|尚不能|不代表|不支持|证明|验证)/u;
+  const justifiedSourceCorrection = /(?:原文|材料|页面|课件)[^\n]{0,140}(?:写成|标为|给成)[^\n]{0,100}(?:粗略|近似|错误|不准确|复算|实际|准确)/u;
   return markdown.split(/\r?\n/u).map((line) => line.trim()).filter((line) => {
     const visible = stripProtectedMarkdown(line);
-    return line && narration.test(visible) && !justifiedEvidenceBoundary.test(visible);
+    return line && narration.test(visible) && !justifiedEvidenceBoundary.test(visible) && !justifiedSourceCorrection.test(visible);
   });
 }
 

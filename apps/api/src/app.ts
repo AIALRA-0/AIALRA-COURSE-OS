@@ -3292,10 +3292,10 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     }
     return [normalizedValue];
   });
-  const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalize(content.fullExplanationMarkdown)
+  const fullExplanationMarkdown = normalizeAdjacentTeachingHeadings(normalizePackedTeachingProse(normalize(content.fullExplanationMarkdown)
     .split(/\r?\n/)
     .filter((line) => !isTeachingLayoutCommentaryLine(line))
-    .join("\n"));
+    .join("\n")));
   const quoteExplainedSourceLabel = (value: string) => quoteRepeatedSourceLabels(normalize(value), fullExplanationMarkdown);
   const normalizedCoverageEvidence = content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) }));
   return {
@@ -3308,8 +3308,42 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     fullExplanationMarkdown,
     misconceptions: content.misconceptions.map(value => formatMisconception(quoteExplainedSourceLabel(value))),
     coverageEvidence: rebindCoverageEvidenceQuotes({ ...content, coverageEvidence: normalizedCoverageEvidence }, fullExplanationMarkdown),
-    questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
+    questions: content.questions.map((item) => ({ ...item,
+      prompt: normalizePackedTeachingProse(quoteExplainedSourceLabel(item.prompt)),
+      options: item.options?.map(quoteExplainedSourceLabel),
+      expectedAnswer: normalizePackedTeachingProse(quoteExplainedSourceLabel(item.expectedAnswer)),
+      explanation: normalizePackedTeachingProse(quoteExplainedSourceLabel(item.explanation)) }))
   };
+}
+
+/**
+ * Break an overpacked generated paragraph at real Chinese sentence boundaries.
+ * Protected Markdown objects, tables, headings and list rows are left intact.
+ */
+export function normalizePackedTeachingProse(markdown: string): string {
+  let inFence = false;
+  return markdown.split(/\r?\n/u).flatMap((line) => {
+    if (/^\s*(?:```|~~~)/u.test(line)) {
+      inFence = !inFence;
+      return [line];
+    }
+    if (inFence || /^\s*(?:[|>#]|[-*+]\s|\d+[.)]\s|\$\$)/u.test(line)
+      || (line.match(/\p{Script=Han}/gu)?.length ?? 0) <= 160) return [line];
+    const parts = line.split(/(?<=[。！？；])/u).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) return [line];
+    const paragraphs: string[] = [];
+    let current = "";
+    for (const part of parts) {
+      const next = current ? `${current}${part}` : part;
+      if (current && (next.match(/\p{Script=Han}/gu)?.length ?? 0) > 125) {
+        paragraphs.push(current);
+        current = part;
+      } else current = next;
+    }
+    if (current) paragraphs.push(current);
+    return paragraphs.map((paragraph) => paragraph.endsWith("；") ? paragraph.slice(0, -1) : paragraph)
+      .flatMap((paragraph, index) => index === 0 ? [paragraph] : ["", paragraph]);
+  }).join("\n");
 }
 
 function isTeachingLayoutCommentaryLine(line: string): boolean {

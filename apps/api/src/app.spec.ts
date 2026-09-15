@@ -268,6 +268,15 @@ describe("Course OS API", () => {
     expect(normalized.coverageEvidence[0]!.explanation).toBe("先去掉价值预测层，再把编码器接入策略网络，并继续训练策略");
     expect(normalized.coverageEvidence[1]!.explanation).toBe("这段无关说明不能被自动伪装成正文证据");
   });
+  it("splits a long generated paragraph without touching Markdown objects", async () => {
+    const { normalizePackedTeachingProse } = await import("./app.js");
+    const long = `第一句${"用于解释关系".repeat(22)}。第二句${"用于解释条件".repeat(22)}。`;
+    expect(normalizePackedTeachingProse(long)).toContain("。\n\n第二句");
+    const table = "| 方法 | 限制 |\n| --- | --- |\n| 解析方法 | 无法直接处理不可微指标 |";
+    expect(normalizePackedTeachingProse(table)).toBe(table);
+    const semicolons = `第一项${"用于解释关系".repeat(22)}；第二项${"用于解释条件".repeat(22)}；`;
+    expect(normalizePackedTeachingProse(semicolons)).toContain("关系\n\n第二项");
+  });
   it("moves Chinese list punctuation outside strict inline math without changing valid TeX", () => {
     expect(normalizeGeneratedMathPunctuation("权重 $\u0000lambda$ 与 $\\gamma$"))
       .toBe("权重 $\\lambda$ 与 $\\gamma$");
