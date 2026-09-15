@@ -126,6 +126,30 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
       targets.push({ field, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
     }
   }
+  if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION")) {
+    for (const line of content.fullExplanationMarkdown.slice(0, 700).split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:上一页|前一页|前页)/u.test(item))) {
+      targets.push({ field: "fullExplanationMarkdown", quote: line,
+        instruction: "承上启下已经由独立区段完成，这行在完整讲解中重复回顾前页；只删除前页回顾，保留当前页对象、条件和结论。若一行同时含当前页新内容，改成直接从当前对象开始" });
+    }
+  }
+  for (const field of fields) {
+    const actionIssue = `TEACHING_ACTION_COUNT_CONFLATION:${field}`;
+    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
+      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    if (issues.includes(actionIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(item))) {
+        targets.push({ field: path, quote: line,
+          instruction: "这里混淆了动作集合大小和单次执行数量；若动作空间有两个可选动作，应明确写成每个回合只选择并执行其中一个动作，不能写成只有一个动作" });
+      }
+    }
+    const scopeIssue = `TEACHING_UNBOUNDED_GENERALIZATION:${field}`;
+    if (issues.includes(scopeIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(item))) {
+        targets.push({ field: path, quote: line,
+          instruction: "这里把跨多个网表的证据扩大成无条件适用于任意网表；收窄为材料实际支持的训练分布、给定任务或不同网表示例，不保证未见分布和任意规模都成立" });
+      }
+    }
+  }
   if (fields.includes("questions") && issues.includes("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions")) {
     content.questions.forEach((question, index) => {
       const completeQuestion = [question.prompt, ...(question.options || []), question.expectedAnswer, question.explanation].join("\n");
@@ -147,6 +171,33 @@ function fieldContainsAuditQuote(field: string, quote: string): boolean {
   const exactField = comparable(field);
   const exactQuote = comparable(quote);
   return exactQuote.length >= 3 && exactField.includes(exactQuote);
+}
+
+function auditedFormulaEquations(text: string): Array<{ lhs: string; rhs: string }> {
+  const equations: Array<{ lhs: string; rhs: string }> = [];
+  const expression = /(?:\${1,2}\s*)?([A-Za-z\\][A-Za-z0-9_{}^\\]*)\s*=\s*([^$\n。；]+?)(?=\${1,2}|[。；\n]|$)/gu;
+  const normalize = (value: string) => value.normalize("NFKC")
+    .replace(/\\(?:left|right|,|;|!|quad|qquad)/gu, "")
+    .replace(/\\(?:mathrm|text|operatorname)\s*\{([^{}]*)\}/gu, "$1")
+    .replace(/[{}\s]/gu, "")
+    .replace(/λ/gu, "\\lambda")
+    .replace(/α/gu, "\\alpha")
+    .replace(/γ/gu, "\\gamma")
+    .toLowerCase();
+  for (const match of text.matchAll(expression)) equations.push({ lhs: normalize(match[1]!), rhs: normalize(match[2]!) });
+  return equations;
+}
+
+/** Reject an audit that calls two visibly different versions of the same equation consistent. */
+export function supportedSourceCheckFormulaConsistent(check: { claim: string; evidence: string; verdict: string }): boolean {
+  if (check.verdict !== "supported") return true;
+  const claims = auditedFormulaEquations(check.claim);
+  const evidence = auditedFormulaEquations(check.evidence);
+  for (const claim of claims) {
+    const sameLeft = evidence.filter((item) => item.lhs === claim.lhs);
+    if (sameLeft.length > 0 && !sameLeft.some((item) => item.rhs === claim.rhs)) return false;
+  }
+  return true;
 }
 
 export interface SemanticAuditResult {
@@ -733,6 +784,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (sourceChecks.length > 24 || sourceChecks.some((item) => !item || typeof item !== "object"
       || typeof item.claim !== "string" || !item.claim.trim() || typeof item.evidence !== "string" || !item.evidence.trim()
       || !["supported", "contradicted", "unverified"].includes(item.verdict))) return invalidAudit(`source_checks_shape:${sourceChecks.length}`);
+    if (sourceChecks.some((item) => !supportedSourceCheckFormulaConsistent(item))) return invalidAudit("source_supported_formula_mismatch");
     if (scope === "source" && sourceChecks.some(item => !allowedFields.includes(item.field)
       || typeof item.quote !== "string" || !item.quote.trim() || !fieldContainsAuditQuote(fieldText(item.field), item.quote))) return invalidAudit("source_check_quote_not_found");
     const teachingChecks = scope === "source" ? undefined : (parsed as SemanticAuditResult).teachingChecks;

@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.39", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.40", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -403,6 +403,32 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect.objectContaining({ field: "priorKnowledge:0" }),
       expect.objectContaining({ field: "fullExplanationMarkdown", quote: content.fullExplanationMarkdown })
     ]));
+  });
+
+  it("targets the exact repeated bridge and action-count claims", () => {
+    const content = providerTeachingContent() as TeachingPackage;
+    content.fullExplanationMarkdown = "上一页列出了两个动作，本页继续计算更新\n\n## 当前更新\n每个回合只执行一个动作";
+    content.learningObjectives = ["能指出哪些结论依赖只有一个状态、一个动作这一设定"];
+    const targets = teachingRepairTargets(content, ["fullExplanationMarkdown", "learningObjectives"], [
+      "TEACHING_BRIDGE_REPEATED_IN_EXPLANATION", "TEACHING_ACTION_COUNT_CONFLATION:learningObjectives"
+    ]);
+    expect(targets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "fullExplanationMarkdown", quote: "上一页列出了两个动作，本页继续计算更新" }),
+      expect.objectContaining({ field: "learningObjectives:0", quote: "能指出哪些结论依赖只有一个状态、一个动作这一设定" })
+    ]));
+  });
+
+  it("rejects a supported source check whose formula contradicts its evidence", () => {
+    expect(supportedSourceCheckFormulaConsistent({
+      claim: "末端回报为 $r_T = -\\lambda Wirelength - \\alpha congestion - \\gamma density$",
+      evidence: "原图逐项写为 $r_T = -Wirelength - \\lambda congestion - \\gamma density$",
+      verdict: "supported"
+    })).toBe(false);
+    expect(supportedSourceCheckFormulaConsistent({
+      claim: "末端回报为 $r_T = -Wirelength - \\lambda congestion - \\gamma density$",
+      evidence: "原图逐项写为 $r_T = - Wirelength - \\lambda congestion - \\gamma density$",
+      verdict: "supported"
+    })).toBe(true);
   });
 
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {

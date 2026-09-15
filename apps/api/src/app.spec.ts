@@ -181,7 +181,7 @@ describe("Course OS API", () => {
   it("translates an unquoted source count while preserving a quoted source label", () => {
     const content = testTeachingResult(0).content;
     content.fullExplanationMarkdown = "训练使用 10K designs，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样";
-    expect(normalizeTeachingPackageMath(content).fullExplanationMarkdown).toBe("训练使用 10K 个设计样本，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样");
+    expect(normalizeTeachingPackageMath(content).fullExplanationMarkdown).toBe("训练使用 10,000 个设计样本，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样");
   });
 
   it("normalizes abbreviation placement and repeated teaching terms", () => {

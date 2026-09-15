@@ -3091,6 +3091,8 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_METHOD_PROGRESSION_OVERCLAIM:")) fields.add(issue.slice("TEACHING_METHOD_PROGRESSION_OVERCLAIM:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_ACTION_COUNT_CONFLATION:")) fields.add(issue.slice("TEACHING_ACTION_COUNT_CONFLATION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_UNBOUNDED_GENERALIZATION:")) fields.add(issue.slice("TEACHING_UNBOUNDED_GENERALIZATION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
@@ -3263,6 +3265,11 @@ function normalizeKnownTeachingTerms(markdown: string): string {
   return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[^）\r\n]+）)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\bsoftmax\b/gu, "软最大函数")
       .replace(/\b(\d+(?:\.\d+)?)K\s+designs\b/giu, "$1K 个设计样本")
+      .replace(/\b(\d+(?:\.\d+)?)K\s*个(带标注)?设计(?:样本)?/gu, (_match, count: string, labelled: string | undefined) => {
+        const expanded = Number(count) * 1_000;
+        const number = Number.isInteger(expanded) ? String(expanded).replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(expanded);
+        return `${number} 个${labelled ?? ""}设计样本`;
+      })
       .replace(/([\p{Script=Han}])\s+软最大函数(?=\s*[\p{Script=Han}])/gu, "$1软最大函数")
       .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数")
       .replace(/软最大函数(?:函数)+/gu, "软最大函数")

@@ -196,6 +196,15 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (/(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(markdown)) {
         issues.push(`TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`);
       }
+      const claimsOneAvailableAction = /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(markdown);
+      const scopesOneExecutedAction = /(?:每(?:个)?回合|单次|一次|该回合|这个回合)[^；。！？\n]{0,36}(?:执行|选择)[^；。！？\n]{0,20}(?:一个|1\s*个)动作|(?:只|仅)(?:执行|选择)[^；。！？\n]{0,18}(?:一个|1\s*个)动作/u.test(markdown);
+      const pageHasTwoAvailableActions = /(?:两个|2\s*个)动作[^；。！？\n]{0,30}(?:可选|可以选择|供选择|动作空间)|动作(?:空间)?[^；。！？\n]{0,30}(?:包含|有|给出)[^；。！？\n]{0,12}(?:两个|2\s*个)(?:可选)?动作/u.test(learnerText);
+      if (pageHasTwoAvailableActions && claimsOneAvailableAction && !scopesOneExecutedAction) {
+        issues.push(`TEACHING_ACTION_COUNT_CONFLATION:${field}`);
+      }
+      const unboundedNetlistClaim = /(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
+      const explicitlyBoundedNetlistClaim = /(?:并非|不能|无法|不代表|不保证|不一定)[^；。！？\n]{0,30}(?:任意|任何|所有)(?:一个|一种|的)?网表/u.test(markdown);
+      if (unboundedNetlistClaim && !explicitlyBoundedNetlistClaim) issues.push(`TEACHING_UNBOUNDED_GENERALIZATION:${field}`);
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));

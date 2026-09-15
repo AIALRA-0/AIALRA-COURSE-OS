@@ -1,6 +1,6 @@
 {
   "id": "course-os-teaching",
-  "version": "2.4.39",
+  "version": "2.4.40",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": [
     "teaching-system-prompt.md",

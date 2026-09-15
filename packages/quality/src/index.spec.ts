@@ -131,6 +131,23 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative(answerOnly)).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
   });
 
+  it("separates available actions from the action executed in one episode", () => {
+    const correct = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n动作空间包含两个动作供选择，每个回合只执行其中一个动作` };
+    expect(validateTeachingNarrative(correct)).not.toContain("TEACHING_ACTION_COUNT_CONFLATION:fullExplanationMarkdown");
+    const wrong = { ...correct, learningObjectives: ["能指出哪些结论依赖只有一个状态、一个动作这一设定"] };
+    expect(validateTeachingNarrative(wrong)).toContain("TEACHING_ACTION_COUNT_CONFLATION:learningObjectives");
+  });
+
+  it("rejects universal netlist claims that exceed cross-netlist evidence", () => {
+    const wrong = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n这个编码器适用于任意网表` };
+    expect(validateTeachingNarrative(wrong)).toContain("TEACHING_UNBOUNDED_GENERALIZATION:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...wrong,
+      fullExplanationMarkdown: wrong.fullExplanationMarkdown.replace("适用于任意网表", "在材料给出的不同网表上复用，不保证适用于任意网表") }))
+      .not.toContain("TEACHING_UNBOUNDED_GENERALIZATION:fullExplanationMarkdown");
+  });
+
   it("accepts adaptive structure without learner-facing audit labels", () => {
     expect(validateTeachingNarrative(valid)).toEqual([]);
   });
