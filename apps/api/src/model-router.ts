@@ -82,6 +82,15 @@ export function teachingOutputTokenLimit(qualityMode: string): number {
   return qualityMode === "economy" ? 4_000 : qualityMode === "quality" ? 8_000 : 6_000;
 }
 
+function providerTeachingOutputTokenLimit(connection: ProviderConnection, qualityMode: string): number {
+  if (connection.providerId !== "opencode-go" || connection.protocol !== "chat_completions") {
+    return teachingOutputTokenLimit(qualityMode);
+  }
+  // OpenCode Go counts the visual DeepSeek model's hidden reasoning against
+  // max_tokens. Leave enough room for the bounded teaching JSON that follows.
+  return qualityMode === "economy" ? 8_000 : qualityMode === "quality" ? 16_000 : 12_000;
+}
+
 export class ModelRouterGenerationError extends Error {
   readonly provider: string;
 
@@ -434,7 +443,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       }
     } : this.connection.protocol === "chat_completions" ? {
       url: `${baseUrl}/chat/completions`,
-      body: { model: this.connection.model, max_tokens: 4_500, temperature: 0,
+      body: { model: this.connection.model, max_tokens: chatRequiresLocalSchemaValidation ? 8_000 : 4_500, temperature: 0,
         messages: [
           { role: "system", content: chatRequiresLocalSchemaValidation
             ? "你是严格的课程事实核验员。只返回一个合法 JSON 对象，不使用 Markdown 代码围栏，不添加正文。返回结果仍会由 Course OS 按 JSON Schema 严格校验。"
@@ -636,7 +645,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         : instruction },
       { role: "user", content: Array.isArray(text) ? text[0]?.content.map((part) => part.type === "input_text" ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: part.image_url } }) : text }
     ];
-    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: teachingOutputTokenLimit(input.qualityMode), temperature: 0.2, messages,
+    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: providerTeachingOutputTokenLimit(this.connection, input.qualityMode), temperature: 0.2, messages,
       ...(chatRequiresLocalSchemaValidation ? {} : {
         response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } }
       }) } };

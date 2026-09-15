@@ -161,8 +161,9 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(headers.get("x-opencode-request")).toBe("chat-test");
       expect(headers.get("x-opencode-client")).toBe("course-os");
       expect(headers.get("User-Agent")).toBe("course-os/2.4.0");
-      const body = JSON.parse(String(init?.body)) as { response_format?: unknown; messages: Array<{ role: string; content: string }> };
+      const body = JSON.parse(String(init?.body)) as { response_format?: unknown; max_tokens: number; messages: Array<{ role: string; content: string }> };
       expect(body.response_format).toBeUndefined();
+      expect(body.max_tokens).toBe(12_000);
       expect(body.messages[0]?.content).toContain("只输出一个合法 JSON 对象");
       expect(body.messages[0]?.content).toContain("按 JSON Schema 严格校验");
       return Response.json({ model: "deepseek-v4-pro", choices: [{ message: { content: JSON.stringify(providerTeachingContent()) } }], usage: { prompt_tokens: 90, completion_tokens: 210, cached_tokens: 10 } });
@@ -176,8 +177,9 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/chat/completions");
       expect(new Headers(init?.headers).get("x-opencode-session")).toBe("opencode-audit");
-      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }>; response_format?: unknown };
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }>; max_tokens: number; response_format?: unknown };
       expect(body.response_format).toBeUndefined();
+      expect(body.max_tokens).toBe(8_000);
       expect(body.messages[0]?.content).toContain("只返回一个合法 JSON 对象");
       expect(body.messages[0]?.content).toContain("按 JSON Schema 严格校验");
       expect(Array.isArray(body.messages[1]?.content)).toBe(true);
