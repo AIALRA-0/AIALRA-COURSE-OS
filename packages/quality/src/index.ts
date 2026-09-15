@@ -82,7 +82,8 @@ export interface TeachingNarrativeInput {
 
 function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expectedExponent: number }> {
   const mismatches: Array<{ n: number; expectedExponent: number }> = [];
-  for (const match of markdown.matchAll(/(\d{2,5})!\s*=\s*10\^\{(\d+)\}/gu)) {
+  const visibleMath = markdown.replace(/\$/gu, "");
+  for (const match of visibleMath.matchAll(/(\d{2,5})!\s*[,，；;:]?\s*(?:=|≈|约等于|即|约有)\s*10\^\{(\d+)\}/gu)) {
     const n = Number(match[1]);
     const statedExponent = Number(match[2]);
     if (!Number.isInteger(n) || n > 10_000 || !Number.isInteger(statedExponent)) continue;
@@ -96,17 +97,27 @@ function factorialMagnitudeMismatches(markdown: string): Array<{ n: number; expe
   return mismatches;
 }
 
-function untranslatedSourceLabels(markdown: string): string[] {
+export function untranslatedSourceLabels(markdown: string): string[] {
   const labels: string[] = [];
   for (const match of markdown.matchAll(/“([A-Za-z][A-Za-z0-9 +,:?.()/_-]{2,100})”/gu)) {
     const label = match[1]!.trim();
     if (/^[A-Z][A-Z0-9-]{1,12}$/u.test(label)) continue;
     const start = match.index ?? 0;
-    const after = markdown.slice(start + match[0].length, start + match[0].length + 80);
-    const translated = /^(?:，|,)?\s*(?:(?:即|意为|意思是|可译为|表示|对应)[^。！？\n]{0,55}[\p{Script=Han}]{2}|的[\p{Script=Han}]{2,24}(?:模块|方法|步骤|阶段|栏目|标题|标签|对象|网络|层))/u.test(after);
+    const after = markdown.slice(start + match[0].length, start + match[0].length + 160);
+    const translated = /(?:即|意为|意思是|可译为|表示|对应|前者说明|后者说明)[^。！？\n]{0,70}[\p{Script=Han}]{2}/u.test(after)
+      || /^的[\p{Script=Han}]{2,24}(?:模块|方法|步骤|阶段|栏目|标题|标签|对象|网络|层)/u.test(after)
+      || /^[^。！？\n]{0,100}[\p{Script=Han}]{2,20}(?:是|分别是)[^。！？\n]{0,55}/u.test(after);
     if (!translated) labels.push(label);
   }
   return labels;
+}
+
+function hasEnglishOnlyMarkdownTable(markdown: string): boolean {
+  const rows = markdown.split(/\r?\n/u).filter((line) => /^\s*\|.*\|\s*$/u.test(line));
+  const cells = rows.flatMap((row) => row.split("|").slice(1, -1).map((cell) => cell.trim()))
+    .filter((cell) => cell && !/^:?-{3,}:?$/u.test(cell));
+  const englishCells = cells.filter((cell) => /[A-Za-z]{3}/u.test(cell) && !/[\p{Script=Han}]/u.test(cell));
+  return cells.length >= 8 && englishCells.length / cells.length >= 0.6;
 }
 
 export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrativeInput, "pageKind" | "sourceDensity">): number {
@@ -225,15 +236,24 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
         issues.push(`TEACHING_ABBREVIATION_PLACEMENT:${field}`);
       }
       if (untranslatedSourceLabels(markdown).length > 0) issues.push(`TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`);
+      if (hasEnglishOnlyMarkdownTable(markdown)) issues.push(`TEACHING_ENGLISH_ONLY_TABLE:${field}`);
       for (const mismatch of factorialMagnitudeMismatches(markdown)) {
         issues.push(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:${mismatch.n}:${mismatch.expectedExponent}`);
+      }
+      if (/功耗[^；。！？\n]{0,35}(?:是|指|表示)?[^；。！？\n]{0,12}(?:芯片工作时)?消耗的能量/u.test(semanticMarkdown)
+        && !/单位时间|能量消耗(?:速率|速度)|功率/u.test(semanticMarkdown)) {
+        issues.push(`TEACHING_POWER_ENERGY_CONFUSION:${field}`);
       }
       const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|(?:没有|不存在)[^；。！？\n]{0,60}(?:一个)?[^；。！？\n]{0,30}(?:同时|全部)[^；。！？\n]{0,24}(?:达到|实现)?最优|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(semanticMarkdown);
       const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(semanticMarkdown);
       if (directLogicalOverclaim && !explicitlyLimitedClaim) issues.push(`TEACHING_LOGICAL_OVERCLAIM:${field}`);
-      const progressionText = semanticMarkdown;
-      const progressionDenied = /(?:不|不能|无法|未)(?:等于|代表|构成|足以|能推出)?[^；。！？\n]{0,50}(?:逐代|后一(?:种方法|代)|解决前一)|(?:没有|未)(?:给出|说明|证明|显示)?[^；。！？\n]{0,70}(?:演进关系|替代关系|对比证据|后一(?:种方法|代)[^；。！？\n]{0,35}(?:解决|弥补|取代)(?:了|过)?前一(?:种方法|代))/u.test(progressionText);
-      if (!progressionDenied && /(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(progressionText)) {
+      const progressionClaim = /(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)|(?:特点|优势)[^；。！？\n]{0,45}(?:正好|分别)?(?:对应|回应)[^；。！？\n]{0,55}(?:前三|前几|各)(?:行|类)?[^；。！？\n]{0,30}(?:限制|短板)|(?:可扩展|泛化|不可微)[^；。！？\n]{0,100}回应[^；。！？\n]{0,45}(?:限制|问题)/u;
+      const progressionDenial = /(?:不|不能|无法|未)(?:等于|代表|构成|足以|能推出)?[^；。！？\n]{0,50}(?:逐代|后一(?:种方法|代)|解决前一)|(?:没有|未)(?:给出|说明|证明|显示)?[^；。！？\n]{0,70}(?:演进关系|替代关系|对比证据|后一(?:种方法|代)[^；。！？\n]{0,35}(?:解决|弥补|取代)(?:了|过)?前一(?:种方法|代))/u;
+      const progressionOverclaim = semanticMarkdown.split(/[；。！？\n]/u)
+        .map((clause) => clause.trim())
+        .filter(Boolean)
+        .some((clause) => progressionClaim.test(clause) && !progressionDenial.test(clause));
+      if (progressionOverclaim) {
         issues.push(`TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`);
       }
       const claimsOneAvailableAction = /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(semanticMarkdown);
@@ -255,9 +275,21 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
         issues.push(`TEACHING_FORMULA_SIGN_DESCRIPTION_REVERSED:${field}`);
       }
       const sourceShowsMultipleEmbeddings = /Edge embeddings/u.test(learnerText) && /Macro embeddings/u.test(learnerText);
-      if (sourceShowsMultipleEmbeddings && /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(semanticMarkdown)) {
+      const fixedLengthClaim = /固定长度[^；。！？\n]{0,20}(?:向量|表示)/u.test(semanticMarkdown);
+      const fixedLengthDenied = /(?:没有|未)(?:给出|说明|显示)?[^；。！？\n]{0,35}固定长度|(?:不能|无法|不应|不得)[^；。！？\n]{0,35}(?:当成|视为|称为)?[^；。！？\n]{0,20}固定长度/u.test(semanticMarkdown);
+      if (sourceShowsMultipleEmbeddings && fixedLengthClaim && !fixedLengthDenied) {
         issues.push(`TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:${field}`);
       }
+      if (/不同颜色[^；。！？\n]{0,35}(?:表示|对应)[^；。！？\n]{0,45}(?:指标|数值|程度|高低)/u.test(semanticMarkdown)) {
+        issues.push(`TEACHING_UNLABELED_COLOR_MEANING:${field}`);
+      }
+    }
+    const forceDirectedStandardCells = /(?:标准单元|第二阶段)[^。！？\n]{0,90}(?:基于力|力导向)/u.test(explanation);
+    if (forceDirectedStandardCells && /(?:前两个阶段|宏单元(?:放置)?和标准单元(?:放置)?)[^。！？\n]{0,55}(?:都|均)?由强化学习(?:智能体)?/u.test(input.mainContentMarkdown)) {
+      issues.push("TEACHING_STAGE_ACTOR_CONTRADICTION:mainContentMarkdown");
+    }
+    if (/(?:第二阶段|标准单元放置)[^。！？\n]{0,150}(?:动作记为|动作是)[^。！？\n]{0,20}\$a_\{?T-1\}?\$/u.test(explanation)) {
+      issues.push("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));

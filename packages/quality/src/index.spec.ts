@@ -343,8 +343,42 @@ describe("learner-facing teaching narrative", () => {
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n$1000! = 10^{2500}$` }))
       .toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567");
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n课件把 $1000!$，约等于 $10^{2500}$` }))
+      .toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n材料把规模粗略写成 $1000! = 10^{2500}$，实际计算更接近 $4.02\\times10^{2567}$` }))
       .not.toContain("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:fullExplanationMarkdown:1000:2567");
+  });
+
+  it("rejects English-only tables, physics term confusion, invented method correspondence, and stage contradictions", () => {
+    const englishTable = `${valid.fullExplanationMarkdown}\n\n| Method | Approach | Limitation | Era |\n| --- | --- | --- | --- |\n| Simulated Annealing | Random perturbations | Too slow | 1980s |`;
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, fullExplanationMarkdown: englishTable }))
+      .toContain("TEACHING_ENGLISH_ONLY_TABLE:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n功耗是芯片工作时消耗的能量` }))
+      .toContain("TEACHING_POWER_ENERGY_CONFUSION:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n三个特点正好对应前三类方法留下的限制` }))
+      .toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n年代顺序不能证明后一种方法解决前一种方法\n\n三个特点正好对应前三类方法留下的限制` }))
+      .toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n标准单元在第二阶段改用力导向方法放置`,
+      mainContentMarkdown: "- 前两个阶段都由强化学习智能体完成" }))
+      .toContain("TEACHING_STAGE_ACTOR_CONTRADICTION:mainContentMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n第二阶段是标准单元放置，其动作记为 $a_{T-1}$` }))
+      .toContain("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:fullExplanationMarkdown");
+  });
+
+  it("accepts explicit denials of fixed-length output and rejects invented unlabeled color meanings", () => {
+    const learner = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n“Edge embeddings”表示边嵌入，“Macro embeddings”表示宏单元嵌入，页面没有说明它们怎样汇聚成固定长度向量` };
+    expect(validateTeachingNarrative(learner)).not.toContain("TEACHING_GRAPH_ENCODER_FIXED_LENGTH_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n不同颜色表示不同指标的高低，但页面没有图例` }))
+      .toContain("TEACHING_UNLABELED_COLOR_MEANING:fullExplanationMarkdown");
   });
 
   it("does not invent a fixed-length graph vector from multiple embedding outputs", () => {

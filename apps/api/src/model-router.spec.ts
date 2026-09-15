@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.43", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.44", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -439,6 +439,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect.objectContaining({ field: "fullExplanationMarkdown", quote: "$1000! = 10^{2500}$" }),
       expect.objectContaining({ field: "fullExplanationMarkdown", quote: expect.stringContaining("每个回合") })
     ]));
+  });
+
+  it("does not send already translated source labels back for repair", () => {
+    const content = providerTeachingContent() as TeachingPackage;
+    content.questions = [{
+      kind: "multiple_choice",
+      prompt: "怎样区分动作空间与本回合执行数量",
+      options: ["两个可选动作", "只执行一个动作", "无法判断", "没有动作"],
+      expectedAnswer: "只执行一个动作",
+      explanation: "页面写出“Two actions”，即“两个可选动作”，也写出“One episode with one action”，即“一个回合只执行一个动作”；后文再次引用“one action”却没有翻译"
+    }];
+    const targets = teachingRepairTargets(content, ["questions"], ["TEACHING_UNTRANSLATED_SOURCE_LABEL:questions"]);
+    expect(targets).toEqual([expect.objectContaining({
+      field: "questions:0:explanation",
+      quote: expect.stringContaining("后文再次引用“one action”却没有翻译")
+    })]);
   });
 
   it("rejects a supported source check whose formula contradicts its evidence", () => {

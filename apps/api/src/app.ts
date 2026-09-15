@@ -3088,7 +3088,12 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_REWARD_DIRECTION_REVERSED:")) fields.add(issue.slice("TEACHING_REWARD_DIRECTION_REVERSED:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_ABBREVIATION_PLACEMENT:")) fields.add(issue.slice("TEACHING_ABBREVIATION_PLACEMENT:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_UNTRANSLATED_SOURCE_LABEL:")) fields.add(issue.slice("TEACHING_UNTRANSLATED_SOURCE_LABEL:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_ENGLISH_ONLY_TABLE:")) fields.add(issue.slice("TEACHING_ENGLISH_ONLY_TABLE:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:")) fields.add(issue.split(":")[1] as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_POWER_ENERGY_CONFUSION:")) fields.add(issue.slice("TEACHING_POWER_ENERGY_CONFUSION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_UNLABELED_COLOR_MEANING:")) fields.add(issue.slice("TEACHING_UNLABELED_COLOR_MEANING:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_STAGE_ACTOR_CONTRADICTION:")) fields.add(issue.slice("TEACHING_STAGE_ACTOR_CONTRADICTION:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:")) fields.add(issue.slice("TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);

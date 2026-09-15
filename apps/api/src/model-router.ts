@@ -1,5 +1,5 @@
 import { applySemanticAuditFindings } from "./teaching-patches.js";
-import { hasUnqualifiedWeightedTrend, incompletePriorKnowledgeDefinitions, sourceNarrationLines, teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
+import { hasUnqualifiedWeightedTrend, incompletePriorKnowledgeDefinitions, sourceNarrationLines, teachingCompositionContract, untranslatedSourceLabels, unpairedEnglishPhrases } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
@@ -72,6 +72,13 @@ export interface ModelRouterClient {
 /** Give the repair call actual locations and readable instructions, not just internal error codes. */
 export function teachingRepairTargets(content: TeachingPackage, fields: Array<keyof TeachingPackage>, issues: string[]) {
   const targets: Array<{ field: string; quote: string; instruction: string }> = [];
+  const fieldEntries = (field: keyof TeachingPackage): Array<[string, string]> => field === "questions"
+    ? content.questions.flatMap((question, index) => (["prompt", "expectedAnswer", "explanation"] as const)
+      .map((key) => [`questions:${index}:${key}`, question[key]] as [string, string])
+      .concat((question.options || []).map((text, optionIndex) => [`questions:${index}:options:${optionIndex}`, text] as [string, string])))
+    : typeof content[field] === "string" ? [[field, content[field] as string]]
+      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) =>
+        typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
   if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_HEADING_DUPLICATE")) {
     const headings = [...content.fullExplanationMarkdown.matchAll(/^#{1,6}\s+(.+)$/gmu)];
     for (const heading of headings) if (headings.filter(other => other[1]!.trim() === heading[1]!.trim()).length > 1) {
@@ -80,11 +87,7 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   }
   if (issues.some(issue => issue.includes("UNPAIRED_ENGLISH"))) {
     for (const field of fields) {
-      const entries: Array<[string, string]> = field === "questions"
-        ? content.questions.flatMap((q, i) => (["prompt", "expectedAnswer", "explanation"] as const).map(key => [`questions:${i}:${key}`, q[key]] as [string, string])
-          .concat((q.options || []).map((text, n) => [`questions:${i}:options:${n}`, text] as [string, string])))
-        : typeof content[field] === "string" ? [[field, content[field] as string]]
-        : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((text, i) => typeof text === "string" ? [[`${field}:${i}`, text] as [string, string]] : []) : [];
+      const entries = fieldEntries(field);
       for (const [path, text] of entries) for (const line of text.split(/\r?\n/u)) {
         const words = unpairedEnglishPhrases(line);
         if (words.length) targets.push({ field: path, quote: line, instruction: `这行普通英文未配中文：${words.join("、")}；在这里改用准确中文或已核实的双语名称，保留数字和语义；不能只加引号隐藏未翻译的解释` });
@@ -122,17 +125,15 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   for (const field of fields) {
     const issue = `TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`;
     if (!issues.includes(issue)) continue;
-    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
-      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
-    for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:前一|依次|逐代|恰好对应)/u.test(item))) {
+    const entries = fieldEntries(field);
+    for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:前一|前三|前几|依次|逐代|恰好对应|回应了)/u.test(item))) {
       targets.push({ field: path, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
     }
   }
   for (const field of fields) {
     const issue = `TEACHING_LOGICAL_OVERCLAIM:${field}`;
     if (!issues.includes(issue)) continue;
-    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
-      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    const entries = fieldEntries(field);
     for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:不存在|没有)[^；。！？\n]{0,60}(?:唯一|同时)[^；。！？\n]{0,40}最优/u.test(item))) {
       targets.push({ field: path, quote: line, instruction: "这行把目标竞争扩大成绝对不存在最优方案；只写材料能够证明的取舍关系。没有目标函数、权重、约束或比较证据时，改成仅凭当前材料不能断言能否同时达到最优" });
     }
@@ -145,8 +146,7 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   }
   for (const field of fields) {
     const actionIssue = `TEACHING_ACTION_COUNT_CONFLATION:${field}`;
-    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
-      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    const entries = fieldEntries(field);
     if (issues.includes(actionIssue)) {
       for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:只有|仅有)[^；。！？\n]{0,28}(?:一个|1\s*个)动作/u.test(item))) {
         targets.push({ field: path, quote: line,
@@ -181,18 +181,51 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   }
   for (const field of fields) {
     const untranslatedIssue = `TEACHING_UNTRANSLATED_SOURCE_LABEL:${field}`;
+    const englishTableIssue = `TEACHING_ENGLISH_ONLY_TABLE:${field}`;
     const factorialIssue = issues.find((issue) => issue.startsWith(`TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:${field}:`));
-    const entries: Array<[string, string]> = typeof content[field] === "string" ? [[field, content[field] as string]]
-      : Array.isArray(content[field]) ? (content[field] as unknown[]).flatMap((item, index) => typeof item === "string" ? [[`${field}:${index}`, item] as [string, string]] : []) : [];
+    const powerIssue = `TEACHING_POWER_ENERGY_CONFUSION:${field}`;
+    const colorIssue = `TEACHING_UNLABELED_COLOR_MEANING:${field}`;
+    const actorIssue = `TEACHING_STAGE_ACTOR_CONTRADICTION:${field}`;
+    const terminalActionIssue = `TEACHING_TERMINAL_ACTION_STAGE_MISASSIGNED:${field}`;
+    const entries = fieldEntries(field);
     if (issues.includes(untranslatedIssue)) {
-      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /“[A-Za-z][^”]{2,100}”/u.test(item))) {
+      for (const [path, value] of entries) {
+        const untranslated = new Set(untranslatedSourceLabels(value));
+        for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) =>
+          [...item.matchAll(/“([A-Za-z][A-Za-z0-9 +,:?.()/_-]{2,100})”/gu)].some((match) => untranslated.has(match[1]!.trim())))) {
         targets.push({ field: path, quote: line, instruction: "英文来源标签首次出现时保留引号，并在同一句用‘即’‘意为’或‘表示’给出准确中文；后文只用中文，不用裸英文或只加引号" });
+        }
+      }
+    }
+    if (issues.includes(englishTableIssue)) {
+      for (const [path, value] of entries) {
+        const table = value.split(/\r?\n/u).filter((line) => /^\s*\|.*\|\s*$/u.test(line)).join("\n");
+        if (table) targets.push({ field: path, quote: table, instruction: "保留表格的行列和值，把表头和普通文字单元格改成中文；原文方法名确需保留时放在中文名称后的括号中，不能继续输出全英文表格" });
       }
     }
     if (factorialIssue) {
       const [, , n, expectedExponent] = factorialIssue.split(":");
-      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => new RegExp(`${n}!\\s*=\\s*10\\^\\{\\d+\\}`).test(item))) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => new RegExp(`${n}!\\s*[,，；;:]?\\s*(?:=|≈|约等于|即|约有).*10\\^\\{\\d+\\}`).test(item.replace(/\$/gu, "")))) {
         targets.push({ field: path, quote: line, instruction: `保留课件把 ${n}! 写成该等式的原始事实，但明确它只是粗略写法；实际十进制数量级更接近 10^{${expectedExponent}}，不能继续把两个指数写成精确相等` });
+      }
+    }
+    if (issues.includes(powerIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /功耗[^；。！？\n]{0,50}消耗的能量/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "把功耗定义为单位时间内的能量消耗速率，而不是能量本身；只修正该术语与受影响结论" });
+      }
+    }
+    if (issues.includes(colorIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) => /不同颜色[^；。！？\n]{0,35}(?:表示|对应)/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: "图片没有图例，删除颜色代表指标高低、数值或类别的断言；只保留可见色块和无法确认颜色语义的边界" });
+      }
+    }
+    if (issues.includes(actorIssue) || issues.includes(terminalActionIssue)) {
+      for (const [path, value] of entries) for (const line of value.split(/\r?\n/u).map((item) => item.trim()).filter((item) =>
+        issues.includes(actorIssue) ? /(?:前两个阶段|宏单元(?:放置)?和标准单元(?:放置)?)[^。！？\n]{0,55}(?:强化学习|智能体)/u.test(item)
+          : /(?:第二阶段|标准单元放置)[^。！？\n]{0,150}(?:动作记为|动作是)[^。！？\n]{0,20}\$a_\{?T-1\}?\$/u.test(item))) {
+        targets.push({ field: path, quote: line, instruction: issues.includes(actorIssue)
+          ? "宏单元由强化学习逐步放置，标准单元改用基于力的方法放置；修正总结中的执行者归属"
+          : "$a_{T-1}$ 属于进入 $s_T$ 前的最后一个宏单元时间步，不是标准单元放置动作；按阶段边界修正" });
       }
     }
   }
