@@ -165,11 +165,23 @@ describe("Course OS API", () => {
     expect(validateTeachingNarrative({ ...normalized, strictWritingStyle: true })).not.toContain("TEACHING_LAYOUT_COMMENTARY");
   });
 
-  it("caps an already structured teaching summary without rewriting its items", () => {
+  it("caps a structured teaching summary losslessly without another model call", () => {
     const content = testTeachingResult(0).content;
     content.mainContentMarkdown = ["第一项", "第二项", "第三项", "第四项", "第五项", "第六项"].map((item) => `- ${item}`).join("\n");
     const normalized = normalizeTeachingPackageMath(content);
-    expect(normalized.mainContentMarkdown.split("\n")).toEqual(["- 第一项", "- 第二项", "- 第三项", "- 第四项", "- 第五项", "- 第六项"]);
+    expect(normalized.mainContentMarkdown.split("\n")).toEqual(["- 第一项", "- 第二项", "- 第三项", "- 第四项", "- 第五项；第六项"]);
+  });
+
+  it("removes a generic summary heading and turns each remaining fact into a list item", () => {
+    const content = testTeachingResult(0).content;
+    content.mainContentMarkdown = "## 主要内容\n\n先确认输入\n再计算结果\n最后核对边界";
+    expect(normalizeTeachingPackageMath(content).mainContentMarkdown).toBe("- 先确认输入\n- 再计算结果\n- 最后核对边界");
+  });
+
+  it("translates an unquoted source count while preserving a quoted source label", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown = "训练使用 10K designs，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样";
+    expect(normalizeTeachingPackageMath(content).fullExplanationMarkdown).toBe("训练使用 10K 个设计样本，即一万个设计样本；原图标签“labelled data (10K designs)”保持原样");
   });
 
   it("normalizes abbreviation placement and repeated teaching terms", () => {

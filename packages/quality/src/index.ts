@@ -114,7 +114,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
   if (new Set(headings).size !== headings.length) issues.push("TEACHING_HEADING_DUPLICATE");
   if (/^#{2,4}\s+[^\n]+\n(?:\s*\n)*#{2,4}\s+/m.test(explanation)) issues.push("TEACHING_ADJACENT_HEADINGS");
   if (headings.some((heading) => /^(?:页面上的对象|本页对象|原图对象)$/u.test(heading))) issues.push("TEACHING_SOURCE_COMMENTARY_HEADING");
-  if (input.chapterBridgeMarkdown?.trim() && /(?:上一页|前一页)/u.test(explanation.slice(0, 700))) issues.push("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION");
+  if (input.chapterBridgeMarkdown?.trim() && /(?:上一页|前一页|前页)/u.test(explanation.slice(0, 700))) issues.push("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION");
 
   const learnerText = [
     input.chapterBridgeMarkdown || "",
@@ -172,7 +172,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       && !/(?:因此|所以|无法|不能|需要|难以|难以确认)/u.test(clause))) {
       issues.push("TEACHING_IRRELEVANT_ABSENCE_CHECKLIST");
     }
-    if (sourceNarrationLines(explanation).length >= 6) issues.push("TEACHING_SOURCE_COMMENTARY_OVERUSE");
+    if (sourceNarrationLines(explanation).length >= 4) issues.push("TEACHING_SOURCE_COMMENTARY_OVERUSE");
     const mathFields = {
       chapterBridgeMarkdown: input.chapterBridgeMarkdown || "",
       learningObjectives: input.learningObjectives.join("\n"),
@@ -193,6 +193,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       const directLogicalOverclaim = /(?:没有|不存在)(?:一个)?(?:唯一(?:的)?)?最优(?:解|方案|摆法)|每(?:一代|一种|个阶段)[^；。！？\n]{0,32}(?:都)?(?:不够用|无效|失败)/u.test(markdown);
       const explicitlyLimitedClaim = /(?:不能|无法)(?:据此|仅凭|从(?:本页|这些|该表|材料))?[^；。！？\n]{0,24}(?:断言|推出|证明|确定|确认)[^；。！？\n]{0,24}(?:唯一(?:的)?)?最优/u.test(markdown);
       if (directLogicalOverclaim && !explicitlyLimitedClaim) issues.push(`TEACHING_LOGICAL_OVERCLAIM:${field}`);
+      if (/(?:每一行|后一(?:行|代|种方法)|下一(?:行|代|种方法))[^；。！？\n]{0,80}(?:恰好|依次|逐一)?[^；。！？\n]{0,40}(?:对应|解决|弥补)[^；。！？\n]{0,45}前一(?:行|代|种方法)|(?:四类|这些|上述)方法[^；。！？\n]{0,60}(?:依次|逐代)[^；。！？\n]{0,50}(?:解决|弥补)/u.test(markdown)) {
+        issues.push(`TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`);
+      }
     }
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));
@@ -249,6 +252,7 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
       if (split < 2 || definition.length < 70 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 8)) {
         issues.push("TEACHING_PRIOR_DEFINITION_INCOMPLETE");
       }
+      if (/[“”"']/u.test(label)) issues.push("TEACHING_PRIOR_TERM_PAIR_MALFORMED");
       if (hasUnpairedEnglishPhrase(definition, sourceNames)) issues.push("TEACHING_PRIOR_UNPAIRED_ENGLISH");
       if (/（[^）\n]*[,，]\s*[A-Z][A-Z0-9-]{1,12}）/u.test(label)) issues.push("TEACHING_PRIOR_ABBREVIATION_PLACEMENT");
     }
@@ -392,6 +396,16 @@ export function hasUnpairedEnglishPhrase(markdown: string, sourceNames: string[]
 export function sourceNarrationLines(markdown: string): string[] {
   const narration = /(?:页面|本页|原图|课件|表中|原表|图中)(?=(?:第一|第二|上半|下半|左|右)?(?:组|部分)?(?:要点|内容|文字|公式|表格|一栏|一行)?(?:给出|列出|写着|写的是|显示|说明|没有|只|下半部分|第一组|第二组)|[^\n]{0,10}(?:给出|列出|写着|显示|没有))/u;
   return markdown.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line && narration.test(stripProtectedMarkdown(line)));
+}
+
+/** Locate definitions that fail the same contract used by the narrative gate. */
+export function incompletePriorKnowledgeDefinitions(priorKnowledge: string[]): string[] {
+  return priorKnowledge.filter((item) => {
+    const definition = item.trim().replace(/^[-*+]\s+/, "");
+    const split = definition.indexOf("：");
+    const clauses = split < 0 ? [] : definition.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
+    return split < 2 || definition.length < 70 || clauses.length < 3 || clauses.length > 5 || clauses.some((part) => part.length < 8);
+  });
 }
 
 export function unpairedEnglishPhrases(markdown: string, sourceNames: string[] = []): string[] {

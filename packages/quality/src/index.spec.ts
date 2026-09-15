@@ -267,6 +267,24 @@ describe("learner-facing teaching narrative", () => {
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, chapterBridgeMarkdown: bridge,
       fullExplanationMarkdown: `## 输入怎样进入结果\n先读取当前输入，再执行转换规则\n\n${valid.fullExplanationMarkdown}` }))
       .not.toEqual(expect.arrayContaining(["TEACHING_SOURCE_COMMENTARY_HEADING", "TEACHING_BRIDGE_REPEATED_IN_EXPLANATION"]));
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, chapterBridgeMarkdown: bridge,
+      fullExplanationMarkdown: `## 当前计算\n前页已经给出输入，本页计算结果\n\n${valid.fullExplanationMarkdown}` }))
+      .toContain("TEACHING_BRIDGE_REPEATED_IN_EXPLANATION");
+  });
+
+  it("rejects a method lineage invented from a chronological comparison table", () => {
+    const input = { ...valid, strictWritingStyle: true,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n表格中每一行的限制恰好对应前一行暴露的短板，因此后一代方法依次解决了前一代方法的问题` };
+    expect(validateTeachingNarrative(input)).toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown");
+    expect(validateTeachingNarrative({ ...input,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n表格只分别列出各方法的思路、限制和年代，没有给出逐代替代关系` }))
+      .not.toContain("TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown");
+  });
+
+  it("rejects nested quotation marks inside a bilingual term label", () => {
+    const prior = "强化学习智能体（Reinforcement Learning “Agent”）：在环境中选择动作的决策对象；它读取状态并输出动作；通过回报调整后续选择；用于连续决策任务；它与环境给出的回报不同";
+    expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, priorKnowledge: [prior] }))
+      .toContain("TEACHING_PRIOR_TERM_PAIR_MALFORMED");
   });
 
   it("rejects a learning objective that says another parameter stays unchanged after both are updated", () => {

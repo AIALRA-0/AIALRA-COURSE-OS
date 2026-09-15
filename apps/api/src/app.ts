@@ -3090,6 +3090,7 @@ export function focusedTeachingRepairFields(issues: string[], englishFields: Tea
     else if (issue.startsWith("TEACHING_CONCAT_DIMENSION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_CONCAT_DIMENSION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:")) fields.add(issue.slice("TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_LOGICAL_OVERCLAIM:")) fields.add(issue.slice("TEACHING_LOGICAL_OVERCLAIM:".length) as keyof TeachingPackage);
+    else if (issue.startsWith("TEACHING_METHOD_PROGRESSION_OVERCLAIM:")) fields.add(issue.slice("TEACHING_METHOD_PROGRESSION_OVERCLAIM:".length) as keyof TeachingPackage);
     else if (issue.startsWith("TEACHING_PRIOR_")) fields.add(issue === "TEACHING_PRIOR_DEFINITION_REPEATED" ? "fullExplanationMarkdown" : "priorKnowledge");
     else if (issue === "TEACHING_MISCONCEPTION_REASON_MISSING" || issue === "TEACHING_MISCONCEPTIONS_PACKED") fields.add("misconceptions");
     else if (issue === "TEACHING_UNPAIRED_ENGLISH" && englishFields.length) englishFields.forEach((field) => fields.add(field));
@@ -3248,12 +3249,20 @@ function isTeachingLayoutCommentaryLine(line: string): boolean {
 
 /** Keep the high-level recap within its contract without rewriting facts. */
 function normalizeTeachingSummaryMarkdown(markdown: string): string {
-  return markdown;
+  const lines = markdown.trim().split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  const withoutGenericHeading = lines.filter((line) => !/^#{1,6}\s*(?:主要内容|总结|要点|核心要点)\s*$/u.test(line));
+  if (withoutGenericHeading.length < 2) return markdown;
+  if (withoutGenericHeading.some((line) => /^#{1,6}\s/u.test(line))) return markdown;
+  const items = withoutGenericHeading.map((line) => line.replace(/^[-*+]\s+/, "").trim()).filter(Boolean);
+  if (items.length < 2) return markdown;
+  const capped = items.length <= 5 ? items : [...items.slice(0, 4), items.slice(4).join("；")];
+  return capped.map((item) => `- ${item}`).join("\n");
 }
 
 function normalizeKnownTeachingTerms(markdown: string): string {
   return markdown.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|（[^）\r\n]+）)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\bsoftmax\b/gu, "软最大函数")
+      .replace(/\b(\d+(?:\.\d+)?)K\s+designs\b/giu, "$1K 个设计样本")
       .replace(/([\p{Script=Han}])\s+软最大函数(?=\s*[\p{Script=Han}])/gu, "$1软最大函数")
       .replace(/软最大函数\s+(?=[\p{Script=Han}])/gu, "软最大函数")
       .replace(/软最大函数(?:函数)+/gu, "软最大函数")

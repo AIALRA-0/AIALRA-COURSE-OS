@@ -4,7 +4,7 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.38", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.39", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -373,6 +373,36 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     }] } as TeachingPackage;
     const targets = teachingRepairTargets(content, ["questions"], ["TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions"]);
     expect(targets).toEqual([expect.objectContaining({ field: "questions:0", quote: "两个指标越小，回报就越大" })]);
+  });
+
+  it("locates the exact incomplete definition and weighted trend sentence", () => {
+    const content = { ...providerTeachingContent(),
+      priorKnowledge: [
+        "学习率（Learning Rate）：控制参数更新幅度的正数；更新时乘以梯度；本页取 0.1；它与回报不同，回报来自环境",
+        "回报（Reward）：环境在智能体执行动作后给出的数值反馈；它用于评价这一步产生的结果是否有利；算法读取回报并据此调整后续动作选择；在每次智能体与环境完成交互后产生；它与模型内部保存的参数数值不同"
+      ],
+      fullExplanationMarkdown: "公式为 $r=-x-\\lambda y$；三项前面都是负号，说明线长越长，回报数值越低" } as TeachingPackage;
+    const targets = teachingRepairTargets(content, ["priorKnowledge", "fullExplanationMarkdown"], [
+      "TEACHING_PRIOR_DEFINITION_INCOMPLETE", "TEACHING_WEIGHTED_TREND_CONDITION_MISSING:fullExplanationMarkdown"
+    ]);
+    expect(targets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "priorKnowledge:0", quote: content.priorKnowledge[0] }),
+      expect.objectContaining({ field: "fullExplanationMarkdown", quote: expect.stringContaining("线长越长") })
+    ]));
+    expect(targets.some((target) => target.field === "priorKnowledge:1")).toBe(false);
+  });
+
+  it("locates an invented method progression and malformed term label", () => {
+    const content = { ...providerTeachingContent(),
+      priorKnowledge: ["强化学习智能体（Reinforcement Learning “Agent”）：负责选择动作；读取当前状态；输出一个动作；用于连续决策；它与环境不同"],
+      fullExplanationMarkdown: "表格中每一行的限制恰好对应前一行的短板" } as TeachingPackage;
+    const targets = teachingRepairTargets(content, ["priorKnowledge", "fullExplanationMarkdown"], [
+      "TEACHING_PRIOR_TERM_PAIR_MALFORMED", "TEACHING_METHOD_PROGRESSION_OVERCLAIM:fullExplanationMarkdown"
+    ]);
+    expect(targets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "priorKnowledge:0" }),
+      expect.objectContaining({ field: "fullExplanationMarkdown", quote: content.fullExplanationMarkdown })
+    ]));
   });
 
   it("repairs only the failing teaching field and keeps the verified page intact", async () => {

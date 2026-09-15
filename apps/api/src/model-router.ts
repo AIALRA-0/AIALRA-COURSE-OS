@@ -1,5 +1,5 @@
 import { applySemanticAuditFindings } from "./teaching-patches.js";
-import { hasUnqualifiedWeightedTrend, sourceNarrationLines, teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
+import { hasUnqualifiedWeightedTrend, incompletePriorKnowledgeDefinitions, sourceNarrationLines, teachingCompositionContract, unpairedEnglishPhrases } from "@course-os/quality";
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
@@ -94,6 +94,36 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
   if (fields.includes("fullExplanationMarkdown") && issues.includes("TEACHING_SOURCE_COMMENTARY_OVERUSE")) {
     for (const line of sourceNarrationLines(content.fullExplanationMarkdown)) {
       targets.push({ field: "fullExplanationMarkdown", quote: line, instruction: "这行把来源当成叙述主语；改成直接讲对象、关系或结论。只有本行用于保留原始标签、解释来源冲突或限定证据时才保留一次来源说明" });
+    }
+  }
+  if (fields.includes("priorKnowledge") && issues.includes("TEACHING_PRIOR_DEFINITION_INCOMPLETE")) {
+    const incomplete = new Set(incompletePriorKnowledgeDefinitions(content.priorKnowledge));
+    content.priorKnowledge.forEach((definition, index) => {
+      if (incomplete.has(definition)) targets.push({ field: `priorKnowledge:${index}`, quote: definition,
+        instruction: "这个定义没有满足三至五个完整分句，或其中有过短的占位分句；保留有依据的事实，用一个中文冒号和三至五个中文分号分句补齐是什么、作用、工作方式、适用时机与区别中的必要部分，每个分句至少八个汉字，不能编造来源没有提供的训练细节" });
+    });
+  }
+  if (fields.includes("priorKnowledge") && issues.includes("TEACHING_PRIOR_TERM_PAIR_MALFORMED")) {
+    content.priorKnowledge.forEach((definition, index) => {
+      const label = definition.slice(0, Math.max(0, definition.indexOf("：")));
+      if (/[“”"']/u.test(label)) targets.push({ field: `priorKnowledge:${index}`, quote: definition,
+        instruction: "术语名称中的中英文配对格式错误；括号内只保留已核实的正式英文全称，不嵌套引号，不拼接两个不同概念；无法核实英文时删除英文，只保留准确中文名称" });
+    });
+  }
+  for (const field of fields) {
+    const issue = `TEACHING_WEIGHTED_TREND_CONDITION_MISSING:${field}`;
+    if (field === "questions" || !issues.includes(issue) || typeof content[field] !== "string") continue;
+    const markdown = content[field] as string;
+    const lines = markdown.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    const candidates = lines.filter((line) => /(?:越大|越长|越高|越多|增加|增大)[^\n]{0,90}(?:回报|奖励|得分|结果|数值)[^\n]{0,35}(?:越低|下降|降低|减少|减小)|(?:回报|奖励|得分|结果|数值)[^\n]{0,60}(?:越低|下降|降低|减少|减小)/u.test(line));
+    for (const line of candidates.length ? candidates : [markdown.slice(0, 1200)]) targets.push({ field, quote: line,
+      instruction: "这个趋势结论来自带符号权重的公式；在同一句实际断言中写明权重为正或非负，并写明比较时其他输入保持不变；来源没有给出权重符号时，改成无法仅凭当前公式确定变化方向" });
+  }
+  for (const field of fields) {
+    const issue = `TEACHING_METHOD_PROGRESSION_OVERCLAIM:${field}`;
+    if (!issues.includes(issue) || typeof content[field] !== "string") continue;
+    for (const line of (content[field] as string).split(/\r?\n/u).map((item) => item.trim()).filter((item) => /(?:前一|依次|逐代|恰好对应)/u.test(item))) {
+      targets.push({ field, quote: line, instruction: "这行把并列表格擅自解释成后一种方法逐代解决前一种方法；只保留各行明确写出的思路、限制与年代。材料没有给出演进因果或对比实验时，明确不能推出逐代替代关系" });
     }
   }
   if (fields.includes("questions") && issues.includes("TEACHING_WEIGHTED_TREND_CONDITION_MISSING:questions")) {
