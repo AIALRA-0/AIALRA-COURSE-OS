@@ -163,7 +163,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(headers.get("User-Agent")).toBe("course-os/2.4.0");
       const body = JSON.parse(String(init?.body)) as { response_format?: unknown; max_tokens: number; messages: Array<{ role: string; content: string }> };
       expect(body.response_format).toBeUndefined();
-      expect(body.max_tokens).toBe(12_000);
+      expect(body.max_tokens).toBe(6_000);
+      expect(body).toMatchObject({ thinking: { type: "disabled" } });
       expect(body.messages[0]?.content).toContain("只输出一个合法 JSON 对象");
       expect(body.messages[0]?.content).toContain("输出结构：");
       return Response.json({ model: "deepseek-v4-pro", choices: [{ message: { content: JSON.stringify(providerTeachingContent()) } }], usage: { prompt_tokens: 90, completion_tokens: 210, cached_tokens: 10 } });
@@ -663,6 +664,21 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await client.auditTeachingPackage({ ...providerInput("audit-fallback", true), teachingPackage: providerTeachingContent() as TeachingPackage, maxCostUsd: 0.01 });
     expect(result.provider).toBe("deepseek");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not switch to paid fallback for authentication or content failures", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "invalid_api_key" } }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: ["opencode-go", "deepseek"].map(id => ({ id, displayName: id, baseUrl: `https://${id}.test`, enabled: true,
+        credential: { configured: true }, models: [{ id: "flash-test", displayName: "Flash", protocol: "chat_completions" as const,
+          supportsVision: true, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] })),
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(),
+        rules: [{ stage: "teach", providerId: "opencode-go", modelId: "flash-test", fallbackProviderId: "deepseek", fallbackModelId: "flash-test", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    await expect(client.generateTeachingPackage(providerInput("primary-auth-failure"))).rejects.toMatchObject({ provider: "opencode-go", code: "MODEL_PROVIDER_FAILED:invalid_api_key" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses current provider routes even when persisted model settings are older", async () => {

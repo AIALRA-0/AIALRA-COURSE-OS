@@ -2824,7 +2824,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
                 finalAuditUnsupportedCount = decisiveAudit.sourceChecks?.filter((check) => check.verdict !== "supported").length ?? 0;
                 sourceRepairAccepted = !sourceRepairFailureKind && decisiveAudit.findings.length === 0
                   && (decisiveAudit.sourceChecks?.length ?? 0) >= Math.min(sourceRepairTargets.length, 8)
-                  && decisiveAudit.sourceChecks!.every((check) => check.verdict === "supported");
+                  && decisiveAudit.sourceChecks!.every((check) => check.verdict === "supported")
+                  && (decisiveAudit.teachingChecks ?? []).every((check) => check.verdict === "supported");
                 if (!sourceRepairAccepted && !sourceRepairFailureKind) sourceRepairFailureKind = decisiveAudit.findings.length > 0 ? "final_audit_findings"
                   : finalAuditUnsupportedCount > 0 ? "final_audit_unsupported" : "final_audit_insufficient_checks";
                 if (sourceRepairAccepted) {

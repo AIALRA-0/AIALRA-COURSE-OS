@@ -87,8 +87,9 @@ function providerTeachingOutputTokenLimit(connection: ProviderConnection, qualit
   if (connection.providerId !== "opencode-go" || connection.protocol !== "chat_completions") {
     return teachingOutputTokenLimit(qualityMode);
   }
-  // OpenCode Go counts the visual DeepSeek model's hidden reasoning against
-  // max_tokens. Leave enough room for the bounded teaching JSON that follows.
+  // DeepSeek chat requests explicitly disable hidden reasoning, so reserve only
+  // the teaching JSON allowance. Other chat models keep their existing allowance.
+  if (/^deepseek-/.test(connection.model)) return teachingOutputTokenLimit(qualityMode);
   return qualityMode === "economy" ? 8_000 : qualityMode === "quality" ? 16_000 : 12_000;
 }
 
@@ -309,7 +310,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       idleTimeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     };
     try {
-      const rawBody = init.body;
+      const rawBody = this.connection.providerId === "opencode-go" && /^deepseek-/.test(this.connection.model)
+        && this.connection.protocol === "chat_completions" && typeof init.body === "string"
+        ? JSON.stringify({ ...JSON.parse(init.body), thinking: { type: "disabled" } })
+        : init.body;
       const useResponsesStream = ["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
       const requestBody = useResponsesStream
@@ -807,6 +811,10 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         return await execute(new HttpProviderTeachingClient(connection));
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
+        // Only exhausted subscription quota authorizes switching to metered billing.
+        // Content, configuration and network failures retain the original provider.
+        if (error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
+          && !/^MODEL_PROVIDER_FAILED:(?:429|rate_limited|quota_exhausted|rate_limit_exceeded)$/.test(error.code)) throw error;
         lastError = error;
       }
     }
