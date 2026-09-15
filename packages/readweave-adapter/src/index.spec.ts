@@ -183,6 +183,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const course = { id: "replay-course", workspaceId: "personal", title: "原始标题", status: "active" as const,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     await api.createCourse(course, { ...context, idempotencyKey: "replay-course-create" });
+    const listTreeNodes = vi.spyOn(api, "listTreeNodes").mockRejectedValue(new Error("full tree projection must not run during write readback"));
     const first = await api.updateTreeNode(course.id, { title: "新标题" }, 0, { ...context, idempotencyKey: "replay-tree-update" });
     const requestsBeforeReplay = remote.requests.length;
 
@@ -192,6 +193,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const replayRequests = remote.requests.slice(requestsBeforeReplay);
     expect(replayRequests).toHaveLength(1);
     expect(replayRequests.every((item) => item.method === "GET" && !item.path.endsWith("/content"))).toBe(true);
+    expect(listTreeNodes).not.toHaveBeenCalled();
   });
 
   it("reads native page questions without writing or importing another page's links", async () => {

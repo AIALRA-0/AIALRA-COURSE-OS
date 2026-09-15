@@ -1008,8 +1008,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async readBackTreeNode(nodeId: string, expected: CourseTreeNode): Promise<CourseTreeNode> {
-    const visible = (await this.listTreeNodes()).find((candidate) => candidate.id === nodeId);
-    const node = visible ?? (await this.readState()).treeNodes.find((candidate) => candidate.id === nodeId);
+    // The successful state write already committed and cached the exact object
+    // owned by the serialized mutation. Rebuilding every virtual release node
+    // here scans and clones the multi-megabyte state after each small tree edit.
+    const state = await this.readStateReference(true);
+    const stored = state.treeNodes.find((candidate) => candidate.id === nodeId);
+    const course = state.courses.find((candidate) => candidate.id === nodeId);
+    const node = stored ?? (course ? courseNodeFromProject(course) : undefined);
     if (!node || node.title !== expected.title || node.parentId !== expected.parentId || (expected.revision !== undefined && node.revision !== expected.revision)) throw new Error("READWEAVE_TREE_READBACK_FAILED");
     if (expected.readweaveNoteId && node.readweaveNoteId !== expected.readweaveNoteId) throw new Error("READWEAVE_TREE_IDENTITY_READBACK_FAILED");
     if (node.readweaveNoteId) await this.getNote(node.readweaveNoteId);
