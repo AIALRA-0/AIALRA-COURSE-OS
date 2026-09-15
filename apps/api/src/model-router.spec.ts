@@ -153,7 +153,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "opencode-go", model: "qwen3.8-flash", usage: { inputTokens: 120, cachedInputTokens: 30, outputTokens: 240, apiEquivalentUsd: 0.003 } });
   });
 
-  it("uses JSON schema with OpenCode Go chat completions models", async () => {
+  it("uses locally validated JSON with OpenCode Go chat completions models", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/chat/completions");
       const headers = new Headers(init?.headers);
@@ -161,9 +161,10 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(headers.get("x-opencode-request")).toBe("chat-test");
       expect(headers.get("x-opencode-client")).toBe("course-os");
       expect(headers.get("User-Agent")).toBe("course-os/2.4.0");
-      const body = JSON.parse(String(init?.body)) as { response_format?: { type?: string; json_schema?: { schema?: unknown } } };
-      expect(body.response_format?.type).toBe("json_schema");
-      expect(body.response_format?.json_schema?.schema).toBeTruthy();
+      const body = JSON.parse(String(init?.body)) as { response_format?: unknown; messages: Array<{ role: string; content: string }> };
+      expect(body.response_format).toBeUndefined();
+      expect(body.messages[0]?.content).toContain("只输出一个合法 JSON 对象");
+      expect(body.messages[0]?.content).toContain("按 JSON Schema 严格校验");
       return Response.json({ model: "deepseek-v4-pro", choices: [{ message: { content: JSON.stringify(providerTeachingContent()) } }], usage: { prompt_tokens: 90, completion_tokens: 210, cached_tokens: 10 } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -175,8 +176,10 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/chat/completions");
       expect(new Headers(init?.headers).get("x-opencode-session")).toBe("opencode-audit");
-      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }>; response_format: { type: string } };
-      expect(body.response_format.type).toBe("json_schema");
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }>; response_format?: unknown };
+      expect(body.response_format).toBeUndefined();
+      expect(body.messages[0]?.content).toContain("只返回一个合法 JSON 对象");
+      expect(body.messages[0]?.content).toContain("按 JSON Schema 严格校验");
       expect(Array.isArray(body.messages[1]?.content)).toBe(true);
       return Response.json({ model: "deepseek-v4-flash-vision-exp", choices: [{ message: { content: JSON.stringify({
         sourceChecks: [{ claim: "输入先于输出", evidence: "原图箭头从输入指向输出", verdict: "supported" }], findings: []

@@ -143,9 +143,9 @@ export function defaultModelProviders(): ModelProviderConfig[] {
   return [
     { id: "opencode-go", displayName: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1", enabled: true, credential: { configured: false }, models: [
       { id: "qwen3.8-flash", displayName: "Qwen 3.8 Flash", protocol: "messages", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },
-      { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" },
-      { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" },
-      { id: "deepseek-v4-flash-vision-exp", displayName: "DeepSeek V4 Flash Vision Exp", protocol: "chat_completions", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }
+      { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },
+      { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", protocol: "chat_completions", supportsVision: false, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" },
+      { id: "deepseek-v4-flash-vision-exp", displayName: "DeepSeek V4 Flash Vision Exp", protocol: "chat_completions", supportsVision: true, supportsJsonSchema: false, supportsReasoning: true, billingMode: "subscription_quota" }
     ] },
     { id: "deepseek", displayName: "DeepSeek API", baseUrl: "https://api.deepseek.com", enabled: true, credential: { configured: false }, models: [
       { id: "deepseek-flash", displayName: "DeepSeek Flash", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" },

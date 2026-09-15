@@ -424,6 +424,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
     const baseUrl = this.connection.baseUrl.replace(/\/$/, "");
+    const chatRequiresLocalSchemaValidation = this.connection.providerId === "opencode-go";
     const request = this.connection.protocol === "responses" ? {
       url: `${baseUrl}/responses`,
       body: { model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
@@ -435,12 +436,16 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       url: `${baseUrl}/chat/completions`,
       body: { model: this.connection.model, max_tokens: 4_500, temperature: 0,
         messages: [
-          { role: "system", content: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。" },
+          { role: "system", content: chatRequiresLocalSchemaValidation
+            ? "你是严格的课程事实核验员。只返回一个合法 JSON 对象，不使用 Markdown 代码围栏，不添加正文。返回结果仍会由 Course OS 按 JSON Schema 严格校验。"
+            : "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。" },
           { role: "user", content: input.sourceImageDataUrl
             ? [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: input.sourceImageDataUrl } }]
             : prompt }
         ],
-        response_format: { type: "json_schema", json_schema: { name: "course_os_semantic_audit", schema: auditSchema, strict: true } }
+        ...(chatRequiresLocalSchemaValidation ? {} : {
+          response_format: { type: "json_schema", json_schema: { name: "course_os_semantic_audit", schema: auditSchema, strict: true } }
+        })
       }
     } : undefined;
     if (!request) throw new ModelRouterGenerationError("MODEL_PROVIDER_SEMANTIC_AUDIT_UNSUPPORTED", this.connection.model, emptyUsage(started), this.connection.providerId);
@@ -624,11 +629,17 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         }
       };
     }
+    const chatRequiresLocalSchemaValidation = this.connection.providerId === "opencode-go";
     const messages = [
-      { role: "system", content: instruction },
+      { role: "system", content: chatRequiresLocalSchemaValidation
+        ? `${instruction}\n\n只输出一个合法 JSON 对象，不使用 Markdown 代码围栏或额外说明。返回结果仍会由 Course OS 按 JSON Schema 严格校验。`
+        : instruction },
       { role: "user", content: Array.isArray(text) ? text[0]?.content.map((part) => part.type === "input_text" ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: part.image_url } }) : text }
     ];
-    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: teachingOutputTokenLimit(input.qualityMode), temperature: 0.2, messages, response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } } } };
+    return { url: `${baseUrl}/chat/completions`, headers, body: { model: this.connection.model, max_tokens: teachingOutputTokenLimit(input.qualityMode), temperature: 0.2, messages,
+      ...(chatRequiresLocalSchemaValidation ? {} : {
+        response_format: { type: "json_schema", json_schema: { name: "course_os_teaching_package", strict: true, schema: teachingPackageSchema } }
+      }) } };
   }
 }
 
