@@ -3069,7 +3069,16 @@ export function applySemanticAuditFindings(content: TeachingPackage, findings: S
       set = (text) => { options[Number(optionPosition)] = text; };
     } else throw new Error("TEACHING_SEMANTIC_AUDIT_FIELD_INVALID");
     const at = value.indexOf(finding.original);
-    if (at < 0 || value.lastIndexOf(finding.original) !== at || finding.original === finding.replacement) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
+    if (finding.original === finding.replacement) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
+    if (at < 0) {
+      // A later audit can repeat a correction already applied by the first
+      // source pass. Treat one exact replacement as an idempotent finding;
+      // every genuinely missing or ambiguous quote still fails closed.
+      const replacementAt = value.indexOf(finding.replacement);
+      if (replacementAt >= 0 && value.lastIndexOf(finding.replacement) === replacementAt) continue;
+      throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
+    }
+    if (value.lastIndexOf(finding.original) !== at) throw new Error("TEACHING_SEMANTIC_AUDIT_QUOTE_INVALID");
     set(value.slice(0, at) + finding.replacement + value.slice(at + finding.original.length));
     fields.push(finding.field);
   }
@@ -3233,13 +3242,20 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : quoteRepeatedSourceLabels(
       normalize(content.chapterBridgeMarkdown), titleAcronyms.map((label) => `“${label}”`).join(" ")),
     learningObjectives: content.learningObjectives.map(quoteExplainedSourceLabel),
-    mainContentMarkdown: quoteExplainedSourceLabel(content.mainContentMarkdown),
+    mainContentMarkdown: normalizeTeachingSummaryMarkdown(quoteExplainedSourceLabel(content.mainContentMarkdown)),
     priorKnowledge: priorKnowledge.map((value) => quoteRepeatedSourceLabels(value, fullExplanationMarkdown)),
     fullExplanationMarkdown,
     misconceptions: content.misconceptions.map(quoteExplainedSourceLabel),
     coverageEvidence: content.coverageEvidence.map((item) => ({ ...item, explanation: normalize(item.explanation) })),
     questions: content.questions.map((item) => ({ ...item, prompt: quoteExplainedSourceLabel(item.prompt), options: item.options?.map(quoteExplainedSourceLabel), expectedAnswer: quoteExplainedSourceLabel(item.expectedAnswer), explanation: quoteExplainedSourceLabel(item.explanation) }))
   };
+}
+
+/** Keep the high-level recap within its contract without rewriting facts. */
+function normalizeTeachingSummaryMarkdown(markdown: string): string {
+  const lines = markdown.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 5 || !lines.every((line) => /^[-*+]\s+\S/u.test(line))) return markdown;
+  return lines.slice(0, 5).join("\n");
 }
 
 function normalizeKnownTeachingTerms(markdown: string): string {

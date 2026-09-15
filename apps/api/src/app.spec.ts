@@ -69,6 +69,9 @@ describe("Course OS API", () => {
     expect(applied.content.misconceptions[0]).toContain("原始比值是 1.5，但裁剪后仍是 1.2");
     expect(applied.content.fullExplanationMarkdown).toBe(before.fullExplanationMarkdown);
     expect(before.misconceptions[0]).toContain("原始比值是 1.2");
+    const replayed = applySemanticAuditFindings(applied.content, [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "来源页：0.30 / 0.20 = 1.5" }]);
+    expect(replayed.content).toEqual(applied.content);
+    expect(replayed.fields).toEqual([]);
     expect(() => applySemanticAuditFindings(before, [{ field: "fullExplanationMarkdown", original: "不存在的句子", replacement: "改写", evidence: "来源" }])).toThrow();
     expect(() => applySemanticAuditFindings(before, [{ field: "questions:0:expectedAnswer", original: "答案", replacement: "改写", evidence: "来源" }])).toThrow();
   });
@@ -122,6 +125,13 @@ describe("Course OS API", () => {
     content.questions[0]!.explanation = "把 e^0 = 1 代入，再比较 x_1 与 x_2";
     const normalized = normalizeTeachingPackageMath(content);
     expect(normalized.questions[0]!.explanation).toBe("把 $e^0$ = 1 代入，再比较 $x_1$ 与 $x_2$");
+  });
+
+  it("caps an already structured teaching summary without rewriting its items", () => {
+    const content = testTeachingResult(0).content;
+    content.mainContentMarkdown = ["第一项", "第二项", "第三项", "第四项", "第五项", "第六项"].map((item) => `- ${item}`).join("\n");
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.mainContentMarkdown.split("\n")).toEqual(["- 第一项", "- 第二项", "- 第三项", "- 第四项", "- 第五项"]);
   });
 
   it("normalizes abbreviation placement and repeated teaching terms", () => {
