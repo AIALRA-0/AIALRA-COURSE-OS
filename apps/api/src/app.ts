@@ -3197,7 +3197,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .map((match) => match[0]))];
   const translateMathHeadingReference = (value: string) => value
     .split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”)/gu)
-    .map((part, index) => index % 2 === 1 ? part : part.replace(/\bWhat is\s+(\$[^$\r\n]+\$)\s+一栏/gu, "解释 $1 的栏目"))
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\s+一栏/gu, "解释 $1 的栏目"))
     .join("");
   const normalize = (value: string) => quoteRepeatedSourceLabels(
     normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(

@@ -181,7 +181,16 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     const objectivePromisesCalculation = input.learningObjectives.some((objective) =>
       /(?:能|能够|可以)[^。；\n]{0,45}(?:算出|计算|求出)[^。；\n]{0,45}(?:更新|参数|结果|数值)/u.test(objective));
     const explanationDeniesCalculation = /(?:更新后|更新结果|参数)[^。；\n]{0,30}(?:具体)?(?:数值|结果)[^。；\n]{0,18}(?:无法|不能)[^。；\n]{0,12}(?:确定|算出|计算)|(?:无法|不能)[^。；\n]{0,18}(?:确定|算出|计算)[^。；\n]{0,30}(?:更新后|更新结果|参数)(?:的)?(?:具体)?(?:数值|结果)/u.test(explanation);
-    if (objectivePromisesCalculation && explanationDeniesCalculation) issues.push("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+    const objectiveClaimsFormulaEquivalence = input.learningObjectives.some((objective) => /(?:两|2)(?:个|条|种)[^。；\n]{0,20}(?:公式|计算式)[^。；\n]{0,16}(?:等价|相同)|(?:等价|相同)[^。；\n]{0,16}(?:公式|计算式)/u.test(objective));
+    const explanationDeniesFormulaEquivalence = /(?:两|2)(?:个|条|种)[^。；\n]{0,60}(?:公式|计算式|写法)[^。；\n]{0,80}(?:无法|不能|未说明)[^。；\n]{0,30}(?:统一|等价|相同|确定)|(?:无法|不能|未说明)[^。；\n]{0,50}(?:两|2)(?:个|条|种)[^。；\n]{0,30}(?:公式|计算式|写法)/u.test(learnerText);
+    const objectivePromisesRoutingMethod = input.learningObjectives.some((objective) => /(?:说出|指出|说明)[^。；\n]{0,55}(?:方法|实现)[^。；\n]{0,25}布线|布线[^。；\n]{0,25}(?:方法|实现)/u.test(objective));
+    const explanationDeniesRoutingMethod = /布线[^。；\n]{0,30}(?:实现方式|方法|细节)[^。；\n]{0,18}(?:无法|不能|未给出|未说明|不能确认)|(?:无法|不能|未给出|未说明|不能确认)[^。；\n]{0,24}布线[^。；\n]{0,20}(?:实现方式|方法|细节)/u.test(learnerText);
+    const objectivePromisesKnownConcatDimension = input.learningObjectives.some((objective) => /(?:输入|拼接)[^。；\n]{0,45}(?:边权|权重|w_?\{?ij\}?)[^。；\n]{0,55}(?:维度|64)/iu.test(objective));
+    const explanationDeniesConcatDimension = /(?:边权|w_?\{?ij\}?)[^。；\n]{0,36}(?:维度|形状)[^。；\n]{0,18}(?:没有|未给出|未说明|无法|不能)|(?:没有|未给出|未说明|无法|不能)[^。；\n]{0,30}(?:边权|w_?\{?ij\}?)[^。；\n]{0,18}(?:维度|形状)/iu.test(learnerText);
+    if ((objectivePromisesCalculation && explanationDeniesCalculation)
+      || (objectiveClaimsFormulaEquivalence && explanationDeniesFormulaEquivalence)
+      || (objectivePromisesRoutingMethod && explanationDeniesRoutingMethod)
+      || (objectivePromisesKnownConcatDimension && explanationDeniesConcatDimension)) issues.push("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
     const terminalRewardShown = /\$r_(?:T|\{T\})\$|\$r_(?:T|\{T\})\s*=|末端回报[^。；\n]{0,30}(?:表达式|由|组成|写成)/u.test(learnerText);
     const terminalRewardDenied = /(?:没有|未)(?:给出|说明)[^。；\n]{0,20}(?:最终|末端)(?:奖励|回报)[^。；\n]{0,20}(?:哪里|位置|形式|表达式|数值|来源|如何)/u.test(learnerText);
     if (terminalRewardShown && terminalRewardDenied) issues.push("TEACHING_OBJECT_PRESENCE_CONTRADICTION");
@@ -377,7 +386,7 @@ export function normalizeBareMathSymbols(text: string): string {
 /** Move a trailing abbreviation before the Chinese term and keep only the official English name in parentheses. */
 export function normalizePriorDefinitionAbbreviation(text: string): string {
   return text.replace(
-    /^(\s*)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
+    /^(\s*(?:[-*+]\s+)?)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
     "$1$4 $2（$3）："
   );
 }

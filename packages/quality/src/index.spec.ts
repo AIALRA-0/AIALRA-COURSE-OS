@@ -194,6 +194,8 @@ describe("learner-facing teaching narrative", () => {
   it("moves a definition abbreviation outside the official English name parentheses", () => {
     expect(normalizePriorDefinitionAbbreviation("马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架"))
       .toBe("MDP 马尔可夫决策过程（Markov Decision Process）：一种序贯决策框架");
+    expect(normalizePriorDefinitionAbbreviation("- 马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架"))
+      .toBe("- MDP 马尔可夫决策过程（Markov Decision Process）：一种序贯决策框架");
     expect(normalizePriorDefinitionAbbreviation("策略（Policy）：动作的概率分布"))
       .toBe("策略（Policy）：动作的概率分布");
   });
@@ -374,6 +376,14 @@ describe("learner-facing teaching narrative", () => {
     const deniedReward = { ...valid, strictWritingStyle: true,
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n末端回报 $r_T$ 由三个分项组成。页面没有给出最终回报在哪里` };
     expect(validateTeachingNarrative(deniedReward)).toContain("TEACHING_OBJECT_PRESENCE_CONTRADICTION");
+    const falseEquivalence = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["说明两条计算式为什么等价"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n两条写法同时存在，但当前材料未说明怎样统一` };
+    expect(validateTeachingNarrative(falseEquivalence)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+    const unknownRouting = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["说出由哪些方法分别承担放置与布线"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n本页未给出布线的实现方式` };
+    expect(validateTeachingNarrative(unknownRouting)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
   });
 
   it("accepts a concrete causal correction without requiring one fixed pair of cue words", () => {
