@@ -190,6 +190,9 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     const explanationDeniesRoutingMethod = /布线[^。；\n]{0,30}(?:实现方式|方法|细节)[^。；\n]{0,18}(?:无法|不能|未给出|未说明|不能确认)|(?:无法|不能|未给出|未说明|不能确认)[^。；\n]{0,24}布线[^。；\n]{0,20}(?:实现方式|方法|细节)/u.test(learnerText);
     const objectivePromisesKnownConcatDimension = input.learningObjectives.some((objective) => /(?:输入|拼接)[^。；\n]{0,45}(?:边权|权重|w_?\{?ij\}?)[^。；\n]{0,55}(?:维度|64)/iu.test(objective));
     const explanationDeniesConcatDimension = /(?:边权|w_?\{?ij\}?)[^。；\n]{0,36}(?:维度|形状)[^。；\n]{0,18}(?:没有|未给出|未说明|无法|不能)|(?:没有|未给出|未说明|无法|不能)[^。；\n]{0,30}(?:边权|w_?\{?ij\}?)[^。；\n]{0,18}(?:维度|形状)/iu.test(learnerText);
+    const objectiveClaimsOnlySelectedParameterChanges = input.learningObjectives.some((objective) =>
+      /(?:只|仅)[^。；\n]{0,24}(?:改变|改动|更新)[^。；\n]{0,30}(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)|(?:被选中动作|选中动作)[^。；\n]{0,24}(?:参数|权重)[^。；\n]{0,24}(?:只|仅)[^。；\n]{0,16}(?:改变|改动|更新)/u.test(objective));
+    const explanationSaysMultiplePolicyParametersChange = /(?:同时|都|两个|两项|两个分量)[^。；\n]{0,30}(?:改变|改动|更新)[^。；\n]{0,30}(?:参数|权重)|(?:参数|权重)[^。；\n]{0,30}(?:同时|都|两个|两项|两个分量)[^。；\n]{0,20}(?:改变|改动|更新)/u.test(learnerText);
     if (explanationDeniesConcatDimension) {
       for (const [field, markdown] of Object.entries(mathFields)) {
         if (hasUnsupportedConcatDimensionClaim(markdown)) issues.push(`TEACHING_CONCAT_DIMENSION_CONTRADICTION:${field}`);
@@ -198,7 +201,8 @@ export function validateTeachingNarrative(input: TeachingNarrativeInput): string
     if ((objectivePromisesCalculation && explanationDeniesCalculation)
       || (objectiveClaimsFormulaEquivalence && explanationDeniesFormulaEquivalence)
       || (objectivePromisesRoutingMethod && explanationDeniesRoutingMethod)
-      || (objectivePromisesKnownConcatDimension && explanationDeniesConcatDimension)) issues.push("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
+      || (objectivePromisesKnownConcatDimension && explanationDeniesConcatDimension)
+      || (objectiveClaimsOnlySelectedParameterChanges && explanationSaysMultiplePolicyParametersChange)) issues.push("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
     const terminalRewardShown = /\$r_(?:T|\{T\})\$|\$r_(?:T|\{T\})\s*=|末端回报[^。；\n]{0,30}(?:表达式|由|组成|写成)/u.test(learnerText);
     const terminalRewardDenied = /(?:没有|未)(?:给出|说明)[^。；\n]{0,20}(?:最终|末端)(?:奖励|回报)[^。；\n]{0,20}(?:哪里|位置|形式|表达式|数值|来源|如何)/u.test(learnerText);
     if (terminalRewardShown && terminalRewardDenied) issues.push("TEACHING_OBJECT_PRESENCE_CONTRADICTION");
@@ -295,10 +299,13 @@ function hasUnqualifiedWeightedTrend(markdown: string): boolean {
 
 /** Do not fold an extra edge-weight term into a known 64-D node-pair vector. */
 function hasUnsupportedConcatDimensionClaim(markdown: string): boolean {
-  return markdown.split(/\r?\n|。/u).some((line) =>
-    /(?:边权|边的[^，；]{0,16}权重|w_?\{?ij\}?)/iu.test(line)
-    && /64\s*维/u.test(line)
-    && /(?:拼成|拼接(?:成|为)?|一并进入|共同进入|合成|构成)/u.test(line));
+  return markdown.split(/\r?\n|。/u).some((line) => {
+    if (!/(?:边权|边的[^，；]{0,16}权重|w_?\{?ij\}?)/iu.test(line)
+      || !/64\s*维/u.test(line)
+      || !/(?:拼成|拼接(?:成|为)?|一并进入|共同进入|合成|构成)/u.test(line)) return false;
+    if (/(?:不能|不可|无法|不应|并非|不是)[^。\n]{0,100}64\s*维|(?:维度|总维度)[^。\n]{0,50}(?:无法|不能|未知|未给出|未说明)/u.test(line)) return false;
+    return true;
+  });
 }
 
 /** Compare only explicit totals for the same source scope, not incidental counts. */
@@ -405,6 +412,15 @@ export function normalizePriorDefinitionAbbreviation(text: string): string {
     /^(\s*(?:[-*+]\s+)?)([\p{Script=Han}][^：（\n]{1,30})（([A-Za-z][A-Za-z .&/-]{1,80})[,，]\s*([A-Z][A-Z0-9-]{1,12})）：/u,
     "$1$4 $2（$3）："
   );
+}
+
+/** Preserve every definition fact while keeping the policy's three-to-five-clause shape. */
+export function normalizePriorDefinitionClauseCount(text: string): string {
+  const split = text.indexOf("：");
+  if (split < 2) return text;
+  const clauses = text.slice(split + 1).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
+  if (clauses.length <= 5) return text;
+  return `${text.slice(0, split + 1)}${[...clauses.slice(0, 4), clauses.slice(4).join("，")].join("；")}`;
 }
 
 /** Turn a source label mistakenly formatted as inline code back into a quoted source object. */

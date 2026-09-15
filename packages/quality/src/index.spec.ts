@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -200,6 +200,13 @@ describe("learner-facing teaching narrative", () => {
       .toBe("策略（Policy）：动作的概率分布");
   });
 
+  it("preserves definition facts while merging excess policy clauses", () => {
+    expect(normalizePriorDefinitionClauseCount("术语：它是什么；具体做什么；怎样工作；何时使用；如何区分；补充边界"))
+      .toBe("术语：它是什么；具体做什么；怎样工作；何时使用；如何区分，补充边界");
+    expect(normalizePriorDefinitionClauseCount("术语：它是什么；具体做什么；怎样工作；何时使用；如何区分"))
+      .toBe("术语：它是什么；具体做什么；怎样工作；何时使用；如何区分");
+  });
+
   it("restores source labels from code spans without changing commands or identifiers", () => {
     const source = "Agent\nMacro order: place larger ones first\npnpm run build";
     expect(normalizeSourceLabelCodeSpans("椭圆标记 `Agent`，方框写着 `Macro order: place larger ones first`", source))
@@ -391,6 +398,14 @@ describe("learner-facing teaching narrative", () => {
       fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n边权 $w_{ij}^e$ 的维度没有给出，两个 32 维节点向量拼接后是 64 维`,
       mainContentMarkdown: "- 两个节点向量和边权共同拼成 64 维输入\n- 输出为 32 维" };
     expect(validateTeachingNarrative(unknownEdgeWeightDimension)).toContain("TEACHING_CONCAT_DIMENSION_CONTRADICTION:mainContentMarkdown");
+    const correctlySeparatedDimensions = { ...unknownEdgeWeightDimension,
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n页面主公式除两个节点向量外还多出边权 $w_{ij}^e$；它的维度没有给出，因此总维度无法确定，不能把它与后面 $[v_i;v_j]$ 的 64 维结论合并成同一个维度结论`,
+      mainContentMarkdown: "- 两个节点向量拼接后是 64 维\n- 含边权的总维度无法确定" };
+    expect(validateTeachingNarrative(correctlySeparatedDimensions)).not.toContain("TEACHING_CONCAT_DIMENSION_CONTRADICTION:fullExplanationMarkdown");
+    const selectedParameterContradiction = { ...valid, strictWritingStyle: true,
+      learningObjectives: ["能说明为什么本次更新只改变被选中动作对应的策略权重"],
+      fullExplanationMarkdown: `${valid.fullExplanationMarkdown}\n\n梯度的两个分量都不为零，因此两个策略参数会同时更新` };
+    expect(validateTeachingNarrative(selectedParameterContradiction)).toContain("TEACHING_OBJECTIVE_EXPLANATION_CONTRADICTION");
     const misplacedBridgeAbbreviation = { ...valid, strictWritingStyle: true,
       chapterBridgeMarkdown: "上一页介绍了马尔可夫决策过程（Markov Decision Process, MDP）的基本循环\n\n本页继续完成一次更新" };
     expect(validateTeachingNarrative(misplacedBridgeAbbreviation)).toContain("TEACHING_ABBREVIATION_PLACEMENT:chapterBridgeMarkdown");

@@ -126,10 +126,12 @@ describe("Course OS API", () => {
 
   it("normalizes abbreviation placement and repeated teaching terms", () => {
     const content = testTeachingResult(0).content;
-    content.priorKnowledge = ["马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架；描述状态与动作；按转移产生结果；用于连续决策；不同于单步分类"];
+    content.priorKnowledge = ["马尔可夫决策过程（Markov Decision Process, MDP）：一种序贯决策框架；描述状态与动作；按转移产生结果；用于连续决策；不同于单步分类；补充说明适用边界"];
     content.fullExplanationMarkdown += "\n\n动作概率由软最大函数函数计算";
     const normalized = normalizeTeachingPackageMath(content);
     expect(normalized.priorKnowledge[0]).toMatch(/^MDP 马尔可夫决策过程（Markov Decision Process）：/u);
+    expect(normalized.priorKnowledge[0]!.split("；")).toHaveLength(5);
+    expect(normalized.priorKnowledge[0]).toContain("不同于单步分类，补充说明适用边界");
     expect(normalized.fullExplanationMarkdown).toContain("动作概率由软最大函数计算");
     expect(normalized.fullExplanationMarkdown).not.toContain("函数函数");
   });
