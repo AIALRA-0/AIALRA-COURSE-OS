@@ -21,6 +21,11 @@ export const teachingPackageSchema = JSON.parse(readHarnessFile("teaching-packag
 export const semanticAuditSchema = JSON.parse(readHarnessFile("semantic-audit.schema.json")) as Record<string, unknown>;
 const harnessManifest = JSON.parse(readHarnessFile("harness-manifest.json")) as { id: string; version: string; taskContract: "GENERATE + TEACHING" };
 
+export function generationHarnessFileSha256(value: string | Buffer): string {
+  const canonical = (typeof value === "string" ? value : value.toString("utf8")).replace(/\r\n?/gu, "\n");
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
 export interface PromptInput {
   pageTitle: string;
   pageNumber: number;
@@ -142,12 +147,12 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 }
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
-  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: createHash("sha256").update(readHarnessFile(name)).digest("hex") }));
+  const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: generationHarnessFileSha256(readHarnessFile(name)) }));
   for (const name of ["app.ts", "generation-harness.ts", "teaching-blueprint.ts", "model-router.ts", "teaching-patches.ts", "model-usage-meter.ts", "pricing.ts"]) {
-    files.push({ path: `apps/api/src/${name}`, sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, name))).digest("hex") });
+    files.push({ path: `apps/api/src/${name}`, sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, name))) });
   }
-  files.push({ path: "packages/quality/src/index.ts", sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/index.ts"))).digest("hex") });
-  files.push({ path: "packages/quality/src/presentation.ts", sha256: createHash("sha256").update(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/presentation.ts"))).digest("hex") });
+  files.push({ path: "packages/quality/src/index.ts", sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/index.ts"))) });
+  files.push({ path: "packages/quality/src/presentation.ts", sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/presentation.ts"))) });
   const aggregateSha256 = createHash("sha256").update(JSON.stringify({ version: harnessManifest.version, files })).digest("hex");
   return { id: harnessManifest.id, version: harnessManifest.version, taskContract: harnessManifest.taskContract, files, aggregateSha256 };
 }

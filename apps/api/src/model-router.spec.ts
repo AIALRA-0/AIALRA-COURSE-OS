@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { generationHarnessFileSha256 } from "./generation-harness.js";
 import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, resolvedSourceConflictVerdict, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.45", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.46", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
@@ -13,6 +14,10 @@ describe("generation harness", () => {
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240");
     expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
     expect(snapshot.files.find((file) => file.path === "policy-formula-explanation.md")?.sha256).toBe("65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e");
+  });
+
+  it("hashes the same Harness source identically across Windows and Linux line endings", () => {
+    expect(generationHarnessFileSha256("第一行\r\n第二行\r\n")).toBe(generationHarnessFileSha256("第一行\n第二行\n"));
   });
 
   it("bounds model output so one slide cannot consume an unbounded response", () => {
