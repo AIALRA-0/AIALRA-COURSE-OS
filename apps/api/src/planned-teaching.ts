@@ -59,16 +59,23 @@ export async function writePlannedLesson(input: ModelRouterInput,
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
     return result.content;
   };
-  const plan = await run({ phase: "plan", instructions: planningPrompt,
+  let repairUsed = false;
+  const planRequest: PlannedCall = { phase: "plan", instructions: planningPrompt,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements }),
-    schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 4800 }) as TeachingPlan;
-  const planIssues = validateTeachingPlan(plan, blueprint);
+    schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 4800 };
+  let plan = await run(planRequest) as TeachingPlan;
+  let planIssues = validateTeachingPlan(plan, blueprint);
+  if (planIssues.length) {
+    repairUsed = true;
+    plan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
+      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置" }) }) as TeachingPlan;
+    planIssues = validateTeachingPlan(plan, blueprint);
+  }
   if (planIssues.length) throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);
   trace.plan = plan;
   let content: Partial<TeachingPackage> = {};
-  let repairUsed = false;
   for (let index = 0; index < fieldsByPhase.length; index++) {
     const fields = fieldsByPhase[index]!;
     const schema = partialSchema(fields);

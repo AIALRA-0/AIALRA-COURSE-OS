@@ -153,6 +153,16 @@ export function App() {
   }, [mode]);
 
   const release = useMemo(() => releases.find((item) => item.id === releaseId), [releaseId, releases]);
+  useEffect(() => {
+    if (loading || !releaseId || release) return;
+    let active = true;
+    api.release(releaseId).then((loaded) => {
+      if (active) setReleases((current) => current.some(item => item.id === loaded.id) ? current : [...current, loaded]);
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : "无法载入指定课程版本");
+    });
+    return () => { active = false; };
+  }, [loading, releaseId, release]);
   const indexedPage = release?.pages[pageIndex];
   const detailedPage = loadedPage && loadedPage.releaseId === release?.id && loadedPage.page.id === indexedPage?.id ? loadedPage.page : undefined;
   const page = detailedPage ?? indexedPage;

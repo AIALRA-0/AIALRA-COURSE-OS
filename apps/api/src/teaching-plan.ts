@@ -65,7 +65,8 @@ export function validateTeachingPlan(plan: TeachingPlan, blueprint: TeachingBlue
     steps.add(step.id);
     for (const fact of step.factIds) {
       if (!facts.has(fact)) issues.push(`PLAN_UNKNOWN_FACT:${fact}`);
-      if (assigned.has(fact)) issues.push(`PLAN_FACT_TAUGHT_TWICE:${fact}`);
+      // Reusing a fact as an input is not teaching its definition twice. The
+      // first referencing step owns its explanation; later steps may apply it.
       assigned.add(fact);
     }
   }
@@ -132,7 +133,8 @@ export function plannedCoverageIssues(content: TeachingPackage, blueprint: Teach
   }
   for (const requirement of blueprint.requirementPackage.requirements) {
     const fields = new Set(content.coverageEvidence.filter(evidence => evidence.atomId === requirement.atomId).flatMap(evidence => evidence.coveredFields));
-    if (requirement.requiredFields.some(field => !fields.has(field))) issues.push(`PLAN_EVIDENCE_MISSING:${requirement.atomId}`);
+    const missing = requirement.requiredFields.filter(field => !fields.has(field));
+    if (missing.length) issues.push(`PLAN_EVIDENCE_MISSING:${requirement.atomId}:${missing.join("+")}`);
   }
   return [...new Set(issues)];
 }

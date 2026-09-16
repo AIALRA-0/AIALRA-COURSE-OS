@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { describeGenerationError } from "./generation-errors.js";
 
 describe("generation error classification", () => {
+  it("preserves the failing teaching phase without exposing details or misreading source IDs as HTTP codes", () => {
+    expect(describeGenerationError(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:source-401,source-402"))).toMatchObject({ code: "TEACHING_PLAN_INVALID", retryable: false });
+  });
   it("marks exhausted provider balance as explicit and non-retryable", () => {
     expect(describeGenerationError(new Error("MODEL_PROVIDER_INSUFFICIENT_BALANCE"))).toEqual({
       code: "PROVIDER_QUOTA_EXHAUSTED",

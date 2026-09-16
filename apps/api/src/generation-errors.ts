@@ -15,6 +15,8 @@ export function describeGenerationError(error: unknown): GenerationErrorDescript
 }
 
 function normalizeCode(raw: string): string {
+  const teachingPhase = /^(TEACHING_(?:PLAN|OPENING|EXPLANATION|CONSOLIDATION)_INVALID)(?::|$)/u.exec(raw)?.[1];
+  if (teachingPhase) return teachingPhase;
   if (raw.includes("INSUFFICIENT_BALANCE") || raw.includes("QUOTA_EXHAUSTED") || raw.includes("402")) return "PROVIDER_QUOTA_EXHAUSTED";
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
   if (raw.includes("429") || raw.includes("RATE_LIMIT")) return "PROVIDER_RATE_LIMIT";

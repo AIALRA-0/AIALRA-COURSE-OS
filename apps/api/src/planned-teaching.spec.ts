@@ -30,14 +30,14 @@ describe("planned teaching", () => {
     expect(context).not.toContain("OCR_MUST");
     expect(context).not.toContain("imageUrl");
   });
-  it("rejects missing sources, duplicate teaching, cycles and untested objectives", () => {
+  it("rejects missing sources, cycles and untested objectives while allowing application of an earlier fact", () => {
     const { input, plan } = fixture();
     expect(validateTeachingPlan(plan, input.blueprint!)).toEqual([]);
     plan.steps.push({ ...plan.steps[0]!, id: "other", dependsOn: ["other"] });
     plan.objectives.push({ id: "uncovered", startingPoint: "已知", outcome: "目标", stepIds: ["missing"] });
     plan.facts[0]!.atomId = "not-source";
     const issues = validateTeachingPlan(plan, input.blueprint!);
-    expect(issues).toContain("PLAN_FACT_TAUGHT_TWICE:f");
+    expect(issues).not.toContain("PLAN_FACT_TAUGHT_TWICE:f");
     expect(issues).toContain("PLAN_FORWARD_DEPENDENCY:other");
     expect(issues).toContain("PLAN_OBJECTIVE_UNTESTED:uncovered");
     expect(issues).toContain("PLAN_SOURCE_UNASSIGNED:a");
@@ -66,6 +66,18 @@ describe("planned teaching", () => {
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
     expect(phases).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation"]);
+  });
+  it("repairs an unassigned plan fact before writing, within the same single repair budget", async () => {
+    const { input, plan } = fixture();
+    const broken = structuredClone(plan);
+    broken.steps[0]!.factIds = [];
+    const phases: string[] = [];
+    const outputs = [broken, plan, opening, explanation, closing];
+    await writePlannedLesson(input, async request => {
+      phases.push(request.phase);
+      return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
+    });
+    expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation"]);
   });
   it("uses one provider and bills all four actual calls without audit requests", async () => {
     const { input, plan } = fixture();

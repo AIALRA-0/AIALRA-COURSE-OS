@@ -19,7 +19,11 @@ export function preparePageForGeneration(page: PageLesson): PageLesson {
   }))].map((requirement) => {
     const atom = atoms.get(requirement.atomId) as unknown as Record<string, unknown> | undefined;
     if (!atom) return structuredClone(requirement);
-    const requiredFields = requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
+    // An imported whole-page image is a source locator. Its label is importer
+    // metadata; visual observations must come from the image, not that label.
+    const requiredFields = importedWholePage && requirement.atomId === page.atoms[0]?.id
+      ? ["observation"]
+      : requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
     return { ...structuredClone(requirement), requiredFields };
   });
   return { ...structuredClone(page), atoms: expandedAtoms, coverageRequirements };
