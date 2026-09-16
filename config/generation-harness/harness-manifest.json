@@ -1,10 +1,11 @@
 {
   "id": "course-os-teaching",
-  "version": "2.4.52",
+  "version": "2.4.53",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": [
     "page-plan-prompt.md",
     "planned-writing-prompt.md",
+    "writing-format-contract.md",
     "teaching-system-prompt.md",
     "teaching-user-prompt.md",
     "teaching-blueprint.md",

@@ -57,7 +57,7 @@ import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
 import { previousLessonContext } from "./teaching-plan.js";
-import { plannedContentIssues, planningPrompt, plannedWritingPrompt, type PlannedTrace } from "./planned-teaching.js";
+import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
 
 export interface AppDependencies {
@@ -101,7 +101,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-harness/current", async (_request, response, next) => {
     try {
       const snapshot = currentGenerationHarness();
-      response.json({ ...snapshot, systemPrompt: `${plannedWritingPrompt}\n\n${policyFormatRules}`, userPrompt: "按阶段提供教学计划、前页讲解和前部内容摘要", blueprint: planningPrompt, schema: teachingPackageSchema,
+      response.json({ ...snapshot, systemPrompt: `${plannedWritingPrompt}\n\n${writingFormatContract}`, userPrompt: "按阶段提供教学计划、前页讲解的已知起点和前部内容摘要", blueprint: planningPrompt, schema: teachingPackageSchema,
         phases: ["plan", "opening", "explanation", "consolidation"], maximumRepairCalls: 1 });
     } catch (error) { next(error); }
   });
@@ -4101,7 +4101,7 @@ async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
     status: manifest.status,
     summary: manifest.summary,
     taskContract: "GENERATE + TEACHING",
-    promptTemplate: `${plannedWritingPrompt}\n\n${policyFormatRules}`,
+    promptTemplate: `${plannedWritingPrompt}\n\n${writingFormatContract}`,
     files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })),
     aggregateSha256: manifest.aggregateSha256,
     validator: { status: issues.length ? "failed" : "passed", sourceVerification: configuredSkillRoot ? "source_and_manifest" : "manifest_only", issues }

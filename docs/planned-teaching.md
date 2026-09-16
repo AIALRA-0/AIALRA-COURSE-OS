@@ -9,7 +9,7 @@ The production provider adapter uses a source-grounded plan followed by three bo
 3. The explanation call receives that actual opening as context, the plan and source facts. Previously defined concepts are applied rather than defined again.
 4. The final call receives a bounded, whole-paragraph extract of the explanation plus the opening. It produces the summary, misconceptions and four questions.
 
-The writing policy is the versioned `policy-format-rules.md`. Content responsibilities belong to the teaching plan. Course-specific repair instructions are not sent by this path. Legacy direct clients retain their old response compatibility.
+The writing policy is the versioned `policy-format-rules.md`. Its page-facing presentation requirements are consolidated in `writing-format-contract.md`, pinned in the same Harness snapshot. Each call receives only its own section responsibilities plus this format contract. Content responsibilities belong to the teaching plan. Course-specific repair instructions are not sent by this path. Legacy direct clients retain their old response compatibility.
 
 ## Checks and cost
 
@@ -17,7 +17,7 @@ The local validator verifies schemas, known source IDs, complete fact assignment
 
 Only one partial-stage repair is permitted per page. Preceding stages are not regenerated. The provider and model remain fixed throughout one page. Each request is bounded against the remaining page budget using the configured price snapshot; actual or estimated usage is accumulated, including failed calls. The current ceiling remains USD 0.06, a budget in USD rather than a guaranteed live currency conversion.
 
-Planned DeepSeek calls explicitly enable reasoning instead of inheriting the legacy transport's disabled setting. Output limits include reasoning tokens; those tokens count toward cost, while hidden reasoning text is neither saved nor shown. Source fidelity constrains meaning, not the use of untranslated labels in learner prose. Imported image labels are locators; actual observed image content receives its own coverage claim.
+Planned calls explicitly disable reasoning after real bounded trials exhausted their entire output allowance without producing content. The transport preserves explicit settings rather than silently overriding them. A token-limit response is distinct from malformed JSON and is not repeated with the same limit. Source fidelity constrains meaning, not the use of untranslated labels in learner prose. Imported image labels are locators; actual observed image content receives its own coverage claim. Local structural success does not establish semantic correctness or full style compliance; record actual source/content review separately.
 
 `teachingTrace` persists the actual plan, preceding-page context and phase receipts inside the private lesson data. The public inspection endpoint shows the active prompts. Existing task leases, snapshot pinning, readback hashes and immutable releases remain in force.
 

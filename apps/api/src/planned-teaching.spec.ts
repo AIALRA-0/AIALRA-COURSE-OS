@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson } from "./planned-teaching.js";
+import { writePlannedLesson, plannedInstructions } from "./planned-teaching.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput } from "./model-router.js";
 import { applyTeachingPackage } from "./app.js";
 
@@ -90,16 +90,23 @@ describe("planned teaching", () => {
     expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.004);
     expect(result.teachingTrace?.phases).toHaveLength(4);
   });
-  it("does not override explicit planned reasoning in chat transport", async () => {
+  it("bounds planned chat calls without unbounded reasoning", async () => {
     const { input, plan } = fixture();
     const outputs = [plan, opening, explanation, closing];
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
-      expect(JSON.parse(init.body as string)).toMatchObject({ thinking: { type: "enabled" }, reasoning_effort: "high" });
+      expect(JSON.parse(init.body as string)).toMatchObject({ thinking: { type: "disabled" } });
       return Response.json({ model: "deepseek-v4-flash", choices: [{ message: { content: JSON.stringify(outputs.shift()) } }], usage: { prompt_tokens: 100, completion_tokens: 200, cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetcher);
     await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "chat_completions" }).generateTeachingPackage(input);
     expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+  it("sends only the current section responsibilities with the versioned formatting contract", () => {
+    const prompt = plannedInstructions(["fullExplanationMarkdown", "coverageEvidence"]);
+    expect(prompt).toContain("fullExplanationMarkdown：");
+    expect(prompt).not.toContain("priorKnowledge：");
+    expect(prompt).toContain("# 中文教学正文格式");
+    expect(prompt).not.toContain("FMT-001");
   });
   it("persists actual visual observations as coverage rather than teaching importer labels", () => {
     const { page, plan } = fixture();
@@ -110,6 +117,13 @@ describe("planned teaching", () => {
     expect(result.coverageRequirements).toHaveLength(1);
     expect(result.coverageRequirements[0]?.requiredFields).toEqual(["observation"]);
     expect(result.coverageClaims[0]?.coveredFields).toEqual(["observation"]);
+  });
+  it("does not repeat a token-exhausted request as a JSON repair", async () => {
+    const { input } = fixture();
+    const fetcher = vi.fn(async () => Response.json({ model: "deepseek-v4-flash", choices: [{ finish_reason: "length", message: { content: "" } }], usage: { prompt_tokens: 100, completion_tokens: 10000 } }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "chat_completions" }).generateTeachingPackage(input)).rejects.toThrow("MODEL_PROVIDER_OUTPUT_LIMIT");
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it("preserves charges and stage if a later provider request fails", async () => {
     const { input, plan } = fixture();

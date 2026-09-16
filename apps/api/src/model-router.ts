@@ -1042,13 +1042,13 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     if (maxTokens < 1000) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
     const base = this.connection.baseUrl.replace(/\/$/, "");
     const image = request.image;
-    const schemaInstruction = `${request.instructions}\n只输出 JSON，结构如下：${JSON.stringify(request.schema)}`;
+    const schemaInstruction = `${request.instructions}\n请输出符合下列 JSON Schema 的内容对象，不得返回 Schema 本身；字符串必须填写实际内容：${JSON.stringify(request.schema)}`;
     const protocol = this.connection.protocol;
     const body = protocol === "responses" ? {
       model: this.connection.model, instructions: request.instructions,
       input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
       max_output_tokens: maxTokens,
-      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "high" } } : { temperature: 0.2 }),
+      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
       text: { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
     } : protocol === "messages" ? {
       model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
@@ -1056,7 +1056,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     } : {
       model: this.connection.model, max_tokens: maxTokens,
       ...(["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.model.startsWith("deepseek-")
-        ? { thinking: { type: "enabled" }, reasoning_effort: "high" } : { temperature: 0.2 }),
+        ? { thinking: { type: "disabled" } } : { temperature: 0.2 }),
       messages: [{ role: "system", content: schemaInstruction }, { role: "user", content: image
         ? [{ type: "text", text: request.prompt }, { type: "image_url", image_url: { url: image } }] : request.prompt }]
     };
@@ -1064,6 +1064,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       { method: "POST", headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:${request.phase}`), body: JSON.stringify(body) }, started);
     const usage = normalizeProviderUsage(received.usage, received.usage?.cost ?? received.cost, started);
     const model = received.model || this.connection.model;
+    if (received.choices?.[0]?.finish_reason === "length" || received.incomplete_details?.reason === "max_output_tokens") {
+      throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_LIMIT", model, usage, this.connection.providerId, request.phase);
+    }
     if (!response.ok || providerBodyFailed(received)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(received)), model, usage, this.connection.providerId, request.phase);
     const cost = this.usageCostUsd(usage);
     if (cost === undefined || cost > budget) throw new ModelRouterGenerationError(cost === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId, request.phase);
@@ -1345,7 +1348,7 @@ interface ProviderResponseBody {
   model?: string;
   output?: unknown;
   output_text?: string;
-  choices?: Array<{ message?: { content?: string | Array<{ text?: string }> }; text?: string }>;
+  choices?: Array<{ message?: { content?: string | Array<{ text?: string }> }; text?: string; finish_reason?: string }>;
   content?: Array<{ type?: string; text?: string }>;
   usage?: Partial<ModelRouterUsage> & {
     prompt_tokens?: number;

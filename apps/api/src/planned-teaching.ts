@@ -1,12 +1,19 @@
 import { readFileSync } from "node:fs";
 import { validateMarkdownMath } from "@course-os/quality";
-import { policyFormatRules, teachingPackageSchema } from "./generation-harness.js";
+import { teachingPackageSchema } from "./generation-harness.js";
 import { plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 
 const readPrompt = (name: string) => readFileSync(new URL(`../../../config/generation-harness/${name}`, import.meta.url), "utf8");
 export const planningPrompt = readPrompt("page-plan-prompt.md");
 export const plannedWritingPrompt = readPrompt("planned-writing-prompt.md");
+export const writingFormatContract = readPrompt("writing-format-contract.md");
+export function plannedInstructions(fields: readonly string[]) {
+  const fieldNames = Object.keys(teachingPackageSchema.properties as Record<string, unknown>);
+  const selected = plannedWritingPrompt.split("\n").filter(line => !fieldNames.some(field => line.startsWith(`${field}：`))
+    || fields.some(field => line.startsWith(`${field}：`))).join("\n");
+  return `${selected}\n\n${writingFormatContract}`;
+}
 export interface PlannedCall {
   phase: string;
   instructions: string;
@@ -74,7 +81,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements }),
-    schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 10000 };
+    schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
   let plan = await run(planRequest) as TeachingPlan;
   let planIssues = validateTeachingPlan(plan, blueprint);
   if (planIssues.length && !repairUsed) {
@@ -89,15 +96,15 @@ export async function writePlannedLesson(input: ModelRouterInput,
   for (let index = 0; index < fieldsByPhase.length; index++) {
     const fields = fieldsByPhase[index]!;
     const schema = partialSchema(fields);
-    const request: PlannedCall = { phase: phases[index]!, instructions: `${plannedWritingPrompt}\n\n${policyFormatRules}`,
+    const request: PlannedCall = { phase: phases[index]!, instructions: plannedInstructions(fields),
       prompt: JSON.stringify({ language: input.language, pageTitle: input.pageTitle, plan,
-        previousTeaching: index === 0 ? input.previousPageContext : undefined,
+        previousTeaching: index === 0 ? plan.knownStartingPoint : undefined,
         precedingSections: teachingSectionMemory(content), fields,
         coverageRequirements: index === 1 ? blueprint.requirementPackage.requirements : undefined,
         instruction: index === 0 ? "先写承接和先验知识，再从已建立的对象描述学习目标"
           : index === 1 ? "前部知识已讲过，只应用，按计划逐步解释当前课件，不扩写后续章节"
           : "依据实际完整讲解生成总结、辨析和问题，遵守计划题目顺序，不引入正文未讲的结论" }),
-      schema, maxOutputTokens: index === 1 ? 14000 : 9000 };
+      schema, maxOutputTokens: index === 1 ? 9000 : 5000 };
     let partial = await run(request) as Partial<TeachingPackage>;
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
