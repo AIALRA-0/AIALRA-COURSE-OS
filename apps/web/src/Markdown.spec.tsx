@@ -27,9 +27,11 @@ describe("lesson math rendering", () => {
   });
 
   it("keeps teaching subheadings below the page and section headings", () => {
-    const html = renderToStaticMarkup(createElement(Markdown, { nestedHeadings: true, children: "## 为什么先训练\n\n说明训练的作用\n\n### 何时使用\n\n说明适用条件" }));
+    const html = renderToStaticMarkup(createElement(Markdown, { nestedHeadings: true, children: "## 为什么先训练\n\n说明训练的作用\n\n### 何时使用\n\n说明适用条件\n\n#### 变量含义\n\n说明变量\n\n##### 更细的说明" }));
     expect(html).toContain("<h4>为什么先训练</h4>");
     expect(html).toContain("<h5>何时使用</h5>");
+    expect(html).toContain("<h6>变量含义</h6>");
+    expect(html).toContain("<h6>更细的说明</h6>");
     expect(html).not.toContain("<h2>");
   });
 });

@@ -1147,7 +1147,10 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 
 .lesson-section-title h3 { font-size: 21px; line-height: 1.4; font-weight: 700; }
 .lesson-block > h1, .lesson-block > h2, .lesson-block > h3 { color: var(--ink); font-size: clamp(17px, 1.45vw, 21px); line-height: 1.45; }
-.lesson-block > h4, .lesson-block > h5, .lesson-block > h6 { color: var(--ink); font-size: 16px; line-height: 1.5; }
+.lesson-block > h4, .lesson-block > h5, .lesson-block > h6 { color: var(--ink); line-height: 1.5; }
+.lesson-block > h4 { font-size: 20px; margin: 28px 0 14px; }
+.lesson-block > h5 { font-size: 18px; margin: 23px 0 11px; }
+.lesson-block > h6 { font-size: 16px; margin: 18px 0 9px; }
 .answer { display: grid; gap: 12px; font-size: 14px; }
 .answer > strong { color: var(--ink); font-size: 14px; }
 .answer > div { padding-top: 11px; border-top: 1px solid var(--line); }
@@ -1318,6 +1321,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .lesson-section-title { grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
   .lesson-section-title > span { width: 31px; height: 31px; }
   .lesson-section-title h3 { font-size: 19px; }
+  .lesson-block > h4 { font-size: 18px; }
+  .lesson-block > h5 { font-size: 17px; }
   .review-session-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .review-session-actions .primary-button { grid-column: 1 / -1; margin-left: 0; }
   .review-session-visual { min-height: 220px; padding: 10px; }

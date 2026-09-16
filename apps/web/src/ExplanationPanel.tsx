@@ -79,7 +79,7 @@ function sectionDescriptor(value: string): string {
 
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
   if (!section) return null;
-  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}>{section.kind !== "main_content" && <SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />}{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{section.markdown}</Markdown> : null}{children}</article>;
+  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{section.markdown}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {

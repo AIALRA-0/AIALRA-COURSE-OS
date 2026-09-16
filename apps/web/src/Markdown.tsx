@@ -18,7 +18,9 @@ export function Markdown({ children, nestedHeadings = false, inline = false }: {
           h1: ({ children: label }: { children?: ReactNode }) => <h4>{label}</h4>,
           h2: ({ children: label }: { children?: ReactNode }) => <h4>{label}</h4>,
           h3: ({ children: label }: { children?: ReactNode }) => <h5>{label}</h5>,
-          h4: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>
+          h4: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>,
+          h5: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>,
+          h6: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>
         } : {}),
         ...(inline ? { p: ({ children: text }) => <span>{text}</span> } : {}),
         table: ({ children: rows }) => <div className="lesson-table-scroll"><table>{rows}</table></div>,
