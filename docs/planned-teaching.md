@@ -17,6 +17,8 @@ The local validator verifies schemas, known source IDs, complete fact assignment
 
 Only one partial-stage repair is permitted per page. Preceding stages are not regenerated. The provider and model remain fixed throughout one page. Each request is bounded against the remaining page budget using the configured price snapshot; actual or estimated usage is accumulated, including failed calls. The current ceiling remains USD 0.06, a budget in USD rather than a guaranteed live currency conversion.
 
+Planned DeepSeek calls explicitly enable reasoning instead of inheriting the legacy transport's disabled setting. Output limits include reasoning tokens; those tokens count toward cost, while hidden reasoning text is neither saved nor shown. Source fidelity constrains meaning, not the use of untranslated labels in learner prose. Imported image labels are locators; actual observed image content receives its own coverage claim.
+
 `teachingTrace` persists the actual plan, preceding-page context and phase receipts inside the private lesson data. The public inspection endpoint shows the active prompts. Existing task leases, snapshot pinning, readback hashes and immutable releases remain in force.
 
 ## Review cases

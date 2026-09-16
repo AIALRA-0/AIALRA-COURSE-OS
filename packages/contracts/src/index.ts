@@ -116,6 +116,7 @@ export interface DiagramElement {
   label: string;
   observation: string;
   inference?: string;
+  sourceRole?: "page_locator";
 }
 
 export interface TextElement {

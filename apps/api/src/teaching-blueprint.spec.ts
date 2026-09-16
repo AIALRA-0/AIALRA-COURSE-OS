@@ -50,7 +50,7 @@ describe("teaching blueprint", () => {
     } as PageLesson;
     const prepared = preparePageForGeneration(imported);
     const regions = prepared.atoms.filter((atom) => atom.kind === "text_region");
-    expect(prepared.coverageRequirements.find(item => item.atomId === "whole-page")?.requiredFields).toEqual(["observation"]);
+    expect(prepared.coverageRequirements.find(item => item.atomId === "whole-page")).toBeUndefined();
     expect(regions).toHaveLength(3);
     expect(regions.map((atom) => atom.observation).join("\n")).toContain("32×64");
     expect(regions.map((atom) => atom.observation).join("\n")).not.toContain("17/27");

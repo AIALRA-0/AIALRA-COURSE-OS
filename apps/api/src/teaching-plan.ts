@@ -123,18 +123,23 @@ export function teachingSectionMemory(content: Partial<TeachingPackage>) {
   };
 }
 
-export function plannedCoverageIssues(content: TeachingPackage, blueprint: TeachingBlueprint): string[] {
+export function plannedCoverageIssues(content: TeachingPackage, blueprint: TeachingBlueprint, plan?: TeachingPlan): string[] {
   const issues: string[] = [];
   for (const evidence of content.coverageEvidence) {
     if (!blueprint.resourcePackage.atomIds.includes(evidence.atomId)) issues.push(`PLAN_EVIDENCE_UNKNOWN_ATOM:${evidence.atomId}`);
     if (!content.fullExplanationMarkdown.includes(evidence.explanation)) issues.push(`PLAN_EVIDENCE_QUOTE_MISSING:${evidence.atomId}`);
-    const valid = new Set(blueprint.requirementPackage.requirements.filter(r => r.atomId === evidence.atomId).flatMap(r => r.requiredFields));
+    const requirements = blueprint.requirementPackage.requirements.filter(r => r.atomId === evidence.atomId);
+    // Image locators may gain actual observations during visual planning.
+    const valid = new Set(requirements.length ? requirements.flatMap(r => r.requiredFields) : ["observation"]);
     if (evidence.coveredFields.some(field => !valid.has(field))) issues.push(`PLAN_EVIDENCE_UNKNOWN_FIELD:${evidence.atomId}`);
   }
   for (const requirement of blueprint.requirementPackage.requirements) {
     const fields = new Set(content.coverageEvidence.filter(evidence => evidence.atomId === requirement.atomId).flatMap(evidence => evidence.coveredFields));
     const missing = requirement.requiredFields.filter(field => !fields.has(field));
     if (missing.length) issues.push(`PLAN_EVIDENCE_MISSING:${requirement.atomId}:${missing.join("+")}`);
+  }
+  for (const atomId of new Set(plan?.facts.map(fact => fact.atomId) ?? [])) {
+    if (!content.coverageEvidence.some(evidence => evidence.atomId === atomId)) issues.push(`PLAN_FACT_EVIDENCE_MISSING:${atomId}`);
   }
   return [...new Set(issues)];
 }

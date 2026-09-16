@@ -2523,7 +2523,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       } else {
         const issues = plannedContentIssues(generation.content, { pageTitle: page.title, pageNumber: page.pageNumber, sourceText,
           writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
-          language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || "balanced", idempotencyKey: jobId, blueprint });
+          language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || "balanced", idempotencyKey: jobId, blueprint }, generation.teachingTrace.plan);
         if (issues.length) throw new ModelRouterGenerationError(`TEACHING_PLAN_CONTENT_INVALID:${issues[0]}`, generation.model, generation.usage, generation.provider);
         await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, {
           planningMode: "source-plan", plan: generation.teachingTrace.plan, phases: generation.teachingTrace.phases,
@@ -3172,6 +3172,13 @@ function deterministicTeachingPackage(page: CourseRelease["pages"][number]): Tea
 }
 
 export function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only", teachingTrace?: PlannedTrace): CourseRelease["pages"][number] {
+  if (teachingTrace) {
+    const observed = new Set(content.coverageEvidence.map(evidence => evidence.atomId));
+    const imageRequirements = page.atoms.filter(atom => atom.kind === "image_region" && observed.has(atom.id)
+      && !page.coverageRequirements.some(requirement => requirement.atomId === atom.id))
+      .map(atom => ({ id: `${page.id}:observed:${atom.id}`, atomId: atom.id, requiredFields: ["observation"], risk: "general" as const }));
+    page = { ...page, coverageRequirements: [...page.coverageRequirements, ...imageRequirements] };
+  }
   const normalizedContent = teachingTrace ? content : normalizeTeachingPackageMath(content);
   const anchorIds = page.anchors.map((item) => item.id);
   const atomIds = page.atoms.map((item) => item.id);
@@ -3895,7 +3902,7 @@ function createImportedPage(sourceHash: string, pageNumber: number, title: strin
       { id: pageAnchorId, pageId, kind: "page", label: `第 ${pageNumber} 页原始画面` },
       { id: textAnchorId, pageId, kind: "text", label: `第 ${pageNumber} 页离线提取文本`, text }
     ],
-    atoms: [{ kind: "image_region", id: atomId, label: "整页来源画面", observation: "页面图片和文本已经离线提取，仍需完成逐元素识别与教授级讲解" }],
+    atoms: [{ kind: "image_region", sourceRole: "page_locator", id: atomId, label: "整页来源画面", observation: "页面图片和文本已经离线提取，仍需完成逐元素识别与教授级讲解" }],
     blocks: [
       { id: `${pageId}:objective`, title: "本页目标", kind: "objective", markdown: "待确认：先根据原始页面确定学生学完后应能完成的具体任务", sourceAnchorIds: [pageAnchorId, textAnchorId], atomIds: [atomId] },
       { id: `${pageId}:prerequisite`, title: "需要先知道什么", kind: "prerequisite", markdown: "待确认：补齐理解本页所需的定义、符号和前置步骤", sourceAnchorIds: [pageAnchorId, textAnchorId], atomIds: [atomId] },

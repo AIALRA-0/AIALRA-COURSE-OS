@@ -7,10 +7,14 @@ const requiredSections = ["prior_knowledge", "learning_objectives", "full_explan
 export function preparePageForGeneration(page: PageLesson): PageLesson {
   const sourceText = page.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => learningSourceText(anchor.text!)).join("\n");
   const importedWholePage = page.atoms.length === 1 && page.atoms[0]?.kind === "image_region";
+  const image = page.atoms[0];
+  const pageLocator = importedWholePage && image?.kind === "image_region"
+    && (image.sourceRole === "page_locator" || image.label === "整页来源画面");
   const textRegions = importedWholePage ? sourceTextRegions(page.id, sourceText) : [];
   const expandedAtoms: PageLesson["atoms"] = [...page.atoms, ...textRegions];
   const atoms = new Map(expandedAtoms.map((atom) => [atom.id, atom]));
-  const coverageRequirements = [...page.coverageRequirements, ...textRegions.filter((region) => !isPresentationHeadingOnly(region.observation, page.title)).map((region) => ({
+  const sourceRequirements = page.coverageRequirements.filter(requirement => !pageLocator || requirement.atomId !== page.atoms[0]?.id);
+  const coverageRequirements = [...sourceRequirements, ...textRegions.filter((region) => !isPresentationHeadingOnly(region.observation, page.title)).map((region) => ({
     id: `${page.id}:requirement:${region.id}`,
     atomId: region.id,
     // The region label is a generated bookkeeping number, not slide content.
@@ -19,11 +23,7 @@ export function preparePageForGeneration(page: PageLesson): PageLesson {
   }))].map((requirement) => {
     const atom = atoms.get(requirement.atomId) as unknown as Record<string, unknown> | undefined;
     if (!atom) return structuredClone(requirement);
-    // An imported whole-page image is a source locator. Its label is importer
-    // metadata; visual observations must come from the image, not that label.
-    const requiredFields = importedWholePage && requirement.atomId === page.atoms[0]?.id
-      ? ["observation"]
-      : requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
+    const requiredFields = requirement.requiredFields.filter((field) => hasSourceValue(atom[field]));
     return { ...structuredClone(requirement), requiredFields };
   });
   return { ...structuredClone(page), atoms: expandedAtoms, coverageRequirements };

@@ -580,7 +580,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     try {
       const rawBody = this.connection.providerId === "opencode-go" && /^deepseek-/.test(this.connection.model)
         && this.connection.protocol === "chat_completions" && typeof init.body === "string"
-        ? JSON.stringify({ ...JSON.parse(init.body), thinking: { type: "disabled" } })
+        ? JSON.stringify({ thinking: { type: "disabled" }, ...JSON.parse(init.body) })
         : init.body;
       const useResponsesStream = ["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
@@ -1048,13 +1048,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       model: this.connection.model, instructions: request.instructions,
       input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
       max_output_tokens: maxTokens,
-      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "high" } } : { temperature: 0.2 }),
       text: { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
     } : protocol === "messages" ? {
       model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
       messages: [{ role: "user", content: image ? [{ type: "text", text: request.prompt }, anthropicImagePart(image)] : request.prompt }]
     } : {
-      model: this.connection.model, temperature: 0.2, max_tokens: maxTokens,
+      model: this.connection.model, max_tokens: maxTokens,
+      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.model.startsWith("deepseek-")
+        ? { thinking: { type: "enabled" }, reasoning_effort: "high" } : { temperature: 0.2 }),
       messages: [{ role: "system", content: schemaInstruction }, { role: "user", content: image
         ? [{ type: "text", text: request.prompt }, { type: "image_url", image_url: { url: image } }] : request.prompt }]
     };

@@ -4,6 +4,7 @@ import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson } from "./planned-teaching.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput } from "./model-router.js";
+import { applyTeachingPackage } from "./app.js";
 
 const quote = "先确定实际需要处理的对象，再观察处理前后的变化，这样才能把操作与结果对应起来";
 const usage = { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEquivalentUsd: 0.001, durationMs: 10 };
@@ -88,6 +89,27 @@ describe("planned teaching", () => {
     expect(fetcher).toHaveBeenCalledTimes(4);
     expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.004);
     expect(result.teachingTrace?.phases).toHaveLength(4);
+  });
+  it("does not override explicit planned reasoning in chat transport", async () => {
+    const { input, plan } = fixture();
+    const outputs = [plan, opening, explanation, closing];
+    const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+      expect(JSON.parse(init.body as string)).toMatchObject({ thinking: { type: "enabled" }, reasoning_effort: "high" });
+      return Response.json({ model: "deepseek-v4-flash", choices: [{ message: { content: JSON.stringify(outputs.shift()) } }], usage: { prompt_tokens: 100, completion_tokens: 200, cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "chat_completions" }).generateTeachingPackage(input);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+  it("persists actual visual observations as coverage rather than teaching importer labels", () => {
+    const { page, plan } = fixture();
+    page.atoms[0] = { id: "a", kind: "image_region", label: "image", observation: "imported" };
+    page.coverageRequirements = [];
+    page.blocks = [{ id: "core", kind: "core", title: "正文", markdown: "来源", sourceAnchorIds: [], atomIds: ["a"] }];
+    const result = applyTeachingPackage(page, { ...opening, ...explanation, ...closing } as any, true, "multimodal", { version: 1, plan, phases: [] });
+    expect(result.coverageRequirements).toHaveLength(1);
+    expect(result.coverageRequirements[0]?.requiredFields).toEqual(["observation"]);
+    expect(result.coverageClaims[0]?.coveredFields).toEqual(["observation"]);
   });
   it("preserves charges and stage if a later provider request fails", async () => {
     const { input, plan } = fixture();
