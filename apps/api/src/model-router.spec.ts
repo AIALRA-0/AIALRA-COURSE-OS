@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generationHarnessFileSha256 } from "./generation-harness.js";
+import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, resolvedSourceConflictVerdict, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
@@ -946,6 +947,46 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const failure = await client.generateTeachingPackage(providerInput("no-fallback-test")).catch((error: unknown) => error);
     expect(failure).toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_FAILED:rate_limited" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a zero-usage quota error across a planned-stage retry", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "429" } }, { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const page = {
+      id: "sample:page:1", pageNumber: 1, title: "示例", imageUrl: "",
+      anchors: [], atoms: [], blocks: [], coverageRequirements: [], coverageClaims: [],
+      quality: { highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false, issues: [] }
+    } as Parameters<typeof buildTeachingBlueprint>[0];
+    const input = {
+      ...providerInput("planned-quota-test"),
+      blueprint: buildTeachingBlueprint(page, "来源内容", "zh-CN", "quality", "writing-policy:test", false),
+      maxCostUsd: 0.06
+    };
+    const client = new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-token", model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true, billingMode: "subscription_quota" });
+    await expect(client.generateTeachingPackage(input)).rejects.toMatchObject({ provider: "opencode-go", code: "MODEL_PROVIDER_FAILED:429" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reaches the configured provider fallback after a planned-stage quota failure", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "429" } }, { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const page = {
+      id: "sample:page:2", pageNumber: 2, title: "示例", imageUrl: "",
+      anchors: [], atoms: [], blocks: [], coverageRequirements: [], coverageClaims: [],
+      quality: { highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false, issues: [] }
+    } as Parameters<typeof buildTeachingBlueprint>[0];
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: ["opencode-go", "deepseek"].map(id => ({ id, displayName: id, baseUrl: `https://${id}.test`, enabled: true,
+        credential: { configured: true }, models: [{ id: "deepseek-v4-flash-vision-exp", displayName: "Vision", protocol: "chat_completions" as const,
+          supportsVision: true, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] })),
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(),
+        rules: [{ stage: "teach", providerId: "opencode-go", modelId: "deepseek-v4-flash-vision-exp", fallbackProviderId: "deepseek", fallbackModelId: "deepseek-v4-flash-vision-exp", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const input = { ...providerInput("planned-fallback-test"),
+      blueprint: buildTeachingBlueprint(page, "来源内容", "zh-CN", "quality", "writing-policy:test", false), maxCostUsd: 0.06 };
+    await expect(client.generateTeachingPackage(input)).rejects.toMatchObject({ provider: "deepseek", code: "MODEL_PROVIDER_FAILED:429" });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("falls back during semantic audit when the primary quota route fails", async () => {

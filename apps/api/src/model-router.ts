@@ -1016,7 +1016,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     let calls = resumedReceipts.length;
     try {
       const result = await writePlannedLesson(input, async request => {
-        const spent = calls ? this.usageCostUsd(usage) : 0;
+        // A rejected request can have no usage receipt. It consumed no known
+        // tokens, so preserve its provider error through the stage retry and
+        // allow the configured quota fallback to handle it.
+        const spent = calls && (usage.inputTokens > 0 || usage.outputTokens > 0 || usage.apiEquivalentUsd !== null)
+          ? this.usageCostUsd(usage) : 0;
         if (spent === undefined || spent >= (input.maxCostUsd ?? 0.06)) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
         let response: Awaited<ReturnType<HttpProviderTeachingClient["requestPlannedStage"]>>;
         try { response = await this.requestPlannedStage(input, request, (input.maxCostUsd ?? 0.06) - spent); }
