@@ -1010,7 +1010,12 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       const result = await writePlannedLesson(input, async request => {
         const spent = calls ? this.usageCostUsd(usage) : 0;
         if (spent === undefined || spent >= (input.maxCostUsd ?? 0.06)) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
-        const response = await this.requestPlannedStage(input, request, (input.maxCostUsd ?? 0.06) - spent);
+        let response: Awaited<ReturnType<HttpProviderTeachingClient["requestPlannedStage"]>>;
+        try { response = await this.requestPlannedStage(input, request, (input.maxCostUsd ?? 0.06) - spent); }
+        catch (error) {
+          if (error instanceof ModelRouterGenerationError) usage = calls++ === 0 ? error.usage : sumProviderUsage(usage, error.usage);
+          throw error;
+        }
         usage = calls++ === 0 ? response.usage : sumProviderUsage(usage, response.usage);
         if (calls > 1 && response.model !== model) throw new Error("MODEL_PROVIDER_CHANGED_DURING_PAGE");
         model = response.model;
@@ -1019,7 +1024,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       return { content: result.content, teachingTrace: result.trace, usage, model, provider: this.connection.providerId };
     } catch (error) {
       if (error instanceof ModelRouterGenerationError) {
-        throw new ModelRouterGenerationError(error.code, error.model, calls ? sumProviderUsage(usage, error.usage) : error.usage, error.provider, error.responseShape);
+        throw new ModelRouterGenerationError(error.code, error.model, usage, error.provider, error.responseShape);
       }
       throw new ModelRouterGenerationError(error instanceof Error ? error.message : "TEACHING_PLAN_FAILED", model, usage, this.connection.providerId);
     }

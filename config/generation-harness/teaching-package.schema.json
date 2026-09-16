@@ -1,12 +1,12 @@
 {
   "type": "object",
   "properties": {
-    "chapterBridgeMarkdown": { "type": "string", "maxLength": 600 },
-    "learningObjectives": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string", "minLength": 8, "maxLength": 180 } },
-    "mainContentMarkdown": { "type": "string", "minLength": 30, "maxLength": 1800 },
-    "priorKnowledge": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 40, "maxLength": 600 } },
-    "fullExplanationMarkdown": { "type": "string", "minLength": 120, "maxLength": 5000 },
-    "misconceptions": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "minLength": 35, "maxLength": 500 } },
+    "chapterBridgeMarkdown": { "type": "string", "minLength": 1 },
+    "learningObjectives": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string", "minLength": 1 } },
+    "mainContentMarkdown": { "type": "string", "minLength": 1 },
+    "priorKnowledge": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "type": "string", "minLength": 1 } },
+    "fullExplanationMarkdown": { "type": "string", "minLength": 120 },
+    "misconceptions": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "minLength": 1 } },
     "coverageEvidence": {
       "type": "array",
       "items": {
@@ -14,7 +14,7 @@
         "properties": {
           "atomId": { "type": "string", "minLength": 1 },
           "coveredFields": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-          "explanation": { "type": "string", "minLength": 20, "maxLength": 400 }
+          "explanation": { "type": "string", "minLength": 1 }
         },
         "required": ["atomId", "coveredFields", "explanation"],
         "additionalProperties": false
@@ -28,10 +28,10 @@
         "type": "object",
         "properties": {
           "kind": { "type": "string", "enum": ["comprehension", "multiple_choice"] },
-          "prompt": { "type": "string", "minLength": 8, "maxLength": 240 },
-          "options": { "type": "array", "minItems": 0, "maxItems": 4, "items": { "type": "string", "minLength": 1, "maxLength": 240 } },
-          "expectedAnswer": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "explanation": { "type": "string", "minLength": 8, "maxLength": 500 }
+          "prompt": { "type": "string", "minLength": 1 },
+          "options": { "type": "array", "minItems": 0, "maxItems": 4, "items": { "type": "string", "minLength": 1 } },
+          "expectedAnswer": { "type": "string", "minLength": 1 },
+          "explanation": { "type": "string", "minLength": 1 }
         },
         "required": ["kind", "prompt", "options", "expectedAnswer", "explanation"],
         "additionalProperties": false

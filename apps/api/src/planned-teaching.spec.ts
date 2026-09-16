@@ -104,4 +104,14 @@ describe("planned teaching", () => {
       expect((error as ModelRouterGenerationError).responseShape).toBe("opening");
     }
   });
+  it("retries invalid JSON only once and retains the failed call in costs and the trace", async () => {
+    const { input, plan } = fixture();
+    const outputs = [JSON.stringify(plan), "not JSON", JSON.stringify(opening), JSON.stringify(explanation), JSON.stringify(closing)];
+    const fetcher = vi.fn(async () => Response.json({ model: "deepseek-v4-flash", output_text: outputs.shift(), usage: { input_tokens: 100, output_tokens: 200, cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetcher);
+    const result = await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "responses" }).generateTeachingPackage(input);
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.005);
+    expect(result.teachingTrace?.phases.map(phase => phase.phase)).toEqual(["plan", "opening_invalid_json", "opening_repair", "explanation", "consolidation"]);
+  });
 });

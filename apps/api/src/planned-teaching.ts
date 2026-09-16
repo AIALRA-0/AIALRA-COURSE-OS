@@ -52,14 +52,24 @@ export async function writePlannedLesson(input: ModelRouterInput,
   call: (request: PlannedCall) => Promise<{ content: unknown; provider: string; model: string; usage: ModelRouterUsage }>) {
   const blueprint = input.blueprint!;
   const trace: PlannedTrace = { version: 1, plan: undefined as unknown as TeachingPlan, previousPageContext: input.previousPageContext, phases: [] };
+  let repairUsed = false;
   const run = async (request: PlannedCall) => {
     await input.onTeachingPhase?.(request.phase, "started");
-    const result = await call(request);
+    let result: Awaited<ReturnType<typeof call>>;
+    try { result = await call(request); }
+    catch (error) {
+      if (repairUsed || !(error instanceof Error) || error.message !== "MODEL_PROVIDER_OUTPUT_JSON_INVALID") throw error;
+      const failed = error as Error & { provider?: string; model?: string; usage?: ModelRouterUsage };
+      if (failed.provider && failed.model && failed.usage) trace.phases.push({ phase: `${request.phase}_invalid_json`, provider: failed.provider, model: failed.model, usage: failed.usage });
+      repairUsed = true;
+      request = { ...request, phase: `${request.phase}_repair`, instructions: `${request.instructions}\n上次返回不是合法 JSON，只返回一个完整 JSON 对象，字符串内换行与反斜杠必须按 JSON 转义，不输出对象外的文字` };
+      await input.onTeachingPhase?.(request.phase, "started");
+      result = await call(request);
+    }
     trace.phases.push({ phase: request.phase, provider: result.provider, model: result.model, usage: result.usage });
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
     return result.content;
   };
-  let repairUsed = false;
   const planRequest: PlannedCall = { phase: "plan", instructions: planningPrompt,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
@@ -67,7 +77,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 4800 };
   let plan = await run(planRequest) as TeachingPlan;
   let planIssues = validateTeachingPlan(plan, blueprint);
-  if (planIssues.length) {
+  if (planIssues.length && !repairUsed) {
     repairUsed = true;
     plan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
       instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置" }) }) as TeachingPlan;
