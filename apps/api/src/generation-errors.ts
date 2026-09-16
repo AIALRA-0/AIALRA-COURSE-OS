@@ -6,6 +6,29 @@ export interface GenerationErrorDescriptor {
   safeMessage: string;
 }
 
+export interface GenerationFailureRoute {
+  category: "provider" | "output" | "content" | "storage" | "configuration" | "internal";
+  phase?: "plan" | "opening" | "explanation" | "consolidation";
+  action: "switch_provider" | "retry_stage" | "repair_field" | "retry_readback" | "hold_source" | "pause";
+  code: string;
+}
+
+/** Safe, finite recovery classification for persisted events and automation. */
+export function classifyGenerationFailure(error: unknown): GenerationFailureRoute {
+  const raw = error instanceof Error ? error.message : String(error || "INTERNAL_FAILURE");
+  const code = describeGenerationError(error).code;
+  const phase = /TEACHING_(PLAN|OPENING|EXPLANATION|CONSOLIDATION)_INVALID/u.exec(raw)?.[1]?.toLowerCase() as GenerationFailureRoute["phase"] | undefined;
+  if (code === "PROVIDER_QUOTA_EXHAUSTED") return { category: "provider", action: "switch_provider", code };
+  if (["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT"].includes(code)) return { category: "provider", action: "retry_stage", code };
+  if (code === "READWEAVE_UNAVAILABLE" || code === "READWEAVE_HASH_MISMATCH") return { category: "storage", action: "retry_readback", code };
+  if (phase) return { category: "content", action: "repair_field", code, phase };
+  if (code === "FORMULA_INVALID" || code === "COVERAGE_GAP") return { category: "content", action: "repair_field", code };
+  if (code === "MODEL_INVALID_OUTPUT" || code === "MODEL_OUTPUT_LIMIT") return { category: "output", action: "retry_stage", code };
+  if (code.startsWith("BLUEPRINT_") || code.includes("SOURCE_")) return { category: "content", action: "hold_source", code };
+  if (code === "PROVIDER_AUTH" || code === "PROVIDER_INVALID_REQUEST" || code.includes("CHECKPOINT_MISMATCH")) return { category: "configuration", action: "pause", code };
+  return { category: "internal", action: "pause", code };
+}
+
 const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE"]);
 
 export function describeGenerationError(error: unknown): GenerationErrorDescriptor {

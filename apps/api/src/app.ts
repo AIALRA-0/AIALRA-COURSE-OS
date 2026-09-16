@@ -47,7 +47,7 @@ import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
-import { describeGenerationError } from "./generation-errors.js";
+import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
@@ -2512,7 +2512,28 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
+      const checkpointKey = `${jobId}:${page.id}`;
+      const teachingFingerprint = createHash("sha256").update(JSON.stringify({ releaseId: release.id, pageId: page.id,
+        sourceText, sourceImage: page.imageUrl, previousPageContext, blueprintSha256: blueprint.sha256,
+        writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+        harnessSnapshotId: currentJob.harnessSnapshotId, language: currentJob.language || "zh-CN",
+        qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd) })).digest("hex");
+      const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
+      if (savedCheckpoint && savedCheckpoint.fingerprint !== teachingFingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
       let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v12`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+        teachingFingerprint, generationAttempt: currentJob.attempt, resumeTeaching: savedCheckpoint,
+        onTeachingCheckpoint: async checkpoint => {
+          await dependencies.operations.mutate(state => {
+            const job = state.jobs.find(item => item.id === jobId);
+            if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) throw new Error("LEASE_LOST");
+            const existing = state.generationCheckpoints[checkpointKey];
+            if (existing && existing.fingerprint !== checkpoint.fingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
+            state.generationCheckpoints[checkpointKey] = checkpoint;
+            dependencies.operations.appendEvent(state, jobId, "generation.page.checkpoint", {
+              pageId: page.id, completedPhases: checkpoint.completedPhases, pendingPhase: checkpoint.pending?.phase,
+              fingerprint: checkpoint.fingerprint });
+          });
+        },
         onTeachingPhase: async (phase, state, usage) => {
           await assertGenerationFence(jobId, fenceToken, dependencies);
           await appendGenerationStageEvent(jobId, page.id, phase === "plan" ? "atomize" : phase.endsWith("_repair") ? "repair" : "teach", state, dependencies, { phase, ...usage });
@@ -2967,6 +2988,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           return;
         }
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
+        delete state.generationCheckpoints[checkpointKey];
         dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
         if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {
           Object.assign(job, transitionJob(job, "failed"));
@@ -3001,6 +3023,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         }
       }
       await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
+        failureRoute: classifyGenerationFailure(error),
         ...(error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}),
         ...(persistenceStage ? { persistenceStage, backendFailureKind: safeReadWeaveFailureKind(error) } : {})
       }, fenceToken);
@@ -3042,6 +3065,7 @@ async function failGenerationJob(jobId: string, issue: string, dependencies: App
     for (const pageId of job.pageIds) {
       if (!job.completedPageIds.includes(pageId) && !job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
     }
+    job.lastErrorCode = issue;
     Object.assign(job, transitionJob(job, "failed"));
     dependencies.operations.appendEvent(state, job.id, "job.failed", { issue, failedPageIds: job.failedPageIds });
   });
@@ -3051,6 +3075,7 @@ async function markGenerationPageFailed(jobId: string, pageId: string, issue: st
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "running" || (fenceToken !== undefined && job.lease?.fenceToken !== fenceToken)) return;
+    job.lastErrorCode = issue;
     if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
     dependencies.operations.appendEvent(state, job.id, "generation.page.failed", { pageId, issue, ...details });
     if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { describeGenerationError } from "./generation-errors.js";
+import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 
 describe("generation error classification", () => {
+  it("routes content, transport, quota and storage failures to distinct recovery actions", () => {
+    expect(classifyGenerationFailure(new Error("TEACHING_EXPLANATION_INVALID:PLAN_EVIDENCE_QUOTE_MISSING:a"))).toMatchObject({ category: "content", phase: "explanation", action: "repair_field" });
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:429"))).toMatchObject({ category: "provider", action: "retry_stage" });
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_INSUFFICIENT_BALANCE"))).toMatchObject({ category: "provider", action: "switch_provider" });
+    expect(classifyGenerationFailure(new Error("READWEAVE_DRAFT_READBACK_MISMATCH"))).toMatchObject({ category: "storage", action: "retry_readback" });
+  });
   it("preserves the failing teaching phase without exposing details or misreading source IDs as HTTP codes", () => {
     expect(describeGenerationError(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:source-401,source-402"))).toMatchObject({ code: "TEACHING_PLAN_INVALID", retryable: false });
   });

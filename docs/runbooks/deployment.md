@@ -11,9 +11,9 @@ Secret files are mounted from `COURSE_OS_SECRET_DIR`. Each secret must be readab
 ## Preflight
 
 1. Record the exact Git commit, `df`, all containers, images, volumes, and Compose configuration.
-2. Require at least 40 GB free before any image build.
+2. Estimate the build's peak disk use and retain enough space for the current and rollback images; stop if this specific build would exhaust the disk.
 3. Verify the previous Compose file, runtime image, converter image, PostgreSQL backup, and ReadWeave snapshot are recoverable.
-4. Run the full local gate and the clean-root publication gate. A denied or incomplete gate stops deployment.
+4. Run the full local quality suite and a focused scan for secrets, private course files, server identifiers, and deployment evidence before publication.
 
 Validate the template without starting services:
 

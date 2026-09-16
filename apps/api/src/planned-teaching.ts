@@ -3,6 +3,8 @@ import { validateMarkdownMath } from "@course-os/quality";
 import { teachingPackageSchema } from "./generation-harness.js";
 import { plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
+import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
+import { classifyGenerationFailure } from "./generation-errors.js";
 
 const readPrompt = (name: string) => readFileSync(new URL(`../../../config/generation-harness/${name}`, import.meta.url), "utf8");
 export const planningPrompt = readPrompt("page-plan-prompt.md");
@@ -26,7 +28,15 @@ export interface PlannedTrace {
   version: 1;
   plan: TeachingPlan;
   previousPageContext?: string;
-  phases: Array<{ phase: string; provider: string; model: string; usage: ModelRouterUsage }>;
+  phases: Array<{ phase: string; provider: string; model: string; usage: ModelRouterUsage; attempt?: number }>;
+}
+export interface PlannedCheckpoint {
+  fingerprint: string;
+  plan?: TeachingPlan;
+  content: Partial<TeachingPackage>;
+  completedPhases: string[];
+  pending?: { phase: string; content: Partial<TeachingPackage>; issues: string[] };
+  trace: PlannedTrace;
 }
 
 const fieldsByPhase = [
@@ -58,22 +68,38 @@ export function plannedContentIssues(content: TeachingPackage, input: ModelRoute
 export async function writePlannedLesson(input: ModelRouterInput,
   call: (request: PlannedCall) => Promise<{ content: unknown; provider: string; model: string; usage: ModelRouterUsage }>) {
   const blueprint = input.blueprint!;
-  const trace: PlannedTrace = { version: 1, plan: undefined as unknown as TeachingPlan, previousPageContext: input.previousPageContext, phases: [] };
-  let repairUsed = false;
+  const resume = input.resumeTeaching?.fingerprint === input.teachingFingerprint ? input.resumeTeaching : undefined;
+  const trace: PlannedTrace = resume ? structuredClone(resume.trace)
+    : { version: 1, plan: undefined as unknown as TeachingPlan, previousPageContext: input.previousPageContext, phases: [] };
+  const jsonRepairs = new Set<string>();
+  const save = async (checkpoint: Omit<PlannedCheckpoint, "fingerprint" | "trace">) => {
+    if (!input.teachingFingerprint || !input.onTeachingCheckpoint) return;
+    const saved: PlannedCheckpoint = { fingerprint: input.teachingFingerprint, ...structuredClone(checkpoint), trace: structuredClone(trace) };
+    await input.onTeachingCheckpoint(saved);
+    // The configured fallback receives this same request object; it must resume
+    // the last committed phase instead of starting a second whole-page attempt.
+    input.resumeTeaching = saved;
+  };
   const run = async (request: PlannedCall) => {
     await input.onTeachingPhase?.(request.phase, "started");
     let result: Awaited<ReturnType<typeof call>>;
     try { result = await call(request); }
     catch (error) {
-      if (repairUsed || !(error instanceof Error) || error.message !== "MODEL_PROVIDER_OUTPUT_JSON_INVALID") throw error;
+      const route = classifyGenerationFailure(error);
+      if (route.category === "provider" && route.action === "retry_stage") {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        result = await call(request);
+      } else {
+      if (!(error instanceof Error) || error.message !== "MODEL_PROVIDER_OUTPUT_JSON_INVALID" || jsonRepairs.has(request.phase)) throw error;
       const failed = error as Error & { provider?: string; model?: string; usage?: ModelRouterUsage };
-      if (failed.provider && failed.model && failed.usage) trace.phases.push({ phase: `${request.phase}_invalid_json`, provider: failed.provider, model: failed.model, usage: failed.usage });
-      repairUsed = true;
-      request = { ...request, phase: `${request.phase}_repair`, instructions: `${request.instructions}\n上次返回不是合法 JSON，只返回一个完整 JSON 对象，字符串内换行与反斜杠必须按 JSON 转义，不输出对象外的文字` };
+      if (failed.provider && failed.model && failed.usage) trace.phases.push({ phase: `${request.phase}_invalid_json`, provider: failed.provider, model: failed.model, usage: failed.usage, attempt: input.generationAttempt });
+      jsonRepairs.add(request.phase);
+      request = { ...request, phase: `${request.phase}_json_repair`, instructions: `${request.instructions}\n上次返回不是合法 JSON，只返回一个完整 JSON 对象，字符串内换行与反斜杠必须按 JSON 转义，不输出对象外的文字` };
       await input.onTeachingPhase?.(request.phase, "started");
       result = await call(request);
+      }
     }
-    trace.phases.push({ phase: request.phase, provider: result.provider, model: result.model, usage: result.usage });
+    trace.phases.push({ phase: request.phase, provider: result.provider, model: result.model, usage: result.usage, attempt: input.generationAttempt });
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
     return result.content;
   };
@@ -82,17 +108,18 @@ export async function writePlannedLesson(input: ModelRouterInput,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
-  let plan = await run(planRequest) as TeachingPlan;
+  let plan = resume?.plan ?? await run(planRequest) as TeachingPlan;
   let planIssues = validateTeachingPlan(plan, blueprint);
-  if (planIssues.length && !repairUsed) {
-    repairUsed = true;
+  if (planIssues.length) {
     plan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
       instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置" }) }) as TeachingPlan;
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.length) throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);
   trace.plan = plan;
-  let content: Partial<TeachingPackage> = {};
+  let content: Partial<TeachingPackage> = resume ? structuredClone(resume.content) : {};
+  const completedPhases = resume ? [...resume.completedPhases] : [];
+  if (!resume?.plan) await save({ plan, content, completedPhases });
   for (let index = 0; index < fieldsByPhase.length; index++) {
     const fields = fieldsByPhase[index]!;
     const schema = partialSchema(fields);
@@ -105,21 +132,40 @@ export async function writePlannedLesson(input: ModelRouterInput,
           : index === 1 ? "前部知识已讲过，只应用，按计划逐步解释当前课件，不扩写后续章节"
           : "依据实际完整讲解生成总结、辨析和问题，遵守计划题目顺序，不引入正文未讲的结论" }),
       schema, maxOutputTokens: index === 1 ? 9000 : 5000 };
-    let partial = await run(request) as Partial<TeachingPackage>;
+    if (completedPhases.includes(phases[index]!)) continue;
+    const pending = resume?.pending;
+    const pendingContent = pending && pending.phase === phases[index] ? pending.content : undefined;
+    let partial = pendingContent
+      ? structuredClone(pendingContent)
+      : await run(request) as Partial<TeachingPackage>;
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
-    if (issues.length && !repairUsed) {
-      repairUsed = true;
-      partial = await run({ ...request, phase: `${request.phase}_repair`,
-        prompt: JSON.stringify({ originalInput: JSON.parse(request.prompt), currentFields: partial, issues,
-          instruction: "只修复当前阶段字段的已列问题，保留其余内容，不输出其他字段" }) }) as Partial<TeachingPackage>;
+    if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
+    for (let round = 0; round < 2 && issues.length; round++) {
+      const tickets = generationRepairTickets(phases[index]!, partial, issues, blueprint.resourcePackage.atomIds);
+      if (tickets.length === 0) break;
+      for (const ticket of tickets) {
+        const patch = await run({ phase: `${request.phase}_repair`,
+          instructions: `${plannedInstructions([ticket.field])}\n${ticket.instruction}`,
+          prompt: JSON.stringify({ pageTitle: input.pageTitle, issue: ticket.issues, field: ticket.field,
+            currentField: partial[ticket.field], explanation: ticket.field === "coverageEvidence" ? partial.fullExplanationMarkdown : undefined,
+            requirements: ticket.field === "coverageEvidence" ? blueprint.requirementPackage.requirements : undefined,
+            facts: ticket.field === "coverageEvidence" ? plan.facts : undefined,
+            precedingSections: ticket.field === "coverageEvidence" ? undefined : teachingSectionMemory(content) }),
+          schema: partialSchema([ticket.field]), maxOutputTokens: ticket.field === "fullExplanationMarkdown" ? 9000 : 3500 }) as Partial<TeachingPackage>;
+        partial = applyGenerationRepair(partial, ticket, patch);
+        await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
+      }
       issues = schemaIssues(partial, schema);
       if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
       if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
+      if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     }
     if (issues.length) throw new Error(`TEACHING_${request.phase.toUpperCase()}_INVALID:${issues.join(",")}`);
     content = { ...content, ...partial };
+    completedPhases.push(phases[index]!);
+    await save({ plan, content, completedPhases });
   }
   return { content: content as TeachingPackage, trace };
 }

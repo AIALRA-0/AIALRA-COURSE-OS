@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
-import { writePlannedLesson, type PlannedCall, type PlannedTrace } from "./planned-teaching.js";
+import { writePlannedLesson, type PlannedCall, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
@@ -51,6 +51,10 @@ export interface ModelRouterInput {
   sourceText: string;
   previousPageContext?: string;
   onTeachingPhase?: (phase: string, state: "started" | "completed", usage?: ModelRouterUsage) => Promise<void>;
+  teachingFingerprint?: string;
+  generationAttempt?: number;
+  resumeTeaching?: PlannedCheckpoint;
+  onTeachingCheckpoint?: (checkpoint: PlannedCheckpoint) => Promise<void>;
   sourceImageDataUrl?: string;
   writingPolicySnapshotId: string;
   language: string;
@@ -1003,9 +1007,13 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   private async generatePlannedLesson(input: ModelRouterInput): Promise<TeachingGenerationResult> {
-    let usage = emptyUsage(Date.now());
+    const checkpoint = input.resumeTeaching;
+    const resumedReceipts = checkpoint && checkpoint.fingerprint === input.teachingFingerprint
+      ? checkpoint.trace.phases.filter(phase => phase.attempt === input.generationAttempt)
+      : [];
+    let usage = resumedReceipts.reduce((total, phase) => sumProviderUsage(total, phase.usage), emptyUsage(Date.now()));
     let model = this.connection.model;
-    let calls = 0;
+    let calls = resumedReceipts.length;
     try {
       const result = await writePlannedLesson(input, async request => {
         const spent = calls ? this.usageCostUsd(usage) : 0;

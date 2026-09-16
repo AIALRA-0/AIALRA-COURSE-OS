@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, OrderedEvent, ReviewPlan, ReviewSession } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
+import type { PlannedCheckpoint } from "./planned-teaching.js";
 
 export interface OperationalState {
   schemaVersion: "1.0.0";
   imports: ImportRecord[];
   jobs: GenerationJob[];
+  generationCheckpoints: Record<string, PlannedCheckpoint>;
   generationPlans: GenerationPlan[];
   sessions: LearningSession[];
   reviewPlans: ReviewPlan[];
@@ -21,6 +23,7 @@ export const EMPTY: OperationalState = {
   schemaVersion: "1.0.0",
   imports: [],
   jobs: [],
+  generationCheckpoints: {},
   generationPlans: [],
   sessions: [],
   reviewPlans: [],
@@ -154,6 +157,7 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     schemaVersion: "1.0.0",
     imports: Array.isArray(value?.imports) ? value.imports : [],
     jobs: Array.isArray(value?.jobs) ? value.jobs : [],
+    generationCheckpoints: value?.generationCheckpoints && typeof value.generationCheckpoints === "object" ? value.generationCheckpoints : {},
     generationPlans: Array.isArray(value?.generationPlans) ? value.generationPlans : [],
     sessions: Array.isArray(value?.sessions) ? value.sessions : [],
     reviewPlans: Array.isArray(value?.reviewPlans) ? value.reviewPlans : [],
