@@ -513,6 +513,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.input[0]?.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
       expect(body.max_output_tokens).toBe(2_500);
       expect(body.instructions).toContain("maximumExplanationCharacters");
+      expect(body.instructions).toContain("正式名称内部已有缩写时保留原名");
+      expect(body.instructions).not.toContain("只保留已核实的正式英文全称");
       expect(body.input[0]?.content[0]?.text).toContain('"maximumExplanationCharacters":3500');
       return Response.json({ model: "deepseek-flash", output_text: JSON.stringify({ priorKnowledge: replacement }), usage: { input_tokens: 200, output_tokens: 80, total_cost: 0.002 } });
     });

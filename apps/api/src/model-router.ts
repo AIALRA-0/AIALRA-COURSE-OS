@@ -113,7 +113,7 @@ export function teachingRepairTargets(content: TeachingPackage, fields: Array<ke
     content.priorKnowledge.forEach((definition, index) => {
       const label = definition.slice(0, Math.max(0, definition.indexOf("：")));
       if (/[“”"']/u.test(label)) targets.push({ field: `priorKnowledge:${index}`, quote: definition,
-        instruction: "术语名称中的中英文配对格式错误；括号内只保留已核实的正式英文全称，不嵌套引号，不拼接两个不同概念；无法核实英文时删除英文，只保留准确中文名称" });
+        instruction: "术语名称中的中英文配对格式错误；括号内只保留与中文概念有对应证据的英文名称本体，不嵌套引号，不拼接两个不同概念；学术概念可用可靠学术来源核对，无法核实时删除英文，只保留准确中文名称" });
     });
   }
   for (const field of fields) {
@@ -684,7 +684,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, { type: "input_image", image_url: input.sourceImageDataUrl }] }]
       : prompt;
     const responseRequest = { model: this.connection.model,
-          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${fields.includes("coverageEvidence") ? "从 evidenceSpans 选择真正解释对应来源对象的片段编号，explanation 只填 excerpt: 编号，不自行摘录、拼接或改写正文。" : coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。英文缩写首次出现时写出中文名称、英文全称与缩写，后文优先使用中文，英文或缩写每次出现仍需中英文配对。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。\n本次成文要求：${fields.map(field => teachingCompositionContract[field as keyof typeof teachingCompositionContract] || "只绑定真实来源对象与正文片段").join("\n")}\n${fields.includes("questions") ? "题库修复必须删除无助于理解的原文英文复述，改用准确中文表达；不要把已能准确用中文表达的原文标签再次作为题目解释中的普通英文。只有程序标识、数学变量或题目确实要求辨认的原始对象才保留原样，并在对象外用中文解释。理解题的 expectedAnswer 若含独立比较项，必须直接写成多行 Markdown 列表；不能只给 explanation 换行而漏掉标准答案。" : ""}`,
+          instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${fields.includes("coverageEvidence") ? "从 evidenceSpans 选择真正解释对应来源对象的片段编号，explanation 只填 excerpt: 编号，不自行摘录、拼接或改写正文。" : coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。独立英文缩写首次出现时写出中文名称、经核实的英文全称与缩写；正式名称内部已有缩写时保留原名并就近说明其中文含义与有依据的英文全称；后文优先使用中文，无法核实时只保留准确中文并说明原图标签。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。\n本次成文要求：${fields.map(field => teachingCompositionContract[field as keyof typeof teachingCompositionContract] || "只绑定真实来源对象与正文片段").join("\n")}\n${fields.includes("questions") ? "题库修复必须删除无助于理解的原文英文复述，改用准确中文表达；不要把已能准确用中文表达的原文标签再次作为题目解释中的普通英文。只有程序标识、数学变量或题目确实要求辨认的原始对象才保留原样，并在对象外用中文解释。理解题的 expectedAnswer 若含独立比较项，必须直接写成多行 Markdown 列表；不能只给 explanation 换行而漏掉标准答案。" : ""}`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
           ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
