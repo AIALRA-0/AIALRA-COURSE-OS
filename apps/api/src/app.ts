@@ -56,6 +56,9 @@ import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConn
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
+import { previousLessonContext } from "./teaching-plan.js";
+import { plannedContentIssues, planningPrompt, plannedWritingPrompt, type PlannedTrace } from "./planned-teaching.js";
+import { policyFormatRules } from "./generation-harness.js";
 
 export interface AppDependencies {
   dataDir: string;
@@ -98,7 +101,8 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-harness/current", async (_request, response, next) => {
     try {
       const snapshot = currentGenerationHarness();
-      response.json({ ...snapshot, systemPrompt: professorInstructions("zh-CN"), userPrompt: teachingUserPromptTemplate, blueprint: teachingBlueprint, schema: teachingPackageSchema });
+      response.json({ ...snapshot, systemPrompt: `${plannedWritingPrompt}\n\n${policyFormatRules}`, userPrompt: "按阶段提供教学计划、前页讲解和前部内容摘要", blueprint: planningPrompt, schema: teachingPackageSchema,
+        phases: ["plan", "opening", "explanation", "consolidation"], maximumRepairCalls: 1 });
     } catch (error) { next(error); }
   });
 
@@ -2495,7 +2499,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       const sourceText = buildGenerationSourceText(page);
       const previousPage = release.pages.find((candidate) => candidate.pageNumber === page.pageNumber - 1);
-      const previousPageContext = previousPage ? [previousPage.title, ...previousPage.anchors.filter((anchor) => anchor.kind === "text" && anchor.text).map((anchor) => anchor.text!.trim())].join("\n").slice(0, 2_000) : undefined;
+      const previousDraft = previousPage ? await dependencies.readweave.getDraftByPage(previousPage.id) : undefined;
+      const previousTeaching = previousDraft?.status === "ready" && previousDraft.workspaceId === currentJob.workspaceId
+        && previousDraft.sourceReleaseId === release.id ? previousDraft.page : previousPage;
+      const previousPageContext = previousLessonContext(previousTeaching);
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       await appendGenerationStageEvent(jobId, page.id, "atomize", "started", dependencies);
@@ -2505,12 +2512,26 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
-      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v11`, stage: "teach", maxCostUsd: pageCostLimitUsd });
-      generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
-      generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
+      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v12`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+        onTeachingPhase: async (phase, state, usage) => {
+          await assertGenerationFence(jobId, fenceToken, dependencies);
+          await appendGenerationStageEvent(jobId, page.id, phase === "plan" ? "atomize" : phase.endsWith("_repair") ? "repair" : "teach", state, dependencies, { phase, ...usage });
+        } });
+      if (!generation.teachingTrace) {
+        generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
+        generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
+      } else {
+        const issues = plannedContentIssues(generation.content, { pageTitle: page.title, pageNumber: page.pageNumber, sourceText,
+          writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+          language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || "balanced", idempotencyKey: jobId, blueprint });
+        if (issues.length) throw new ModelRouterGenerationError(`TEACHING_PLAN_CONTENT_INVALID:${issues[0]}`, generation.model, generation.usage, generation.provider);
+        await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, {
+          planningMode: "source-plan", plan: generation.teachingTrace.plan, phases: generation.teachingTrace.phases,
+          previousPageId: previousPageContext ? previousPage?.id : undefined });
+      }
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
       let rejectedNarrativeIssues: string[] = [];
-      if (runtimeModelRouter) {
+      if (runtimeModelRouter && !generation.teachingTrace) {
         let coverageIssues = validateTeachingCoverageEvidence(page, generation.content);
         let validatedCoverageEvidence = coverageIssues.length === 0 ? structuredClone(generation.content.coverageEvidence) : undefined;
         let narrativeIssues = validateTeachingNarrative({
@@ -2892,8 +2913,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       // A rejected source candidate remains inspectable, but its unresolved
       // coverage evidence is retained as an explicit blocking quality issue.
-      if (rejectedNarrativeIssues.length === 0) assertTeachingCoverageEvidence(page, generation.content);
-      const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only");
+      if (rejectedNarrativeIssues.length === 0 && !generation.teachingTrace) assertTeachingCoverageEvidence(page, generation.content);
+      const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), sourceImageDataUrl ? "multimodal" : "text_only", generation.teachingTrace);
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
       const issues = [...new Set([...validatePageForPublication(generatedPage), ...rejectedNarrativeIssues])];
       generatedPage.quality = {
@@ -3150,14 +3171,14 @@ function deterministicTeachingPackage(page: CourseRelease["pages"][number]): Tea
   return { content, provider: "local-deterministic", model: "deterministic-local-fallback", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 0 } };
 }
 
-export function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only"): CourseRelease["pages"][number] {
-  const normalizedContent = normalizeTeachingPackageMath(content);
+export function applyTeachingPackage(page: CourseRelease["pages"][number], content: TeachingPackage, modelBacked: boolean, inputMode: "multimodal" | "text_only" = "text_only", teachingTrace?: PlannedTrace): CourseRelease["pages"][number] {
+  const normalizedContent = teachingTrace ? content : normalizeTeachingPackageMath(content);
   const anchorIds = page.anchors.map((item) => item.id);
   const atomIds = page.atoms.map((item) => item.id);
   const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: text.replace(/^[-*]\s*/, "").trim(), sourceAnchorIds: anchorIds }));
   // Coverage evidence is operational metadata. Appending it to the lesson
   // made the learner-facing explanation read like an internal audit log.
-  const fullExplanationMarkdown = removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
+  const fullExplanationMarkdown = teachingTrace ? normalizedContent.fullExplanationMarkdown : removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
   const lessonSections: LessonSection[] = [
     ...(normalizedContent.chapterBridgeMarkdown?.trim() ? [{ id: `${page.id}:section:bridge`, kind: "chapter_bridge" as const, title: "承上启下", markdown: normalizedContent.chapterBridgeMarkdown.trim(), sourceAnchorIds: anchorIds, atomIds }] : []),
     { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: sentenceItems("prior", normalizedContent.priorKnowledge), sourceAnchorIds: anchorIds, atomIds },
@@ -3178,7 +3199,7 @@ export function applyTeachingPackage(page: CourseRelease["pages"][number], conte
     const status = coveredFields.length === 0 ? "missing" as const : requirement.requiredFields.every((field) => coveredFields.includes(field)) ? "covered" as const : "partial" as const;
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
-  return { ...page, blocks, lessonFlowVersion: 2, teachingCompositionVersion: modelBacked ? 1 : undefined, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+  return { ...page, blocks, lessonFlowVersion: 2, teachingCompositionVersion: modelBacked ? 1 : undefined, teachingTrace, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
 }
 
 function isPlaceholderTeachingBlock(markdown: string): boolean {
@@ -4073,7 +4094,7 @@ async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
     status: manifest.status,
     summary: manifest.summary,
     taskContract: "GENERATE + TEACHING",
-    promptTemplate: professorInstructions("zh-CN"),
+    promptTemplate: `${plannedWritingPrompt}\n\n${policyFormatRules}`,
     files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })),
     aggregateSha256: manifest.aggregateSha256,
     validator: { status: issues.length ? "failed" : "passed", sourceVerification: configuredSkillRoot ? "source_and_manifest" : "manifest_only", issues }

@@ -39,7 +39,7 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   for (const phrase of forbidden) if (explanation.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   const questions = page.questionBank?.filter((question) => question.status === "approved") ?? [];
   if (questions.length !== 4) issues.push("TEACHING_QUESTION_COUNT_INVALID");
-  if (sections.length >= 5 && questions.length) {
+  if (sections.length >= 5 && questions.length && page.teachingTrace?.version !== 1) {
     issues.push(...validateTeachingNarrative({
       lessonFlowVersion: page.lessonFlowVersion,
       strictWritingStyle: page.lessonFlowVersion === 2,

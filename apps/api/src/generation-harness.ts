@@ -148,7 +148,8 @@ export function modelInput(input: PromptInput): string | Array<{ role: "user"; c
 
 export function currentGenerationHarness(): GenerationHarnessSnapshot {
   const files = ["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md"].map((name) => ({ path: name, sha256: generationHarnessFileSha256(readHarnessFile(name)) }));
-  for (const name of ["app.ts", "generation-harness.ts", "teaching-blueprint.ts", "model-router.ts", "teaching-patches.ts", "model-usage-meter.ts", "pricing.ts"]) {
+  for (const name of ["page-plan-prompt.md", "planned-writing-prompt.md"]) files.push({ path: name, sha256: generationHarnessFileSha256(readHarnessFile(name)) });
+  for (const name of ["app.ts", "generation-harness.ts", "teaching-blueprint.ts", "model-router.ts", "teaching-patches.ts", "model-usage-meter.ts", "pricing.ts", "teaching-plan.ts", "planned-teaching.ts"]) {
     files.push({ path: `apps/api/src/${name}`, sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, name))) });
   }
   files.push({ path: "packages/quality/src/index.ts", sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/index.ts"))) });

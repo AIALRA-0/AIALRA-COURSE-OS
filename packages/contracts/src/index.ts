@@ -201,6 +201,16 @@ export interface PageLesson {
   /** New lessons use the reader-first section order; omitted for immutable older lessons */
   lessonFlowVersion?: 2;
   teachingCompositionVersion?: 1;
+  /** Persisted construction evidence; never rendered as learner prose. */
+  teachingTrace?: {
+    version: 1;
+    plan: unknown;
+    previousPageContext?: string;
+    phases: Array<{ phase: string; provider: string; model: string; usage: {
+      inputTokens: number; cachedInputTokens: number; outputTokens: number;
+      apiEquivalentUsd: number | null; durationMs: number;
+    } }>;
+  };
   lessonSections?: LessonSection[];
   questionBank?: QuestionBankItem[];
   coverageRequirements: CoverageRequirement[];

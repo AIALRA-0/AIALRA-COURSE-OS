@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
+import { writePlannedLesson, type PlannedCall, type PlannedTrace } from "./planned-teaching.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
@@ -36,6 +37,7 @@ export interface ModelRouterUsage {
 }
 
 export interface TeachingGenerationResult {
+  teachingTrace?: PlannedTrace;
   content: TeachingPackage;
   provider: string;
   model: string;
@@ -48,6 +50,7 @@ export interface ModelRouterInput {
   pageNumber: number;
   sourceText: string;
   previousPageContext?: string;
+  onTeachingPhase?: (phase: string, state: "started" | "completed", usage?: ModelRouterUsage) => Promise<void>;
   sourceImageDataUrl?: string;
   writingPolicySnapshotId: string;
   language: string;
@@ -936,6 +939,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
+    if (input.blueprint && !input.repair) return this.generatePlannedLesson(input);
     let firstFailure: ModelRouterGenerationError;
     try {
       return await this.generateOnce(input);
@@ -996,6 +1000,70 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       const code = error instanceof Error && /^[A-Z0-9_:-]+$/.test(error.message) ? error.message : "MODEL_PROVIDER_INVALID_TEACHING_PACKAGE";
       throw new ModelRouterGenerationError(code, body.model || this.connection.model, usage, this.connection.providerId, describeTeachingResponseShape(content), content);
     }
+  }
+
+  private async generatePlannedLesson(input: ModelRouterInput): Promise<TeachingGenerationResult> {
+    let usage = emptyUsage(Date.now());
+    let model = this.connection.model;
+    let calls = 0;
+    try {
+      const result = await writePlannedLesson(input, async request => {
+        const spent = calls ? this.usageCostUsd(usage) : 0;
+        if (spent === undefined || spent >= (input.maxCostUsd ?? 0.06)) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
+        const response = await this.requestPlannedStage(input, request, (input.maxCostUsd ?? 0.06) - spent);
+        usage = calls++ === 0 ? response.usage : sumProviderUsage(usage, response.usage);
+        if (calls > 1 && response.model !== model) throw new Error("MODEL_PROVIDER_CHANGED_DURING_PAGE");
+        model = response.model;
+        return response;
+      });
+      return { content: result.content, teachingTrace: result.trace, usage, model, provider: this.connection.providerId };
+    } catch (error) {
+      if (error instanceof ModelRouterGenerationError) {
+        throw new ModelRouterGenerationError(error.code, error.model, calls ? sumProviderUsage(usage, error.usage) : error.usage, error.provider, error.responseShape);
+      }
+      throw new ModelRouterGenerationError(error instanceof Error ? error.message : "TEACHING_PLAN_FAILED", model, usage, this.connection.providerId);
+    }
+  }
+
+  private async requestPlannedStage(input: ModelRouterInput, request: PlannedCall, budget: number) {
+    const started = Date.now();
+    const price = priceSnapshotFor(this.connection.providerId, this.connection.model);
+    if (!price) throw new Error("MODEL_PROVIDER_COST_UNAVAILABLE");
+    // Conservative character bound plus image allowance before requesting tokens.
+    const estimatedInput = request.instructions.length + request.prompt.length + JSON.stringify(request.schema).length + (request.image ? 8000 : 0);
+    const reserve = estimatedInput * price.inputMicrousdPerMillion / 1e12;
+    const allowance = Math.floor((budget - reserve) * 1e12 / price.outputMicrousdPerMillion);
+    const maxTokens = Math.min(request.maxOutputTokens, allowance);
+    if (maxTokens < 1000) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
+    const base = this.connection.baseUrl.replace(/\/$/, "");
+    const image = request.image;
+    const schemaInstruction = `${request.instructions}\n只输出 JSON，结构如下：${JSON.stringify(request.schema)}`;
+    const protocol = this.connection.protocol;
+    const body = protocol === "responses" ? {
+      model: this.connection.model, instructions: request.instructions,
+      input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
+      max_output_tokens: maxTokens,
+      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+      text: { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
+    } : protocol === "messages" ? {
+      model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
+      messages: [{ role: "user", content: image ? [{ type: "text", text: request.prompt }, anthropicImagePart(image)] : request.prompt }]
+    } : {
+      model: this.connection.model, temperature: 0.2, max_tokens: maxTokens,
+      messages: [{ role: "system", content: schemaInstruction }, { role: "user", content: image
+        ? [{ type: "text", text: request.prompt }, { type: "image_url", image_url: { url: image } }] : request.prompt }]
+    };
+    const { response, body: received } = await this.requestJson(`${base}/${protocol === "responses" ? "responses" : protocol === "messages" ? "messages" : "chat/completions"}`,
+      { method: "POST", headers: providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:${request.phase}`), body: JSON.stringify(body) }, started);
+    const usage = normalizeProviderUsage(received.usage, received.usage?.cost ?? received.cost, started);
+    const model = received.model || this.connection.model;
+    if (!response.ok || providerBodyFailed(received)) throw new ModelRouterGenerationError(providerFailureCode(response.status, providerBodyError(received)), model, usage, this.connection.providerId, request.phase);
+    const cost = this.usageCostUsd(usage);
+    if (cost === undefined || cost > budget) throw new ModelRouterGenerationError(cost === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId, request.phase);
+    let content: unknown;
+    try { const output = extractProviderOutput(received); content = typeof output === "string" ? parseProviderJson(output) : output; }
+    catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", model, usage, this.connection.providerId, request.phase); }
+    return { content, usage, model, provider: this.connection.providerId };
   }
 
   private async generateMissingTeachingTail(input: ModelRouterInput, partial: TeachingPackage, missing: TeachingTailField[]): Promise<TeachingGenerationResult> {
