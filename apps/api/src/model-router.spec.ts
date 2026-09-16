@@ -5,14 +5,15 @@ import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGeneratio
 describe("generation harness", () => {
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.55", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.56", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(true);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "apps/api/src/teaching-patches.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/teaching-plan.ts", "apps/api/src/planned-teaching.ts", "packages/quality/src/index.ts", "packages/quality/src/presentation.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["teaching-system-prompt.md", "teaching-user-prompt.md", "teaching-blueprint.md", "teaching-package.schema.json", "source-audit-prompt.md", "teaching-audit-prompt.md", "semantic-audit-prompt.md", "semantic-audit.schema.json", "policy-skill.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "apps/api/src/app.ts", "apps/api/src/generation-harness.ts", "apps/api/src/teaching-blueprint.ts", "apps/api/src/model-router.ts", "apps/api/src/teaching-patches.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/teaching-plan.ts", "apps/api/src/planned-teaching.ts", "packages/quality/src/index.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("c48701d067403b7b77c3242319ea2e6edf94be5a4333c798be54274f676c1240");
-    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("a4e00e0b3441f7e7036b810f8bda685422649a498682834c898e6d4c263e9a9c");
+    expect(snapshot.files.find((file) => file.path === "policy-skill.md")?.sha256).toBe("c0a8122648c926e06d6a43d27e9097f48e818fce17e19ab8429151ffc4d6d457");
+    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("d834bf4624dbf0fb850a63ae35061864122afe090ce16e51a9845506af35a563");
+    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("8034dfb53735e479f97d82dfc74a846d6170aa3415e80f809d17bd3502c06463");
     expect(snapshot.files.find((file) => file.path === "policy-formula-explanation.md")?.sha256).toBe("65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e");
   });
 
@@ -53,6 +54,9 @@ describe("generation harness", () => {
     expect(text).toContain("四道题的题干与答案解释");
     expect(text).toContain("priorKnowledge");
     expect(text).toContain("每句至少十二字");
+    expect(text).toContain("学术概念可核对可靠学术来源");
+    expect(text).toContain("正式名称内部含缩写时就近展开");
+    expect(text).not.toContain("中文全称（官方英文全称）");
     expect(text).toContain("空行分成两个自然段");
   });
 });

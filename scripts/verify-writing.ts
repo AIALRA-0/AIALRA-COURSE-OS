@@ -30,6 +30,7 @@ if (manifest) {
   validateManifest(manifest, "CURRENT");
   knownPolicyIds.add(manifest.policySnapshotId);
   const bundledPolicyFiles = new Map([
+    ["SKILL.md", resolve("config/generation-harness/policy-skill.md")],
     ["references/format-rules.md", resolve("config/generation-harness/policy-format-rules.md")],
     ["references/explanation-framework.md", resolve("config/generation-harness/policy-explanation-framework.md")],
     ["references/formula-explanation.md", resolve("config/generation-harness/policy-formula-explanation.md")]
