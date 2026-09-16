@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { validateMarkdownMath } from "@course-os/quality";
 import { teachingPackageSchema } from "./generation-harness.js";
-import { plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
+import { assignUnplacedPlanFacts, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -113,6 +113,10 @@ export async function writePlannedLesson(input: ModelRouterInput,
   if (planIssues.length) {
     plan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
       instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置" }) }) as TeachingPlan;
+    planIssues = validateTeachingPlan(plan, blueprint);
+  }
+  if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
+    plan = assignUnplacedPlanFacts(plan);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.length) throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);

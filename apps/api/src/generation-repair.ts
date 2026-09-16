@@ -60,13 +60,29 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
 export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candidate: T, ticket: GenerationRepairTicket, patch: Partial<TeachingPackage>): T {
   if (repairHash(candidate[ticket.field]) !== ticket.expectedHash) throw new Error("GENERATION_REPAIR_STALE");
   if (Object.keys(patch).length !== 1 || !Object.prototype.hasOwnProperty.call(patch, ticket.field)) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
-  if (repairHash(patch[ticket.field]) === ticket.expectedHash) throw new Error("GENERATION_REPAIR_NO_CHANGE");
-  const before = candidate[ticket.field], after = patch[ticket.field];
+  const before = candidate[ticket.field];
+  let after = patch[ticket.field];
   if (ticket.field === "coverageEvidence" && Array.isArray(before) && Array.isArray(after) && ticket.atomIds?.length) {
-    const protectedClaims = (entries: typeof before) => entries.filter(item => item && typeof item === "object"
-      && "atomId" in item && !ticket.atomIds!.includes(String(item.atomId)));
-    if (repairHash(protectedClaims(before)) !== repairHash(protectedClaims(after))) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
+    const beforeClaims = before as TeachingPackage["coverageEvidence"];
+    const afterClaims = after as TeachingPackage["coverageEvidence"];
+    const belongsToTicket = (item: unknown) => Boolean(item && typeof item === "object" && "atomId" in item
+      && ticket.atomIds!.includes(String(item.atomId)));
+    const changedClaims = afterClaims.filter(belongsToTicket);
+    if (changedClaims.length === 0) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
+    const merged: TeachingPackage["coverageEvidence"] = [];
+    let inserted = false;
+    for (const item of beforeClaims) {
+      if (belongsToTicket(item)) {
+        if (!inserted) merged.push(...changedClaims);
+        inserted = true;
+      } else merged.push(item);
+    }
+    if (!inserted) merged.push(...changedClaims);
+    // The model may return the whole array and rewrite unrelated claims. Only
+    // the ticketed atom is applied; all other claims remain byte-for-byte.
+    after = merged as typeof after;
   }
+  if (repairHash(after) === ticket.expectedHash) throw new Error("GENERATION_REPAIR_NO_CHANGE");
   if (typeof before === "string" && typeof after === "string") {
     let prefix = 0;
     while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
@@ -75,5 +91,5 @@ export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candid
       && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
     if (Math.max(before.length - prefix - suffix, after.length - prefix - suffix) > 1200) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
   }
-  return { ...candidate, [ticket.field]: patch[ticket.field] };
+  return { ...candidate, [ticket.field]: after };
 }

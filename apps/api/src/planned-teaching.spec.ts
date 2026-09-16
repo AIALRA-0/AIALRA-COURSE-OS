@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { assignUnplacedPlanFacts, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedInstructions } from "./planned-teaching.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -23,6 +23,15 @@ function fixture(title = "概念") {
 
 describe("planned teaching", () => {
   afterEach(() => vi.unstubAllGlobals());
+  it("places a source fact omitted from step assignments without changing its text", () => {
+    const { input, plan } = fixture();
+    plan.facts.push({ id: "f11", atomId: "a", observation: "另一个来源事实", qualification: "保留原条件" });
+    expect(validateTeachingPlan(plan, input.blueprint!)).toContain("PLAN_FACT_UNASSIGNED:f11");
+    const placed = assignUnplacedPlanFacts(plan);
+    expect(placed.steps[0]?.factIds).toEqual(["f", "f11"]);
+    expect(placed.facts).toEqual(plan.facts);
+    expect(validateTeachingPlan(placed, input.blueprint!)).toEqual([]);
+  });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {
     for (const issue of [
       "PLAN_EVIDENCE_QUOTE_MISSING:source-text-region:8",
@@ -44,6 +53,21 @@ describe("planned teaching", () => {
     const preserved = { ...explanation, coverageEvidence: [...explanation.coverageEvidence, { atomId: "b", coveredFields: ["observation"], explanation: quote }] };
     const scoped = generationRepairTickets("explanation", preserved, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair(preserved, scoped, { coverageEvidence: [] })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+  });
+  it("applies only the ticketed evidence when a model also rewrites protected claims", () => {
+    const original = { ...explanation, coverageEvidence: [
+      { atomId: "a", coveredFields: ["observation"], explanation: "旧的错误引文" },
+      { atomId: "b", coveredFields: ["observation"], explanation: "保持不变的引文" }
+    ] };
+    const ticket = generationRepairTickets("explanation", original, ["PLAN_EVIDENCE_QUOTE_MISSING:a"], ["a", "b"])[0]!;
+    const result = applyGenerationRepair(original, ticket, { coverageEvidence: [
+      { atomId: "a", coveredFields: ["observation"], explanation: quote },
+      { atomId: "b", coveredFields: ["observation"], explanation: "模型不应改动的引文" }
+    ] });
+    expect(result.coverageEvidence).toEqual([
+      { atomId: "a", coveredFields: ["observation"], explanation: quote },
+      original.coverageEvidence[1]
+    ]);
   });
   it("creates a scoped repair ticket when a required field is absent", () => {
     const ticket = generationRepairTickets("opening", {}, ["result.learningObjectives:required"])[0]!;

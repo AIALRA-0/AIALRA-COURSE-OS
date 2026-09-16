@@ -88,6 +88,22 @@ export function validateTeachingPlan(plan: TeachingPlan, blueprint: TeachingBlue
   return [...new Set(issues)];
 }
 
+/** Bind an existing source fact to the nearest already planned teaching step. */
+export function assignUnplacedPlanFacts(plan: TeachingPlan): TeachingPlan {
+  const result = structuredClone(plan);
+  const assigned = new Set(result.steps.flatMap(step => step.factIds));
+  for (const [index, fact] of result.facts.entries()) {
+    if (assigned.has(fact.id)) continue;
+    const nearest = result.facts.slice(0, index).reverse().find(item => assigned.has(item.id))
+      ?? result.facts.slice(index + 1).find(item => assigned.has(item.id));
+    const step = result.steps.find(item => item.factIds.includes(nearest?.id ?? "")) ?? result.steps.at(-1);
+    if (!step) continue;
+    step.factIds.push(fact.id);
+    assigned.add(fact.id);
+  }
+  return result;
+}
+
 /** Extract generated teaching only. OCR and images never become preceding knowledge. */
 export function previousLessonContext(page: PageLesson | undefined): string | undefined {
   if (!page?.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())) return undefined;
