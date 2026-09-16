@@ -1151,6 +1151,9 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .lesson-block > h4 { font-size: 20px; margin: 28px 0 14px; }
 .lesson-block > h5 { font-size: 18px; margin: 23px 0 11px; }
 .lesson-block > h6 { font-size: 16px; margin: 18px 0 9px; }
+.section-full_explanation > h4:not(:first-of-type) { padding-top: 28px; border-top: 1px solid var(--line); }
+.section-full_explanation > hr:has(+ h4) { display: none; }
+.section-prior_knowledge strong { font-weight: inherit; }
 .answer { display: grid; gap: 12px; font-size: 14px; }
 .answer > strong { color: var(--ink); font-size: 14px; }
 .answer > div { padding-top: 11px; border-top: 1px solid var(--line); }
