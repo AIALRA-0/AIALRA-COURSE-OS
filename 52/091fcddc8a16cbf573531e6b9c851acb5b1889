@@ -1,0 +1,28 @@
+apps/api/src/generation-repair.ts
+  h_5cfef65f822283 32-63,129
+apps/api/src/model-router.spec.ts
+  h_5cfef65f822283 9
+apps/api/src/planned-teaching.spec.ts
+  h_5cfef65f822283 5,50-60,121-140,324-337
+apps/api/src/planned-teaching.ts
+  h_5cfef65f822283 4,152,154,185,203-209,211
+apps/api/src/teaching-plan.ts
+  h_5cfef65f822283 162-180
+config/generation-harness/harness-manifest.json
+  h_5cfef65f822283 3
+packages/quality/src/presentation.spec.ts
+  h_5cfef65f822283 55-60
+packages/quality/src/presentation.ts
+  h_5cfef65f822283 55-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "52091fcddc8a16cbf573531e6b9c851acb5b1889",
+  "prompts": {},
+  "humans": {
+    "h_5cfef65f822283": {
+      "author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
