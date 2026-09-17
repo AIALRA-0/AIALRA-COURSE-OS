@@ -194,6 +194,14 @@ describe("planned teaching", () => {
       ["MATH_UNCLOSED_INLINE_DELIMITER"]).map(ticket => ticket.field)).toEqual(["mainContentMarkdown"]);
     expect(generationRepairTickets("explanation", explanation, ["UNCLASSIFIED_ISSUE"])).toEqual([]);
   });
+  it("binds a source title to a matching teaching heading without adding title commentary", () => {
+    const content = { fullExplanationMarkdown: "## Edge-GNN 是什么\n\n先解释编码器如何处理网表\n\n## 为什么要预训练它",
+      coverageEvidence: [{ atomId: "title", coveredFields: ["observation"],
+        explanation: "页面标题是 EDGE-GNN: WHY? ，它要交代的是 Edge-GNN 为什么存在" }] };
+    expect(bindExactCoverageLines(content).coverageEvidence[0]?.explanation).toBe("## Edge-GNN 是什么");
+    const unrelated = { ...content, fullExplanationMarkdown: "## 无关章节\n\n先解释另一项内容" };
+    expect(bindExactCoverageLines(unrelated).coverageEvidence[0]?.explanation).toBe(content.coverageEvidence[0]?.explanation);
+  });
   it("rejects stale, unchanged and out-of-scope repair patches", () => {
     const ticket = generationRepairTickets("explanation", explanation, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair({ ...explanation, coverageEvidence: [] }, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_STALE");

@@ -211,9 +211,17 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
     const excerpt = matched || contained ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
       .filter(span => span.length >= Math.max(24, Math.ceil(line.length * 0.4))))
       .sort((left, right) => right.length - left.length)[0];
-    if (!matched && !contained && !excerpt) return evidence;
+    // A title is a navigation cue. Its subject may be taught under a clearer
+    // heading without repeating the source title as an annotation in prose.
+    const sourceTitle = /^页面标题是\s*([^，。；\n]+)/u.exec(evidence.explanation)?.[1] ?? "";
+    const titleTerms = [...sourceTitle.matchAll(/[A-Za-z][A-Za-z0-9-]{3,}/gu)]
+      .map(match => match[0].toLocaleLowerCase()).sort((left, right) => right.length - left.length);
+    const titleHeading = matched || contained || excerpt || !titleTerms.length ? undefined
+      : sourceLines.find(line => /^#{1,6}\s/u.test(line)
+        && titleTerms.some(term => line.toLocaleLowerCase().includes(term)));
+    if (!matched && !contained && !excerpt && !titleHeading) return evidence;
     changed = true;
-    return { ...evidence, explanation: matched || contained || excerpt! };
+    return { ...evidence, explanation: matched || contained || excerpt || titleHeading! };
   });
   return changed ? { ...content, coverageEvidence } : content;
 }
