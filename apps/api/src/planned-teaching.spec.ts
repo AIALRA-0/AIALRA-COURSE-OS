@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -66,6 +66,16 @@ it("rebinds a citation after punctuation-only teaching repair", () => {
   ] });
   expect(content.coverageEvidence[0]?.explanation).toBe(actual);
 });
+it("rebinds an exact surviving excerpt after a scoped explanation repair", () => {
+  const original = "$\\theta$：人工智能模型的可学习参数（learnable parameters of the AI model），也就是训练过程中会被不断调整的那些数值，模型对同一块芯片给出什么布局，由这组参数决定";
+  const repaired = "- $\\theta$：人工智能模型的可学习参数，也就是训练过程中会被不断调整的那些数值，模型对同一块芯片给出什么布局，由这组参数决定；原文没有指定模型类别";
+  const result = bindExactCoverageLines({ fullExplanationMarkdown: repaired, coverageEvidence: [
+    { atomId: "a", coveredFields: ["observation"], explanation: original }
+  ] });
+  expect(result.coverageEvidence[0]!.explanation.length).toBeGreaterThanOrEqual(24);
+  expect(repaired).toContain(result.coverageEvidence[0]!.explanation);
+  expect(result.coverageEvidence[0]!.explanation).toContain("训练过程中会被不断调整");
+});
 it("normalizes question punctuation without changing answer-option equality", () => {
   const content = normalizePlannedQuestionPunctuation({ questions: [{ kind: "multiple_choice" as const,
     prompt: "应该选哪一个。", options: ["正确选项。", "错误选项。", "另一选项。", "最后一项。"],
@@ -74,9 +84,27 @@ it("normalizes question punctuation without changing answer-option equality", ()
   expect(content.questions?.[0]?.options).toContain(content.questions?.[0]?.expectedAnswer);
   expect(plannedFormatIssues(content)).not.toContain("TEACHING_FORMAT:questions:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
 });
+it("realigns a question label only when its existing step tests an uncovered objective", () => {
+  const plan: TeachingPlan = { problem: "比较结果", knownStartingPoint: "已有输入", scopeBoundary: "只看本页", facts: [], prerequisites: [],
+    steps: [{ id: "s1", factIds: [], dependsOn: [], explanation: "解释输入", example: "", boundary: "" },
+      { id: "s2", factIds: [], dependsOn: [], explanation: "解释输出", example: "", boundary: "" }],
+    objectives: [{ id: "o1", startingPoint: "输入", outcome: "核对输入", stepIds: ["s1"] },
+      { id: "o2", startingPoint: "输出", outcome: "核对输出", stepIds: ["s2"] }],
+    questions: [{ objectiveId: "o1", stepId: "s1", kind: "comprehension", focus: "核对输入" },
+      { objectiveId: "o1", stepId: "s2", kind: "comprehension", focus: "核对输出" }]
+  };
+  expect(alignPlanQuestionObjectives(plan).questions.map(q => q.objectiveId)).toEqual(["o1", "o2"]);
+  const unrelated = structuredClone(plan);
+  unrelated.questions[1]!.stepId = "s1";
+  expect(alignPlanQuestionObjectives(unrelated)).toEqual(unrelated);
+});
 it("does not demand a teaching quote for a title-only source fact", () => {
   const { input, plan } = fixture("术语");
   plan.facts[0]!.observation = "页面标题为 TERMINOLOGY";
+  expect(plannedCoverageIssues({ ...opening, ...explanation, ...closing, coverageEvidence: [] } as TeachingPackage,
+    { ...input.blueprint!, requirementPackage: { ...input.blueprint!.requirementPackage, requirements: [] } }, plan))
+    .not.toContain("PLAN_FACT_EVIDENCE_MISSING:a");
+  plan.facts[0]!.observation = "页面顶部标题为 TERMINOLOGY，表明本页主题是术语约定";
   expect(plannedCoverageIssues({ ...opening, ...explanation, ...closing, coverageEvidence: [] } as TeachingPackage,
     { ...input.blueprint!, requirementPackage: { ...input.blueprint!.requirementPackage, requirements: [] } }, plan))
     .not.toContain("PLAN_FACT_EVIDENCE_MISSING:a");

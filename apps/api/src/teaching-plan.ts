@@ -104,6 +104,18 @@ export function assignUnplacedPlanFacts(plan: TeachingPlan): TeachingPlan {
   return result;
 }
 
+/** Fix an objectiveId label only when the question already tests one of that objective's steps. */
+export function alignPlanQuestionObjectives(plan: TeachingPlan): TeachingPlan {
+  const result = structuredClone(plan);
+  for (const goal of result.objectives) {
+    if (result.questions.some(question => question.objectiveId === goal.id)) continue;
+    const candidate = result.questions.find(question => goal.stepIds.includes(question.stepId)
+      && result.questions.filter(other => other.objectiveId === question.objectiveId).length > 1);
+    if (candidate) candidate.objectiveId = goal.id;
+  }
+  return result;
+}
+
 /** Extract generated teaching only. OCR and images never become preceding knowledge. */
 export function previousLessonContext(page: PageLesson | undefined): string | undefined {
   if (!page?.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())) return undefined;
@@ -154,7 +166,7 @@ export function plannedCoverageIssues(content: TeachingPackage, blueprint: Teach
     const missing = requirement.requiredFields.filter(field => !fields.has(field));
     if (missing.length) issues.push(`PLAN_EVIDENCE_MISSING:${requirement.atomId}:${missing.join("+")}`);
   }
-  const teachableFacts = plan?.facts.filter(fact => !/^(?:本页|该页|页面)?(?:标题|页码)(?:为|是|：)/u.test(fact.observation.trim())) ?? [];
+  const teachableFacts = plan?.facts.filter(fact => !/^(?:(?:本页|该页|页面)(?:顶部|上方|左侧|右侧)?的?)?(?:标题|页码)(?:为|是|：)/u.test(fact.observation.trim())) ?? [];
   for (const atomId of new Set(teachableFacts.map(fact => fact.atomId))) {
     if (!content.coverageEvidence.some(evidence => evidence.atomId === atomId)) issues.push(`PLAN_FACT_EVIDENCE_MISSING:${atomId}`);
   }
@@ -167,6 +179,21 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
   const explanation = content.fullExplanationMarkdown;
   const sourceLines = explanation.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
   const punctuationKey = (line: string) => line.replace(/[，,；;](?:以及|并且)/gu, "，").replace(/[，,；;]/gu, "，");
+  const sharedExcerpt = (left: string, right: string): string => {
+    if (left.length > 400 || right.length > 500) return "";
+    let previous = new Uint16Array(right.length + 1);
+    let best = "";
+    for (let i = 1; i <= left.length; i++) {
+      const current = new Uint16Array(right.length + 1);
+      for (let j = 1; j <= right.length; j++) {
+        if (left[i - 1] !== right[j - 1]) continue;
+        current[j] = previous[j - 1]! + 1;
+        if (current[j]! > best.length) best = left.slice(i - current[j]!, i);
+      }
+      previous = current;
+    }
+    return best.trim();
+  };
   let changed = false;
   const coverageEvidence = content.coverageEvidence.map(evidence => {
     if (explanation.includes(evidence.explanation)) return evidence;
@@ -176,9 +203,12 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
       sourceLine === line || sourceLine.replace(/^[-*+]\s+/u, "") === line ||
       punctuationKey(sourceLine) === punctuationKey(line) ||
       punctuationKey(sourceLine.replace(/^[-*+]\s+/u, "")) === punctuationKey(line)))[0];
-    if (!matched) return evidence;
+    const excerpt = matched ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
+      .filter(span => span.length >= Math.max(24, Math.ceil(line.length * 0.4))))
+      .sort((left, right) => right.length - left.length)[0];
+    if (!matched && !excerpt) return evidence;
     changed = true;
-    return { ...evidence, explanation: matched };
+    return { ...evidence, explanation: matched || excerpt! };
   });
   return changed ? { ...content, coverageEvidence } : content;
 }

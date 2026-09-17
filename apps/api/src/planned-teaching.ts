@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { formatMisconception, normalizeHumanReadableChineseMarkdown, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
-import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -167,6 +167,10 @@ export async function writePlannedLesson(input: ModelRouterInput,
   }
   if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
     plan = assignUnplacedPlanFacts(plan);
+    planIssues = validateTeachingPlan(plan, blueprint);
+  }
+  if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_OBJECTIVE_UNTESTED:"))) {
+    plan = alignPlanQuestionObjectives(plan);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.length) throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);
