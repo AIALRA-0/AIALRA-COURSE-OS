@@ -48,6 +48,18 @@ export function normalizePackedTeachingProse(markdown: string): string {
   }).join("\n");
 }
 
+/** Title-case ordinary English term names without rewriting official mixed-case names or source quotes. */
+export function normalizeEnglishTermCase(markdown: string): string {
+  const minor = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"]);
+  const protectedParts = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]+`|“[^”\r\n]*”|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+)/gu;
+  return markdown.split(protectedParts).map((part, index) => index % 2 === 1 ? part : part.replace(
+    /([\p{Script=Han}]{2,25})（([A-Za-z][A-Za-z ]{2,80})）/gu,
+    (_match, chinese: string, english: string) => `${chinese}（${english.split(/(\s+)/u).map((word, position) => {
+      if (!/^[a-z]+$/u.test(word) || (position > 0 && minor.has(word))) return word;
+      return word[0]!.toUpperCase() + word.slice(1);
+    }).join("")}）`)).join("");
+}
+
 export interface PresentationInput {
   chapterBridgeMarkdown?: string;
   learningObjectives: string[];

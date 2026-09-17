@@ -178,7 +178,7 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
   if (!content.fullExplanationMarkdown || !content.coverageEvidence) return content;
   const explanation = content.fullExplanationMarkdown;
   const sourceLines = explanation.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
-  const punctuationKey = (line: string) => line.replace(/[，,；;](?:以及|并且)/gu, "，").replace(/[，,；;]/gu, "，");
+  const punctuationKey = (line: string) => line.replace(/[，,；;。](?:以及|并且)/gu, "，").replace(/[，,；;。]/gu, "，");
   const sharedExcerpt = (left: string, right: string): string => {
     if (left.length > 400 || right.length > 500) return "";
     let previous = new Uint16Array(right.length + 1);

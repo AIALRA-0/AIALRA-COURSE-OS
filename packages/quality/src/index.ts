@@ -1,5 +1,5 @@
 import { validateTeachingPresentation } from "./presentation.js";
-export { teachingCompositionContract, formatMisconception, normalizePackedTeachingProse, validateTeachingPresentation } from "./presentation.js";
+export { teachingCompositionContract, formatMisconception, normalizeEnglishTermCase, normalizePackedTeachingProse, validateTeachingPresentation } from "./presentation.js";
 import katex from "katex";
 import type { CoverageClaim, CoverageRequirement, MathExpression, PageLesson, PseudoCodeLine } from "@course-os/contracts";
 

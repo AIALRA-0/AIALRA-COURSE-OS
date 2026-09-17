@@ -89,6 +89,16 @@ it("turns a bare source quote label into a sentence without losing the quote", (
   expect(normalized.fullExplanationMarkdown).toContain("课件原文如下：\n> A quoted source");
   expect(plannedFormatIssues(normalized)).not.toContain("TEACHING_FORMAT:fullExplanationMarkdown:WRITING_COLON_PSEUDO_HEADING");
 });
+it("normalizes Chinese full stops in planned explanation before its coverage is checked", () => {
+  const normalized = normalizePlannedSourceIntroductions({ fullExplanationMarkdown: "先看网表。再看编码器如何读取它。最后对照输出" });
+  expect(normalized.fullExplanationMarkdown).not.toContain("。");
+  expect(plannedFormatIssues(normalized)).not.toContain("TEACHING_FORMAT:fullExplanationMarkdown:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
+});
+it("applies bilingual term capitalization during the same planning phase as validation", () => {
+  const normalized = normalizePlannedSourceIntroductions({ fullExplanationMarkdown: "网表元数据包含工艺节点（tech node）与画布尺寸（canvas size）" });
+  expect(normalized.fullExplanationMarkdown).toContain("工艺节点（Tech Node）与画布尺寸（Canvas Size）");
+  expect(plannedFormatIssues(normalized)).not.toContain("TEACHING_PRESENTATION:fullExplanationMarkdown:ENGLISH_NAME_CASE");
+});
 it("normalizes question punctuation without changing answer-option equality", () => {
   const content = normalizePlannedQuestionPunctuation({ questions: [{ kind: "multiple_choice" as const,
     prompt: "应该选哪一个。", options: ["正确选项。", "错误选项。", "另一选项。", "最后一项。"],

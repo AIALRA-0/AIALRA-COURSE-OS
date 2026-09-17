@@ -46,7 +46,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3372,8 +3372,8 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\??\s+(一栏|区域|区块|栏目)/gu, "解释 $1 的$2"))
     .join("");
   const normalize = (value: string) => normalizeEmbeddedDefinitionAbbreviation(quoteRepeatedSourceLabels(
-    normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms)))), quotedSourceLabels));
+    normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
+      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms))))), quotedSourceLabels));
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const normalizedValue = normalizePriorDefinitionClauseCount(normalize(normalizePriorDefinitionAbbreviation(value)));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);

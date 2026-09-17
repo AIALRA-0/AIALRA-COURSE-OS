@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { formatMisconception, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
@@ -63,7 +63,8 @@ export function normalizePlannedQuestionPunctuation<T extends Partial<TeachingPa
 
 export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPackage>>(content: T): T {
   if (!content.fullExplanationMarkdown) return content;
-  return { ...content, fullExplanationMarkdown: content.fullExplanationMarkdown.replace(/^([ \t]*)原文[：:][ \t]*$/gmu, "$1课件原文如下：") };
+  const introduced = content.fullExplanationMarkdown.replace(/^([ \t]*)原文[：:][ \t]*$/gmu, "$1课件原文如下：");
+  return { ...content, fullExplanationMarkdown: normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(introduced))) };
 }
 
 /** Check the actual phase output while its own fields can still be repaired. */
