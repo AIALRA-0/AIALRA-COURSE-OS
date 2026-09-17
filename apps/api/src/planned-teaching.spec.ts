@@ -11,7 +11,7 @@ import { applyTeachingPackage } from "./app.js";
 
 const quote = "先确定实际需要处理的对象，再观察处理前后的变化，这样才能把操作与结果对应起来";
 const usage = { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEquivalentUsd: 0.001, durationMs: 10 };
-const opening = { chapterBridgeMarkdown: "前页已经说明输入是开始处理时掌握的信息\n\n本页继续说明怎样从输入得到可以核对的结果", priorKnowledge: ["输入：它是处理开始前已经具备的信息；它为当前操作提供具体对象；规则读取这些信息后才决定结果；开始计算前需要先确认输入；输入与处理结束后的输出不同"], learningObjectives: ["给定输入以后，能够按顺序说明它怎样变成结果"] };
+const opening = { chapterBridgeMarkdown: "前页已经说明输入是开始处理时掌握的信息\n\n本页继续说明怎样从输入得到可以核对的结果", priorKnowledge: ["输入（Input）：它是处理开始前已经具备的信息；它为当前操作提供具体对象；规则读取这些信息后才决定结果；开始计算前需要先确认输入；输入与处理结束后的输出不同"], learningObjectives: ["给定输入以后，能够按顺序说明它怎样变成结果"] };
 const explanation = { fullExplanationMarkdown: `### 从具体对象开始\n\n${quote}\n\n处理之前先保留输入的数值和条件，随后只执行材料允许的操作，再把得到的结果与目标比较\n\n### 核对结果\n\n如果输入条件发生变化，应当重新计算对应结果，而不能把之前得到的结论直接用在新的对象上，比较时也要保持其他条件相同`, coverageEvidence: [{ atomId: "a", coveredFields: ["observation"], explanation: quote }] };
 const closing = { mainContentMarkdown: "- 输入提供具体对象，规则决定允许的变化\n- 结果需要在相同条件下与原目标进行比较", misconceptions: ["错误理解：输入变化后可以保留原结果\n\n错因：忽略了结果依赖输入\n\n正确判断：应当重新计算\n\n核对方法：逐项检查输入条件"], questions: [0, 1, 2, 3].map(index => ({ kind: index < 2 ? "comprehension" : "multiple_choice", prompt: `第 ${index + 1} 个练习应当怎样核对输入条件`, options: index < 2 ? [] : ["核对输入", "只看输出", "改变规则", "删除条件"], expectedAnswer: "核对输入", explanation: "因为结果依赖输入，必须先确认输入条件相同，再按照规则计算和比较结果" })) };
 
@@ -29,6 +29,23 @@ it("routes local typography findings to the field that can be repaired", () => {
   expect(issues).toContain("TEACHING_FORMAT:priorKnowledge:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
   expect(generationRepairTickets("opening", { priorKnowledge: ["期望值（expected value）：用概率加权说明结果。"] }, issues)
     .map(ticket => ticket.field)).toEqual(["priorKnowledge"]);
+});
+it.each([
+  ["缺少英文名称", "布局质量指标：衡量布局结果的多个数值", true],
+  ["名称已有配对", "布局质量指标（Layout Quality Metrics）：衡量布局结果的多个数值", false],
+  ["官方大小写", "方法名称（eBay）：保留官方名称", false],
+  ["定义内遗漏不靠猜译补齐", "拥塞（Congestion）：它影响布局质量", false],
+  ["来源标签不能冒充名称", "网表（Netlist）：记录模块之间的连接", false]
+])("checks prerequisite name pairing: %s", (_name, prior, missing) => {
+  const issues = plannedFormatIssues({ priorKnowledge: [prior] });
+  expect(issues.includes("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING")).toBe(missing);
+});
+it("requires four colon-labelled misconception paragraphs", () => {
+  const malformed = "误以为全部指标都最小\n\n错因是忽略了反例\n\n正确判断：逐列比较\n\n核对方法：检查每一列";
+  const issues = plannedFormatIssues({ misconceptions: [malformed] });
+  expect(issues).toContain("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
+  expect(generationRepairTickets("consolidation", { misconceptions: [malformed] }, issues)[0]?.instruction)
+    .toContain("错误理解：、错因：、正确判断：、核对方法：");
 });
 it("targets actual lowercase English parentheses in a bounded repair ticket", () => {
   const candidate = { fullExplanationMarkdown: "平均而言（On average），这是期望值（Expected value），官方名称（eBay）" };

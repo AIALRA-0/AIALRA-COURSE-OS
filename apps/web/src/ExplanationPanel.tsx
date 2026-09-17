@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CourseRelease, LessonSection, PageLesson, PageQuestion, PseudoCodeLine, QuestionBankItem, QuestionSelection, ReadWeavePageQuestions } from "@course-os/contracts";
+import { formatMisconception } from "@course-os/quality";
 import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
 
@@ -77,9 +78,14 @@ function sectionDescriptor(value: string): string {
   } as Record<string, string>)[normalized] || "本节说明";
 }
 
+export function displayMisconception(value: string): string {
+  return formatMisconception(value).replace(/^(错误理解|错因|正确判断|核对方法)：\s*/gmu, "**$1：** ");
+}
+
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
   if (!section) return null;
-  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{item.text}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{section.markdown}</Markdown> : null}{children}</article>;
+  const visible = (text: string) => section.kind === "misconceptions" ? displayMisconception(text) : text;
+  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{visible(item.text)}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{visible(section.markdown)}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {

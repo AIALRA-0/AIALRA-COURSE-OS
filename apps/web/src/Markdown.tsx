@@ -35,7 +35,13 @@ export function Markdown({ children, nestedHeadings = false, inline = false }: {
           h5: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>,
           h6: ({ children: label }: { children?: ReactNode }) => <h6>{label}</h6>
         } : {}),
-        ...(inline ? { p: ({ children: text }) => <span>{text}</span> } : {}),
+        p: ({ node, children: text }) => {
+          if (inline) return <span>{text}</span>;
+          const visible = (node?.children ?? []).filter(child => child.type !== "text" || child.value.trim());
+          const mathOnly = visible.length === 1 && visible[0]?.type === "element"
+            && visible[0].tagName === "span" && (visible[0].properties.className as string[] | undefined)?.includes("katex");
+          return <p className={mathOnly ? "math-only-paragraph" : undefined}>{text}</p>;
+        },
         table: ({ children: rows }) => <div className="lesson-table-scroll"><table>{rows}</table></div>,
         img: () => null,
         a: ({ href, children: label }) => <a href={href} target="_blank" rel="noreferrer">{label}</a>,

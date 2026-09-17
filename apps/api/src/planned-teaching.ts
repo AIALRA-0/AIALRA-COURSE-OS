@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { assignUnplacedPlanFacts, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
@@ -70,6 +70,19 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
     misconceptions: content.misconceptions || [],
     questions: content.questions || []
   }));
+  for (const prior of content.priorKnowledge || []) {
+    const label = prior.trim().replace(/^[-*+]\s+/u, "").split("：", 1)[0] ?? "";
+    if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z\s&/-]{1,80}）/u.test(label)) {
+      issues.push("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
+    }
+  }
+  for (const value of content.misconceptions || []) {
+    const roles = ["错误理解", "错因", "正确判断", "核对方法"];
+    const paragraphs = value.trim().split(/\n\s*\n/u);
+    if (paragraphs.length !== roles.length || paragraphs.some((paragraph, index) => !paragraph.startsWith(`${roles[index]}：`))) {
+      issues.push("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
+    }
+  }
   return [...new Set(issues)];
 }
 
@@ -168,6 +181,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     let partial = pendingContent
       ? structuredClone(pendingContent)
       : await run(request) as Partial<TeachingPackage>;
+    if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
@@ -186,6 +200,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
             precedingSections: ticket.field === "coverageEvidence" ? undefined : teachingSectionMemory(content) }),
           schema: partialSchema([ticket.field]), maxOutputTokens: ticket.field === "fullExplanationMarkdown" ? 9000 : 3500 }) as Partial<TeachingPackage>;
         partial = applyGenerationRepair(partial, ticket, patch);
+        if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
       issues = schemaIssues(partial, schema);

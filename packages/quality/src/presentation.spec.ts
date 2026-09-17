@@ -37,6 +37,13 @@ describe("composition regressions independent of a course or page number", () =>
       questions: [{ prompt: "选择正确公式", options: ["$\\frac{1{2}$"], expectedAnswer: "结果", explanation: "逐项核对" }]
     })).toContain("TEACHING_MATH_INVALID:questions");
   });
+  it.each([
+    ["already labelled", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本"],
+    ["unlabelled first and second roles", "误以为 Ours 全部最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列", "错误理解：误以为 Ours 全部最小\n\n错因：跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列"],
+    ["missing role is not guessed", "只看最大值\n\n因此出错", "只看最大值\n\n因此出错"]
+  ])("normalizes misconception role labels without changing facts: %s", (_name, input, expected) => {
+    expect(formatMisconception(input)).toBe(expected);
+  });
   it("checks bilingual name case in prerequisites without changing official mixed-case names", () => {
     expect(validateTeachingPresentation({ ...base, priorKnowledge: ["期望值（expected value）：对可能结果按概率求平均"] }))
       .toContain("TEACHING_PRESENTATION:priorKnowledge:ENGLISH_NAME_CASE");

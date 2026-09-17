@@ -13,10 +13,15 @@ export const teachingCompositionContract = {
 
 /** Only explicit role labels are split; a definition or an arbitrary colon is never guessed into a list. */
 export function formatMisconception(value: string): string {
-  if (!/^错误理解[：:]/u.test(value.trim())) return value;
-  const parts = value.trim().split(/[；;]\s*(?=(?:错因|正确判断|核对方法)[：:])/u);
-  if (parts.length !== 4 || !parts.every((part, i) => part.startsWith(["错误理解", "错因", "正确判断", "核对方法"][i]!))) return value;
-  return parts.join("\n\n");
+  const parts = value.trim().split(/\n\s*\n|[；;]\s*(?=(?:错因|正确判断|核对方法)[：:])/u);
+  if (parts.length !== 4 || !/^(?:错误理解[：:]|误以为\s*)/u.test(parts[0]!)
+    || !/^(?:错因[：:]|错因是\s*)/u.test(parts[1]!)
+    || !/^正确判断[：:]/u.test(parts[2]!) || !/^核对方法[：:]/u.test(parts[3]!)) return value;
+  return parts.map((part, index) => {
+    if (index === 0) return /^错误理解[：:]/u.test(part) ? part.replace(/^错误理解:/u, "错误理解：") : `错误理解：${part}`;
+    if (index === 1) return part.replace(/^错因是\s*/u, "错因：").replace(/^错因:/u, "错因：");
+    return part.replace(/^([^：]+):/u, "$1：");
+  }).join("\n\n");
 }
 
 export interface PresentationInput {

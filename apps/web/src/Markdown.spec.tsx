@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Markdown, normalizeStandaloneMathBlocks } from "./Markdown.js";
+import { displayMisconception } from "./ExplanationPanel.js";
 
 describe("lesson math rendering", () => {
   it("centers standalone equations without changing inline formulas or fenced code", () => {
@@ -18,6 +19,24 @@ describe("lesson math rendering", () => {
     const html = renderToStaticMarkup(createElement("li", null, createElement(Markdown, { children: "令 W_e$v_i;v_j$ 表示边的嵌入" })));
     expect(html.match(/class="katex"/g)).toHaveLength(2);
     expect(html).toContain("表示边的嵌入");
+  });
+  it("renders old misconception prose as four consistently labelled paragraphs", () => {
+    const old = "误以为 Ours 每列都最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：检查每列";
+    const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(old) }));
+    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
+      expect(html).toContain(`<strong>${role}</strong>`);
+    }
+    expect(html.match(/<p>/g)).toHaveLength(4);
+  });
+  it.each([
+    ["仅有公式", "$x$", true],
+    ["公式前有文字", "目标是 $J(\\theta,G)$", false],
+    ["公式后有文字", "$K$ 是芯片数", false],
+    ["两侧都有文字", "将 $K=4$ 代入目标", false],
+    ["列项内有公式和文字", "- 能区分 $1/K$ 与求和", false]
+  ])("centers only a pure formula paragraph: %s", (_name, source, centered) => {
+    const html = renderToStaticMarkup(createElement(Markdown, { children: source }));
+    expect(html.includes('class="math-only-paragraph"')).toBe(centered);
   });
 
   it("renders mathematical answer options as inline content", () => {
