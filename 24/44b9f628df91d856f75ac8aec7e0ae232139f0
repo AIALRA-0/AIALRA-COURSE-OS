@@ -1,0 +1,37 @@
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_3e3b6d88e8e4b1 3
+apps/api/src/teaching-plan.ts
+  s_e8850ef125fb32::t_58fcf1970c4a27 206-207,210-211,214,216
+  s_e8850ef125fb32::t_088bfbc21c6a7f 208-209
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_3e3b6d88e8e4b1 9
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_58fcf1970c4a27 2,790
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_f93d072f4c7d0b 6,79-91,100-106
+packages/quality/src/index.spec.ts
+  s_e8850ef125fb32::t_f93d072f4c7d0b 787-788
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_58fcf1970c4a27 2,54,56,58-60,64-65,67-68,210,239
+  s_e8850ef125fb32::t_c0ab516e9b351f 66
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_bff0417ab61748 49,3414
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_a264c3f122e6ff 27-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2444b9f628df91d856f75ac8aec7e0ae232139f0",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
