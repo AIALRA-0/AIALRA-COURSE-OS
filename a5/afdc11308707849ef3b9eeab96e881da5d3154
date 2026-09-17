@@ -1,0 +1,53 @@
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_05d72d7f3621a7 9
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_a97d61e4c8a6e0 82
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_a97d61e4c8a6e0 101-102
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_8642e4d56edda4 59
+  s_e8850ef125fb32::t_7dc326043bcd40 25-26
+  s_e8850ef125fb32::t_a97d61e4c8a6e0 9,16-24,27-29
+  s_e8850ef125fb32::t_05d72d7f3621a7 14
+packages/quality/src/presentation.spec.ts
+  s_e8850ef125fb32::t_7dc326043bcd40 31,41-42
+packages/quality/src/index.spec.ts
+  s_e8850ef125fb32::t_51415240858e18 2
+  s_e8850ef125fb32::t_0fe995054e01cc 768-786,819-821
+  s_e8850ef125fb32::t_5154cb194f2e9c 826
+  s_e8850ef125fb32::t_cced50d5f24cbe 822-825,827-829
+apps/web/src/Markdown.spec.tsx
+  s_e8850ef125fb32::t_51415240858e18 32-44
+  s_f4bc084e1b5e1b::t_2fcdb9d3d8c08e 31
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_190e0796f0ff6d 784-786,809,813,815-825
+  s_e8850ef125fb32::t_8642e4d56edda4 800,810-811,814,830,846-849,853-855
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_feae2bd64bcdd8 2,327-328
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_05d72d7f3621a7 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a5afdc11308707849ef3b9eeab96e881da5d3154",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
