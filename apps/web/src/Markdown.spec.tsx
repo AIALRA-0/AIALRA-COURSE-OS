@@ -29,6 +29,20 @@ describe("lesson math rendering", () => {
     expect(html.match(/<p>/g)).toHaveLength(4);
   });
   it.each([
+    "错误理解：只看平均值\n\n错因：漏掉边界\n\n正确判断：先检查 $K=4$\n\n核对方法：回到原图“Reward”一行",
+    "错误理解：只看平均值；错因：漏掉边界；正确判断：先检查 $K=4$；核对方法：回到原图“Reward”一行",
+    "**错误理解：** 只看平均值\n\n**错因：** 漏掉边界\n\n**正确判断：** 先检查 $K=4$\n\n**核对方法：** 回到原图“Reward”一行"
+  ])("always renders each misconception label once in bold", source => {
+    const visible = displayMisconception(source);
+    expect(displayMisconception(visible)).toBe(visible);
+    const html = renderToStaticMarkup(createElement(Markdown, { children: visible }));
+    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    }
+    expect(html).toContain("katex");
+    expect(html).toContain("Reward");
+  });
+  it.each([
     ["仅有公式", "$x$", true],
     ["公式前有文字", "目标是 $J(\\theta,G)$", false],
     ["公式后有文字", "$K$ 是芯片数", false],

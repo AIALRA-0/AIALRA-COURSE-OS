@@ -6,22 +6,27 @@ export const teachingCompositionContract = {
   learningObjectives: "每项只承诺正文真正教会的一种判断、计算或操作，不提前堆放陌生术语",
   fullExplanationMarkdown: "先按对象与依赖建立段落，再成文；独立步骤用有序列表，比较项和表格列说明用列表；同一因果过程保持连续；公式、代码、表格保留原对象且逐项解释",
   mainContentMarkdown: "讲解后的两至五条要点，不加标题、不引入新术语，每条继承成立条件",
-  misconceptions: "一个元素一处误解，错误理解、错因、正确判断、核对方法各占一个段落；解释因果，不能只贴标签",
+  misconceptions: "一个元素一处误解，错误理解、错因、正确判断、核对方法各占一个段落；四个标签统一加粗，解释因果，不能只贴标签",
   questions: "题干、每个选项、标准答案和解析均使用中文与合法数学，不为复述原文重新插入英文；理解题标准答案的独立并列内容分行列项，不挤成分号串；解析按依据、运算步骤、结果与误选原因分段或列项，每个错误选项的理由单独列项，不能用分号串成一段；选择题标准答案必须逐字等于一个选项",
   preservation: "换行、列表层级、公式和代码在生成、保存、读取和渲染中保持一致；不通过删掉问题段落或截断总结来通过验证"
 } as const;
 
-/** Only explicit role labels are split; a definition or an arbitrary colon is never guessed into a list. */
+/** Normalize explicit role labels without rewriting the explanation itself. */
 export function formatMisconception(value: string): string {
-  const parts = value.trim().split(/\n\s*\n|[；;]\s*(?=(?:错因|正确判断|核对方法)[：:])/u);
-  if (parts.length !== 4 || !/^(?:错误理解[：:]|误以为\s*)/u.test(parts[0]!)
-    || !/^(?:错因[：:]|错因是\s*)/u.test(parts[1]!)
-    || !/^正确判断[：:]/u.test(parts[2]!) || !/^核对方法[：:]/u.test(parts[3]!)) return value;
-  return parts.map((part, index) => {
-    if (index === 0) return /^错误理解[：:]/u.test(part) ? part.replace(/^错误理解:/u, "错误理解：") : `错误理解：${part}`;
-    if (index === 1) return part.replace(/^错因是\s*/u, "错因：").replace(/^错因:/u, "错因：");
-    return part.replace(/^([^：]+):/u, "$1：");
-  }).join("\n\n");
+  const parts = value.trim().split(/\n\s*\n|[；;]\s*(?=(?:\*\*)?(?:错因|正确判断|核对方法)[：:])/u);
+  const roles = ["错误理解", "错因", "正确判断", "核对方法"] as const;
+  if (parts.length !== roles.length) return value;
+  const bodies = parts.map((part, index) => {
+    const unwrapped = part.trim().replace(/^\*\*((?:错误理解|错因|正确判断|核对方法)[：:])\*\*/u, "$1");
+    const prefix = index === 0 ? /^(?:错误理解[：:]|误以为\s*)/u
+      : index === 1 ? /^(?:错因[：:]|错因是\s*)/u
+        : new RegExp(`^${roles[index]}[：:]`, "u");
+    const match = unwrapped.match(prefix);
+    if (!match) return undefined;
+    return (index === 0 && match[0].startsWith("误以为") ? unwrapped : unwrapped.slice(match[0].length)).trimStart();
+  });
+  if (bodies.some(body => !body)) return value;
+  return bodies.map((body, index) => `**${roles[index]}：** ${body}`).join("\n\n");
 }
 
 /** Split a long generated sentence only at real Chinese sentence boundaries. */
@@ -51,7 +56,7 @@ export function normalizePackedTeachingProse(markdown: string): string {
 /** Title-case ordinary English term names without rewriting official mixed-case names or source quotes. */
 export function normalizeEnglishTermCase(markdown: string): string {
   const minor = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"]);
-  const protectedParts = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]+`|“[^”\r\n]*”|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+)/gu;
+  const protectedParts = /(```[\s\S]*?```|~~~[\s\S]*?~~~|^(?: {4}|\t|\s*[>|]|\s*<[^>]*>)[^\r\n]*$|!?\[[^\]\r\n]*\]\([^\r\n]*?\)|`[^`\r\n]+`|“[^”\r\n]*”|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+)/gmu;
   return markdown.split(protectedParts).map((part, index) => index % 2 === 1 ? part : part.replace(
     /([\p{Script=Han}]{2,25})（([A-Za-z][A-Za-z ]{2,80})）/gu,
     (_match, chinese: string, english: string) => `${chinese}（${english.split(/(\s+)/u).map((word, position) => {

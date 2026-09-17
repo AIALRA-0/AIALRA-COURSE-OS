@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, formatMisconception, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -765,6 +765,25 @@ describe("learner-facing teaching narrative", () => {
     expect(normalizeHumanReadableChineseMarkdown(source)).toBe("正文第一句；正文第二句\n> 原文句号。\n`原样。` 和 $x_{。}=1$\n```text\n日志。\n```");
     expect(validateHumanReadableChinese(normalizeHumanReadableChineseMarkdown(source))).toEqual([]);
   });
+  it("leaves opaque Markdown objects byte-for-byte intact across format checks", () => {
+    const source = [
+      "正文第一句。",
+      "    代码原文。",
+      "<span>原始标注。</span>",
+      "| 字段 | 原文。 |",
+      "> 引用原文。",
+      "正文 [链接原名。](https://example.org/a) 后续。",
+      "\\[",
+      "x_{。}=1",
+      "\\]",
+      "![原图标注。](https://example.org/figure.svg)"
+    ].join("\n");
+    const expected = source.replace("正文第一句。", "正文第一句")
+      .replace(" 后续。", " 后续");
+    expect(normalizeHumanReadableChineseMarkdown(source)).toBe(expected);
+    expect(normalizeHumanReadableChineseMarkdown(expected)).toBe(expected);
+    expect(validateHumanReadableChinese(expected)).toEqual([]);
+  });
 
   it("turns a standalone colon label into a real Markdown heading", () => {
     expect(normalizeHumanReadableChineseMarkdown("操作：\n执行检查")).toBe("## 操作\n执行检查");
@@ -796,6 +815,17 @@ describe("learner-facing teaching narrative", () => {
   it("capitalizes ordinary bilingual term names but preserves official spelling and source quotes", () => {
     const value = "工艺节点（tech node）和画布尺寸（canvas size）；公司（eBay）；“原图写工艺节点（tech node）”；`工艺节点（tech node）`";
     expect(normalizeEnglishTermCase(value)).toBe("工艺节点（Tech Node）和画布尺寸（Canvas Size）；公司（eBay）；“原图写工艺节点（tech node）”；`工艺节点（tech node）`");
+  });
+  it("keeps English spelling inside source tables and links", () => {
+    const source = "正文工艺节点（tech node）\n| 原表工艺节点（tech node） |\n[原文工艺节点（tech node）](https://example.org/source)";
+    expect(normalizeEnglishTermCase(source)).toBe("正文工艺节点（Tech Node）\n| 原表工艺节点（tech node） |\n[原文工艺节点（tech node）](https://example.org/source)");
+  });
+  it("formats only misconception role labels and preserves the teaching evidence", () => {
+    const source = "误以为 $K=4$ 就是四次训练\n\n错因是把芯片数当成训练次数\n\n正确判断：按原图“4 Designs”核对 $K$\n\n核对方法：查看 `Count(G)` 的定义";
+    const result = formatMisconception(source);
+    expect(result).toBe("**错误理解：** 误以为 $K=4$ 就是四次训练\n\n**错因：** 把芯片数当成训练次数\n\n**正确判断：** 按原图“4 Designs”核对 $K$\n\n**核对方法：** 查看 `Count(G)` 的定义");
+    expect(formatMisconception(result)).toBe(result);
+    expect(formatMisconception("普通定义：不属于易错点")).toBe("普通定义：不属于易错点");
   });
 });
 

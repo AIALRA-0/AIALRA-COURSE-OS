@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { validateMarkdownMath } from "@course-os/quality";
+import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
@@ -324,7 +324,8 @@ describe("planned teaching", () => {
       return { content, provider: "deepseek", model: "flash", usage };
     });
     expect(calls).toEqual(["plan", "opening", "explanation", ...(phase === "explanation" ? ["explanation_repair", "consolidation"] : ["consolidation", "consolidation_repair"])]);
-    expect(result.content).toMatchObject({ ...opening, ...explanation, ...closing });
+    expect(result.content).toMatchObject({ ...opening, ...explanation, ...closing,
+      misconceptions: closing.misconceptions.map(formatMisconception) });
   });
   it("keeps repair capacity for consolidation after explanation repair, matching page 7", async () => {
     const { input, plan } = fixture();

@@ -28,7 +28,7 @@ describe("composition regressions independent of a course or page number", () =>
     const value = "错误理解：差值是 $0.35^2$；错因：混淆了差与平方；正确判断：先相减再平方；核对方法：分别计算两步";
     const formatted = formatMisconception(value);
     expect(formatted.split("\n\n")).toHaveLength(4);
-    expect(formatted.replaceAll("\n\n", "；")).toBe(value);
+    expect(formatted).toBe("**错误理解：** 差值是 $0.35^2$\n\n**错因：** 混淆了差与平方\n\n**正确判断：** 先相减再平方\n\n**核对方法：** 分别计算两步");
     expect(formatMisconception(formatted)).toBe(formatted);
     expect(validateTeachingPresentation({ ...base, misconceptions: [formatted] })).toEqual([]);
   });
@@ -38,8 +38,8 @@ describe("composition regressions independent of a course or page number", () =>
     })).toContain("TEACHING_MATH_INVALID:questions");
   });
   it.each([
-    ["already labelled", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本"],
-    ["unlabelled first and second roles", "误以为 Ours 全部最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列", "错误理解：误以为 Ours 全部最小\n\n错因：跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列"],
+    ["already labelled", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本", "**错误理解：** 把单次高分当成总体优势\n\n**错因：** 忽略随机性\n\n**正确判断：** 比较平均\n\n**核对方法：** 核对样本"],
+    ["unlabelled first and second roles", "误以为 Ours 全部最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列", "**错误理解：** 误以为 Ours 全部最小\n\n**错因：** 跳过反例\n\n**正确判断：** 逐列比较\n\n**核对方法：** 核对每列"],
     ["missing role is not guessed", "只看最大值\n\n因此出错", "只看最大值\n\n因此出错"]
   ])("normalizes misconception role labels without changing facts: %s", (_name, input, expected) => {
     expect(formatMisconception(input)).toBe(expected);

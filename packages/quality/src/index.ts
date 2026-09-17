@@ -781,7 +781,9 @@ export function validateHumanReadableChinese(markdown: string): string[] {
   if (visible.split(/\r?\n/).some((line) => /；\s*$/.test(line))) issues.push("WRITING_LINE_END_SEMICOLON_FORBIDDEN");
   // Inspect the original visible line: removing inline math/code can turn
   // “这个回报是：$r_T=...$” into a fake empty colon heading.
-  const headingLines = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "").replace(/^\s*>.*$/gm, "").replace(/`([^`\r\n]+)`/g, "$1");
+  const headingLines = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "")
+    .split(/(\r?\n)/u).map(part => isOpaqueMarkdownLine(part) ? "" : part).join("")
+    .replace(/`([^`\r\n]+)`/g, "$1");
   if (headingLines.split(/\r?\n/).some((line) => !isNaturalListIntroduction(line) && /^\s*(?!#{1,6}\s)(?:[-*+]\s*)?[\p{Script=Han}A-Za-z0-9 _-]{1,18}[：:]\s*$/u.test(line))) issues.push("WRITING_COLON_PSEUDO_HEADING");
   return issues;
 }
@@ -795,6 +797,7 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
   let inFence = false;
   let fenceMarker = "";
   let inDisplayMath = false;
+  let inBracketMath = false;
   return markdown.split(/(\r?\n)/).map((part) => {
     if (/^\r?\n$/.test(part)) return part;
     const fence = part.match(/^\s*(`{3,}|~{3,})/);
@@ -803,14 +806,28 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
       else if (part.trimStart().startsWith(fenceMarker)) { inFence = false; fenceMarker = ""; }
       return part;
     }
-    if (inFence || /^\s*[>|]/.test(part)) return part;
+    if (inFence) return part;
+    const bracketOpen = (part.match(/(?<!\\)\\\[/gu) ?? []).length;
+    const bracketClose = (part.match(/(?<!\\)\\\]/gu) ?? []).length;
     const displayCount = part.match(/(?<!\\)\$\$/g)?.length ?? 0;
-    if (inDisplayMath || displayCount > 0) {
+    if (inBracketMath || inDisplayMath) {
+      if ((bracketOpen + bracketClose) % 2 === 1) inBracketMath = !inBracketMath;
+      if (displayCount % 2 === 1) inDisplayMath = !inDisplayMath;
+      return part;
+    }
+    // Source objects and indented code are opaque, as in ReadWeave's prose
+    // range scanner. A format pass must not rewrite their original bytes.
+    if (isOpaqueMarkdownLine(part)) return part;
+    if (bracketOpen || bracketClose) {
+      if ((bracketOpen + bracketClose) % 2 === 1) inBracketMath = !inBracketMath;
+      return part;
+    }
+    if (displayCount > 0) {
       if (displayCount % 2 === 1) inDisplayMath = !inDisplayMath;
       return part;
     }
     const protectedValues: string[] = [];
-    const protectedLine = part.replace(/“[^”\r\n]*”|「[^」\r\n]*」|`[^`\r\n]+`|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
+    const protectedLine = part.replace(/!?\[[^\]\r\n]*\]\([^\r\n]*?\)|“[^”\r\n]*”|「[^」\r\n]*」|`[^`\r\n]+`|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+/g, (value) => {
       protectedValues.push(value);
       return `\u0000${protectedValues.length - 1}\u0000`;
     });
@@ -826,11 +843,16 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
   }).join("");
 }
 
+function isOpaqueMarkdownLine(line: string): boolean {
+  return /^(?: {4}|\t|\s*(?:[>|]|<[^>]*>|!\[[^\]\n]*\]\(|\[[^\]\n]+\]:\s*\S))/u.test(line);
+}
+
 function stripProtectedMarkdown(markdown: string): string {
   return markdown
     .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "")
-    .replace(/^\s*>.*$/gm, "")
-    .replace(/^\s*\|.*$/gm, "")
+    .split(/(\r?\n)/u).map(part => isOpaqueMarkdownLine(part) ? "" : part).join("")
+    .replace(/\\\[[\s\S]*?\\\]|\\\([^\r\n]*?\\\)/gu, "")
+    .replace(/!?\[[^\]\r\n]*\]\([^\r\n]*?\)/gu, "")
     .replace(/`[^`\r\n]+`/g, "")
     .replace(/\$\$[\s\S]*?\$\$/g, "")
     .replace(/(?<!\$)\$[^$\r\n]+\$(?!\$)/g, "")

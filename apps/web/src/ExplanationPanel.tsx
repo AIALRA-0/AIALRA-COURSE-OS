@@ -79,7 +79,7 @@ function sectionDescriptor(value: string): string {
 }
 
 export function displayMisconception(value: string): string {
-  return formatMisconception(value).replace(/^(错误理解|错因|正确判断|核对方法)：\s*/gmu, "**$1：** ");
+  return formatMisconception(value);
 }
 
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
