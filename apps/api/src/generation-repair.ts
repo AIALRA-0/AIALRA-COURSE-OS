@@ -20,6 +20,15 @@ const explanationFields: RepairField[] = ["fullExplanationMarkdown", "coverageEv
 const closingFields: RepairField[] = ["mainContentMarkdown", "misconceptions", "questions"];
 const openingFields: RepairField[] = ["chapterBridgeMarkdown", "priorKnowledge", "learningObjectives"];
 
+function englishCaseTargets(value: unknown): string[] {
+  const visible = (typeof value === "string" ? value : JSON.stringify(value) ?? "")
+    .replace(/```[\s\S]*?```|`[^`\n]+`|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|“[^”\n]*”/gu, "");
+  const minorWords = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"]);
+  return [...new Set([...visible.matchAll(/（([A-Za-z][A-Za-z ]{2,80})）/gu)]
+    .map(match => match[1]!)
+    .filter(name => name.split(/\s+/u).some((word, index) => /^[a-z]+$/u.test(word) && (index === 0 || !minorWords.has(word)))))];
+}
+
 /** Turn every validation finding into a bounded field edit, never a phase rewrite. */
 export function generationRepairTickets(phase: string, candidate: Partial<TeachingPackage>, issues: string[], knownAtomIds?: readonly string[]): GenerationRepairTicket[] {
   const allowed = phase === "explanation" ? explanationFields : phase === "consolidation" ? closingFields : openingFields;
@@ -54,7 +63,7 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
     }) } : {}),
     instruction: field === "coverageEvidence"
       ? "仅修正覆盖证据：atomId 必须真实存在，explanation 必须逐字摘录完整讲解中的连续原文，coveredFields 只能声明该引文真正解释的内容；不得改写正文或虚构证据"
-      : `仅修正 ${field} 字段中列出的问题；保留其余已正确的事实、条件、数值、公式和段落，不输出其他字段。普通英文术语须核对中英文所指并使用正确的名称大小写；独立复杂公式使用 $$ 公式块并实际居中；并列的符号解释、步骤和比较项分行列举，子项缩进；删除普通中文句号，长段落按语义换行，不改原始引文、代码和公式字符`
+      : `仅修正 ${field} 字段中列出的问题；保留其余已正确的事实、条件、数值、公式和段落，不输出其他字段。${fieldIssues.some(issue => issue.endsWith(":ENGLISH_NAME_CASE")) ? `逐一处理这些具体的英文括号：${englishCaseTargets(candidate[field]).join("、")}。先判定它是不是有来源对应的正式名称；普通英文解释短语应删除英文、保留已经写明的中文意思，不能只改为标题式大小写伪装成术语；真正的英文名称才按官方或学术通用写法调整主要实词首字母。` : ""}独立复杂公式使用 $$ 公式块并实际居中；并列的符号解释、步骤和比较项分行列举，子项缩进；删除普通中文句号，长段落按语义换行，不改原始引文、代码和公式字符`
   })).filter(ticket => ticket.field !== "coverageEvidence" || !knownAtomIds?.length || (ticket.atomIds?.length ?? 0) > 0);
 }
 

@@ -30,6 +30,15 @@ it("routes local typography findings to the field that can be repaired", () => {
   expect(generationRepairTickets("opening", { priorKnowledge: ["期望值（expected value）：用概率加权说明结果。"] }, issues)
     .map(ticket => ticket.field)).toEqual(["priorKnowledge"]);
 });
+it("targets actual lowercase English parentheses in a bounded repair ticket", () => {
+  const candidate = { fullExplanationMarkdown: "平均而言（On average），这是期望值（Expected value），官方名称（eBay）" };
+  const [ticket] = generationRepairTickets("explanation", candidate,
+    ["TEACHING_PRESENTATION:fullExplanationMarkdown:ENGLISH_NAME_CASE"]);
+  expect(ticket?.instruction).toContain("On average");
+  expect(ticket?.instruction).toContain("Expected value");
+  expect(ticket?.instruction).not.toContain("具体的英文括号：eBay");
+  expect(ticket?.instruction).toContain("普通英文解释短语应删除英文");
+});
 
 function fixture(title = "概念") {
   const page = { id: "p", pageNumber: 2, title, imageUrl: "", anchors: [], blocks: [], atoms: [{ id: "a", kind: "text_region", label: title, observation: "输入经过规则处理" }], coverageRequirements: [{ id: "r", atomId: "a", requiredFields: ["observation"], risk: "high" }], coverageClaims: [], quality: { issues: [], highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false } } as PageLesson;
