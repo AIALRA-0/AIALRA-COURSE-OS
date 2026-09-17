@@ -1,0 +1,56 @@
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_8cd21a90118c96 66
+  s_e8850ef125fb32::t_dc6da6795a8053 2,67
+apps/api/src/teaching-plan.ts
+  s_e8850ef125fb32::t_8dfca90f108f8a 181
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_7e58c95da9c032 2
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_7224a94968073d 97-101
+  s_e8850ef125fb32::t_8cd21a90118c96 92-96
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_77fa56ac75b84c 60
+  s_e8850ef125fb32::t_7e58c95da9c032 51-59,62
+  s_36a381ab4bccf9::t_60166a09f3be09 61
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_d9c81208ae8fb9 3
+packages/quality/src/index.spec.ts
+  s_e8850ef125fb32::t_7224a94968073d 2,796-798
+  s_f4bc084e1b5e1b::t_a3d8f1b140b72a 799
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_dc6da6795a8053 49,3375-3376
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_d9c81208ae8fb9 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "69ed994930c375c91e0a2b12ee0b3ba5d33f5848",
+  "prompts": {},
+  "sessions": {
+    "s_36a381ab4bccf9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a1a6-6503-79c1-8d40-f56fe9691ee6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
