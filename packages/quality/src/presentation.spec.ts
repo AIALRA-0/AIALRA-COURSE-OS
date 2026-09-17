@@ -40,6 +40,7 @@ describe("composition regressions independent of a course or page number", () =>
   it.each([
     ["already labelled", "错误理解：把单次高分当成总体优势\n\n错因：忽略随机性\n\n正确判断：比较平均\n\n核对方法：核对样本", "**错误理解：** 把单次高分当成总体优势\n\n**错因：** 忽略随机性\n\n**正确判断：** 比较平均\n\n**核对方法：** 核对样本"],
     ["unlabelled first and second roles", "误以为 Ours 全部最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：核对每列", "**错误理解：** 误以为 Ours 全部最小\n\n**错因：** 跳过反例\n\n**正确判断：** 逐列比较\n\n**核对方法：** 核对每列"],
+    ["partially broken first label", "*错误理解：** 把图当装饰\n\n**错因：** 没看到计算\n\n**正确判断：** 先计算表示\n\n**核对方法：** 按流程图核对", "**错误理解：** 把图当装饰\n\n**错因：** 没看到计算\n\n**正确判断：** 先计算表示\n\n**核对方法：** 按流程图核对"],
     ["missing role is not guessed", "只看最大值\n\n因此出错", "只看最大值\n\n因此出错"]
   ])("normalizes misconception role labels without changing facts: %s", (_name, input, expected) => {
     expect(formatMisconception(input)).toBe(expected);

@@ -3207,7 +3207,7 @@ export function applyTeachingPackage(page: CourseRelease["pages"][number], conte
   const normalizedContent = teachingTrace ? content : normalizeTeachingPackageMath(content);
   const anchorIds = page.anchors.map((item) => item.id);
   const atomIds = page.atoms.map((item) => item.id);
-  const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: text.replace(/^[-*]\s*/, "").trim(), sourceAnchorIds: anchorIds }));
+  const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: text.replace(/^[-*+]\s+/, "").trim(), sourceAnchorIds: anchorIds }));
   // Coverage evidence is operational metadata. Appending it to the lesson
   // made the learner-facing explanation read like an internal audit log.
   const fullExplanationMarkdown = teachingTrace ? normalizedContent.fullExplanationMarkdown : removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);

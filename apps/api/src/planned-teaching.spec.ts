@@ -45,6 +45,9 @@ it("requires four colon-labelled misconception paragraphs", () => {
   const malformed = "误以为全部指标都最小\n\n错因是忽略了反例\n\n正确判断：逐列比较\n\n核对方法：检查每一列";
   const issues = plannedFormatIssues({ misconceptions: [malformed] });
   expect(issues).toContain("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
+  const plain = "错误理解：全部指标都最小\n\n错因：忽略反例\n\n正确判断：逐列比较\n\n核对方法：检查每列";
+  expect(plannedFormatIssues({ misconceptions: [plain] })).toContain("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
+  expect(plannedFormatIssues({ misconceptions: [formatMisconception(plain)] })).not.toContain("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
   expect(generationRepairTickets("consolidation", { misconceptions: [malformed] }, issues)[0]?.instruction)
     .toContain("错误理解：、错因：、正确判断：、核对方法：");
 });

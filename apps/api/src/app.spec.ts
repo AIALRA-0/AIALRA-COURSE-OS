@@ -236,7 +236,9 @@ describe("Course OS API", () => {
     const page = applyTeachingPackage(testRelease().pages[0]!, content, true);
     const restored = JSON.parse(JSON.stringify(page));
     expect(restored.lessonSections.find((s: {kind: string}) => s.kind === "learning_objectives").items[0].text).toBe(content.learningObjectives[0]);
-    expect(restored.lessonSections.find((s: {kind: string}) => s.kind === "misconceptions").items[0].text.split("\n\n")).toHaveLength(4);
+    const misconception = restored.lessonSections.find((s: {kind: string}) => s.kind === "misconceptions").items[0].text;
+    expect(misconception.split("\n\n")).toHaveLength(4);
+    for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) expect(misconception).toContain(`**${role}：** `);
   });
 
   it("requires the actual coverage excerpt rather than an overlapping phrase", () => {
