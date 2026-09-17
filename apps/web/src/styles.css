@@ -1166,7 +1166,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .sentence-list li p { margin: 0; }
 .lesson-block p { margin: 12px 0; }
 .lesson-block pre { font-size: .9em; }
-.katex-display { margin: 18px 0; padding: 10px 0; }
+.katex-display { max-width: 100%; margin: 18px 0; padding: 10px 0; text-align: center; }
+.lesson-block p:has(> .katex:only-child) { text-align: center; overflow-x: auto; }
 .katex { font-size: 1.04em; }
 
 .pseudocode-walkthrough > p { margin: 0 0 14px; color: var(--muted); font-size: .92em; }

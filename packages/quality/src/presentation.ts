@@ -34,6 +34,7 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
   const fields: Record<string, string[]> = {
     chapterBridgeMarkdown: [input.chapterBridgeMarkdown || ""],
     learningObjectives: input.learningObjectives,
+    priorKnowledge: input.priorKnowledge,
     fullExplanationMarkdown: [input.fullExplanationMarkdown],
     mainContentMarkdown: [input.mainContentMarkdown],
     misconceptions: input.misconceptions,
@@ -42,12 +43,26 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
   const issues = new Set<string>();
   for (const [field, texts] of Object.entries(fields)) {
     for (const text of texts) {
-      const prose = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|`[^`\n]+`|https?:\/\/\S+/g, "");
+      const prose = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|`[^`\n]+`|https?:\/\/\S+|“[^”\n]*”/g, "");
       for (const line of prose.split(/\r?\n/u)) {
         // Tables and quoted source are objects, not prose paragraphs.
         if (/^\s*(?:[|>]|#{1,6}\s)/u.test(line)) continue;
         if ((line.match(/\p{Script=Han}/gu)?.length || 0) > 180) issues.add(`TEACHING_PRESENTATION:${field}:PROSE_PACKED`);
         if (/(?:两个|三个|四个|两项|三项|四项)(?:问题|步骤|目标|原因|条件)[：:][^\n]*[；;]/u.test(line)) issues.add(`TEACHING_PRESENTATION:${field}:PARALLEL_ITEMS_PACKED`);
+        // Ordinary academic names use title case. Keep official mixed-case names,
+        // code, formulas, and quoted source labels untouched.
+        const names = [...line.matchAll(/[\p{Script=Han}]{2,25}（([A-Za-z][A-Za-z ]{2,80})）/gu)];
+        const minorWords = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"]);
+        if (names.some(match => match[1]!.split(/\s+/u).some((word, index) => /^[a-z]+$/u.test(word)
+          && (index === 0 || !minorWords.has(word))))) issues.add(`TEACHING_PRESENTATION:${field}:ENGLISH_NAME_CASE`);
+      }
+      if (field === "fullExplanationMarkdown") {
+        if (text.split(/\r?\n/u).some(line => /^\s*\$[^$\n]*(?:=|\\(?:sum|frac|int|prod|left|right))[^$\n]*\$\s*$/u.test(line))) {
+          issues.add(`TEACHING_PRESENTATION:${field}:STANDALONE_MATH_INLINE`);
+        }
+        if (text.split(/\r?\n/u).filter(line => /^\s*(?![-*+]\s)(?:\$[^$\n]+\$|[A-Za-zθΣαβγ])\s*的定义是/u.test(line)).length >= 3) {
+          issues.add(`TEACHING_PRESENTATION:${field}:SYMBOL_DEFINITIONS_UNLISTED`);
+        }
       }
     }
   }

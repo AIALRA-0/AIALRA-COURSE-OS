@@ -28,6 +28,7 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
     let field: RepairField | undefined;
     if (/^PLAN_(?:EVIDENCE|FACT_EVIDENCE)/u.test(issue)) field = "coverageEvidence";
     else if (/^result\./u.test(issue)) field = issue.slice(7).split(/[.:]/u)[0] as RepairField;
+    else if (/^TEACHING_(?:FORMAT|PRESENTATION):/u.test(issue)) field = issue.split(":")[1] as RepairField;
     else if (issue === "PLAN_QUESTION_MIX" || issue === "PLAN_QUESTION_ANSWER_INVALID") field = "questions";
     else if (issue.startsWith("MATH_") || issue.includes("MATH_") || issue.includes("DELIMITER")) {
       field = allowed.find(key => {
@@ -53,7 +54,7 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
     }) } : {}),
     instruction: field === "coverageEvidence"
       ? "仅修正覆盖证据：atomId 必须真实存在，explanation 必须逐字摘录完整讲解中的连续原文，coveredFields 只能声明该引文真正解释的内容；不得改写正文或虚构证据"
-      : `仅修正 ${field} 字段中列出的问题；保留其余已正确的事实、条件、数值、公式和段落，不输出其他字段`
+      : `仅修正 ${field} 字段中列出的问题；保留其余已正确的事实、条件、数值、公式和段落，不输出其他字段。普通英文术语须核对中英文所指并使用正确的名称大小写；独立复杂公式使用 $$ 公式块并实际居中；并列的符号解释、步骤和比较项分行列举，子项缩进；删除普通中文句号，长段落按语义换行，不改原始引文、代码和公式字符`
   })).filter(ticket => ticket.field !== "coverageEvidence" || !knownAtomIds?.length || (ticket.atomIds?.length ?? 0) > 0);
 }
 

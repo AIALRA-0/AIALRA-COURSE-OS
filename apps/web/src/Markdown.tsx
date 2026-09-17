@@ -7,8 +7,21 @@ import { normalizeLegacyMathDelimiters } from "@course-os/quality";
 
 export { normalizeLegacyMathDelimiters } from "@course-os/quality";
 
+/** A formula occupying its own line is a displayed object, not inline prose. */
+export function normalizeStandaloneMathBlocks(source: string): string {
+  let inFence = false;
+  return source.split(/\r?\n/u).map(line => {
+    if (/^\s*(?:```|~~~)/u.test(line)) { inFence = !inFence; return line; }
+    if (inFence) return line;
+    const match = /^\s*\$([^$\n]+)\$\s*$/u.exec(line);
+    if (!match || !/(?:=|\\(?:sum|frac|int|prod|left|right))/u.test(match[1]!)) return line;
+    return `\n$$\n${match[1]}\n$$\n`;
+  }).join("\n");
+}
+
 export function Markdown({ children, nestedHeadings = false, inline = false }: { children: string; nestedHeadings?: boolean; inline?: boolean }) {
-  const normalized = normalizeLegacyMathDelimiters(children);
+  const withMath = normalizeLegacyMathDelimiters(children);
+  const normalized = inline ? withMath : normalizeStandaloneMathBlocks(withMath);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkMath, remarkGfm]}

@@ -3,7 +3,8 @@ import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { assignUnplacedPlanFacts, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedInstructions } from "./planned-teaching.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions } from "./planned-teaching.js";
+import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 import { applyTeachingPackage } from "./app.js";
@@ -14,6 +15,22 @@ const opening = { chapterBridgeMarkdown: "前页已经说明输入是开始处�
 const explanation = { fullExplanationMarkdown: `### 从具体对象开始\n\n${quote}\n\n处理之前先保留输入的数值和条件，随后只执行材料允许的操作，再把得到的结果与目标比较\n\n### 核对结果\n\n如果输入条件发生变化，应当重新计算对应结果，而不能把之前得到的结论直接用在新的对象上，比较时也要保持其他条件相同`, coverageEvidence: [{ atomId: "a", coveredFields: ["observation"], explanation: quote }] };
 const closing = { mainContentMarkdown: "- 输入提供具体对象，规则决定允许的变化\n- 结果需要在相同条件下与原目标进行比较", misconceptions: ["错误理解：输入变化后可以保留原结果\n\n错因：忽略了结果依赖输入\n\n正确判断：应当重新计算\n\n核对方法：逐项检查输入条件"], questions: [0, 1, 2, 3].map(index => ({ kind: index < 2 ? "comprehension" : "multiple_choice", prompt: `第 ${index + 1} 个练习应当怎样核对输入条件`, options: index < 2 ? [] : ["核对输入", "只看输出", "改变规则", "删除条件"], expectedAnswer: "核对输入", explanation: "因为结果依赖输入，必须先确认输入条件相同，再按照规则计算和比较结果" })) };
 
+it("supplies every byte of the approved writing skill to each Chinese generation phase", () => {
+  const instructions = plannedInstructions(["priorKnowledge"], "zh-CN");
+  for (const fullFile of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
+    expect(instructions).toContain(fullFile.trim());
+  }
+  expect(plannedInstructions(["priorKnowledge"], "en")).not.toContain(policyFormatRules.trim());
+});
+
+it("routes local typography findings to the field that can be repaired", () => {
+  const issues = plannedFormatIssues({ priorKnowledge: ["期望值（expected value）：用概率加权说明结果。"] });
+  expect(issues).toContain("TEACHING_PRESENTATION:priorKnowledge:ENGLISH_NAME_CASE");
+  expect(issues).toContain("TEACHING_FORMAT:priorKnowledge:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
+  expect(generationRepairTickets("opening", { priorKnowledge: ["期望值（expected value）：用概率加权说明结果。"] }, issues)
+    .map(ticket => ticket.field)).toEqual(["priorKnowledge"]);
+});
+
 function fixture(title = "概念") {
   const page = { id: "p", pageNumber: 2, title, imageUrl: "", anchors: [], blocks: [], atoms: [{ id: "a", kind: "text_region", label: title, observation: "输入经过规则处理" }], coverageRequirements: [{ id: "r", atomId: "a", requiredFields: ["observation"], risk: "high" }], coverageClaims: [], quality: { issues: [], highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false } } as PageLesson;
   const plan: TeachingPlan = { problem: `解释${title}`, knownStartingPoint: "输入与输出", scopeBoundary: "只解释当前材料给出的操作", facts: [{ id: "f", atomId: "a", observation: "输入经过规则处理", qualification: "保持条件" }], prerequisites: [{ name: "输入", explanation: "开始时已知的信息" }], steps: [{ id: "s", factIds: ["f"], dependsOn: [], explanation: `讲解${title}的对象与关系`, example: "", boundary: "输入条件不变" }], objectives: [{ id: "g", startingPoint: "已知输入", outcome: "能核对输出", stepIds: ["s"] }], questions: [0, 1, 2, 3].map(index => ({ objectiveId: "g", stepId: "s", kind: index < 2 ? "comprehension" : "multiple_choice", focus: `问题${index}` })) };
@@ -23,6 +40,16 @@ function fixture(title = "概念") {
 
 describe("planned teaching", () => {
   afterEach(() => vi.unstubAllGlobals());
+  it("also supplies the full skill at planning time", async () => {
+    const { input, plan } = fixture();
+    await writePlannedLesson(input, async request => {
+      if (request.phase === "plan") for (const fullFile of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
+        expect(request.instructions).toContain(fullFile.trim());
+      }
+      return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+    });
+  });
   it("places a source fact omitted from step assignments without changing its text", () => {
     const { input, plan } = fixture();
     plan.facts.push({ id: "f11", atomId: "a", observation: "另一个来源事实", qualification: "保留原条件" });
@@ -263,7 +290,7 @@ describe("planned teaching", () => {
     expect(prompt).toContain("fullExplanationMarkdown：");
     expect(prompt).not.toContain("priorKnowledge：");
     expect(prompt).toContain("# 中文教学正文格式");
-    expect(prompt).not.toContain("FMT-001");
+    expect(prompt).toContain("FMT-001");
   });
   it("persists actual visual observations as coverage rather than teaching importer labels", () => {
     const { page, plan } = fixture();

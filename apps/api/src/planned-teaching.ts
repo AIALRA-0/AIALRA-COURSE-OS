@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { validateMarkdownMath } from "@course-os/quality";
-import { teachingPackageSchema } from "./generation-harness.js";
+import { validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { assignUnplacedPlanFacts, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -10,11 +10,12 @@ const readPrompt = (name: string) => readFileSync(new URL(`../../../config/gener
 export const planningPrompt = readPrompt("page-plan-prompt.md");
 export const plannedWritingPrompt = readPrompt("planned-writing-prompt.md");
 export const writingFormatContract = readPrompt("writing-format-contract.md");
-export function plannedInstructions(fields: readonly string[]) {
+export function plannedInstructions(fields: readonly string[], language = "zh-CN") {
   const fieldNames = Object.keys(teachingPackageSchema.properties as Record<string, unknown>);
   const selected = plannedWritingPrompt.split("\n").filter(line => !fieldNames.some(field => line.startsWith(`${field}：`))
     || fields.some(field => line.startsWith(`${field}：`))).join("\n");
-  return `${selected}\n\n${writingFormatContract}`;
+  const completePolicy = writingPolicyInstructions(language);
+  return `${selected}\n\n${writingFormatContract}${completePolicy ? `\n\n---\n\n${completePolicy}` : ""}`;
 }
 export interface PlannedCall {
   phase: string;
@@ -46,6 +47,31 @@ const fieldsByPhase = [
 ] as const;
 const phases = ["opening", "explanation", "consolidation"];
 const partialSchema = (fields: readonly string[]) => ({ type: "object", properties: Object.fromEntries(fields.map(field => [field, (teachingPackageSchema.properties as Record<string, unknown>)[field]])), required: fields, additionalProperties: false });
+
+/** Check the actual phase output while its own fields can still be repaired. */
+export function plannedFormatIssues(content: Partial<TeachingPackage>): string[] {
+  const visible: Partial<Record<keyof TeachingPackage, string[]>> = {
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : [content.chapterBridgeMarkdown],
+    priorKnowledge: content.priorKnowledge,
+    learningObjectives: content.learningObjectives,
+    fullExplanationMarkdown: content.fullExplanationMarkdown === undefined ? undefined : [content.fullExplanationMarkdown],
+    mainContentMarkdown: content.mainContentMarkdown === undefined ? undefined : [content.mainContentMarkdown],
+    misconceptions: content.misconceptions,
+    questions: content.questions?.flatMap(question => [question.prompt, ...question.options || [], question.expectedAnswer, question.explanation])
+  };
+  const issues = Object.entries(visible).flatMap(([field, values]) => (values || []).flatMap(value =>
+    validateHumanReadableChinese(value).map(issue => `TEACHING_FORMAT:${field}:${issue}`)));
+  issues.push(...validateTeachingPresentation({
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown,
+    priorKnowledge: content.priorKnowledge || [],
+    learningObjectives: content.learningObjectives || [],
+    fullExplanationMarkdown: content.fullExplanationMarkdown || "",
+    mainContentMarkdown: content.mainContentMarkdown || "",
+    misconceptions: content.misconceptions || [],
+    questions: content.questions || []
+  }));
+  return [...new Set(issues)];
+}
 
 export function plannedContentIssues(content: TeachingPackage, input: ModelRouterInput, plan?: TeachingPlan): string[] {
   const issues = schemaIssues(content, teachingPackageSchema);
@@ -103,7 +129,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
     return result.content;
   };
-  const planRequest: PlannedCall = { phase: "plan", instructions: planningPrompt,
+  const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}`,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements }),
@@ -127,7 +153,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
   for (let index = 0; index < fieldsByPhase.length; index++) {
     const fields = fieldsByPhase[index]!;
     const schema = partialSchema(fields);
-    const request: PlannedCall = { phase: phases[index]!, instructions: plannedInstructions(fields),
+    const request: PlannedCall = { phase: phases[index]!, instructions: plannedInstructions(fields, input.language),
       prompt: JSON.stringify({ language: input.language, pageTitle: input.pageTitle, plan,
         previousTeaching: index === 0 ? plan.knownStartingPoint : undefined,
         precedingSections: teachingSectionMemory(content), fields,
@@ -145,13 +171,14 @@ export async function writePlannedLesson(input: ModelRouterInput,
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
+    if (!issues.length) issues.push(...plannedFormatIssues(partial));
     if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     for (let round = 0; round < 2 && issues.length; round++) {
       const tickets = generationRepairTickets(phases[index]!, partial, issues, blueprint.resourcePackage.atomIds);
       if (tickets.length === 0) break;
       for (const ticket of tickets) {
         const patch = await run({ phase: `${request.phase}_repair`,
-          instructions: `${plannedInstructions([ticket.field])}\n${ticket.instruction}`,
+          instructions: `${plannedInstructions([ticket.field], input.language)}\n${ticket.instruction}`,
           prompt: JSON.stringify({ pageTitle: input.pageTitle, issue: ticket.issues, field: ticket.field,
             currentField: partial[ticket.field], explanation: ticket.field === "coverageEvidence" ? partial.fullExplanationMarkdown : undefined,
             requirements: ticket.field === "coverageEvidence" ? blueprint.requirementPackage.requirements : undefined,
@@ -164,6 +191,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       issues = schemaIssues(partial, schema);
       if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
       if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
+      if (!issues.length) issues.push(...plannedFormatIssues(partial));
       if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     }
     if (issues.length) throw new Error(`TEACHING_${request.phase.toUpperCase()}_INVALID:${issues.join(",")}`);

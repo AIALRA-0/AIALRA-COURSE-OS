@@ -14,6 +14,7 @@ export const teachingBlueprint = readHarnessFile("teaching-blueprint.md");
 export const sourceAuditPrompt = readHarnessFile("source-audit-prompt.md");
 export const teachingAuditPrompt = readHarnessFile("teaching-audit-prompt.md");
 export const semanticAuditPrompt = readHarnessFile("semantic-audit-prompt.md");
+export const policySkill = readHarnessFile("policy-skill.md");
 export const policyFormatRules = readHarnessFile("policy-format-rules.md");
 export const policyExplanationFramework = readHarnessFile("policy-explanation-framework.md");
 export const policyFormulaExplanation = readHarnessFile("policy-formula-explanation.md");
@@ -62,10 +63,18 @@ export interface GenerationHarnessSnapshot {
 const targetLanguage = (language: string): string => language === "en" ? "English" : "简体中文";
 const render = (template: string, values: Record<string, string>): string => Object.entries(values).reduce((result, [key, value]) => result.replaceAll(`{{${key}}}`, value), template);
 
+/** Every Chinese-writing model call receives the complete approved snapshot. */
+export function writingPolicyInstructions(language: string): string {
+  if (language === "en") return "";
+  const fullPolicy = [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]
+    .map((part) => part.trim()).join("\n\n---\n\n");
+  return `以下是当前批准写作技能的四份完整原文，不是节选。逐份通读后按适用的成文规则输出；文件操作、中间件命令和交付流程由 Course OS 执行，不写入学习正文\n\n${fullPolicy}`;
+}
+
 export function professorInstructions(language: string): string {
   const systemPrompt = render(teachingSystemPromptTemplate, { LANGUAGE: targetLanguage(language) }).trim();
   if (language === "en") return systemPrompt;
-  return `${systemPrompt}\n\n---\n\n${policyFormatRules.trim()}\n\n---\n\n${policyExplanationFramework.trim()}\n\n---\n\n${policyFormulaExplanation.trim()}`;
+  return `${systemPrompt}\n\n---\n\n${writingPolicyInstructions(language)}`;
 }
 
 export function modelInput(input: PromptInput): string | Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "high" }> }> {
