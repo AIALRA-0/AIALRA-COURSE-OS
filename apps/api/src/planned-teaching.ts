@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { formatMisconception, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, normalizeHumanReadableChineseMarkdown, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
@@ -48,6 +48,17 @@ const fieldsByPhase = [
 const phases = ["opening", "explanation", "consolidation"];
 const partialSchema = (fields: readonly string[]) => ({ type: "object", properties: Object.fromEntries(fields.map(field => [field, (teachingPackageSchema.properties as Record<string, unknown>)[field]])), required: fields, additionalProperties: false });
 
+/** Mechanical punctuation only; keep the answer text and matching options intact. */
+export function normalizePlannedQuestionPunctuation<T extends Partial<TeachingPackage>>(content: T): T {
+  if (!content.questions) return content;
+  return { ...content, questions: content.questions.map(question => ({ ...question,
+    prompt: normalizeHumanReadableChineseMarkdown(question.prompt),
+    options: question.options?.map(normalizeHumanReadableChineseMarkdown),
+    expectedAnswer: normalizeHumanReadableChineseMarkdown(question.expectedAnswer),
+    explanation: normalizeHumanReadableChineseMarkdown(question.explanation)
+  })) };
+}
+
 /** Check the actual phase output while its own fields can still be repaired. */
 export function plannedFormatIssues(content: Partial<TeachingPackage>): string[] {
   const visible: Partial<Record<keyof TeachingPackage, string[]>> = {
@@ -72,7 +83,7 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
   }));
   for (const prior of content.priorKnowledge || []) {
     const label = prior.trim().replace(/^[-*+]\s+/u, "").split("：", 1)[0] ?? "";
-    if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z\s&/-]{1,80}）/u.test(label)) {
+    if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z\s&/,，-]{1,80}）/u.test(label)) {
       issues.push("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
     }
   }
@@ -181,7 +192,10 @@ export async function writePlannedLesson(input: ModelRouterInput,
     let partial = pendingContent
       ? structuredClone(pendingContent)
       : await run(request) as Partial<TeachingPackage>;
-    if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+    if (index === 2) {
+      partial = normalizePlannedQuestionPunctuation(partial);
+      if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+    }
     if (index === 1) partial = bindExactCoverageLines(partial);
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
@@ -207,7 +221,10 @@ export async function writePlannedLesson(input: ModelRouterInput,
           // and let the next bounded round diagnose the real remaining issue.
           if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
         }
-        if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+        if (index === 2) {
+          partial = normalizePlannedQuestionPunctuation(partial);
+          if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+        }
         if (index === 1) partial = bindExactCoverageLines(partial);
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }

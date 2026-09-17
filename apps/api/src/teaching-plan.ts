@@ -154,7 +154,8 @@ export function plannedCoverageIssues(content: TeachingPackage, blueprint: Teach
     const missing = requirement.requiredFields.filter(field => !fields.has(field));
     if (missing.length) issues.push(`PLAN_EVIDENCE_MISSING:${requirement.atomId}:${missing.join("+")}`);
   }
-  for (const atomId of new Set(plan?.facts.map(fact => fact.atomId) ?? [])) {
+  const teachableFacts = plan?.facts.filter(fact => !/^(?:本页|该页|页面)?(?:标题|页码)(?:为|是|：)/u.test(fact.observation.trim())) ?? [];
+  for (const atomId of new Set(teachableFacts.map(fact => fact.atomId))) {
     if (!content.coverageEvidence.some(evidence => evidence.atomId === atomId)) issues.push(`PLAN_FACT_EVIDENCE_MISSING:${atomId}`);
   }
   return [...new Set(issues)];
@@ -165,13 +166,16 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
   if (!content.fullExplanationMarkdown || !content.coverageEvidence) return content;
   const explanation = content.fullExplanationMarkdown;
   const sourceLines = explanation.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  const punctuationKey = (line: string) => line.replace(/[，,；;](?:以及|并且)/gu, "，").replace(/[，,；;]/gu, "，");
   let changed = false;
   const coverageEvidence = content.coverageEvidence.map(evidence => {
     if (explanation.includes(evidence.explanation)) return evidence;
     const candidateLines = evidence.explanation.split(/\r?\n/u).map(line => line.trim()).filter(line => line.length >= 24)
       .sort((left, right) => right.length - left.length);
     const matched = candidateLines.flatMap(line => sourceLines.filter(sourceLine =>
-      sourceLine === line || sourceLine.replace(/^[-*+]\s+/u, "") === line))[0];
+      sourceLine === line || sourceLine.replace(/^[-*+]\s+/u, "") === line ||
+      punctuationKey(sourceLine) === punctuationKey(line) ||
+      punctuationKey(sourceLine.replace(/^[-*+]\s+/u, "")) === punctuationKey(line)))[0];
     if (!matched) return evidence;
     changed = true;
     return { ...evidence, explanation: matched };

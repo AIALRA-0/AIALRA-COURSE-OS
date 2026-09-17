@@ -780,6 +780,10 @@ describe("learner-facing teaching narrative", () => {
   });
 
   it("does not mistake a sentence with inline math or code for an empty colon heading", () => {
+    expect(validateHumanReadableChinese("它们分别约束不同的维度：\n- 第一项限制面积\n- 第二项限制线长"))
+      .not.toContain("WRITING_COLON_PSEUDO_HEADING");
+    expect(validateHumanReadableChinese("公式从内往外依次执行三步：\n1. 读取输入\n2. 计算结果"))
+      .not.toContain("WRITING_COLON_PSEUDO_HEADING");
     expect(validateHumanReadableChinese("它旁边给出的回报是一段表达式：$r_T=-x$\n下一句解释这项回报"))
       .not.toContain("WRITING_COLON_PSEUDO_HEADING");
     expect(validateHumanReadableChinese("原图的标签是：`Force-directed method`\n这里解释标签"))

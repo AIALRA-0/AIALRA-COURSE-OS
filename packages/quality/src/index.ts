@@ -787,7 +787,7 @@ export function validateHumanReadableChinese(markdown: string): string[] {
 }
 
 function isNaturalListIntroduction(line: string): boolean {
-  return /^(?:本页|这里|下面|以下|需要|请|先|再|核对|检查|分别|可以|包括|例如|要回答)[^\n]{2,70}[：:]\s*$/u.test(line.trim());
+  return /^(?:本页|这里|下面|以下|需要|请|先|再|核对|检查|分别|可以|包括|例如|要回答|它们分别|公式从)[^\n]{2,70}[：:]\s*$/u.test(line.trim());
 }
 
 /** Apply only lossless punctuation repairs outside code, quotes, URLs and math. */

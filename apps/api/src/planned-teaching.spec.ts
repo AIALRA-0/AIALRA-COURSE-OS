@@ -3,7 +3,7 @@ import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions } from "./planned-teaching.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -34,6 +34,7 @@ it.each([
   ["缺少英文名称", "布局质量指标：衡量布局结果的多个数值", true],
   ["名称已有配对", "布局质量指标（Layout Quality Metrics）：衡量布局结果的多个数值", false],
   ["官方大小写", "方法名称（eBay）：保留官方名称", false],
+  ["英文全称与缩写", "最差负时序裕量（Worst Negative Slack，WNS）：指最严重的时序违例", false],
   ["定义内遗漏不靠猜译补齐", "拥塞（Congestion）：它影响布局质量", false],
   ["来源标签不能冒充名称", "网表（Netlist）：记录模块之间的连接", false]
 ])("checks prerequisite name pairing: %s", (_name, prior, missing) => {
@@ -57,6 +58,32 @@ it("rebinds a long coverage claim to its own exact explained line", () => {
   expect(original.coverageEvidence[0]?.explanation).toContain("继续解释");
   expect(bindExactCoverageLines({ ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] })).toEqual(
     { ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] });
+});
+it("rebinds a citation after punctuation-only teaching repair", () => {
+  const actual = "这一页要回答三个问题：它是什么；为什么需要它；怎样使用它";
+  const content = bindExactCoverageLines({ fullExplanationMarkdown: actual, coverageEvidence: [
+    { atomId: "a", coveredFields: ["observation"], explanation: "这一页要回答三个问题：它是什么，为什么需要它，以及怎样使用它" }
+  ] });
+  expect(content.coverageEvidence[0]?.explanation).toBe(actual);
+});
+it("normalizes question punctuation without changing answer-option equality", () => {
+  const content = normalizePlannedQuestionPunctuation({ questions: [{ kind: "multiple_choice" as const,
+    prompt: "应该选哪一个。", options: ["正确选项。", "错误选项。", "另一选项。", "最后一项。"],
+    expectedAnswer: "正确选项。", explanation: "因为这个答案符合条件。" }] });
+  expect(content.questions?.[0]?.expectedAnswer).toBe("正确选项");
+  expect(content.questions?.[0]?.options).toContain(content.questions?.[0]?.expectedAnswer);
+  expect(plannedFormatIssues(content)).not.toContain("TEACHING_FORMAT:questions:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
+});
+it("does not demand a teaching quote for a title-only source fact", () => {
+  const { input, plan } = fixture("术语");
+  plan.facts[0]!.observation = "页面标题为 TERMINOLOGY";
+  expect(plannedCoverageIssues({ ...opening, ...explanation, ...closing, coverageEvidence: [] } as TeachingPackage,
+    { ...input.blueprint!, requirementPackage: { ...input.blueprint!.requirementPackage, requirements: [] } }, plan))
+    .not.toContain("PLAN_FACT_EVIDENCE_MISSING:a");
+  plan.facts[0]!.observation = "芯片由功能块组成";
+  expect(plannedCoverageIssues({ ...opening, ...explanation, ...closing, coverageEvidence: [] } as TeachingPackage,
+    { ...input.blueprint!, requirementPackage: { ...input.blueprint!.requirementPackage, requirements: [] } }, plan))
+    .toContain("PLAN_FACT_EVIDENCE_MISSING:a");
 });
 it("targets actual lowercase English parentheses in a bounded repair ticket", () => {
   const candidate = { fullExplanationMarkdown: "平均而言（On average），这是期望值（Expected value），官方名称（eBay）" };
