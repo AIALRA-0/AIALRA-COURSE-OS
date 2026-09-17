@@ -159,3 +159,22 @@ export function plannedCoverageIssues(content: TeachingPackage, blueprint: Teach
   }
   return [...new Set(issues)];
 }
+
+/** Rebind a model's multi-paragraph claim only to its own exact line in the explanation. */
+export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(content: T): T {
+  if (!content.fullExplanationMarkdown || !content.coverageEvidence) return content;
+  const explanation = content.fullExplanationMarkdown;
+  const sourceLines = explanation.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  let changed = false;
+  const coverageEvidence = content.coverageEvidence.map(evidence => {
+    if (explanation.includes(evidence.explanation)) return evidence;
+    const candidateLines = evidence.explanation.split(/\r?\n/u).map(line => line.trim()).filter(line => line.length >= 24)
+      .sort((left, right) => right.length - left.length);
+    const matched = candidateLines.flatMap(line => sourceLines.filter(sourceLine =>
+      sourceLine === line || sourceLine.replace(/^[-*+]\s+/u, "") === line))[0];
+    if (!matched) return evidence;
+    changed = true;
+    return { ...evidence, explanation: matched };
+  });
+  return changed ? { ...content, coverageEvidence } : content;
+}

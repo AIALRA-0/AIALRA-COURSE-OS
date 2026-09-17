@@ -52,7 +52,11 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
       for (const line of prose.split(/\r?\n/u)) {
         // Tables and quoted source are objects, not prose paragraphs.
         if (/^\s*(?:[|>]|#{1,6}\s)/u.test(line)) continue;
-        if ((line.match(/\p{Script=Han}/gu)?.length || 0) > 180) issues.add(`TEACHING_PRESENTATION:${field}:PROSE_PACKED`);
+        const oneDefinition = field === "priorKnowledge" && /^\s*(?:[-*+]\s+)?[^：\n]{2,100}：/u.test(line)
+          && (line.split(/[；;]/u).length >= 3 && line.split(/[；;]/u).length <= 5);
+        if (!oneDefinition && (line.match(/\p{Script=Han}/gu)?.length || 0) > 180) {
+          issues.add(`TEACHING_PRESENTATION:${field}:PROSE_PACKED`);
+        }
         if (/(?:两个|三个|四个|两项|三项|四项)(?:问题|步骤|目标|原因|条件)[：:][^\n]*[；;]/u.test(line)) issues.add(`TEACHING_PRESENTATION:${field}:PARALLEL_ITEMS_PACKED`);
         // Ordinary academic names use title case. Keep official mixed-case names,
         // code, formulas, and quoted source labels untouched.

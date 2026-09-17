@@ -52,6 +52,12 @@ describe("composition regressions independent of a course or page number", () =>
     expect(validateTeachingPresentation({ ...base, priorKnowledge: ["期望值（Expected Value）：对可能结果按概率求平均", "方法名称（eBay）：保留官方写法"] }))
       .toEqual([]);
   });
+  it("keeps one complete five-clause term definition together instead of flagging its length", () => {
+    const definition = "层次结构（Hierarchy）：把一个大系统按包含关系分成若干层，每一层由下一层的对象组成；这样同一层的对象可以单独设计、复用和替换，层与层之间的接口保持稳定；工作方式是先确定顶层整体，再逐层把整体拆成若干组成部分，并由上一层引用下一层的实例；它适用于对象之间存在明确由什么组成关系的场合，用来控制复杂度并支持并行设计与重复使用；它与并列分类不同，并列分类只按性质把对象分组，并不规定谁包含谁，本页用它把整块芯片到门级单元串成一条链";
+    expect(definition.match(/\p{Script=Han}/gu)!.length).toBeGreaterThan(180);
+    expect(validateTeachingPresentation({ ...base, priorKnowledge: [definition] })).not.toContain("TEACHING_PRESENTATION:priorKnowledge:PROSE_PACKED");
+    expect(validateTeachingPresentation({ ...base, fullExplanationMarkdown: definition })).toContain("TEACHING_PRESENTATION:fullExplanationMarkdown:PROSE_PACKED");
+  });
   it("separates displayed formulas and parallel symbol definitions", () => {
     const cramped = "## 目标函数\n\n$J(\\theta,G)=\\frac{1}{K}\\sum_{g\\in G}E_g$\n\n$J$ 的定义是目标\n\n$K$ 的定义是数量\n\n$G$ 的定义是集合";
     expect(validateTeachingPresentation({ ...base, fullExplanationMarkdown: cramped }))

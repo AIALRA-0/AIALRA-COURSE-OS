@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { assignUnplacedPlanFacts, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -46,6 +46,17 @@ it("requires four colon-labelled misconception paragraphs", () => {
   expect(issues).toContain("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
   expect(generationRepairTickets("consolidation", { misconceptions: [malformed] }, issues)[0]?.instruction)
     .toContain("错误理解：、错因：、正确判断：、核对方法：");
+});
+it("rebinds a long coverage claim to its own exact explained line", () => {
+  const line = "- $K$ 是集合中芯片设计的数量；它决定外层平均要除以几";
+  const original = { fullExplanationMarkdown: `## 平均目标\n\n${line}`, coverageEvidence: [
+    { atomId: "a", coveredFields: ["observation"], explanation: `公式如下\n\n${line.slice(2)}\n\n继续解释` }
+  ] };
+  const result = bindExactCoverageLines(original);
+  expect(result.coverageEvidence[0]?.explanation).toBe(line);
+  expect(original.coverageEvidence[0]?.explanation).toContain("继续解释");
+  expect(bindExactCoverageLines({ ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] })).toEqual(
+    { ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] });
 });
 it("targets actual lowercase English parentheses in a bounded repair ticket", () => {
   const candidate = { fullExplanationMarkdown: "平均而言（On average），这是期望值（Expected value），官方名称（eBay）" };
@@ -106,6 +117,26 @@ describe("planned teaching", () => {
     const preserved = { ...explanation, coverageEvidence: [...explanation.coverageEvidence, { atomId: "b", coveredFields: ["observation"], explanation: quote }] };
     const scoped = generationRepairTickets("explanation", preserved, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair(preserved, scoped, { coverageEvidence: [] })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+  });
+  it("accepts two distant small corrections but rejects a whole-field rewrite", () => {
+    const original = `## 起点\n${"先看对象再判断结果".repeat(50)}。\n\n## 过程\n${"保持原有事实和条件".repeat(50)}。`;
+    const ticket = generationRepairTickets("explanation", { fullExplanationMarkdown: original },
+      ["TEACHING_FORMAT:fullExplanationMarkdown:WRITING_CHINESE_FULL_STOP_FORBIDDEN"])[0]!;
+    expect(applyGenerationRepair({ fullExplanationMarkdown: original }, ticket,
+      { fullExplanationMarkdown: original.replaceAll("。", "") }).fullExplanationMarkdown).not.toContain("。");
+    expect(() => applyGenerationRepair({ fullExplanationMarkdown: original }, ticket,
+      { fullExplanationMarkdown: "无关的新文章".repeat(350) })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+  });
+  it("uses the second bounded repair round when the first patch changes nothing", async () => {
+    const { input, plan } = fixture();
+    const badOpening = { ...opening, priorKnowledge: [opening.priorKnowledge[0]!.replace("输入（Input）：", "输入：")] };
+    const responses = [plan, badOpening, { priorKnowledge: badOpening.priorKnowledge }, { priorKnowledge: opening.priorKnowledge }, explanation, closing];
+    const calls: string[] = [];
+    await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: responses.shift(), provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["plan", "opening", "opening_repair", "opening_repair", "explanation", "consolidation"]);
   });
   it("applies only the ticketed evidence when a model also rewrites protected claims", () => {
     const original = { ...explanation, coverageEvidence: [
@@ -289,6 +320,20 @@ describe("planned teaching", () => {
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
     expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation"]);
+  });
+  it("makes a second bounded plan repair when an objective still has no question", async () => {
+    const { input, plan } = fixture();
+    const broken = structuredClone(plan);
+    broken.objectives.push({ id: "second", startingPoint: "已有输出", outcome: "检查另一种条件", stepIds: ["s"] });
+    const corrected = structuredClone(broken);
+    corrected.questions[3]!.objectiveId = "second";
+    const calls: string[] = [];
+    const outputs = [broken, broken, corrected, opening, explanation, closing];
+    await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: outputs.shift(), provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation"]);
   });
   it("uses one provider and bills all four actual calls without audit requests", async () => {
     const { input, plan } = fixture();

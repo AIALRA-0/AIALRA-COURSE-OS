@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { formatMisconception, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
-import { assignUnplacedPlanFacts, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
+import { assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -149,9 +149,9 @@ export async function writePlannedLesson(input: ModelRouterInput,
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
   let plan = resume?.plan ?? await run(planRequest) as TeachingPlan;
   let planIssues = validateTeachingPlan(plan, blueprint);
-  if (planIssues.length) {
+  for (let round = 0; round < 2 && planIssues.length; round++) {
     plan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
-      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置" }) }) as TeachingPlan;
+      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as TeachingPlan;
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
@@ -182,6 +182,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       ? structuredClone(pendingContent)
       : await run(request) as Partial<TeachingPackage>;
     if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+    if (index === 1) partial = bindExactCoverageLines(partial);
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
@@ -199,8 +200,15 @@ export async function writePlannedLesson(input: ModelRouterInput,
             facts: ticket.field === "coverageEvidence" ? plan.facts : undefined,
             precedingSections: ticket.field === "coverageEvidence" ? undefined : teachingSectionMemory(content) }),
           schema: partialSchema([ticket.field]), maxOutputTokens: ticket.field === "fullExplanationMarkdown" ? 9000 : 3500 }) as Partial<TeachingPackage>;
-        partial = applyGenerationRepair(partial, ticket, patch);
+        try {
+          partial = applyGenerationRepair(partial, ticket, patch);
+        } catch (error) {
+          // A model can return the unchanged field. Keep the last valid checkpoint
+          // and let the next bounded round diagnose the real remaining issue.
+          if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
+        }
         if (index === 2 && partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+        if (index === 1) partial = bindExactCoverageLines(partial);
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
       issues = schemaIssues(partial, schema);
