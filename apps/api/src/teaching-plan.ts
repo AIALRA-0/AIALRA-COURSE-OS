@@ -203,12 +203,17 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
       sourceLine === line || sourceLine.replace(/^[-*+]\s+/u, "") === line ||
       punctuationKey(sourceLine) === punctuationKey(line) ||
       punctuationKey(sourceLine.replace(/^[-*+]\s+/u, "")) === punctuationKey(line)))[0];
-    const excerpt = matched ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
+    const contained = matched ? undefined : candidateLines.flatMap(line => sourceLines.filter(sourceLine => {
+      const bare = sourceLine.replace(/^[-*+]\s+/u, "");
+      return (bare.length >= Math.max(24, Math.ceil(line.length * 0.4)) && line.includes(bare))
+        || (bare.startsWith("$") && bare.length >= 16 && line.startsWith(bare));
+    }))[0];
+    const excerpt = matched || contained ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
       .filter(span => span.length >= Math.max(24, Math.ceil(line.length * 0.4))))
       .sort((left, right) => right.length - left.length)[0];
-    if (!matched && !excerpt) return evidence;
+    if (!matched && !contained && !excerpt) return evidence;
     changed = true;
-    return { ...evidence, explanation: matched || excerpt! };
+    return { ...evidence, explanation: matched || contained || excerpt! };
   });
   return changed ? { ...content, coverageEvidence } : content;
 }

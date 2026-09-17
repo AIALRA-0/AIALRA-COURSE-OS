@@ -3,7 +3,7 @@ import { validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation } from "./planned-teaching.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -76,6 +76,19 @@ it("rebinds an exact surviving excerpt after a scoped explanation repair", () =>
   expect(repaired).toContain(result.coverageEvidence[0]!.explanation);
   expect(result.coverageEvidence[0]!.explanation).toContain("训练过程中会被不断调整");
 });
+it("binds a shortened source definition to the actual explained bullet", () => {
+  const actual = "- $\\theta$：人工智能模型的可学习参数";
+  const content = bindExactCoverageLines({ fullExplanationMarkdown: actual, coverageEvidence: [
+    { atomId: "a", coveredFields: ["observation"], explanation: "$\\theta$：人工智能模型的可学习参数（learnable parameters of the AI model）" }
+  ] });
+  expect(content.coverageEvidence[0]?.explanation).toBe(actual);
+});
+it("turns a bare source quote label into a sentence without losing the quote", () => {
+  const value = "原文：\n> A quoted source\n\n页面对这个目标的说明是：\n> More evidence";
+  const normalized = normalizePlannedSourceIntroductions({ fullExplanationMarkdown: value });
+  expect(normalized.fullExplanationMarkdown).toContain("课件原文如下：\n> A quoted source");
+  expect(plannedFormatIssues(normalized)).not.toContain("TEACHING_FORMAT:fullExplanationMarkdown:WRITING_COLON_PSEUDO_HEADING");
+});
 it("normalizes question punctuation without changing answer-option equality", () => {
   const content = normalizePlannedQuestionPunctuation({ questions: [{ kind: "multiple_choice" as const,
     prompt: "应该选哪一个。", options: ["正确选项。", "错误选项。", "另一选项。", "最后一项。"],
@@ -83,6 +96,13 @@ it("normalizes question punctuation without changing answer-option equality", ()
   expect(content.questions?.[0]?.expectedAnswer).toBe("正确选项");
   expect(content.questions?.[0]?.options).toContain(content.questions?.[0]?.expectedAnswer);
   expect(plannedFormatIssues(content)).not.toContain("TEACHING_FORMAT:questions:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
+});
+it("splits a long comprehension answer into readable paragraphs before checking it", () => {
+  const sentence = "状态说明智能体当前能看到什么，并列出网表、节点、边和画布的必要信息；";
+  const content = normalizePlannedQuestionPunctuation({ questions: [{ kind: "comprehension" as const,
+    prompt: "本页状态包含什么", options: [], expectedAnswer: sentence.repeat(6), explanation: "逐项回到来源检查" }] });
+  expect(content.questions?.[0]?.expectedAnswer).toContain("\n\n");
+  expect(plannedFormatIssues(content)).not.toContain("TEACHING_PRESENTATION:questions:PROSE_PACKED");
 });
 it("realigns a question label only when its existing step tests an uncovered objective", () => {
   const plan: TeachingPlan = { problem: "比较结果", knownStartingPoint: "已有输入", scopeBoundary: "只看本页", facts: [], prerequisites: [],

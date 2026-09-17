@@ -1,5 +1,5 @@
 import { validateTeachingPresentation } from "./presentation.js";
-export { teachingCompositionContract, formatMisconception, validateTeachingPresentation } from "./presentation.js";
+export { teachingCompositionContract, formatMisconception, normalizePackedTeachingProse, validateTeachingPresentation } from "./presentation.js";
 import katex from "katex";
 import type { CoverageClaim, CoverageRequirement, MathExpression, PageLesson, PseudoCodeLine } from "@course-os/contracts";
 
@@ -787,7 +787,7 @@ export function validateHumanReadableChinese(markdown: string): string[] {
 }
 
 function isNaturalListIntroduction(line: string): boolean {
-  return /^(?:本页|这里|下面|以下|需要|请|先|再|核对|检查|分别|可以|包括|例如|要回答|它们分别|公式从)[^\n]{2,70}[：:]\s*$/u.test(line.trim());
+  return /^(?:(?:本页|这里|下面|以下|需要|请|先|再|核对|检查|分别|可以|包括|例如|要回答|它们分别|公式从)[^\n]{2,70}|[^\n]{4,70}(?:是|如下|包括|分为|分成|三步))[：:]\s*$/u.test(line.trim());
 }
 
 /** Apply only lossless punctuation repairs outside code, quotes, URLs and math. */

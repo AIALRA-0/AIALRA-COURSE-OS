@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { formatMisconception, normalizeHumanReadableChineseMarkdown, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
@@ -51,12 +51,19 @@ const partialSchema = (fields: readonly string[]) => ({ type: "object", properti
 /** Mechanical punctuation only; keep the answer text and matching options intact. */
 export function normalizePlannedQuestionPunctuation<T extends Partial<TeachingPackage>>(content: T): T {
   if (!content.questions) return content;
+  const normalizeAnswer = (value: string) => normalizePackedTeachingProse(normalizeHumanReadableChineseMarkdown(value));
   return { ...content, questions: content.questions.map(question => ({ ...question,
-    prompt: normalizeHumanReadableChineseMarkdown(question.prompt),
+    prompt: normalizeAnswer(question.prompt),
     options: question.options?.map(normalizeHumanReadableChineseMarkdown),
-    expectedAnswer: normalizeHumanReadableChineseMarkdown(question.expectedAnswer),
-    explanation: normalizeHumanReadableChineseMarkdown(question.explanation)
+    expectedAnswer: question.kind === "comprehension" ? normalizeAnswer(question.expectedAnswer)
+      : normalizeHumanReadableChineseMarkdown(question.expectedAnswer),
+    explanation: normalizeAnswer(question.explanation)
   })) };
+}
+
+export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPackage>>(content: T): T {
+  if (!content.fullExplanationMarkdown) return content;
+  return { ...content, fullExplanationMarkdown: content.fullExplanationMarkdown.replace(/^([ \t]*)原文[：:][ \t]*$/gmu, "$1课件原文如下：") };
 }
 
 /** Check the actual phase output while its own fields can still be repaired. */
@@ -200,7 +207,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       partial = normalizePlannedQuestionPunctuation(partial);
       if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
     }
-    if (index === 1) partial = bindExactCoverageLines(partial);
+    if (index === 1) partial = bindExactCoverageLines(normalizePlannedSourceIntroductions(partial));
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
@@ -229,7 +236,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
           partial = normalizePlannedQuestionPunctuation(partial);
           if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
         }
-        if (index === 1) partial = bindExactCoverageLines(partial);
+        if (index === 1) partial = bindExactCoverageLines(normalizePlannedSourceIntroductions(partial));
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
       issues = schemaIssues(partial, schema);

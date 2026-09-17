@@ -24,6 +24,30 @@ export function formatMisconception(value: string): string {
   }).join("\n\n");
 }
 
+/** Split a long generated sentence only at real Chinese sentence boundaries. */
+export function normalizePackedTeachingProse(markdown: string): string {
+  let inFence = false;
+  return markdown.split(/\r?\n/u).flatMap((line) => {
+    if (/^\s*(?:```|~~~)/u.test(line)) { inFence = !inFence; return [line]; }
+    if (inFence || /^\s*(?:[|>#]|[-*+]\s|\d+[.)]\s|\$\$)/u.test(line)
+      || (line.match(/\p{Script=Han}/gu)?.length ?? 0) <= 160) return [line];
+    const parts = line.split(/(?<=[。！？；])/u).map(part => part.trim()).filter(Boolean);
+    if (parts.length < 2) return [line];
+    const paragraphs: string[] = [];
+    let current = "";
+    for (const part of parts) {
+      const next = current ? `${current}${part}` : part;
+      if (current && (next.match(/\p{Script=Han}/gu)?.length ?? 0) > 125) {
+        paragraphs.push(current);
+        current = part;
+      } else current = next;
+    }
+    if (current) paragraphs.push(current);
+    return paragraphs.map(paragraph => paragraph.endsWith("；") ? paragraph.slice(0, -1) : paragraph)
+      .flatMap((paragraph, index) => index === 0 ? [paragraph] : ["", paragraph]);
+  }).join("\n");
+}
+
 export interface PresentationInput {
   chapterBridgeMarkdown?: string;
   learningObjectives: string[];

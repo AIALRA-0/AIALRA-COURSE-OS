@@ -46,7 +46,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3411,29 +3411,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
  * Protected Markdown objects, tables, headings and list rows are left intact.
  */
 export function normalizePackedTeachingProse(markdown: string): string {
-  let inFence = false;
-  return markdown.split(/\r?\n/u).flatMap((line) => {
-    if (/^\s*(?:```|~~~)/u.test(line)) {
-      inFence = !inFence;
-      return [line];
-    }
-    if (inFence || /^\s*(?:[|>#]|[-*+]\s|\d+[.)]\s|\$\$)/u.test(line)
-      || (line.match(/\p{Script=Han}/gu)?.length ?? 0) <= 160) return [line];
-    const parts = line.split(/(?<=[。！？；])/u).map((part) => part.trim()).filter(Boolean);
-    if (parts.length < 2) return [line];
-    const paragraphs: string[] = [];
-    let current = "";
-    for (const part of parts) {
-      const next = current ? `${current}${part}` : part;
-      if (current && (next.match(/\p{Script=Han}/gu)?.length ?? 0) > 125) {
-        paragraphs.push(current);
-        current = part;
-      } else current = next;
-    }
-    if (current) paragraphs.push(current);
-    return paragraphs.map((paragraph) => paragraph.endsWith("；") ? paragraph.slice(0, -1) : paragraph)
-      .flatMap((paragraph, index) => index === 0 ? [paragraph] : ["", paragraph]);
-  }).join("\n");
+  return normalizeSharedPackedProse(markdown);
 }
 
 function isTeachingLayoutCommentaryLine(line: string): boolean {

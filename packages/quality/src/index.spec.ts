@@ -784,6 +784,8 @@ describe("learner-facing teaching narrative", () => {
       .not.toContain("WRITING_COLON_PSEUDO_HEADING");
     expect(validateHumanReadableChinese("公式从内往外依次执行三步：\n1. 读取输入\n2. 计算结果"))
       .not.toContain("WRITING_COLON_PSEUDO_HEADING");
+    expect(validateHumanReadableChinese("页面对这个目标的进一步说明是：\n> 原文内容"))
+      .not.toContain("WRITING_COLON_PSEUDO_HEADING");
     expect(validateHumanReadableChinese("它旁边给出的回报是一段表达式：$r_T=-x$\n下一句解释这项回报"))
       .not.toContain("WRITING_COLON_PSEUDO_HEADING");
     expect(validateHumanReadableChinese("原图的标签是：`Force-directed method`\n这里解释标签"))
