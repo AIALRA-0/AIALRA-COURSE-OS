@@ -1408,7 +1408,9 @@ describe("Course OS API", () => {
     const providers = await request(app).get("/api/v1/model-providers").expect(200);
     expect(JSON.stringify(providers.body)).not.toContain("synthetic-example-deepseek-token");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [{ id: "deepseek-v4-flash" }] }));
-    expect((await request(app).post("/api/v1/model-providers/deepseek:test").expect(200)).body.health.state).toBe("connected");
+    expect((await request(app).post("/api/v1/model-providers/deepseek:test").expect(200)).body).toMatchObject({
+      credential: { configured: true, maskedValue: "••••oken" }, health: { state: "connected" }
+    });
   });
 
   it("keeps native model and search routing inside Course OS instead of the ReadWeave adapter", async () => {
@@ -1442,7 +1444,13 @@ describe("Course OS API", () => {
     expect(policy.body.rules).toEqual([{ kind: "terminology", providerId: "openalex", enabled: true }]);
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ results: [] }));
-    expect((await request(app).post("/api/v1/search-providers/openalex:test").expect(200)).body.health.state).toBe("connected");
+    expect((await request(app).post("/api/v1/search-providers/openalex:test").expect(200)).body).toMatchObject({
+      credential: { configured: false }, health: { state: "connected" }
+    });
+    vi.mocked(globalThis.fetch).mockResolvedValue(Response.json({ results: [] }));
+    expect((await request(app).post("/api/v1/search-providers/tinyfish:test").expect(200)).body).toMatchObject({
+      credential: { configured: true, maskedValue: "••••" }, health: { state: "connected" }
+    });
     expect(readweave.listModelProviders).not.toHaveBeenCalled();
     expect(readweave.getModelRoutePolicy).not.toHaveBeenCalled();
   });

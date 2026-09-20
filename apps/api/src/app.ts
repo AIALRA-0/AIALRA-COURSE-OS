@@ -440,7 +440,8 @@ export function createApp(dependencies: AppDependencies): Express {
       const health = !provider.baseUrl || !model
         ? { providerId, state: "unconfigured" as const, checkedAt: new Date().toISOString(), message: "供应商没有可测试的接口或模型" }
         : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection, providerId === "kuafu");
-      response.json({ ...provider, health });
+      const [resolvedProvider] = await withVaultCredentialStatus([provider], "model-provider", credentialVault);
+      response.json({ ...resolvedProvider, health });
     }
     catch (error) { next(error); }
   });
@@ -544,7 +545,8 @@ export function createApp(dependencies: AppDependencies): Express {
       const apiKey = await credentialVault.get(`search-provider:${providerId}`);
       const connection = searchConnection(provider, apiKey);
       if (!connection) return sendError(request, response, 422, "SEARCH_PROVIDER_UNSUPPORTED", "这个搜索供应商尚未接入执行器", false);
-      response.json({ ...provider, health: await probeSearchConnection(connection) });
+      const [resolvedProvider] = await withVaultCredentialStatus([provider], "search-provider", credentialVault);
+      response.json({ ...resolvedProvider, health: await probeSearchConnection(connection) });
     } catch (error) { next(error); }
   });
 
