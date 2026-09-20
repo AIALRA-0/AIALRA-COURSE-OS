@@ -1,0 +1,150 @@
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_aee57705b70a2f 37
+  s_e8850ef125fb32::t_b37ede100125a4 158,160-175
+  s_e8850ef125fb32::t_bbf91fcc0a5f09 26-27,36,159
+evals/teaching-fast.example.json
+  s_e8850ef125fb32::t_a990f73bf8af1e 1-10
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_63e7c9db31aa59 4,33,169-170,191-193
+  s_e8850ef125fb32::t_2dcc31ae1bc9ef 166
+  s_e8850ef125fb32::t_ed26a88cce1b2d 200-202,206
+  s_e8850ef125fb32::t_e9fd0d07128655 207-208,210
+apps/api/src/search-providers.spec.ts
+  s_e8850ef125fb32::t_ed26a88cce1b2d 42-53
+  s_e8850ef125fb32::t_e9fd0d07128655 17
+  s_e8850ef125fb32::t_44a14245db689c 1-16,18-41,54
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_65080cdbb6fa8f 1122-1138
+  s_e8850ef125fb32::t_5ed54c79d79820 228-240
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_056827de5bfe50 813-814,832-840,934-939
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_63e7c9db31aa59 8,54
+  s_e8850ef125fb32::t_bdb3b0a9004ec6 715,894,1178
+  s_e8850ef125fb32::t_6c9667b0f2ae03 611,1085,1360,1367-1370,1381
+  s_e8850ef125fb32::t_65080cdbb6fa8f 542,547,556-557,559-576,578
+  s_e8850ef125fb32::t_22a26fe6602541 558
+apps/api/src/teaching-plan.ts
+  s_e8850ef125fb32::t_e9fd0d07128655 32-33
+  s_e8850ef125fb32::t_2dcc31ae1bc9ef 3,23,47-48
+  s_e8850ef125fb32::t_63e7c9db31aa59 15-22,24-31,38,46,49,110-115
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_e9fd0d07128655 181
+  s_e8850ef125fb32::t_b0cc8c5e573b45 178-180,182-190,199-207
+  s_e8850ef125fb32::t_ed26a88cce1b2d 194,196-197
+  s_e8850ef125fb32::t_2a884ba0f90ddf 191-193,195,198
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_6f8d44adcf4e3f 776-784,798-799,823-848,851-886
+  s_e8850ef125fb32::t_3c2d410dc56ec1 16,805-806,849-850
+apps/web/src/api.spec.ts
+  s_e8850ef125fb32::t_e16e92ab887a10 29
+  s_e8850ef125fb32::t_1169414777d0a2 15,19
+  s_e8850ef125fb32::t_1b6d63d7687876 1-14,16-18,20-28,30-31
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_da1c71c491c9c7 2-15,17-18
+  s_e8850ef125fb32::t_6b0c37884d85cf 16
+  s_e8850ef125fb32::t_c7f014d5b22664 1,817,860
+packages/quality/src/presentation.spec.ts
+  s_e8850ef125fb32::t_3529e401fd58d0 86
+  s_e8850ef125fb32::t_7a19ec7d3cc634 2-12,14-16,83-85,87-99,101-104,106-136
+  s_e8850ef125fb32::t_05773ae7d0f505 13,100,105
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_7805fdcc8b4d3a 1414-1438
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_c379031068cdad 116-118,137-140,222,228-230
+  s_e8850ef125fb32::t_044cd9ac457f8a 282,316-317
+  s_e8850ef125fb32::t_70d6ba21ca5cb6 82
+  s_e8850ef125fb32::t_c7afd06ae6517b 69-81,83-115,119-136,141-178,180-218,221,224-227,231-237,247-249,251,256-257
+  s_e8850ef125fb32::t_9818e1d2c4ad65 220,223,238-246,252-255
+  s_e8850ef125fb32::t_9dc9656b6c06c4 179,250
+  s_e8850ef125fb32::t_b2f9a5e7dffb23 314-315
+  s_e8850ef125fb32::t_8b43107935e545 68
+  s_e8850ef125fb32::t_b5da98a7f1038b 219
+apps/api/src/pricing.ts
+  s_e8850ef125fb32::t_c6523324d5c5b1 42
+  s_e8850ef125fb32::t_f78ec8b32625a9 1,19,33-36,39-41,43-45,58,99,104-115
+  s_f0dc1701fc0031::t_2313747988134f 116-117
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_65080cdbb6fa8f 422
+  s_e8850ef125fb32::t_ef0a0a6b68eb8a 2307-2309
+  s_e8850ef125fb32::t_2dcc31ae1bc9ef 2349-2353,2356-2361,2702,2705,2708,2713-2714,2729
+  s_e8850ef125fb32::t_20739a76771a31 31,2323-2348,2354-2355
+  s_e8850ef125fb32::t_a24ae2c19b7206 360,378-388,398-408,416,421,429,434,442-450
+  s_e8850ef125fb32::t_7af01bb452e0bd 2674,2706,2722,2728,2730
+  s_e8850ef125fb32::t_3155af2dc36a97 2723
+  s_e8850ef125fb32::t_0776cb5d214716 60,2715-2721
+  s_e8850ef125fb32::t_ed26a88cce1b2d 2707,2709-2712,2724-2727
+  s_e8850ef125fb32::t_9db672d38c2f19 3586-3597
+  s_e8850ef125fb32::t_99498cce4dde94 2362,3766-3789
+  s_e8850ef125fb32::t_4fb095b7acc4fa 30,32,65,451-454,456-481,493-499,501-502,514-519,521-529,531-542
+  s_e8850ef125fb32::t_d9548aeadbe94f 455,482-492,500,503-513,520,530,543-551
+  s_e8850ef125fb32::t_e47f5418354c2b 2300-2301,2313-2314
+  s_e8850ef125fb32::t_ade4bf7b38bf2e 2363
+package.json
+  s_e8850ef125fb32::t_a990f73bf8af1e 22
+apps/api/src/server.ts
+  s_e8850ef125fb32::t_ed26a88cce1b2d 6,38-41
+scripts/eval-teaching-fast.spec.ts
+  s_e8850ef125fb32::t_a990f73bf8af1e 1-38,46-49,51-56
+  s_e8850ef125fb32::t_1dc04a183c74c2 39-41,50
+  s_e8850ef125fb32::t_bf5abfd08592bf 42-45
+scripts/lib/eval-teaching-fast.ts
+  s_e8850ef125fb32::t_bf5abfd08592bf 416-423
+  s_e8850ef125fb32::t_a990f73bf8af1e 1-119,127-271,277-293,313-314,316-341,343-384,386-387,390-415,424-493
+  s_e8850ef125fb32::t_24fadef6d25602 120-126,294-312,315,342,385,388-389
+  s_e8850ef125fb32::t_7466b6d6b14ad9 272-276
+apps/api/src/search-providers.ts
+  s_e8850ef125fb32::t_9be8bfaca910c1 36,42
+  s_e8850ef125fb32::t_290dcc60fb3ac0 1,28-35,37-41,43-56
+  s_e8850ef125fb32::t_e9fd0d07128655 156
+  s_e8850ef125fb32::t_44a14245db689c 2-20,23-27,69-92,94-105,116-155,157,159,161-178
+  s_e8850ef125fb32::t_ed26a88cce1b2d 21-22,93,106-115,158,160
+  s_e8850ef125fb32::t_0635eea340086b 57-68
+apps/api/src/pricing.spec.ts
+  s_e8850ef125fb32::t_c6523324d5c5b1 28
+  s_e8850ef125fb32::t_daf09eb3038ecf 2,20-27,29-30
+  s_f0dc1701fc0031::t_92280d8906b55b 31
+docs/evaluation.md
+  s_e8850ef125fb32::t_a990f73bf8af1e 1-71
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_7d686f1b2e9ca4 3,8,20-21,39,176-179
+  s_e8850ef125fb32::t_9db672d38c2f19 38,40
+  s_e8850ef125fb32::t_290dcc60fb3ac0 7,22-23,41,180-183
+scripts/eval-teaching-fast.ts
+  s_e8850ef125fb32::t_a990f73bf8af1e 1-28,30-37
+  s_e8850ef125fb32::t_61964d4ebb2aec 29
+apps/api/src/provider-settings.ts
+  s_e8850ef125fb32::t_7d686f1b2e9ca4 1-42
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_f3162794569563 749-755,757-769,771-774,776-778,780-783,785-786,788-792,795-799,804-808
+  s_e8850ef125fb32::t_5d6c77b372f5a9 3
+  s_e8850ef125fb32::t_59e9ca217e9395 591,598-601,616-622
+  s_e8850ef125fb32::t_019f52df378e19 682-697,699-721,724-725,727
+  s_e8850ef125fb32::t_daa22542151eb0 787
+  s_e8850ef125fb32::t_77627f05b7f3bf 737
+  s_e8850ef125fb32::t_449239118b6fdf 698,722-723,738,756,770,775,779,784,793-794,800-803
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7825e0360e2e9526be99b868b9b1f5a742c5ad55",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f0dc1701fc0031": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc521-e36b-7fd3-8f60-ebd14a6657c9",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
