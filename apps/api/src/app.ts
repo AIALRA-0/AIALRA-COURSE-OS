@@ -76,6 +76,23 @@ export interface AppDependencies {
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
 
+/** Reconcile legacy metadata with Course OS's own encrypted vault without
+ * reading or exposing the credential value. */
+async function withVaultCredentialStatus<T extends ModelProviderConfig | SearchProviderConfig>(
+  providers: T[], prefix: "model-provider" | "search-provider", vault: SecretVault
+): Promise<T[]> {
+  return Promise.all(providers.map(async provider => {
+    const configured = await vault.has(`${prefix}:${provider.id}`);
+    if (!configured || provider.credential.configured) return structuredClone(provider);
+    return {
+      ...structuredClone(provider),
+      credential: { ...provider.credential, configured: true, maskedValue: provider.credential.maskedValue || "••••" },
+      vault: { backend: "course_os_vault" as const, state: "configured" as const,
+        secretRef: `${prefix}:${provider.id}`, maskedValue: provider.vault?.maskedValue || "••••" }
+    };
+  }));
+}
+
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
   const credentialVault = dependencies.credentialVault ?? new SecretVault(join(dependencies.dataDir, "settings-secrets.json"));
@@ -357,7 +374,10 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/model-providers", async (_request, response, next) => {
-    try { response.json(withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders)); }
+    try {
+      const providers = withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders);
+      response.json(await withVaultCredentialStatus(providers, "model-provider", credentialVault));
+    }
     catch (error) { next(error); }
   });
 
@@ -452,7 +472,9 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/search-providers", async (_request, response, next) => {
-    try { response.json((await dependencies.operations.read()).searchProviders); }
+    try {
+      response.json(await withVaultCredentialStatus((await dependencies.operations.read()).searchProviders, "search-provider", credentialVault));
+    }
     catch (error) { next(error); }
   });
 

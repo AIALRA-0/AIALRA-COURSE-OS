@@ -1419,11 +1419,22 @@ describe("Course OS API", () => {
     const dependencies = createDefaultDependencies(root, readweave);
     const app = createApp(dependencies);
 
+    await dependencies.credentialVault!.set("model-provider:deepseek", "synthetic-existing-deepseek-token");
+    await dependencies.credentialVault!.set("search-provider:tinyfish", "synthetic-existing-search-token");
+
     const models = await request(app).get("/api/v1/model-providers").expect(200);
     expect(models.body.find((provider: { id: string }) => provider.id === "kuafu")).toMatchObject({ enabled: false, baseUrl: "https://api.kuafushe.cc/v1" });
+    expect(models.body.find((provider: { id: string }) => provider.id === "deepseek")).toMatchObject({
+      credential: { configured: true, maskedValue: "••••" }, vault: { backend: "course_os_vault", state: "configured" }
+    });
+    expect(JSON.stringify(models.body)).not.toContain("synthetic-existing-deepseek-token");
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
     expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel"]);
+    expect(searches.body.find((provider: { id: string }) => provider.id === "tinyfish")).toMatchObject({
+      credential: { configured: true, maskedValue: "••••" }, vault: { backend: "course_os_vault", state: "configured" }
+    });
+    expect(JSON.stringify(searches.body)).not.toContain("synthetic-existing-search-token");
     await request(app).patch("/api/v1/search-providers/openalex").set("Idempotency-Key", "native-search-config")
       .send({ enabled: true, maxResults: 6 }).expect(200);
     const policy = await request(app).put("/api/v1/search-route-policy").set("Idempotency-Key", "native-search-policy")
