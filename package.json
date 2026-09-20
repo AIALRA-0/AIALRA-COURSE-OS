@@ -19,6 +19,7 @@
     "verify:routes": "tsx scripts/verify-routes.ts",
     "verify:public": "tsx scripts/verify-public.ts",
     "eval:teaching": "tsx scripts/eval-teaching.ts",
+    "eval:teaching:fast": "tsx scripts/eval-teaching-fast.ts",
     "promote:readweave": "tsx scripts/promote-readweave-state.ts",
     "migrate:ee680-v4": "tsx scripts/migrate-ee680-v4.ts",
     "migrate:pseudocode-v5": "tsx scripts/migrate-pseudocode-v5.ts",

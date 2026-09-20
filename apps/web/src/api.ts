@@ -23,6 +23,8 @@ import type {
   WorkspaceSettings,
   ModelProviderConfig,
   ModelRoutePolicy,
+  SearchProviderConfig,
+  SearchRoutePolicy,
   ReviewMap,
   ReviewPlan,
   ReviewSession,
@@ -30,6 +32,8 @@ import type {
   WritingPolicyCurrent,
   GenerationHarnessCurrent
 } from "@course-os/contracts";
+
+export type { SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const WORKSPACE_ID = "personal";
@@ -151,6 +155,24 @@ export const api = {
     body: JSON.stringify({ secret })
   }),
   testProvider: (providerId: string) => request<ModelProviderConfig>(`/api/v1/model-providers/${encodeURIComponent(providerId)}:test`, { method: "POST" }),
+  searchProviders: () => request<SearchProviderConfig[]>("/api/v1/search-providers"),
+  updateSearchProvider: (providerId: string, patch: { baseUrl?: string; endpoint?: string; enabled?: boolean; maxResults?: number }) => request<SearchProviderConfig>(`/api/v1/search-providers/${encodeURIComponent(providerId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(patch)
+  }),
+  saveSearchProviderCredential: (providerId: string, secret: string) => request<Pick<SearchProviderConfig, "id" | "credential">>(`/api/v1/search-providers/${encodeURIComponent(providerId)}/credential`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({ secret })
+  }),
+  testSearchProvider: (providerId: string) => request<SearchProviderConfig>(`/api/v1/search-providers/${encodeURIComponent(providerId)}:test`, { method: "POST" }),
+  searchRoutePolicy: () => request<SearchRoutePolicy>("/api/v1/search-route-policy"),
+  saveSearchRoutePolicy: (policy: SearchRoutePolicy) => request<SearchRoutePolicy>("/api/v1/search-route-policy", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(policy)
+  }),
   modelRoutePolicy: () => request<ModelRoutePolicy>("/api/v1/model-route-policy"),
   saveModelRoutePolicy: (policy: ModelRoutePolicy) => request<ModelRoutePolicy>("/api/v1/model-route-policy", {
     method: "PUT",

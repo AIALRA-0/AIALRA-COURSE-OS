@@ -175,6 +175,36 @@ describe("planned teaching", () => {
         : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
     });
   });
+  it("searches only declared evidence gaps and carries normalized evidence into writing", async () => {
+    const { input, plan } = fixture("外部方法");
+    plan.researchQueries = [{ id: "rq1", atomId: "a", query: "official method terminology", reason: "课件使用方法名但没有给出正式名称来源" }];
+    const searchEvidence = vi.fn(async () => [{ queryId: "rq1", provider: "openalex", title: "Official terminology", url: "https://example.test/source", snippet: "Unverified search excerpt", status: "candidate" as const }]);
+    input.searchEvidence = searchEvidence;
+    const writingPrompts: Array<Record<string, unknown>> = [];
+    await writePlannedLesson(input, async request => {
+      if (request.phase !== "plan") writingPrompts.push(JSON.parse(request.prompt) as Record<string, unknown>);
+      return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+    });
+    expect(searchEvidence).toHaveBeenCalledOnce();
+    expect(searchEvidence).toHaveBeenCalledWith(plan.researchQueries);
+    const explanationPrompts = writingPrompts.filter(prompt => Array.isArray(prompt.fields) && prompt.fields.includes("fullExplanationMarkdown"));
+    const otherPrompts = writingPrompts.filter(prompt => !Array.isArray(prompt.fields) || !prompt.fields.includes("fullExplanationMarkdown"));
+    expect(explanationPrompts
+      .every(prompt => JSON.stringify(prompt.externalEvidence).includes("Unverified search excerpt"))).toBe(true);
+    expect(explanationPrompts
+      .every(prompt => String(prompt.externalEvidenceRule).includes("候选外部背景")
+        && String(prompt.externalEvidenceRule).includes("不得覆盖 SOURCE"))).toBe(true);
+    expect(otherPrompts.every(prompt => prompt.externalEvidence === undefined)).toBe(true);
+  });
+  it("does not call search when the teaching plan has no external evidence gap", async () => {
+    const { input, plan } = fixture("来源充分");
+    const searchEvidence = vi.fn(async () => []);
+    input.searchEvidence = searchEvidence;
+    await writePlannedLesson(input, async request => ({ content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+      : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage }));
+    expect(searchEvidence).not.toHaveBeenCalled();
+  });
   it("places a source fact omitted from step assignments without changing its text", () => {
     const { input, plan } = fixture();
     plan.facts.push({ id: "f11", atomId: "a", observation: "另一个来源事实", qualification: "保留原条件" });

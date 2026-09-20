@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { formatMisconception, validateTeachingPresentation, type PresentationInput } from "./presentation.js";
+import {
+  displayFormulaMarker,
+  formatMisconception,
+  normalizeBilingualTermShape,
+  normalizeChineseProsePunctuation,
+  normalizeColonIntroducedLineBreaks,
+  normalizeDisplayFormulaParagraphs,
+  normalizeListIndentation,
+  normalizePresentationMarkdown,
+  normalizeThreeLevelHeadings,
+  validateDisplayFormulaAlignment,
+  validatePresentationFormatting,
+  validateTeachingPresentation,
+  type PresentationInput
+} from "./presentation.js";
 import { hasUnpairedEnglishPhrase, validateTeachingNarrative } from "./index.js";
 
 const base: PresentationInput = {
@@ -65,5 +79,59 @@ describe("composition regressions independent of a course or page number", () =>
       .toEqual(expect.arrayContaining(["TEACHING_PRESENTATION:fullExplanationMarkdown:STANDALONE_MATH_INLINE", "TEACHING_PRESENTATION:fullExplanationMarkdown:SYMBOL_DEFINITIONS_UNLISTED"]));
     const structured = "## 目标函数\n\n$$\nJ(\\theta,G)=\\frac{1}{K}\\sum_{g\\in G}E_g\n$$\n\n- $J$：目标\n- $K$：数量\n- $G$：集合";
     expect(validateTeachingPresentation({ ...base, fullExplanationMarkdown: structured })).toEqual([]);
+  });
+
+  it("repairs prose punctuation while preserving code, formulas, URLs and quoted source", () => {
+    const source = "正文第一句。正文第二句。\n\n`原样。` 与 $x_{。}=1$ 以及 https://example.org/a。\n> 原文句号。";
+    expect(normalizeChineseProsePunctuation(source)).toBe("正文第一句；正文第二句\n\n`原样。` 与 $x_{。}=1$ 以及 https://example.org/a\n> 原文句号。");
+  });
+
+  it("breaks only structural colon content and keeps term and misconception labels intact", () => {
+    expect(normalizeColonIntroducedLineBreaks("操作：执行检查")).toBe("操作：\n执行检查");
+    expect(normalizeColonIntroducedLineBreaks("步骤：- 读取输入")).toBe("步骤：\n- 读取输入");
+    expect(normalizeColonIntroducedLineBreaks("概率（Probability）：随机变量按概率加权的平均结果")).toBe("概率（Probability）：随机变量按概率加权的平均结果");
+    expect(normalizeColonIntroducedLineBreaks("**错因：** 把差值当成平方")).toBe("**错因：** 把差值当成平方");
+  });
+
+  it("normalizes nested list indentation without changing list text", () => {
+    expect(normalizeListIndentation("- 一级\n    - 二级\n        - 三级\n  - 同级二级")).toBe("- 一级\n  - 二级\n    - 三级\n  - 同级二级");
+    expect(normalizeListIndentation("```text\n    - 原样代码\n```\n| - 原样表格 |"))
+      .toBe("```text\n    - 原样代码\n```\n| - 原样表格 |");
+    expect(normalizeListIndentation("说明\n\n    - 缩进代码")).toBe("说明\n\n    - 缩进代码");
+  });
+
+  it("caps headings at three levels and preserves headings in code fences", () => {
+    expect(normalizeThreeLevelHeadings("# 一级\n## 二级\n#### 过深\n```md\n#### 原样代码\n```")).toBe("# 一级\n## 二级\n### 过深\n```md\n#### 原样代码\n```");
+    expect(validatePresentationFormatting("# 一级\n### 跳级")).toContain("TEACHING_PRESENTATION:HEADING_LEVEL_JUMP");
+  });
+
+  it("normalizes bilingual term shape and title case but preserves official names", () => {
+    expect(normalizeBilingualTermShape("图神经网络 (graph neural network)、公司（eBay）和公式 $x(graph)$"))
+      .toBe("图神经网络（Graph Neural Network）、公司（eBay）和公式 $x(graph)$");
+  });
+
+  it("centers only pure display formulas when metadata or the supported marker authorizes it", () => {
+    const source = "$$\nx = 1\n$$\n\n这句话包含公式 $x$，但仍然是正文";
+    const centered = normalizeDisplayFormulaParagraphs(source, { centeredParagraphs: [0] });
+    expect(centered.startsWith(`${displayFormulaMarker}\n$$`)).toBe(true);
+    expect(validateDisplayFormulaAlignment(centered)).toEqual([]);
+    const invalid = `${displayFormulaMarker}\n这句话包含公式 $x$，但仍然是正文`;
+    expect(validateDisplayFormulaAlignment(invalid)).toEqual(["TEACHING_PRESENTATION:DISPLAY_FORMULA_PROSE_CENTERED"]);
+    expect(normalizeDisplayFormulaParagraphs(invalid)).toBe("这句话包含公式 $x$，但仍然是正文");
+  });
+
+  it("requires exact bold misconception role labels", () => {
+    const malformed = "错误理解：把差值当成平方\n\n错因：混淆两步\n\n正确判断：先相减再平方\n\n核对方法：分别计算";
+    expect(validateTeachingPresentation({ ...base, misconceptions: [malformed] }))
+      .toContain("TEACHING_PRESENTATION:misconceptions:LABEL_NOT_BOLD");
+    expect(validateTeachingPresentation({ ...base, misconceptions: [formatMisconception(malformed)] }))
+      .not.toContain("TEACHING_PRESENTATION:misconceptions:LABEL_NOT_BOLD");
+  });
+
+  it("composes the safe presentation transforms without touching protected objects", () => {
+    const source = "#### 操作：- 执行检查\n    - 子项\n\n术语 (technical term)。\n\n$$\nx=1\n$$";
+    expect(normalizePresentationMarkdown(source, { centeredParagraphs: [2] })).toBe(
+      "### 操作：\n- 执行检查\n  - 子项\n\n术语（Technical Term）\n\n${displayFormulaMarker}".replace("${displayFormulaMarker}", displayFormulaMarker) + "\n$$\nx=1\n$$"
+    );
   });
 });

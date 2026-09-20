@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -30,6 +30,7 @@ export interface PlannedTrace {
   plan: TeachingPlan;
   previousPageContext?: string;
   phases: Array<{ phase: string; provider: string; model: string; usage: ModelRouterUsage; attempt?: number }>;
+  researchEvidence?: TeachingResearchEvidence[];
 }
 export interface PlannedCheckpoint {
   fingerprint: string;
@@ -162,10 +163,11 @@ export async function writePlannedLesson(input: ModelRouterInput,
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
     return result.content;
   };
-  const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}`,
+  const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}\n\n外部检索不是固定步骤。只有课件来源不足以核实正式术语、外部方法或时效性事实，且 externalSearchAvailable 为 true 时，才填写最多两项 researchQueries，并为每项选择 web、academic、terminology 或 temporal 类型；课件已经给出的事实、公式推导和页面之间的承接不得检索。没有真实缺口时省略 researchQueries 或返回空数组`,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
       source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
-      atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements }),
+      atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements,
+      externalSearchAvailable: Boolean(input.searchEvidence) }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
   let plan = resume?.plan ?? await run(planRequest) as TeachingPlan;
   let planIssues = validateTeachingPlan(plan, blueprint);
@@ -186,17 +188,26 @@ export async function writePlannedLesson(input: ModelRouterInput,
   trace.plan = plan;
   let content: Partial<TeachingPackage> = resume ? structuredClone(resume.content) : {};
   const completedPhases = resume ? [...resume.completedPhases] : [];
+  if ((plan.researchQueries?.length ?? 0) > 0 && !trace.researchEvidence?.length && input.searchEvidence) {
+    trace.researchEvidence = await input.searchEvidence(plan.researchQueries ?? []);
+  }
   if (!resume?.plan) await save({ plan, content, completedPhases });
   for (let index = 0; index < fieldsByPhase.length; index++) {
     const fields = fieldsByPhase[index]!;
     const schema = partialSchema(fields);
     const request: PlannedCall = { phase: phases[index]!, instructions: plannedInstructions(fields, input.language),
       prompt: JSON.stringify({ language: input.language, pageTitle: input.pageTitle, plan,
+        // Only the explanation phase may see candidate external background.
+        // Opening and consolidation remain derived from SOURCE and taught text.
+        externalEvidence: index === 1 ? trace.researchEvidence : undefined,
         previousTeaching: index === 0 ? plan.knownStartingPoint : undefined,
         precedingSections: teachingSectionMemory(content), fields,
         coverageRequirements: index === 1 ? blueprint.requirementPackage.requirements : undefined,
+        externalEvidenceRule: index === 1 && trace.researchEvidence?.length
+          ? "搜索摘要只是候选外部背景，不是已核实的课件来源。只能在明确标注为外部背景时谨慎使用，并保留标题、网址和提供方；不得覆盖 SOURCE，不得写成课件原文或确定事实，证据不足时必须保留不确定性"
+          : undefined,
         instruction: index === 0 ? "先写承接和先验知识，再从已建立的对象描述学习目标"
-          : index === 1 ? "前部知识已讲过，只应用，按计划逐步解释当前课件，不扩写后续章节"
+          : index === 1 ? "前部知识已讲过，只应用，按计划逐步解释当前课件，不扩写后续章节；搜索摘要仅是候选外部背景，不能冒充 SOURCE"
           : "依据实际完整讲解生成总结、辨析和问题，遵守计划题目顺序，不引入正文未讲的结论" }),
       schema, maxOutputTokens: index === 1 ? 9000 : 5000 };
     if (completedPhases.includes(phases[index]!)) continue;

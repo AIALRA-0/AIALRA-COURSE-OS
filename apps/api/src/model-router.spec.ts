@@ -225,6 +225,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash-vision-exp", usage: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 400, apiEquivalentUsd: 0.012 } });
   });
 
+  it("uses the native Kuafu Responses route without a ReadWeave hop", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://api.kuafushe.test/v1/responses");
+      const body = JSON.parse(String(init?.body)) as { model?: string; stream?: boolean; reasoning?: { effort?: string }; text?: { format?: { type?: string } } };
+      expect(body).toMatchObject({ model: "deepseek-v4.1-flash", stream: true, reasoning: { effort: "none" } });
+      expect(body.text?.format?.type).toBe("json_schema");
+      return Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 180, output_tokens: 260, input_tokens_details: { cached_tokens: 40 }, total_cost: 0.002 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://api.kuafushe.test/v1", apiKey: "synthetic-example-kuafu-token", model: "deepseek-v4.1-flash", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("kuafu-responses-test"));
+    expect(result).toMatchObject({ provider: "kuafu", model: "deepseek-v4.1-flash", usage: { inputTokens: 180, cachedInputTokens: 40, outputTokens: 260, apiEquivalentUsd: 0.002 } });
+  });
+
   it("uses OpenCode Go Luna Responses with session identity and structured output", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://opencode.test/responses");
@@ -1105,6 +1118,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const health = await probeProviderConnection({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-probe-token", model: "qwen3.8-flash", protocol: "messages" });
     expect(health).toMatchObject({ providerId: "opencode-go", state: "connected" });
     expect(JSON.stringify(health)).not.toContain("synthetic-example-probe-token");
+  });
+
+  it("fully probes Kuafu model, structured output, and vision without exposing the credential", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer synthetic-example-kuafu-probe-token");
+      if (url.endsWith("/models")) return Response.json({ data: [{ id: "deepseek-v4.1-flash" }] });
+      expect(url).toBe("https://api.kuafushe.test/v1/responses");
+      const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text?: { format?: { type?: string } } };
+      expect(body.input[0]?.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
+      expect(body.text?.format?.type).toBe("json_schema");
+      return Response.json({ status: "completed", output_text: "{\"ok\":true}" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const health = await probeProviderConnection({ providerId: "kuafu", baseUrl: "https://api.kuafushe.test/v1", apiKey: "synthetic-example-kuafu-probe-token", model: "deepseek-v4.1-flash", protocol: "responses", supportsVision: true, billingMode: "metered" }, true);
+    expect(health).toMatchObject({ providerId: "kuafu", state: "connected", message: expect.stringContaining("图片输入") });
+    expect(JSON.stringify(health)).not.toContain("synthetic-example-kuafu-probe-token");
   });
 });
 

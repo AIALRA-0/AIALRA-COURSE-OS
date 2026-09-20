@@ -1,5 +1,21 @@
-import { validateTeachingPresentation } from "./presentation.js";
-export { teachingCompositionContract, formatMisconception, normalizeEnglishTermCase, normalizePackedTeachingProse, validateTeachingPresentation } from "./presentation.js";
+import { normalizePresentationMarkdown, validateTeachingPresentation } from "./presentation.js";
+export {
+  displayFormulaMarker,
+  teachingCompositionContract,
+  formatMisconception,
+  normalizeBilingualTermShape,
+  normalizeChineseProsePunctuation,
+  normalizeColonIntroducedLineBreaks,
+  normalizeDisplayFormulaParagraphs,
+  normalizeEnglishTermCase,
+  normalizeListIndentation,
+  normalizePackedTeachingProse,
+  normalizePresentationMarkdown,
+  normalizeThreeLevelHeadings,
+  validateDisplayFormulaAlignment,
+  validatePresentationFormatting,
+  validateTeachingPresentation
+} from "./presentation.js";
 import katex from "katex";
 import type { CoverageClaim, CoverageRequirement, MathExpression, PageLesson, PseudoCodeLine } from "@course-os/contracts";
 
@@ -798,7 +814,7 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
   let fenceMarker = "";
   let inDisplayMath = false;
   let inBracketMath = false;
-  return markdown.split(/(\r?\n)/).map((part) => {
+  const repaired = markdown.split(/(\r?\n)/).map((part) => {
     if (/^\r?\n$/.test(part)) return part;
     const fence = part.match(/^\s*(`{3,}|~{3,})/);
     if (fence) {
@@ -841,6 +857,7 @@ export function normalizeHumanReadableChineseMarkdown(markdown: string): string 
     }
     return restored;
   }).join("");
+  return normalizePresentationMarkdown(repaired);
 }
 
 function isOpaqueMarkdownLine(line: string): boolean {

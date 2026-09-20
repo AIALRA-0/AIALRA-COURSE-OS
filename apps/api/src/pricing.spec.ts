@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { billingBreakdown, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
+import { billingBreakdown, estimateMicrousd, priceSnapshotFor, searchPriceSnapshotFor } from "./pricing.js";
 
 describe("cost price snapshots", () => {
   afterEach(() => {
@@ -15,6 +15,18 @@ describe("cost price snapshots", () => {
     const snapshot = priceSnapshotFor("deepseek", "deepseek-flash");
     expect(snapshot).toMatchObject({ model: "deepseek-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000 });
     expect(estimateMicrousd(snapshot, 1_000, 0, 500)).toBe(900);
+  });
+
+  it("keeps the Kuafu rate card separate from official DeepSeek pricing", () => {
+    const snapshot = priceSnapshotFor("kuafu", "deepseek-v4.1-flash");
+    expect(snapshot).toMatchObject({ provider: "kuafu", model: "deepseek-v4.1-flash", inputMicrousdPerMillion: 225_000, outputMicrousdPerMillion: 675_000 });
+    expect(billingBreakdown("kuafu", "metered", 1_000)).toEqual({ cashCostMicrousd: 1_000, quotaConsumedMicrousd: 0 });
+  });
+
+  it("exposes independent search request price snapshots", () => {
+    expect(searchPriceSnapshotFor("octen")).toMatchObject({ provider: "octen", currency: "USD", perRequestMicrousd: 1_000 });
+    expect(searchPriceSnapshotFor("openalex")).toMatchObject({ provider: "openalex", perRequestMicrousd: 1_000 });
+    expect(searchPriceSnapshotFor("unknown")).toBeUndefined();
   });
 
   it("tracks Luna usage against the OpenCode Go subscription quota", () => {

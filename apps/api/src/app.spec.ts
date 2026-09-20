@@ -1411,6 +1411,31 @@ describe("Course OS API", () => {
     expect((await request(app).post("/api/v1/model-providers/deepseek:test").expect(200)).body.health.state).toBe("connected");
   });
 
+  it("keeps native model and search routing inside Course OS instead of the ReadWeave adapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-native-providers-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    vi.spyOn(readweave, "listModelProviders").mockRejectedValue(new Error("READWEAVE_PROVIDER_REGISTRY_MUST_NOT_BE_USED"));
+    vi.spyOn(readweave, "getModelRoutePolicy").mockRejectedValue(new Error("READWEAVE_PROVIDER_ROUTE_MUST_NOT_BE_USED"));
+    const dependencies = createDefaultDependencies(root, readweave);
+    const app = createApp(dependencies);
+
+    const models = await request(app).get("/api/v1/model-providers").expect(200);
+    expect(models.body.find((provider: { id: string }) => provider.id === "kuafu")).toMatchObject({ enabled: false, baseUrl: "https://api.kuafushe.cc/v1" });
+
+    const searches = await request(app).get("/api/v1/search-providers").expect(200);
+    expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel"]);
+    await request(app).patch("/api/v1/search-providers/openalex").set("Idempotency-Key", "native-search-config")
+      .send({ enabled: true, maxResults: 6 }).expect(200);
+    const policy = await request(app).put("/api/v1/search-route-policy").set("Idempotency-Key", "native-search-policy")
+      .send({ workspaceId: "personal", rules: [{ kind: "terminology", providerId: "openalex", enabled: true }], allowProviderFallback: false, maxResults: 6, updatedAt: new Date(0).toISOString() }).expect(200);
+    expect(policy.body.rules).toEqual([{ kind: "terminology", providerId: "openalex", enabled: true }]);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ results: [] }));
+    expect((await request(app).post("/api/v1/search-providers/openalex:test").expect(200)).body.health.state).toBe("connected");
+    expect(readweave.listModelProviders).not.toHaveBeenCalled();
+    expect(readweave.getModelRoutePolicy).not.toHaveBeenCalled();
+  });
+
   it("supports tree, optimistic draft editing, validation, conflicts and immutable publishing", async () => {
     const { app, release } = await seededApp();
     const tree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);

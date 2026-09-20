@@ -1,9 +1,11 @@
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, OrderedEvent, ReviewPlan, ReviewSession } from "@course-os/contracts";
+import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, OrderedEvent, ReviewPlan, ReviewSession, SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
+import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
+import { defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults } from "./provider-settings.js";
 
 export interface OperationalState {
   schemaVersion: "1.0.0";
@@ -15,6 +17,10 @@ export interface OperationalState {
   reviewPlans: ReviewPlan[];
   reviewSessions: ReviewSession[];
   attempts: AssessmentAttempt[];
+  modelProviders: ModelProviderConfig[];
+  modelRoutePolicy: ModelRoutePolicy;
+  searchProviders: SearchProviderConfig[];
+  searchRoutePolicy: SearchRoutePolicy;
   events: OrderedEvent[];
   idempotency: Record<string, { kind: string; objectId: string }>;
 }
@@ -29,6 +35,10 @@ export const EMPTY: OperationalState = {
   reviewPlans: [],
   reviewSessions: [],
   attempts: [],
+  modelProviders: mergeCourseModelProviderDefaults([]),
+  modelRoutePolicy: defaultCourseModelRoutePolicy(),
+  searchProviders: mergeCourseSearchProviderDefaults([]),
+  searchRoutePolicy: defaultCourseSearchRoutePolicy(),
   events: [],
   idempotency: {}
 };
@@ -163,6 +173,14 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     reviewPlans: Array.isArray(value?.reviewPlans) ? value.reviewPlans : [],
     reviewSessions: Array.isArray(value?.reviewSessions) ? value.reviewSessions : [],
     attempts: Array.isArray(value?.attempts) ? value.attempts : [],
+    modelProviders: mergeCourseModelProviderDefaults(Array.isArray(value?.modelProviders) ? value.modelProviders : []),
+    modelRoutePolicy: value?.modelRoutePolicy && Array.isArray(value.modelRoutePolicy.rules)
+      ? value.modelRoutePolicy
+      : defaultCourseModelRoutePolicy(),
+    searchProviders: mergeCourseSearchProviderDefaults(Array.isArray(value?.searchProviders) ? value.searchProviders : []),
+    searchRoutePolicy: value?.searchRoutePolicy && Array.isArray(value.searchRoutePolicy.rules)
+      ? value.searchRoutePolicy
+      : defaultCourseSearchRoutePolicy(),
     events: Array.isArray(value?.events) ? value.events : [],
     idempotency: value?.idempotency && typeof value.idempotency === "object" ? value.idempotency : {}
   } as OperationalState;

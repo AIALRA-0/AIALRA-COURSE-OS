@@ -1,5 +1,6 @@
 import type { PageLesson, TeachingBlueprint } from "@course-os/contracts";
 import type { TeachingPackage } from "./model-router.js";
+import type { SearchRouteKind } from "@course-os/contracts";
 
 /** Content decisions, distinct from the versioned writing policy. */
 export interface TeachingPlan {
@@ -11,11 +12,30 @@ export interface TeachingPlan {
   steps: Array<{ id: string; factIds: string[]; dependsOn: string[]; explanation: string; example: string; boundary: string }>;
   objectives: Array<{ id: string; startingPoint: string; outcome: string; stepIds: string[] }>;
   questions: Array<{ objectiveId: string; stepId: string; kind: "comprehension" | "multiple_choice"; focus: string }>;
+  researchQueries?: TeachingResearchQuery[];
+}
+
+export interface TeachingResearchQuery {
+  id: string;
+  atomId: string;
+  query: string;
+  reason: string;
+  kind?: SearchRouteKind;
+}
+
+export interface TeachingResearchEvidence {
+  queryId: string;
+  provider: string;
+  title: string;
+  url: string;
+  snippet: string;
+  /** Search results are discovery hints, not verified source material. */
+  status: "candidate";
 }
 
 const string = { type: "string", minLength: 1 };
 const strings = { type: "array", items: string };
-const object = (properties: Record<string, unknown>) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
+const object = (properties: Record<string, unknown>, optional: string[] = []) => ({ type: "object", properties, required: Object.keys(properties).filter(key => !optional.includes(key)), additionalProperties: false });
 const array = (items: unknown, minItems: number, maxItems: number) => ({ type: "array", items, minItems, maxItems });
 export const teachingPlanSchema = object({
   problem: string, knownStartingPoint: string, scopeBoundary: string,
@@ -23,8 +43,10 @@ export const teachingPlanSchema = object({
   prerequisites: array(object({ name: string, explanation: string }), 1, 5),
   steps: array(object({ id: string, factIds: strings, dependsOn: strings, explanation: string, example: { type: "string" }, boundary: { type: "string" } }), 1, 16),
   objectives: array(object({ id: string, startingPoint: string, outcome: string, stepIds: strings }), 1, 4),
-  questions: array(object({ objectiveId: string, stepId: string, kind: { type: "string", enum: ["comprehension", "multiple_choice"] }, focus: string }), 4, 4)
-});
+  questions: array(object({ objectiveId: string, stepId: string, kind: { type: "string", enum: ["comprehension", "multiple_choice"] }, focus: string }), 4, 4),
+  researchQueries: array(object({ id: string, atomId: string, query: { type: "string", minLength: 3, maxLength: 240 }, reason: string,
+    kind: { type: "string", enum: ["web", "academic", "terminology", "temporal"] } }, ["kind"]), 0, 2)
+}, ["researchQueries"]);
 
 /** Strict local validation also applies when a provider does not enforce schemas. */
 export function schemaIssues(value: unknown, schema: any, path = "result"): string[] {
@@ -85,6 +107,12 @@ export function validateTeachingPlan(plan: TeachingPlan, blueprint: TeachingBlue
       || !plan.objectives.find(goal => goal.id === question.objectiveId)?.stepIds.includes(question.stepId)) issues.push("PLAN_QUESTION_UNTAUGHT");
   }
   if (plan.questions.filter(question => question.kind === "comprehension").length !== 2) issues.push("PLAN_QUESTION_MIX");
+  const researchIds = new Set<string>();
+  for (const query of plan.researchQueries ?? []) {
+    if (researchIds.has(query.id)) issues.push(`PLAN_DUPLICATE_RESEARCH:${query.id}`);
+    researchIds.add(query.id);
+    if (!atoms.has(query.atomId)) issues.push(`PLAN_RESEARCH_UNKNOWN_ATOM:${query.atomId}`);
+  }
   return [...new Set(issues)];
 }
 

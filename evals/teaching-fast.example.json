@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "seed": "course-os-fast-v1",
+  "concurrency": 3,
+  "maxPages": 12,
+  "latestFormalPerModule": true,
+  "selection": {
+    "featureTags": []
+  }
+}

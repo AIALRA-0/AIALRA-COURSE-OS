@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
-import { api } from "./api.js";
+import { api, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
 import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
@@ -588,13 +588,17 @@ function panelTitle(panel: Exclude<UtilityPanel, null>) {
   return ({ search: "全局课程搜索", sync: "ReadWeave 同步状态", account: "账户", settings: "工作区设置", trash: "回收站" })[panel];
 }
 
-type SettingsTab = "general" | "appearance" | "learning" | "readweave" | "providers" | "routing" | "data" | "diagnostics";
+type SettingsTab = "general" | "appearance" | "learning" | "readweave" | "providers" | "search" | "routing" | "data" | "diagnostics";
 
 function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" | "dark"; onTheme: (theme: "light" | "dark") => void; sync?: ReadWeaveSyncStatus; onOpenTrash: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [settings, setSettings] = useState<WorkspaceSettings>({ workspaceId: "personal", language: "zh-CN", theme, baseFontScale: 1.1, defaultQualityMode: "balanced", learningAutoAdvance: false, showEnglishLabels: false, updatedAt: new Date(0).toISOString() });
   const [providers, setProviders] = useState<ModelProviderConfig[]>([]);
   const [policy, setPolicy] = useState<ModelRoutePolicy>({ workspaceId: "personal", rules: [], allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString() });
+  const [searchProviders, setSearchProviders] = useState<SearchProviderConfig[]>([]);
+  const [searchPolicy, setSearchPolicy] = useState<SearchRoutePolicy>({ workspaceId: "personal", rules: [], updatedAt: new Date(0).toISOString() });
+  const [searchSecrets, setSearchSecrets] = useState<Record<string, string>>({});
+  const [searchAvailable, setSearchAvailable] = useState(true);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [trashCount, setTrashCount] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -609,6 +613,13 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
       setPolicy(loadedPolicy);
       setTrashCount(trash.length);
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "设置读取失败"));
+    Promise.allSettled([api.searchProviders(), api.searchRoutePolicy()]).then(([loadedProviders, loadedPolicy]) => {
+      const providersReady = loadedProviders.status === "fulfilled";
+      const policyReady = loadedPolicy.status === "fulfilled";
+      if (providersReady) setSearchProviders(loadedProviders.value);
+      if (policyReady) setSearchPolicy(loadedPolicy.value);
+      setSearchAvailable(providersReady || policyReady);
+    });
   }, []);
 
   useEffect(() => {
@@ -668,8 +679,52 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
     finally { setBusy(false); }
   };
 
+  const saveSearchSecret = async (providerId: string) => {
+    const secret = searchSecrets[providerId]?.trim();
+    if (!secret) return;
+    setBusy(true); setError("");
+    try {
+      const saved = await api.saveSearchProviderCredential(providerId, secret);
+      setSearchProviders((current) => current.map((provider) => provider.id === providerId ? { ...provider, credential: saved.credential } : provider));
+      setSearchSecrets((current) => ({ ...current, [providerId]: "" }));
+      setNotice("搜索接口密钥已加密保存，页面不会回显完整密钥");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "搜索接口密钥保存失败"); }
+    finally { setBusy(false); }
+  };
+
+  const saveSearchProvider = async (provider: SearchProviderConfig) => {
+    setBusy(true); setError("");
+    try {
+      const saved = await api.updateSearchProvider(provider.id, { baseUrl: provider.baseUrl, endpoint: provider.endpoint, enabled: provider.enabled, maxResults: provider.maxResults });
+      setSearchProviders((current) => current.map((item) => item.id === provider.id ? saved : item));
+      setNotice(`${provider.displayName} 搜索设置已保存`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "搜索供应商设置保存失败"); }
+    finally { setBusy(false); }
+  };
+
+  const testSearchProvider = async (providerId: string) => {
+    setBusy(true); setError("");
+    try {
+      const checked = await api.testSearchProvider(providerId);
+      setSearchProviders((current) => current.map((provider) => provider.id === providerId ? checked : provider));
+      setNotice(checked.health?.message || "搜索供应商检查完成");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "搜索供应商连接检查失败"); }
+    finally { setBusy(false); }
+  };
+
+  const saveSearchPolicy = async () => {
+    setBusy(true); setError("");
+    try { setSearchPolicy(await api.saveSearchRoutePolicy(searchPolicy)); setNotice("搜索路由规则已保存"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "搜索路由规则保存失败"); }
+    finally { setBusy(false); }
+  };
+
+  const updateSearchRule = (index: number, patch: Partial<SearchRoutePolicy["rules"][number]>) => {
+    setSearchPolicy((current) => ({ ...current, rules: current.rules.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule) }));
+  };
+
   const updateSetting = <K extends keyof WorkspaceSettings>(key: K, value: WorkspaceSettings[K]) => setSettings((current) => ({ ...current, [key]: value }));
-  const tabs: Array<[SettingsTab, string]> = [["general", "通用"], ["appearance", "外观与字号"], ["learning", "学习偏好"], ["readweave", "ReadWeave"], ["providers", "模型供应商"], ["routing", "模型路由"], ["data", "数据与版本"], ["diagnostics", "诊断"]];
+  const tabs: Array<[SettingsTab, string]> = [["general", "通用"], ["appearance", "外观与字号"], ["learning", "学习偏好"], ["readweave", "ReadWeave"], ["providers", "模型供应商"], ["search", "搜索供应商"], ["routing", "模型路由"], ["data", "数据与版本"], ["diagnostics", "诊断"]];
   return <div className="settings-page">
     <aside className="settings-nav"><div className="settings-nav-title"><strong>工作区设置</strong></div>{tabs.map(([key, label]) => <button key={key} data-action={`settings-tab:${key}`} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}<Icon name="chevronRight" /></button>)}<div className="settings-nav-foot"><span className={`settings-health health-${sync?.state || "offline"}`} /><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待连接"}</span></div></aside>
     <main className="settings-main">
@@ -679,7 +734,8 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
         {tab === "appearance" && <SettingsSection title="让内容更容易看清" description="字体比例保存在个人工作区，不会改变课程发布内容"><SettingsField label="界面主题"><select value={settings.theme === "system" ? theme : settings.theme} onChange={(event) => { const next = event.target.value as WorkspaceSettings["theme"]; updateSetting("theme", next); if (next !== "system") onTheme(next); }}><option value="light">亮色</option><option value="dark">暗色</option><option value="system">跟随系统</option></select></SettingsField><SettingsField label="正文大小"><select value={settings.baseFontScale} onChange={(event) => updateSetting("baseFontScale", Number(event.target.value) as WorkspaceSettings["baseFontScale"])}><option value="1">标准</option><option value="1.1">较大</option><option value="1.2">大字</option><option value="1.3">特大</option></select></SettingsField><SettingsField label="显示英文辅助标签"><input type="checkbox" checked={settings.showEnglishLabels} onChange={(event) => updateSetting("showEnglishLabels", event.target.checked)} />保留英文术语标签</SettingsField><SettingsSaveButton busy={busy} onClick={saveSettings} /></SettingsSection>}
         {tab === "learning" && <SettingsSection title="学习节奏" description="学习位置、缩放和未提交答案会在刷新后恢复"><SettingsField label="学习完成一页后自动进入下一页"><input type="checkbox" checked={settings.learningAutoAdvance} onChange={(event) => updateSetting("learningAutoAdvance", event.target.checked)} />开启自动翻页</SettingsField><div className="settings-callout"><Icon name="target" /><span>完整答案不会直接生成掌握证据，系统还需要无提示和延迟或迁移题表现</span></div><SettingsSaveButton busy={busy} onClick={saveSettings} /></SettingsSection>}
         {tab === "readweave" && <SettingsSection title="ReadWeave 权威连接" description="正式讲解、问答、题库、掌握状态和复习记录统一保存在 ReadWeave"><div className={`settings-connection ${sync?.state || "offline"}`}><span className="live-dot" /><div><strong>{sync?.state === "connected" ? "连接正常" : "当前无法确认连接"}</strong><span>{sync?.message || "等待 Course OS 读取连接状态"}</span></div></div><SettingsRow label="公开跳转" value="由服务器验证" /><SettingsRow label="浏览器密钥" value="不会下发" /><SettingsRow label="当前待写入" value={String(sync?.pendingWrites ?? 0)} /><SettingsRow label="未解决冲突" value={String(sync?.conflicts ?? 0)} /></SettingsSection>}
-        {tab === "providers" && <SettingsSection title="模型供应商" description="密钥只提交给服务端加密保存，浏览器只看到配置状态和末尾四位"><div className="provider-list">{providers.map((provider) => <article className="provider-card" key={provider.id}><header><div><strong>{provider.displayName}</strong><span>{provider.baseUrl || "应急路由，默认关闭"}</span></div><span className={`provider-status ${provider.credential.configured ? "configured" : "unconfigured"}`}>{provider.credential.configured ? provider.credential.maskedValue || "已配置" : "未配置"}</span></header><div className="provider-models">{provider.models.map((model) => <span key={model.id}>{model.displayName} · {model.protocol} · {model.billingMode === "subscription_quota" ? "套餐额度" : model.billingMode === "metered" ? "按量计费" : "未标记"}</span>)}</div><div className="provider-config"><label><span>接口地址</span><input value={provider.baseUrl} disabled={provider.id === "aialra-router"} placeholder="https://..." onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, baseUrl: event.target.value } : item))} /></label><label className="provider-enabled"><input type="checkbox" checked={provider.enabled} onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, enabled: event.target.checked } : item))} />允许路由使用</label><button className="quiet-button" disabled={busy} onClick={() => void saveProvider(provider)}>保存配置</button></div><div className="provider-actions"><input type="password" value={secrets[provider.id] || ""} placeholder={provider.credential.configured ? "输入新密钥以替换" : "粘贴接口密钥"} onChange={(event) => setSecrets((current) => ({ ...current, [provider.id]: event.target.value }))} autoComplete="new-password" /><button className="quiet-button" disabled={busy || !secrets[provider.id]?.trim()} onClick={() => void saveSecret(provider.id)}>保存密钥</button><button className="quiet-button" disabled={busy} onClick={() => void testProvider(provider.id)}>测试连接</button></div>{provider.health && <p className="provider-health"><span className={`settings-health health-${provider.health.state}`} />{provider.health.message}</p>}</article>)}</div></SettingsSection>}
+        {tab === "providers" && <SettingsSection title="模型供应商" description="密钥只提交给服务端加密保存，浏览器只看到配置状态和末尾四位"><div className="provider-list">{providers.map((provider) => <article className="provider-card" key={provider.id}><header><div><strong>{provider.displayName}</strong><span>{provider.baseUrl || "应急路由，默认关闭"}</span></div><span className={`provider-status ${provider.credential.configured ? "configured" : "unconfigured"}`}>{provider.credential.configured ? provider.credential.maskedValue || "已配置" : "未配置"}</span></header><div className="provider-models">{provider.models.map((model) => <span key={model.id}>{model.displayName} · {model.protocol} · {model.billingMode === "subscription_quota" ? "套餐额度" : model.billingMode === "metered" ? "按量计费" : "未标记"}</span>)}</div><div className="provider-capabilities">{Array.from(new Set(provider.models.flatMap((model) => [model.supportsVision ? "图像输入" : "", model.supportsJsonSchema ? "结构化输出" : "", model.supportsReasoning ? "推理" : ""].filter(Boolean)))).map((capability) => <span key={capability}>{capability}</span>)}</div><div className="provider-config"><label><span>接口地址</span><input value={provider.baseUrl} disabled={provider.id === "aialra-router"} placeholder="https://..." onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, baseUrl: event.target.value } : item))} /></label><label className="provider-enabled"><input type="checkbox" checked={provider.enabled} onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, enabled: event.target.checked } : item))} />允许路由使用</label><button className="quiet-button" disabled={busy} onClick={() => void saveProvider(provider)}>保存配置</button></div><div className="provider-actions"><input type="password" value={secrets[provider.id] || ""} placeholder={provider.credential.configured ? "输入新密钥以替换" : "粘贴接口密钥"} onChange={(event) => setSecrets((current) => ({ ...current, [provider.id]: event.target.value }))} autoComplete="new-password" /><button className="quiet-button" disabled={busy || !secrets[provider.id]?.trim()} onClick={() => void saveSecret(provider.id)}>保存密钥</button><button className="quiet-button" disabled={busy} onClick={() => void testProvider(provider.id)}>测试连接</button></div>{provider.health && <p className="provider-health"><span className={`settings-health health-${provider.health.state}`} />{provider.health.message}</p>}</article>)}</div></SettingsSection>}
+        {tab === "search" && <SearchSettingsSection providers={searchProviders} policy={searchPolicy} secrets={searchSecrets} available={searchAvailable} busy={busy} onProviderChange={(providerId, patch) => setSearchProviders((current) => current.map((provider) => provider.id === providerId ? { ...provider, ...patch } : provider))} onPolicyChange={setSearchPolicy} onSecretChange={(providerId, value) => setSearchSecrets((current) => ({ ...current, [providerId]: value }))} onSaveProvider={saveSearchProvider} onSaveSecret={saveSearchSecret} onTestProvider={testSearchProvider} onRuleChange={updateSearchRule} onSavePolicy={saveSearchPolicy} />}
         {tab === "routing" && <SettingsSection title="阶段模型路由" description="优先使用 OpenCode Go 或 DeepSeek，AIALRA 只作为手动打开的应急回退"><div className="route-editor">{policy.rules.map((rule, index) => { const provider = providers.find((item) => item.id === rule.providerId); return <div className="route-editor-row" key={`${rule.stage}-${index}`}><strong>{routeStageLabel(rule.stage)}</strong><select value={rule.providerId} onChange={(event) => setPolicy((current) => ({ ...current, rules: current.rules.map((item, itemIndex) => itemIndex === index ? { ...item, providerId: event.target.value } : item) }))}>{providers.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select><select value={rule.modelId} onChange={(event) => setPolicy((current) => ({ ...current, rules: current.rules.map((item, itemIndex) => itemIndex === index ? { ...item, modelId: event.target.value } : item) }))} aria-label={`${routeStageLabel(rule.stage)}模型`}><option value={rule.modelId}>{rule.modelId}</option>{provider?.models.filter((item) => item.id !== rule.modelId).map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></div>; })}</div><label className="settings-checkbox"><input type="checkbox" checked={policy.allowAialraEmergencyFallback} onChange={(event) => setPolicy((current) => ({ ...current, allowAialraEmergencyFallback: event.target.checked }))} />允许手动启用 AIALRA 应急回退</label><SettingsSaveButton busy={busy} onClick={savePolicy} /></SettingsSection>}
         {tab === "data" && <SettingsSection title="数据与版本" description="正式版本不可原位修改，删除默认进入 ReadWeave 回收站"><SettingsRow label="权威内容" value="ReadWeave" /><SettingsRow label="回收站记录" value={`${trashCount} 条`} /><SettingsRow label="正式发布" value="不可变，可回滚" /><SettingsRow label="原始材料" value="私有、内容寻址、去重保存" /><div className="settings-callout"><Icon name="archive" /><span>测试课程、黄金样本和旧发布版本仍用于回归，但不会混入正式课程树</span></div><button className="quiet-button settings-trash-button" data-action="settings-open-trash" onClick={onOpenTrash}>打开回收站<Icon name="arrowRight" /></button></SettingsSection>}
         {tab === "diagnostics" && <SettingsSection title="连接与诊断" description="这里显示可核对的状态，不显示密钥"><SettingsRow label="Course OS API" value="已载入当前页面" /><SettingsRow label="ReadWeave" value={sync?.state === "connected" ? "已连接" : "离线或待检查"} /><SettingsRow label="同步队列" value={`${sync?.pendingWrites ?? 0} 条待处理`} /><SettingsRow label="冲突" value={`${sync?.conflicts ?? 0} 条`} /><button className="primary-button" data-action="settings-reload" aria-describedby="settings-reload-reason" disabled={busy} onClick={() => window.location.reload()}>重新载入并重试</button><span id="settings-reload-reason" className="sr-only">{busy ? "当前有设置操作正在保存" : "重新载入页面并重新检查连接"}</span></SettingsSection>}
@@ -688,6 +744,66 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
       </div>
     </main>
   </div>;
+}
+
+function SearchSettingsSection({
+  providers,
+  policy,
+  secrets,
+  available,
+  busy,
+  onProviderChange,
+  onPolicyChange,
+  onSecretChange,
+  onSaveProvider,
+  onSaveSecret,
+  onTestProvider,
+  onRuleChange,
+  onSavePolicy
+}: {
+  providers: SearchProviderConfig[];
+  policy: SearchRoutePolicy;
+  secrets: Record<string, string>;
+  available: boolean;
+  busy: boolean;
+  onProviderChange: (providerId: string, patch: Partial<SearchProviderConfig>) => void;
+  onPolicyChange: Dispatch<SetStateAction<SearchRoutePolicy>>;
+  onSecretChange: (providerId: string, value: string) => void;
+  onSaveProvider: (provider: SearchProviderConfig) => Promise<void>;
+  onSaveSecret: (providerId: string) => Promise<void>;
+  onTestProvider: (providerId: string) => Promise<void>;
+  onRuleChange: (index: number, patch: Partial<SearchRoutePolicy["rules"][number]>) => void;
+  onSavePolicy: () => Promise<void>;
+}) {
+  const [activeAction, setActiveAction] = useState("");
+  const rules = policy.rules;
+  const run = async (key: string, action: () => Promise<void>) => {
+    setActiveAction(key);
+    try { await action(); } finally { setActiveAction(""); }
+  };
+  const purposeText = (purpose: NonNullable<SearchProviderConfig["purposes"]>[number]) => ({ web: "网页", academic: "学术", terminology: "术语", temporal: "时效" })[purpose];
+  return <>
+    <SettingsSection title="搜索供应商" description="Course OS 原生搜索设置，密钥只提交给 Course OS 服务端，搜索供应商与 ReadWeave 项目保持独立">
+      {!available && <div className="settings-callout"><Icon name="warning" /><span>当前后端尚未启用搜索供应商接口，模型设置仍可正常使用。启用接口后重新打开本页即可管理搜索线路。</span></div>}
+      {available && providers.length === 0 && <p className="empty-inline">暂无可配置的搜索供应商</p>}
+      <div className="provider-list search-provider-list">{providers.map((provider) => {
+        const actionKey = (action: string) => `${provider.id}:${action}`;
+        return <article className="provider-card search-provider-card" key={provider.id}>
+          <header><div><strong>{provider.displayName}</strong><span>{provider.baseUrl || "由 Course OS 服务端管理"}</span></div><span className={`provider-status ${provider.credential.configured ? "configured" : "unconfigured"}`}>{provider.credential.configured ? provider.credential.maskedValue || "已配置" : "未配置"}</span></header>
+          <div className="provider-capabilities">{(provider.purposes || []).map((purpose) => <span key={`${provider.id}-${purpose}`}>{purposeText(purpose)}</span>)}</div>
+          <div className="provider-config search-provider-config"><label><span>接口地址</span><input value={provider.baseUrl} placeholder="https://..." onChange={(event) => onProviderChange(provider.id, { baseUrl: event.target.value })} /></label><label><span>接口路径</span><input value={provider.endpoint || ""} placeholder="/search" onChange={(event) => onProviderChange(provider.id, { endpoint: event.target.value })} /></label><label><span>结果上限</span><input type="number" min="1" max="20" value={provider.maxResults ?? 8} onChange={(event) => onProviderChange(provider.id, { maxResults: Number(event.target.value) })} /></label><label className="provider-enabled"><input type="checkbox" checked={provider.enabled} onChange={(event) => onProviderChange(provider.id, { enabled: event.target.checked })} />允许路由使用</label><button className="quiet-button" disabled={busy} onClick={() => void run(actionKey("save"), () => onSaveProvider(provider))}>{busy && activeAction === actionKey("save") ? "保存中…" : "保存配置"}</button></div>
+          <div className="provider-actions"><input type="password" value={secrets[provider.id] || ""} placeholder={provider.credential.configured ? "输入新密钥以替换" : "粘贴接口密钥"} onChange={(event) => onSecretChange(provider.id, event.target.value)} autoComplete="new-password" /><button className="quiet-button" disabled={busy || !secrets[provider.id]?.trim()} onClick={() => void run(actionKey("secret"), () => onSaveSecret(provider.id))}>{busy && activeAction === actionKey("secret") ? "保存中…" : "保存密钥"}</button><button className="quiet-button" disabled={busy} onClick={() => void run(actionKey("test"), () => onTestProvider(provider.id))}>{busy && activeAction === actionKey("test") ? "检查中…" : "测试连接"}</button></div>
+          {provider.health && <p className="provider-health"><span className={`settings-health health-${provider.health.state}`} />{provider.health.message}</p>}
+        </article>;
+      })}</div>
+    </SettingsSection>
+    <SettingsSection title="搜索路由" description="只有教学规划明确发现外部证据缺口时才搜索，每页最多两项，不把搜索变成固定重步骤">
+      <div className="search-route-editor">{rules.map((rule, index) => <div className="search-route-row" key={rule.kind}><strong>{({ web: "网页事实", academic: "学术来源", terminology: "正式术语", temporal: "时效信息" })[rule.kind]}</strong><label><span>主线路</span><select value={rule.providerId} onChange={(event) => onRuleChange(index, { providerId: event.target.value })}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label><span>备用线路</span><select value={rule.fallbackProviderId || ""} onChange={(event) => onRuleChange(index, { fallbackProviderId: event.target.value || undefined })}><option value="">不使用备用</option>{providers.filter(provider => provider.id !== rule.providerId).map(provider => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label className="provider-enabled"><input type="checkbox" checked={rule.enabled} onChange={(event) => onRuleChange(index, { enabled: event.target.checked })} />启用</label></div>)}</div>
+      <label className="settings-checkbox"><input type="checkbox" checked={policy.allowProviderFallback ?? false} onChange={(event) => onPolicyChange(current => ({ ...current, allowProviderFallback: event.target.checked }))} />主线路没有结果或失败时允许使用显式备用线路</label>
+      <label className="settings-field"><span>每次搜索结果上限</span><input type="number" min="1" max="20" value={policy.maxResults ?? 8} onChange={(event) => onPolicyChange(current => ({ ...current, maxResults: Number(event.target.value) }))} /></label>
+      <button className="primary-button settings-save" disabled={busy || !available} onClick={() => void run("search-policy", onSavePolicy)}>{busy && activeAction === "search-policy" ? "保存中…" : "保存搜索路由"}</button>
+    </SettingsSection>
+  </>;
 }
 
 function SettingsSection({ title, description, children }: { title: string; description: string; children: React.ReactNode }) { return <section className="settings-section"><div className="settings-section-heading"><h4>{title}</h4><p>{description}</p></div>{children}</section>; }

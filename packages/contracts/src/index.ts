@@ -13,7 +13,7 @@ export type MasteryState = "unseen" | "introduced" | "practicing" | "mastered" |
 export type WorkspaceMode = "studio" | "learn" | "review";
 export type LessonSectionKind = "chapter_bridge" | "learning_objectives" | "main_content" | "prior_knowledge" | "full_explanation" | "misconceptions";
 export type QuestionKind = "comprehension" | "multiple_choice";
-export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "semantic_audit" | "question_refill";
+export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "semantic_audit" | "question_refill" | "search";
 export type CourseTreeNodeKind = "workspace" | "course" | "module" | "material" | "section" | "release" | "page" | "trash";
 export type TreeNodeCapability =
   | "create"
@@ -773,6 +773,15 @@ export interface CredentialStatus {
   updatedAt?: ISODateTime;
 }
 
+/** Status of the Course OS-owned secret vault entry, without exposing a secret. */
+export interface ProviderVaultStatus {
+  backend: "course_os_vault";
+  state: "missing" | "configured" | "error";
+  secretRef?: string;
+  maskedValue?: string;
+  updatedAt?: ISODateTime;
+}
+
 export interface ProviderHealth {
   providerId: Identifier;
   state: "connected" | "degraded" | "offline" | "unconfigured";
@@ -786,12 +795,15 @@ export interface ModelProviderConfig {
   baseUrl: string;
   enabled: boolean;
   credential: CredentialStatus;
+  /** Optional for old persisted states; new defaults use the Course OS vault status. */
+  vault?: ProviderVaultStatus;
   models: ModelCapability[];
   health?: ProviderHealth;
 }
 
 export interface ModelRouteRule {
-  stage: GenerationStage | "qa";
+  /** Search is recorded as a cost stage, never selected as a model route. */
+  stage: Exclude<GenerationStage, "search"> | "qa";
   providerId: Identifier;
   modelId: Identifier;
   fallbackProviderId?: Identifier;
@@ -806,6 +818,70 @@ export interface ModelRoutePolicy {
   allowProviderFallback?: boolean;
   allowAialraEmergencyFallback: boolean;
   updatedAt: ISODateTime;
+}
+
+export type SearchProviderAuthType = "none" | "bearer" | "x-api-key" | "query";
+export type SearchRouteKind = "web" | "academic" | "terminology" | "temporal";
+
+export interface SearchProviderHealth {
+  providerId: Identifier;
+  state: "connected" | "degraded" | "offline" | "unconfigured";
+  checkedAt: ISODateTime;
+  message: string;
+  latencyMs?: number;
+  lastErrorCode?: string;
+}
+
+export interface SearchProviderConfig {
+  id: Identifier;
+  displayName: string;
+  baseUrl: string;
+  /** Optional for compatibility with older provider records. */
+  endpoint?: string;
+  /** Optional for compatibility with older provider records. */
+  authType?: SearchProviderAuthType;
+  enabled: boolean;
+  credential: CredentialStatus;
+  /** Optional for compatibility with older provider records. */
+  vault?: ProviderVaultStatus;
+  /** Optional because legacy records did not classify search purposes. */
+  purposes?: SearchRouteKind[];
+  /** OpenAlex can be enabled without a private credential. */
+  credentialRequired?: boolean;
+  /** Optional provider-side result limit. */
+  maxResults?: number;
+  health?: SearchProviderHealth;
+  pricing?: {
+    currency: "USD";
+    perRequestMicrousd?: number;
+    capturedAt?: ISODateTime;
+    source?: string;
+  };
+}
+
+export interface SearchRouteRule {
+  kind: SearchRouteKind;
+  providerId: Identifier;
+  fallbackProviderId?: Identifier;
+  enabled: boolean;
+}
+
+export interface SearchRoutePolicy {
+  workspaceId: Identifier;
+  rules: SearchRouteRule[];
+  /** Search fallback is opt-in and must never hide a provider error by default. */
+  allowProviderFallback?: boolean;
+  maxResults?: number;
+  updatedAt: ISODateTime;
+}
+
+export interface SearchPriceSnapshot {
+  id: Identifier;
+  provider: Identifier;
+  currency: "USD";
+  capturedAt: ISODateTime;
+  source: string;
+  perRequestMicrousd: number;
 }
 
 export interface GenerationHarnessCurrent {

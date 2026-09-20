@@ -27,6 +27,9 @@ import type {
   LearningSession,
   ModelRoutePolicy,
   ModelProviderConfig,
+  SearchProviderConfig,
+  SearchRouteKind,
+  SearchRoutePolicy,
   PageQuestion,
   QuestionAttempt,
   QuestionBankItem,
@@ -54,11 +57,12 @@ import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
 import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
-import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
+import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor, searchPriceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
 import { previousLessonContext } from "./teaching-plan.js";
 import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
+import { probeSearchConnection, searchTeachingEvidence, type CourseSearchConnection, type CourseSearchReceipt } from "./search-providers.js";
 
 export interface AppDependencies {
   dataDir: string;
@@ -353,7 +357,7 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/model-providers", async (_request, response, next) => {
-    try { response.json(withCurrentDeepSeekModels(await dependencies.readweave.listModelProviders())); }
+    try { response.json(withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders)); }
     catch (error) { next(error); }
   });
 
@@ -371,7 +375,17 @@ export function createApp(dependencies: AppDependencies): Express {
         patch.enabled = request.body.enabled;
       }
       if (Object.keys(patch).length === 0) return sendError(request, response, 422, "MODEL_PROVIDER_PATCH_EMPTY", "没有提供要修改的供应商设置", false);
-      response.json(await dependencies.readweave.updateModelProvider(request.params.id, patch, writeContext(request, requireIdempotencyKey(request))));
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        const provider = state.modelProviders.find(item => item.id === request.params.id);
+        if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+        if (!state.idempotency[idempotencyKey]) {
+          Object.assign(provider, patch);
+          state.idempotency[idempotencyKey] = { kind: "model_provider_config", objectId: provider.id };
+        }
+        return structuredClone(provider);
+      });
+      response.json(saved);
     } catch (error) { next(error); }
   });
 
@@ -381,7 +395,17 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!secret) return sendError(request, response, 422, "MODEL_PROVIDER_CREDENTIAL_REQUIRED", "请填写接口密钥", false);
       await credentialVault.set(`model-provider:${request.params.id}`, secret);
       const credential = { configured: true, maskedValue: `••••${secret.slice(-4)}`, updatedAt: new Date().toISOString() };
-      const saved = await dependencies.readweave.saveModelProviderCredential(request.params.id, credential, writeContext(request, requireIdempotencyKey(request)));
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        const provider = state.modelProviders.find(item => item.id === request.params.id);
+        if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+        if (!state.idempotency[idempotencyKey]) {
+          provider.credential = credential;
+          provider.vault = { backend: "course_os_vault", state: "configured", secretRef: `model-provider:${provider.id}`, maskedValue: credential.maskedValue, updatedAt: credential.updatedAt };
+          state.idempotency[idempotencyKey] = { kind: "model_provider_credential", objectId: provider.id };
+        }
+        return { id: provider.id, credential: structuredClone(provider.credential), vault: structuredClone(provider.vault) };
+      });
       response.json(saved);
     } catch (error) { next(error); }
   });
@@ -389,25 +413,25 @@ export function createApp(dependencies: AppDependencies): Express {
   app.post(/^\/api\/v1\/model-providers\/[^/]+:test$/, async (request, response, next) => {
     try {
       const providerId = decodeURIComponent(request.path.slice("/api/v1/model-providers/".length, -":test".length));
-      const provider = (await dependencies.readweave.listModelProviders()).find((item) => item.id === providerId);
+      const provider = (await dependencies.operations.read()).modelProviders.find((item) => item.id === providerId);
       if (!provider) return sendError(request, response, 404, "MODEL_PROVIDER_NOT_FOUND", "没有找到这个模型供应商", false);
       const apiKey = await credentialVault.get(`model-provider:${providerId}`);
       const model = provider.models[0];
       const health = !provider.baseUrl || !model
-        ? (await dependencies.readweave.testModelProvider(providerId)).health
-        : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection);
+        ? { providerId, state: "unconfigured" as const, checkedAt: new Date().toISOString(), message: "供应商没有可测试的接口或模型" }
+        : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection, providerId === "kuafu");
       response.json({ ...provider, health });
     }
     catch (error) { next(error); }
   });
 
   app.get("/api/v1/model-providers/models", async (_request, response, next) => {
-    try { response.json(withCurrentDeepSeekModels(await dependencies.readweave.listModelProviders()).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
+    try { response.json(withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
     catch (error) { next(error); }
   });
 
   app.get("/api/v1/model-route-policy", async (_request, response, next) => {
-    try { response.json(await dependencies.readweave.getModelRoutePolicy()); }
+    try { response.json((await dependencies.operations.read()).modelRoutePolicy); }
     catch (error) { next(error); }
   });
 
@@ -415,7 +439,116 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const policy = request.body as ModelRoutePolicy;
       if (!policy || !Array.isArray(policy.rules) || typeof policy.allowAialraEmergencyFallback !== "boolean" || (policy.allowProviderFallback !== undefined && typeof policy.allowProviderFallback !== "boolean")) return sendError(request, response, 422, "MODEL_ROUTE_POLICY_INVALID", "模型路由规则结构无效", false);
-      response.json(await dependencies.readweave.saveModelRoutePolicy(policy, writeContext(request, requireIdempotencyKey(request))));
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        if (!state.idempotency[idempotencyKey]) {
+          state.modelRoutePolicy = structuredClone({ ...policy, updatedAt: new Date().toISOString() });
+          state.idempotency[idempotencyKey] = { kind: "model_route_policy", objectId: policy.workspaceId };
+        }
+        return structuredClone(state.modelRoutePolicy);
+      });
+      response.json(saved);
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/search-providers", async (_request, response, next) => {
+    try { response.json((await dependencies.operations.read()).searchProviders); }
+    catch (error) { next(error); }
+  });
+
+  app.patch("/api/v1/search-providers/:id", async (request, response, next) => {
+    try {
+      const patch: { baseUrl?: string; endpoint?: string; enabled?: boolean; maxResults?: number } = {};
+      if (request.body.baseUrl !== undefined) {
+        if (typeof request.body.baseUrl !== "string") return sendError(request, response, 422, "SEARCH_PROVIDER_BASE_URL_INVALID", "搜索接口地址必须是文本", false);
+        const baseUrl = request.body.baseUrl.trim();
+        if (baseUrl && !isAllowedProviderBaseUrl(baseUrl)) return sendError(request, response, 422, "SEARCH_PROVIDER_BASE_URL_INVALID", "搜索接口地址必须使用 HTTPS，或只在本机使用 HTTP", false);
+        patch.baseUrl = baseUrl;
+      }
+      if (request.body.endpoint !== undefined) {
+        if (typeof request.body.endpoint !== "string" || !request.body.endpoint.startsWith("/") || request.body.endpoint.includes("..")) return sendError(request, response, 422, "SEARCH_PROVIDER_ENDPOINT_INVALID", "搜索接口路径必须以斜杠开头", false);
+        patch.endpoint = request.body.endpoint;
+      }
+      if (request.body.enabled !== undefined) {
+        if (typeof request.body.enabled !== "boolean") return sendError(request, response, 422, "SEARCH_PROVIDER_ENABLED_INVALID", "搜索供应商启用状态必须是布尔值", false);
+        patch.enabled = request.body.enabled;
+      }
+      if (request.body.maxResults !== undefined) {
+        const maxResults = Number(request.body.maxResults);
+        if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 20) return sendError(request, response, 422, "SEARCH_PROVIDER_LIMIT_INVALID", "单次搜索结果数必须是 1 至 20", false);
+        patch.maxResults = maxResults;
+      }
+      if (Object.keys(patch).length === 0) return sendError(request, response, 422, "SEARCH_PROVIDER_PATCH_EMPTY", "没有提供要修改的搜索供应商设置", false);
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        const replay = state.idempotency[idempotencyKey];
+        const provider = state.searchProviders.find(item => item.id === request.params.id);
+        if (!provider) throw new Error("SEARCH_PROVIDER_NOT_FOUND");
+        if (replay) return structuredClone(provider);
+        Object.assign(provider, patch);
+        state.idempotency[idempotencyKey] = { kind: "search_provider_config", objectId: provider.id };
+        return structuredClone(provider);
+      });
+      response.json(saved);
+    } catch (error) { next(error); }
+  });
+
+  app.put("/api/v1/search-providers/:id/credential", async (request, response, next) => {
+    try {
+      const secret = String(request.body.secret || "").trim();
+      if (!secret) return sendError(request, response, 422, "SEARCH_PROVIDER_CREDENTIAL_REQUIRED", "请填写搜索接口密钥", false);
+      const idempotencyKey = requireIdempotencyKey(request);
+      await credentialVault.set(`search-provider:${request.params.id}`, secret);
+      const credential = { configured: true, maskedValue: `••••${secret.slice(-4)}`, updatedAt: new Date().toISOString() };
+      const saved = await dependencies.operations.mutate(state => {
+        const provider = state.searchProviders.find(item => item.id === request.params.id);
+        if (!provider) throw new Error("SEARCH_PROVIDER_NOT_FOUND");
+        if (!state.idempotency[idempotencyKey]) {
+          provider.credential = credential;
+          provider.vault = { backend: "course_os_vault", state: "configured", secretRef: `search-provider:${provider.id}`, maskedValue: credential.maskedValue, updatedAt: credential.updatedAt };
+          state.idempotency[idempotencyKey] = { kind: "search_provider_credential", objectId: provider.id };
+        }
+        return { id: provider.id, credential: structuredClone(provider.credential), vault: structuredClone(provider.vault) };
+      });
+      response.json(saved);
+    } catch (error) { next(error); }
+  });
+
+  app.post(/^\/api\/v1\/search-providers\/[^/]+:test$/, async (request, response, next) => {
+    try {
+      const providerId = decodeURIComponent(request.path.slice("/api/v1/search-providers/".length, -":test".length));
+      const provider = (await dependencies.operations.read()).searchProviders.find(item => item.id === providerId);
+      if (!provider) return sendError(request, response, 404, "SEARCH_PROVIDER_NOT_FOUND", "没有找到这个搜索供应商", false);
+      const apiKey = await credentialVault.get(`search-provider:${providerId}`);
+      const connection = searchConnection(provider, apiKey);
+      if (!connection) return sendError(request, response, 422, "SEARCH_PROVIDER_UNSUPPORTED", "这个搜索供应商尚未接入执行器", false);
+      response.json({ ...provider, health: await probeSearchConnection(connection) });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/search-route-policy", async (_request, response, next) => {
+    try { response.json((await dependencies.operations.read()).searchRoutePolicy); }
+    catch (error) { next(error); }
+  });
+
+  app.put("/api/v1/search-route-policy", async (request, response, next) => {
+    try {
+      const policy = request.body as SearchRoutePolicy;
+      const kinds = new Set(["web", "academic", "terminology", "temporal"]);
+      if (!policy || !Array.isArray(policy.rules) || policy.rules.some(rule => !kinds.has(rule.kind) || typeof rule.providerId !== "string" || typeof rule.enabled !== "boolean")
+        || (policy.allowProviderFallback !== undefined && typeof policy.allowProviderFallback !== "boolean")
+        || (policy.maxResults !== undefined && (!Number.isInteger(policy.maxResults) || policy.maxResults < 1 || policy.maxResults > 20))) {
+        return sendError(request, response, 422, "SEARCH_ROUTE_POLICY_INVALID", "搜索路由规则结构无效", false);
+      }
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        if (!state.idempotency[idempotencyKey]) {
+          state.searchRoutePolicy = structuredClone({ ...policy, updatedAt: new Date().toISOString() });
+          state.idempotency[idempotencyKey] = { kind: "search_route_policy", objectId: policy.workspaceId };
+        }
+        return structuredClone(state.searchRoutePolicy);
+      });
+      response.json(saved);
     } catch (error) { next(error); }
   });
 
@@ -2164,23 +2297,68 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
   const vault = dependencies.credentialVault;
   if (!vault) return environmentFallback;
   try {
-    const providers = await dependencies.readweave.listModelProviders();
+    const settings = await dependencies.operations.read();
+    const providers = settings.modelProviders;
     const configuredProviderIds = new Set(
       (await Promise.all(providers.filter((provider) => provider.enabled).map(async (provider) => {
         return (await vault.has(`model-provider:${provider.id}`)) ? provider.id : undefined;
       }))).filter((providerId): providerId is string => Boolean(providerId))
     );
+    // Injected routers are explicit dependencies used by tests and by the
+    // separately gated emergency route. Direct environment provider discovery
+    // is intentionally absent from the production server.
     if (!configuredProviderIds.size) return environmentFallback;
     return providerRouterFromSettings({
       load: async () => ({
-        providers: await dependencies.readweave.listModelProviders(),
-        policy: await dependencies.readweave.getModelRoutePolicy(),
+        providers: (await dependencies.operations.read()).modelProviders,
+        policy: (await dependencies.operations.read()).modelRoutePolicy,
         credential: async (providerId) => configuredProviderIds.has(providerId) ? vault.get(`model-provider:${providerId}`) : undefined
       })
     });
   } catch {
     return environmentFallback;
   }
+}
+
+function searchConnection(provider: SearchProviderConfig, apiKey?: string): CourseSearchConnection | undefined {
+  if (!["tinyfish", "octen", "openalex", "parallel"].includes(provider.id)) return undefined;
+  return {
+    providerId: provider.id as CourseSearchConnection["providerId"],
+    baseUrl: provider.baseUrl,
+    endpoint: provider.endpoint,
+    apiKey,
+    parameters: provider.maxResults ? { maxResults: provider.maxResults, count: provider.maxResults, perPage: provider.maxResults } : undefined,
+    estimatedMicrousdPerRequest: provider.pricing?.perRequestMicrousd ?? 0
+  };
+}
+
+async function resolveSearchConnections(dependencies: AppDependencies, kind: SearchRouteKind): Promise<CourseSearchConnection[]> {
+  const snapshot = await dependencies.operations.read();
+  const policy = snapshot.searchRoutePolicy;
+  const rule = policy.rules.find(item => item.kind === kind && item.enabled);
+  if (!rule) return [];
+  const ids = [rule.providerId];
+  if (policy.allowProviderFallback && rule.fallbackProviderId) ids.push(rule.fallbackProviderId);
+  const connections: CourseSearchConnection[] = [];
+  for (const id of ids) {
+    const provider = snapshot.searchProviders.find(item => item.id === id && item.enabled && (item.purposes?.includes(kind) ?? true));
+    if (!provider) continue;
+    const apiKey = await dependencies.credentialVault?.get(`search-provider:${provider.id}`);
+    if (provider.credentialRequired !== false && !apiKey) continue;
+    const connection = searchConnection(provider, apiKey);
+    if (connection) {
+      const maxResults = Math.min(provider.maxResults ?? 8, policy.maxResults ?? 8);
+      connection.parameters = { ...(connection.parameters ?? {}), maxResults, count: maxResults, perPage: maxResults };
+      connections.push(connection);
+    }
+  }
+  return connections;
+}
+
+async function hasEnabledSearchRoute(dependencies: AppDependencies): Promise<boolean> {
+  const snapshot = await dependencies.operations.read();
+  return snapshot.searchRoutePolicy.rules.some(rule => rule.enabled
+    && snapshot.searchProviders.some(provider => provider.id === rule.providerId && provider.enabled));
 }
 
 interface PersistGenerationJobInput {
@@ -2493,6 +2671,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     const meter = meterModelRouter(runtimeModelRouter);
     const pageModelRouter = meter.client;
     let finalizedCost: GenerationCostEntry | undefined;
+    const searchReceipts: CourseSearchReceipt[] = [];
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
       await assertGenerationFence(jobId, fenceToken, dependencies);
@@ -2520,8 +2699,35 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd) })).digest("hex");
       const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
       if (savedCheckpoint && savedCheckpoint.fingerprint !== teachingFingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
+      const searchConfigured = await hasEnabledSearchRoute(dependencies);
       let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v12`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         teachingFingerprint, generationAttempt: currentJob.attempt, resumeTeaching: savedCheckpoint,
+        searchEvidence: searchConfigured ? async queries => {
+          await appendGenerationStageEvent(jobId, page.id, "search", "started", dependencies, { queryCount: queries.length });
+          const branches = await Promise.all(queries.slice(0, 2).map(async query => {
+            const connections = await resolveSearchConnections(dependencies, query.kind ?? "terminology");
+            return connections.length ? searchTeachingEvidence([query], connections) : { evidence: [], receipts: [] };
+          }));
+          const evidence = branches.flatMap(result => result.evidence);
+          const receipts: CourseSearchReceipt[] = branches.flatMap(result => result.receipts);
+          searchReceipts.push(...receipts);
+          for (const [receiptIndex, receipt] of receipts.entries()) {
+            const searchCost = makeSearchCostEntry(jobId, currentJob, release, page.id, receipt, receiptIndex);
+            await dependencies.readweave.appendCostEntry(searchCost, systemWriteContext(searchCost.id, currentJob.workspaceId));
+            await dependencies.operations.mutate(state => {
+              const job = state.jobs.find(item => item.id === jobId);
+              if (job) applyActualCost(job, searchCost, state, dependencies);
+            });
+          }
+          await appendGenerationStageEvent(jobId, page.id, "search", "completed", dependencies, {
+            queryCount: queries.length, resultCount: evidence.length,
+            providers: [...new Set(receipts.map(receipt => receipt.provider))],
+            failures: receipts.filter(receipt => receipt.errorCode).map(receipt => ({
+              provider: receipt.provider, code: receipt.errorCode, retryable: receipt.retryable
+            }))
+          });
+          return evidence;
+        } : undefined,
         onTeachingCheckpoint: async checkpoint => {
           await dependencies.operations.mutate(state => {
             const job = state.jobs.find(item => item.id === jobId);
@@ -3377,6 +3583,18 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const normalizedValue = normalizePriorDefinitionClauseCount(normalize(normalizePriorDefinitionAbbreviation(value)));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.filter(line => /^[^：\n]{2,100}：$/u.test(line)).length > 1) {
+      const definitions: string[] = [];
+      let current = "";
+      for (const line of lines) {
+        if (/^[^：\n]{2,100}：$/u.test(line)) {
+          if (current) definitions.push(current);
+          current = line;
+        } else current = current ? `${current}\n${line}` : line;
+      }
+      if (current) definitions.push(current);
+      if (definitions.length > 1) return definitions;
+    }
     if (lines.length > 1 && lines.every((line) => /^(?:[-*]\s*)?[^：\n]{2,100}：\s*.{10,}$/u.test(line))) {
       return lines.map((line) => line.replace(/^[-*]\s*/, ""));
     }
@@ -3543,6 +3761,30 @@ function generationCostEntry(jobId: string, job: GenerationJob, release: CourseR
 
 function failedGenerationCostEntry(jobId: string, job: GenerationJob, release: CourseRelease, pageId: string, error: ModelRouterGenerationError): GenerationCostEntry {
   return makeGenerationCostEntry(jobId, job, release, pageId, error.provider, error.model, error.usage, "failed", false);
+}
+
+function makeSearchCostEntry(jobId: string, job: GenerationJob, release: CourseRelease, pageId: string, receipt: CourseSearchReceipt, index: number): GenerationCostEntry {
+  const searchSnapshot = searchPriceSnapshotFor(receipt.provider);
+  const actualMicrousd = Math.max(0, receipt.estimatedMicrousd || searchSnapshot?.perRequestMicrousd || 0);
+  const billingMode = actualMicrousd === 0 ? "free" as const : "metered" as const;
+  const billing = billingBreakdown(receipt.provider, billingMode, actualMicrousd);
+  return {
+    id: `cost:${jobId}:attempt:${job.attempt}:${pageId}:search:${receipt.queryId}:${receipt.provider}:${index}`,
+    workspaceId: job.workspaceId, courseId: release.courseId, materialVersionId: release.id, pageId,
+    objectId: `draft:${pageId}`, jobId, stage: "search", provider: receipt.provider, model: "native-search",
+    inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
+    unitPriceSnapshot: {
+      id: searchSnapshot?.id ?? `search-price:unavailable:${receipt.provider}`,
+      provider: receipt.provider, model: "native-search", currency: "USD",
+      capturedAt: searchSnapshot?.capturedAt ?? new Date().toISOString(), source: searchSnapshot?.source ?? "价格未配置",
+      inputMicrousdPerMillion: 0, outputMicrousdPerMillion: 0, cachedInputMicrousdPerMillion: 0
+    },
+    estimatedMicrousd: actualMicrousd, actualMicrousd, durationMs: receipt.durationMs, retries: index,
+    status: receipt.resultCount > 0 ? "succeeded" : "failed", qualityPassed: receipt.resultCount > 0,
+    billingMode, cashCostMicrousd: billing.cashCostMicrousd, quotaConsumedMicrousd: billing.quotaConsumedMicrousd,
+    estimatedCashCostMicrousd: billing.cashCostMicrousd, estimatedQuotaConsumedMicrousd: billing.quotaConsumedMicrousd,
+    costBasis: searchSnapshot ? "price_snapshot" : "not_available", createdAt: new Date().toISOString()
+  };
 }
 
 function makeGenerationCostEntry(jobId: string, job: GenerationJob, release: CourseRelease, pageId: string, provider: string, model: string, usage: TeachingGenerationResult["usage"], status: "succeeded" | "failed", qualityPassed: boolean): GenerationCostEntry {

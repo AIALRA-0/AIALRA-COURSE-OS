@@ -1,4 +1,4 @@
-import type { BillingMode, UnitPriceSnapshot } from "@course-os/contracts";
+import type { BillingMode, SearchPriceSnapshot, UnitPriceSnapshot } from "@course-os/contracts";
 
 type PriceDefinition = {
   provider?: string;
@@ -16,6 +16,7 @@ type PricingConfiguration = {
 
 const DEEPSEEK_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing/";
 const OPENCODE_SOURCE = "https://opencode.ai/docs/go/";
+const KUAFU_SOURCE = "course-os-provider-profile:kuafu-v4.1";
 const DEFAULT_CAPTURED_AT = "2026-09-10T04:00:00.000Z";
 
 const DEFAULT_PRICES: PriceDefinition[] = [
@@ -29,8 +30,18 @@ const DEFAULT_PRICES: PriceDefinition[] = [
   { provider: "deepseek", model: "deepseek-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
   { provider: "deepseek", model: "deepseek-v4-flash", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
   { provider: "deepseek", model: "deepseek-v4-flash-vision-exp", inputMicrousdPerMillion: 300_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 6_000 },
-  { provider: "deepseek", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 }
+  { provider: "deepseek", model: "deepseek-v4-pro", inputMicrousdPerMillion: 660_000, outputMicrousdPerMillion: 1_980_000, cachedInputMicrousdPerMillion: 22_000 },
+  // Course OS keeps this as its own versioned profile. Deployment pricing can
+  // replace it through COURSE_OS_PRICING_SNAPSHOT_JSON before enabling Kuafu.
+  { provider: "kuafu", model: "deepseek-v4.1-flash", inputMicrousdPerMillion: 225_000, outputMicrousdPerMillion: 675_000, cachedInputMicrousdPerMillion: 7_500 }
 ];
+
+const DEFAULT_SEARCH_PRICES: Record<string, number> = {
+  tinyfish: 0,
+  octen: 1_000,
+  openalex: 1_000,
+  parallel: 1_000
+};
 
 export function priceSnapshotFor(provider: string, model: string, at = new Date()): UnitPriceSnapshot | undefined {
   const configuration = readPricingConfiguration();
@@ -44,7 +55,7 @@ export function priceSnapshotFor(provider: string, model: string, at = new Date(
   const defaultPrice = DEFAULT_PRICES.find((item) => item.provider === provider && item.model === pricedModel);
   const definition = custom ?? defaultPrice;
   if (!definition) return undefined;
-  const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");
+  const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : provider === "kuafu" ? KUAFU_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");
   const capturedAt = configuration.capturedAt || (provider === "opencode-go" ? "2026-09-15T13:00:00.000Z" : DEFAULT_CAPTURED_AT);
   // OpenCode's published DeepSeek schedule uses UTC, not the server timezone.
   // Explicit deployment rate cards remain authoritative and are never discounted.
@@ -85,8 +96,23 @@ export function billingBreakdown(provider: string, billingMode: BillingMode, cos
 export function billingModeForProvider(provider: string, fallback: BillingMode = "unknown"): BillingMode {
   if (provider === "opencode-go") return "subscription_quota";
   if (provider === "deepseek") return "metered";
+  if (provider === "kuafu") return "metered";
   if (provider === "deterministic-local-fallback") return "free";
   return fallback;
+}
+
+export function searchPriceSnapshotFor(provider: string, at = new Date()): SearchPriceSnapshot | undefined {
+  const perRequestMicrousd = DEFAULT_SEARCH_PRICES[provider];
+  if (perRequestMicrousd === undefined) return undefined;
+  const capturedAt = DEFAULT_CAPTURED_AT;
+  return {
+    id: `search-price:${provider}:${capturedAt}`,
+    provider,
+    currency: "USD",
+    capturedAt,
+    source: "course-os-provider-profile",
+    perRequestMicrousd
+  };
 }
 
 function readPricingConfiguration(): PricingConfiguration {

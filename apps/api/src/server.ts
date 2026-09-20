@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { createApp, createDefaultDependencies, resumeIncompleteImports, resumeIncompleteJobs } from "./app.js";
-import { HttpModelRouterClient, providerRouterFromEnvironment } from "./model-router.js";
+import { HttpModelRouterClient } from "./model-router.js";
 
 const host = process.env.COURSE_OS_HOST || "127.0.0.1";
 const port = Number(process.env.COURSE_OS_PORT || 4100);
@@ -31,14 +31,14 @@ const readweave = process.env.READWEAVE_MODE === "etapi"
   : process.env.READWEAVE_MODE === "http"
     ? new HttpReadWeaveCourseApi(process.env.READWEAVE_BASE_URL || "http://127.0.0.1:37840/api/course/v1", token, fetch, process.env.READWEAVE_PUBLIC_URL)
     : new FileReadWeaveCourseApi(resolve(dataDir, "readweave-course-store.json"), process.env.READWEAVE_PUBLIC_URL);
-if (!process.env.OPENCODE_GO_API_KEY) process.env.OPENCODE_GO_API_KEY = await loadSecretFile(process.env.OPENCODE_GO_API_KEY_FILE);
-if (!process.env.DEEPSEEK_API_KEY) process.env.DEEPSEEK_API_KEY = await loadSecretFile(process.env.DEEPSEEK_API_KEY_FILE);
-const configuredProviderRouter = providerRouterFromEnvironment();
 const modelRouterToken = process.env.MODEL_ROUTER_API_KEY || await loadSecretFile(process.env.MODEL_ROUTER_API_KEY_FILE);
 const emergencyRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" && process.env.MODEL_ROUTER_URL && modelRouterToken
   ? new HttpModelRouterClient(process.env.MODEL_ROUTER_URL, modelRouterToken)
   : undefined;
-const modelRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" ? configuredProviderRouter ?? emergencyRouter : undefined;
+// Direct providers are resolved exclusively from Course OS settings and its
+// secret vault. The legacy router is only an explicitly enabled emergency
+// dependency and still requires the saved route policy to authorize it.
+const modelRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" ? emergencyRouter : undefined;
 
 const dependencies = createDefaultDependencies(dataDir, readweave, modelRouter);
 if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {

@@ -5,6 +5,7 @@ import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHe
 import { modelInput, professorInstructions, semanticAuditPrompt, sourceAuditPrompt, teachingAuditPrompt, semanticAuditSchema, teachingPackageSchema, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { writePlannedLesson, type PlannedCall, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
+import type { TeachingResearchEvidence, TeachingResearchQuery } from "./teaching-plan.js";
 export { currentGenerationHarness, modelInput, professorInstructions, teachingBlueprint, teachingPackageSchema, teachingSystemPromptTemplate, teachingUserPromptTemplate } from "./generation-harness.js";
 
 export interface TeachingPackage {
@@ -50,6 +51,7 @@ export interface ModelRouterInput {
   pageNumber: number;
   sourceText: string;
   previousPageContext?: string;
+  searchEvidence?: (queries: TeachingResearchQuery[]) => Promise<TeachingResearchEvidence[]>;
   onTeachingPhase?: (phase: string, state: "started" | "completed", usage?: ModelRouterUsage) => Promise<void>;
   teachingFingerprint?: string;
   generationAttempt?: number;
@@ -537,12 +539,12 @@ function providerRequestHeaders(connection: ProviderConnection, input: ModelRout
   return headers;
 }
 
-export async function probeProviderConnection(connection: ProviderConnection): Promise<ProviderHealth> {
+export async function probeProviderConnection(connection: ProviderConnection, full = false): Promise<ProviderHealth> {
   const checkedAt = new Date().toISOString();
   if (!connection.apiKey) return { providerId: connection.providerId, state: "unconfigured", checkedAt, message: "请先保存接口密钥" };
   if (!connection.baseUrl) return { providerId: connection.providerId, state: "degraded", checkedAt, message: "这个供应商没有可检查的公开接口地址" };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8_000);
+  const timer = setTimeout(() => controller.abort(), full ? 60_000 : 8_000);
   try {
     const response = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/models`, {
       method: "GET",
@@ -551,9 +553,29 @@ export async function probeProviderConnection(connection: ProviderConnection): P
     });
     if (response.status === 401 || response.status === 403) return { providerId: connection.providerId, state: "offline", checkedAt, message: "接口可以访问，但密钥无效或没有权限" };
     if (!response.ok) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `接口返回 HTTP ${response.status}，请检查地址和供应商状态` };
-    return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，已读取供应商模型目录" };
+    const catalog = await response.json().catch(() => undefined) as { data?: Array<{ id?: unknown }> } | undefined;
+    const models = catalog?.data?.flatMap((item) => typeof item.id === "string" ? [item.id] : []) ?? [];
+    if (full && models.length && !models.includes(connection.model)) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `连接正常，但当前模型目录中没有 ${connection.model}` };
+    if (!full) return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，已读取供应商模型目录" };
+    if (connection.protocol !== "responses") return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，模型目录可用；当前协议使用本地结构校验" };
+    const capabilitySchema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+    const input = connection.supportsVision
+      ? [{ role: "user", content: [{ type: "input_text", text: "Return {\"ok\":true}." }, { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrS8AAAAASUVORK5CYII=" }] }]
+      : "Return {\"ok\":true}.";
+    const capability = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/responses`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: connection.model, instructions: "Return only the requested structured object", input, max_output_tokens: 32,
+        reasoning: { effort: "none" }, text: { format: { type: "json_schema", name: "course_os_provider_probe", schema: capabilitySchema, strict: true } } }),
+      signal: controller.signal
+    });
+    if (capability.status === 401 || capability.status === 403) return { providerId: connection.providerId, state: "offline", checkedAt, message: "模型目录可用，但调用密钥没有生成权限" };
+    if (!capability.ok) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `模型目录可用，但结构化调用返回 HTTP ${capability.status}` };
+    const body = await capability.json().catch(() => undefined) as ProviderResponseBody | undefined;
+    if (!body || providerBodyFailed(body) || extractProviderOutput(body) === undefined) return { providerId: connection.providerId, state: "degraded", checkedAt, message: "模型目录可用，但结构化调用返回了无法识别的结果" };
+    return { providerId: connection.providerId, state: "connected", checkedAt, message: connection.supportsVision ? "连接正常，模型目录、结构化输出和图片输入均可用" : "连接正常，模型目录和结构化输出均可用" };
   } catch (error) {
-    const message = error instanceof Error && error.name === "AbortError" ? "连接检查超过 8 秒，供应商没有及时响应" : "暂时无法连接供应商接口";
+    const message = error instanceof Error && error.name === "AbortError" ? `连接检查超过 ${full ? 60 : 8} 秒，供应商没有及时响应` : "暂时无法连接供应商接口";
     return { providerId: connection.providerId, state: "offline", checkedAt, message };
   } finally {
     clearTimeout(timer);
@@ -586,7 +608,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         && this.connection.protocol === "chat_completions" && typeof init.body === "string"
         ? JSON.stringify({ thinking: { type: "disabled" }, ...JSON.parse(init.body) })
         : init.body;
-      const useResponsesStream = ["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
+      const useResponsesStream = ["deepseek", "kuafu", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
       const requestBody = useResponsesStream
         ? JSON.stringify({ ...(JSON.parse(rawBody as string) as Record<string, unknown>), stream: true })
@@ -690,7 +712,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const responseRequest = { model: this.connection.model,
           instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${fields.includes("coverageEvidence") ? "从 evidenceSpans 选择真正解释对应来源对象的片段编号，explanation 只填 excerpt: 编号，不自行摘录、拼接或改写正文。" : coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。独立英文缩写首次出现时写出中文名称、经核实的英文全称与缩写；正式名称内部已有缩写时保留原名并就近说明其中文含义与有依据的英文全称；后文优先使用中文，无法核实时只保留准确中文并说明原图标签。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。\n本次成文要求：${fields.map(field => teachingCompositionContract[field as keyof typeof teachingCompositionContract] || "只绑定真实来源对象与正文片段").join("\n")}\n${fields.includes("questions") ? "题库修复必须删除无助于理解的原文英文复述，改用准确中文表达；不要把已能准确用中文表达的原文标签再次作为题目解释中的普通英文。只有程序标识、数学变量或题目确实要求辨认的原始对象才保留原样，并在对象外用中文解释。理解题的 expectedAnswer 若含独立比较项，必须直接写成多行 Markdown 列表；不能只给 explanation 换行而漏掉标准答案。" : ""}`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
-          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+          ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
             : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
@@ -869,7 +891,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const request = this.connection.protocol === "responses" ? {
       url: `${baseUrl}/responses`,
       body: { model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-        max_output_tokens: 4_500, ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+        max_output_tokens: 4_500, ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
           : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "low" } }
           : { temperature: 0 }),
         text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
@@ -1060,7 +1082,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       model: this.connection.model, instructions: request.instructions,
       input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
       max_output_tokens: maxTokens,
-      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+      ...(["deepseek", "kuafu", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
       text: { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
     } : protocol === "messages" ? {
       model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
@@ -1153,7 +1175,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           instructions: instruction,
           input: text,
           max_output_tokens: teachingOutputTokenLimit(input.qualityMode),
-          ...(this.connection.providerId === "deepseek" ? { reasoning: { effort: "none" } }
+          ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
             : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
@@ -1335,11 +1357,16 @@ export function providerRouterFromSettings(source: SettingsProviderSource): Mode
 
 export function providerRouterFromEnvironment(): ModelRouterClient | undefined {
   const openCodeKey = process.env.OPENCODE_GO_API_KEY;
+  const kuafuKey = process.env.KUAFU_API_KEY;
   const deepSeekKey = process.env.DEEPSEEK_API_KEY;
   const connections: ProviderConnection[] = [];
   if (openCodeKey) {
     const model = process.env.OPENCODE_GO_MODEL || "deepseek-v4-flash-vision-exp";
     connections.push({ providerId: "opencode-go", baseUrl: process.env.OPENCODE_GO_BASE_URL || "https://opencode.ai/zen/go/v1", apiKey: openCodeKey, model, protocol: openCodeProtocol(model), supportsVision: openCodeSupportsVision(model), billingMode: "subscription_quota" });
+  }
+  if (kuafuKey) {
+    const model = process.env.KUAFU_MODEL || "deepseek-v4.1-flash";
+    connections.push({ providerId: "kuafu", baseUrl: process.env.KUAFU_BASE_URL || "https://api.kuafushe.cc/v1", apiKey: kuafuKey, model, protocol: "responses", supportsVision: process.env.KUAFU_SUPPORTS_VISION === "true", billingMode: "metered" });
   }
   if (deepSeekKey) {
     const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash-vision-exp";
@@ -1351,7 +1378,7 @@ export function providerRouterFromEnvironment(): ModelRouterClient | undefined {
 
 function scoreConnection(connection: ProviderConnection, input: ModelRouterInput): number {
   if (input.sourceImageDataUrl && !connection.supportsVision) return 100;
-  if (input.qualityMode === "economy") return connection.providerId === "opencode-go" ? 0 : 10;
+  if (input.qualityMode === "economy") return connection.providerId === "opencode-go" ? 0 : connection.providerId === "kuafu" ? 5 : 10;
   return connection.providerId === "deepseek" ? 0 : 10;
 }
 

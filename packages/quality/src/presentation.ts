@@ -65,6 +65,196 @@ export function normalizeEnglishTermCase(markdown: string): string {
     }).join("")}）`)).join("");
 }
 
+const protectedMarkdownPattern = /```[\s\S]*?```|~~~[\s\S]*?~~~|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|`[^`\r\n]+`|!?\[[^\]\r\n]*\]\([^\r\n]*?\)|https?:\/\/[^\s。、，；！？、]+|“[^”\r\n]*”|「[^」\r\n]*」/gu;
+
+/** Apply a deterministic transform only to prose outside opaque Markdown objects. */
+function mapPresentationProse(markdown: string, transform: (value: string) => string): string {
+  const protectedValues: string[] = [];
+  const masked = markdown.replace(protectedMarkdownPattern, (value) => {
+    const index = protectedValues.push(value) - 1;
+    return `\uE000${index}\uE001`;
+  });
+  const transformed = transform(masked);
+  return transformed.replace(/\uE000(\d+)\uE001/gu, (_match, index: string) => protectedValues[Number(index)]!);
+}
+
+function isOpaquePresentationLine(line: string): boolean {
+  if (/^\s*(?:[-*+]|\d+[.)])\s+/u.test(line)) return false;
+  return /^(?: {4}|\t|\s*(?:[>|]|\||<[^>]*>))/u.test(line);
+}
+
+function englishTermCase(value: string): string {
+  const minor = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"]);
+  return value.split(/(\s+)/u).map((word, position) => {
+    if (!/^[a-z]+$/u.test(word) || (position > 0 && minor.has(word))) return word;
+    return word[0]!.toUpperCase() + word.slice(1);
+  }).join("");
+}
+
+/** Remove Chinese full stops from authored prose without touching opaque objects. */
+export function normalizeChineseProsePunctuation(markdown: string): string {
+  return mapPresentationProse(markdown, (value) => value.split(/(\r?\n)/u).map((part) => {
+    if (/^\r?\n$/u.test(part) || isOpaquePresentationLine(part) || !/\p{Script=Han}/u.test(part)) return part;
+    return part.replace(/。(?=\s*$)/gu, "").replace(/。/gu, "；").replace(/；(?=\s*$)/gu, "");
+  }).join(""));
+}
+
+function isBilingualTermPrefix(value: string): boolean {
+  return /[\p{Script=Han}]{2,25}（[A-Za-z][A-Za-z -]{1,80}）\s*[：:]$/u.test(value.trim());
+}
+
+function isMisconceptionRolePrefix(value: string): boolean {
+  return /(?:错误理解|错因|正确判断|核对方法)\s*[：:]$/u.test(value.trim());
+}
+
+function colonIntroducesIndependentContent(prefix: string, content: string): boolean {
+  const trimmedPrefix = prefix.trim();
+  const trimmedContent = content.trim();
+  if (!trimmedContent || isBilingualTermPrefix(prefix) || isMisconceptionRolePrefix(prefix)) return false;
+  if (/^(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s|\$\$|\\\[|```|~~~)/u.test(trimmedContent)) return true;
+  if (!/^[\p{Script=Han}A-Za-z0-9` _-]{1,24}[：:]$/u.test(trimmedPrefix)) return false;
+  if (/[。！？；;，,]/u.test(trimmedPrefix) || trimmedContent.length > 120) return false;
+  return /^(?:操作|步骤|流程|注意事项|处理步骤|执行顺序|检查方法)$/u.test(trimmedPrefix)
+    || /^(?:执行|读取|检查|计算|先|再|第一|第二|将|把|不要|不能|需要)/u.test(trimmedContent);
+}
+
+/** Put content introduced by a structural colon on its own Markdown line. */
+export function normalizeColonIntroducedLineBreaks(markdown: string): string {
+  return mapPresentationProse(markdown, (value) => value.split(/\r?\n/u).map((line) => {
+    if (isOpaquePresentationLine(line)) return line;
+    const match = line.match(/^(.*?[：:])\s*(\S[\s\S]*)$/u);
+    if (!match || !colonIntroducesIndependentContent(match[1]!, match[2]!)) return line;
+    const prefix = match[1]!.replace(/\s+$/u, "");
+    const content = match[2]!.trimStart();
+    const listPrefix = /^([ \t]*)(?:[-*+]|\d+[.)])\s+/u.exec(prefix);
+    const continuationIndent = listPrefix ? `${listPrefix[1]}  ` : "";
+    return `${prefix}\n${continuationIndent}${content}`;
+  }).join("\n"));
+}
+
+/** Normalize list indentation to two spaces per nested Markdown level. */
+export function normalizeListIndentation(markdown: string): string {
+  return mapPresentationProse(markdown, (value) => value.split(/\r?\n/u).map((line, lineIndex, lines) => {
+    const previous = lineIndex > 0 ? lines[lineIndex - 1]! : "";
+    if (isOpaquePresentationLine(line)
+      || (/^ {4,}(?:[-*+]|\d+[.)])\s+/u.test(line) && !/^\s*(?:[-*+]|\d+[.)])\s+/u.test(previous))) return line;
+    const match = line.match(/^([ \t]*)([-*+]|\d+[.)])\s+(.*)$/u);
+    if (!match) return line;
+    const columns = [...match[1]!].reduce((total, character) => total + (character === "\t" ? 4 : 1), 0);
+    const level = columns === 0 ? 0 : Math.max(1, Math.ceil(columns / 4));
+    return `${"  ".repeat(level)}${match[2]} ${match[3]}`;
+  }).join("\n"));
+}
+
+/** Keep headings within the supported three-level Markdown hierarchy. */
+export function normalizeThreeLevelHeadings(markdown: string): string {
+  return mapPresentationProse(markdown, (value) => value.split(/\r?\n/u).map((line) => {
+    if (isOpaquePresentationLine(line)) return line;
+    const match = line.match(/^(\s*)(#{1,6})(\s+.*)$/u);
+    if (!match) return line;
+    return `${match[1]}${"#".repeat(Math.min(3, match[2]!.length))}${match[3]}`;
+  }).join("\n"));
+}
+
+/** Convert ordinary Chinese-term parentheses to the documented bilingual shape. */
+export function normalizeBilingualTermShape(markdown: string): string {
+  const shaped = mapPresentationProse(markdown, (value) => value.replace(
+    /([\p{Script=Han}]{2,25})\s*\(([A-Za-z][A-Za-z -]{1,80})\)/gu,
+    (_match, chinese: string, english: string) => `${chinese}（${englishTermCase(english)}）`
+  ));
+  return normalizeEnglishTermCase(shaped);
+}
+
+export const displayFormulaMarker = "<!-- course-os:display-formula -->";
+
+export interface PresentationRenderMetadata {
+  centeredParagraphs?: ReadonlyArray<number> | ReadonlySet<number> | Readonly<Record<string, boolean>>;
+}
+
+function metadataContainsParagraph(metadata: PresentationRenderMetadata | undefined, index: number): boolean {
+  const values = metadata?.centeredParagraphs;
+  if (!values) return false;
+  if (values instanceof Set) return values.has(index);
+  if (Array.isArray(values)) return values.includes(index);
+  return (values as Readonly<Record<string, boolean>>)[String(index)] === true;
+}
+
+function isPureDisplayFormulaParagraph(value: string): boolean {
+  const withoutMarker = value.replace(new RegExp(`^\\s*${displayFormulaMarker}\\s*`, "u"), "").trim();
+  return /^\$\$[\s\S]+\$\$$/u.test(withoutMarker)
+    || /^\\\[[\s\S]+\\\]$/u.test(withoutMarker)
+    || /^\\begin\{(?:equation|displaymath)\}[\s\S]+\\end\{(?:equation|displaymath)\}$/u.test(withoutMarker);
+}
+
+/** Add the supported center marker only when renderer metadata authorizes it. */
+export function normalizeDisplayFormulaParagraphs(markdown: string, metadata?: PresentationRenderMetadata): string {
+  return markdown.split(/\n\s*\n/u).map((paragraph, index) => {
+    const hasMarker = paragraph.includes(displayFormulaMarker);
+    const pureFormula = isPureDisplayFormulaParagraph(paragraph);
+    if (!pureFormula && hasMarker) return paragraph.replace(new RegExp(`\\s*${displayFormulaMarker}\\s*`, "gu"), "").trim();
+    if (pureFormula && !hasMarker && metadataContainsParagraph(metadata, index)) return `${displayFormulaMarker}\n${paragraph.trim()}`;
+    return paragraph;
+  }).join("\n\n");
+}
+
+/** Reject renderer centering metadata or markers applied to prose containing formulas. */
+export function validateDisplayFormulaAlignment(markdown: string, metadata?: PresentationRenderMetadata): string[] {
+  const issues: string[] = [];
+  markdown.split(/\n\s*\n/u).forEach((paragraph, index) => {
+    const marked = paragraph.includes(displayFormulaMarker) || metadataContainsParagraph(metadata, index);
+    if (marked && !isPureDisplayFormulaParagraph(paragraph)) issues.push("TEACHING_PRESENTATION:DISPLAY_FORMULA_PROSE_CENTERED");
+  });
+  return [...new Set(issues)];
+}
+
+/** Apply the bounded presentation repairs in a stable order. */
+export function normalizePresentationMarkdown(markdown: string, metadata?: PresentationRenderMetadata): string {
+  let result = normalizeChineseProsePunctuation(markdown);
+  result = normalizeColonIntroducedLineBreaks(result);
+  result = normalizeListIndentation(result);
+  result = normalizeThreeLevelHeadings(result);
+  result = normalizeBilingualTermShape(result);
+  return normalizeDisplayFormulaParagraphs(result, metadata);
+}
+
+export function validatePresentationFormatting(markdown: string, metadata?: PresentationRenderMetadata): string[] {
+  const issues = new Set<string>();
+  const masked = markdown.replace(protectedMarkdownPattern, (value) => value.replace(/[^\r\n]/gu, " "));
+  let previousHeadingLevel: number | undefined;
+  for (const line of masked.split(/\r?\n/u)) {
+    if (isOpaquePresentationLine(line)) continue;
+    if (/\p{Script=Han}/u.test(line) && /。/u.test(line)) issues.add("TEACHING_PRESENTATION:CHINESE_FULL_STOP");
+    if (/；\s*$/u.test(line)) issues.add("TEACHING_PRESENTATION:LINE_END_SEMICOLON");
+    const colon = line.match(/^(.*?[：:])\s+(\S[\s\S]*)$/u);
+    if (colon && (colonIntroducesIndependentContent(colon[1]!, colon[2]!)
+      || /^(?:[-*+]\s+|\d+[.)]\s+|\$\$|\\\[)/u.test(colon[2]!))) {
+      issues.add("TEACHING_PRESENTATION:COLON_CONTENT_NOT_BROKEN");
+    }
+    const list = line.match(/^([ \t]*)(?:[-*+]|\d+[.)])\s+/u);
+    if (list) {
+      const columns = [...list[1]!].reduce((total, character) => total + (character === "\t" ? 4 : 1), 0);
+      if (columns % 2 !== 0) issues.add("TEACHING_PRESENTATION:LIST_INDENT_NON_CANONICAL");
+    }
+    const heading = line.match(/^[ \t]*(#{1,6})\s+/u);
+    if (heading) {
+      const headingLevel = heading[1]!.length;
+      if (headingLevel > 3) issues.add("TEACHING_PRESENTATION:HEADING_LEVEL_OVERFLOW");
+      if (previousHeadingLevel !== undefined && headingLevel > previousHeadingLevel + 1) {
+        issues.add("TEACHING_PRESENTATION:HEADING_LEVEL_JUMP");
+      }
+      previousHeadingLevel = headingLevel;
+    }
+    if (/\p{Script=Han}{2,25}\s*\([A-Za-z][A-Za-z -]{1,80}\)/u.test(line)) issues.add("TEACHING_PRESENTATION:BILINGUAL_TERM_SHAPE");
+    if (/\p{Script=Han}{2,25}（[^）]*[,，;；]|[^）]*\b(?:also known as|aka|简称)\b[^）]*）/iu.test(line)) issues.add("TEACHING_PRESENTATION:BILINGUAL_TERM_SHAPE");
+  }
+  for (const issue of validateDisplayFormulaAlignment(markdown, metadata)) issues.add(issue);
+  return [...issues];
+}
+
+function validatePresentationMarkdown(markdown: string, metadata?: PresentationRenderMetadata): string[] {
+  return validatePresentationFormatting(markdown, metadata);
+}
+
 export interface PresentationInput {
   chapterBridgeMarkdown?: string;
   learningObjectives: string[];
@@ -89,6 +279,7 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
   const issues = new Set<string>();
   for (const [field, texts] of Object.entries(fields)) {
     for (const text of texts) {
+      for (const issue of validatePresentationMarkdown(text)) issues.add(`${issue}:${field}`);
       const prose = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|`[^`\n]+`|https?:\/\/\S+|“[^”\n]*”/g, "");
       for (const line of prose.split(/\r?\n/u)) {
         // Tables and quoted source are objects, not prose paragraphs.
@@ -119,6 +310,10 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
   for (const value of input.misconceptions) {
     if (/^错误理解[：:]/u.test(value.trim()) && /[；;]\s*(?:错因|正确判断|核对方法)[：:]/u.test(value)) {
       issues.add("TEACHING_PRESENTATION:misconceptions:ROLES_PACKED");
+    }
+    const roleLabels = [...value.matchAll(/(?:^|\n\s*\n)((?:\*\*)?(错误理解|错因|正确判断|核对方法)[：:](?:\*\*)?)/gu)];
+    if (roleLabels.length > 0 && roleLabels.some((match) => match[1] !== `**${match[2]}：**`)) {
+      issues.add("TEACHING_PRESENTATION:misconceptions:LABEL_NOT_BOLD");
     }
   }
   return [...issues];
