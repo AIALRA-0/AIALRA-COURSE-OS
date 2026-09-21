@@ -1408,7 +1408,7 @@ describe("Course OS API", () => {
     const providers = await request(app).get("/api/v1/model-providers").expect(200);
     expect(JSON.stringify(providers.body)).not.toContain("synthetic-example-deepseek-token");
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => String(url).endsWith("/models")
-      ? Response.json({ data: [{ id: "deepseek-v4-flash-vision-exp" }] })
+      ? Response.json({ data: [{ id: "deepseek-flash" }] })
       : Response.json({ status: "completed", output_text: "{\"ok\":true}" }));
     expect((await request(app).post("/api/v1/model-providers/deepseek:test").expect(200)).body).toMatchObject({
       credential: { configured: true, maskedValue: "••••oken" }, health: { state: "connected" }

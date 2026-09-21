@@ -42,11 +42,14 @@ export function mergeCourseModelProviderDefaults(saved: ModelProviderConfig[]): 
 export function mergeCourseModelRoutePolicyDefaults(saved?: ModelRoutePolicy): ModelRoutePolicy {
   const defaults = defaultCourseModelRoutePolicy(saved?.workspaceId || "personal");
   if (!saved || !Array.isArray(saved.rules)) return defaults;
+  const routes = Array.isArray(saved.routes) && saved.routes.length > 0
+    ? structuredClone(saved.routes)
+    : structuredClone(defaults.routes);
   return {
     ...structuredClone(saved),
-    routes: Array.isArray(saved.routes) && saved.routes.length > 0
-      ? structuredClone(saved.routes)
-      : structuredClone(defaults.routes),
+    routes: routes?.map(route => route.providerId === "deepseek" && route.modelId === "deepseek-v4-flash-vision-exp"
+      ? { ...route, modelId: "deepseek-flash" }
+      : route),
     allowProviderFallback: Array.isArray(saved.routes) && saved.routes.length > 0
       ? saved.allowProviderFallback ?? defaults.allowProviderFallback
       : defaults.allowProviderFallback
@@ -59,7 +62,7 @@ export function defaultCourseModelRoutePolicy(workspaceId = "personal"): ModelRo
     routes: [
       { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
       { providerId: "opencode-go", modelId: "deepseek-v4-flash-vision-exp", enabled: true },
-      { providerId: "deepseek", modelId: "deepseek-v4-flash-vision-exp", enabled: true },
+      { providerId: "deepseek", modelId: "deepseek-flash", enabled: true },
       { providerId: "codex", modelId: "gpt-5.6-luna", enabled: true },
       { providerId: "kimi-coding", modelId: "kimi-for-coding-highspeed", enabled: true }
     ],

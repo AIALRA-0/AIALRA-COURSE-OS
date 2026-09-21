@@ -51,6 +51,14 @@ describe("Course OS native model provider defaults", () => {
     expect(merged.allowProviderFallback).toBe(true);
   });
 
+  it("migrates the retired official DeepSeek vision experiment route to the live flash model", () => {
+    const saved = defaultCourseModelRoutePolicy();
+    saved.routes = saved.routes?.map((route) => route.providerId === "deepseek"
+      ? { ...route, modelId: "deepseek-v4-flash-vision-exp" }
+      : route);
+    expect(mergeCourseModelRoutePolicyDefaults(saved).routes?.find((route) => route.providerId === "deepseek")?.modelId).toBe("deepseek-flash");
+  });
+
   it("removes the retired ambiguous emergency provider from persisted settings", () => {
     const saved = [...defaultCourseModelProviders(), { id: "aialra-router", displayName: "legacy", baseUrl: "", enabled: false, credential: { configured: false }, models: [] }];
     expect(mergeCourseModelProviderDefaults(saved).some((provider) => provider.id === "aialra-router")).toBe(false);

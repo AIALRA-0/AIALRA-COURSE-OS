@@ -1164,6 +1164,9 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       if (url.endsWith("/models")) return Response.json({ data: [{ id: "deepseek-v4-flash-vision-exp" }] });
       expect(url).toBe("https://opencode.test/chat/completions");
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }>; thinking?: { type?: string } };
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-opencode-session")).toBeTruthy();
+      expect(headers.get("x-opencode-request")).toBeTruthy();
       expect(body.thinking?.type).toBe("disabled");
       expect(body.messages[1]?.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image_url" })]));
       return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });

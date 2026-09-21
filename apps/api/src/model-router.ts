@@ -583,9 +583,18 @@ export async function probeProviderConnection(connection: ProviderConnection, fu
       reasoning: { effort: "none" },
       text: { format: { type: "json_schema", name: "course_os_provider_probe", schema: capabilitySchema, strict: true } }
     };
+    const probeId = randomUUID();
+    const headers: Record<string, string> = { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json", "Content-Type": "application/json" };
+    if (connection.providerId === "opencode-go") {
+      headers["Idempotency-Key"] = probeId;
+      headers["x-opencode-session"] = probeId;
+      headers["x-opencode-request"] = probeId;
+      headers["x-opencode-client"] = "course-os";
+      headers["User-Agent"] = "course-os/2.4.0";
+    }
     const capability = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/${chat ? "chat/completions" : "responses"}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json", "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal
     });
