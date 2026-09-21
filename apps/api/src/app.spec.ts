@@ -421,12 +421,19 @@ describe("Course OS API", () => {
     expect((await readweave.listReleases()).filter((item) => item.id === "test-release-v2-candidate")).toHaveLength(1);
   }, 45_000);
 
-  it("runs a generation plan one single-page batch at a time", async () => {
-    const { app, operations, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) }, testReleaseWithPages(3));
+  it("runs independent pages concurrently while keeping one job per page", async () => {
+    let releaseGeneration!: () => void;
+    const generationGate = new Promise<void>((resolve) => { releaseGeneration = resolve; });
+    const { app, operations, release } = await seededApp({ generateTeachingPackage: async () => { await generationGate; return testTeachingResult(0); } }, testReleaseWithPages(3));
     const created = await request(app).post("/api/v1/release-candidates")
       .set("Idempotency-Key", "candidate-plan-serial")
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
+    const running = await request(app).get(`/api/v1/generation-plans/${created.body.generationPlan.id}`).expect(200);
+    expect(running.body.plan).toMatchObject({ maxConcurrency: 8 });
+    expect(running.body.plan.jobIds).toHaveLength(3);
+    expect(running.body.activeJobs).toHaveLength(3);
+    releaseGeneration();
     const completed = await waitForPlan(app, created.body.generationPlan.id);
     expect(completed).toMatchObject({ state: "completed", pageIds: [
       "test-release-v2-serial-candidate:page:1",

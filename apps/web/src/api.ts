@@ -226,7 +226,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd, ...options })
   }),
-  generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
+  generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
   writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
   generationHarness: () => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current"),
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {

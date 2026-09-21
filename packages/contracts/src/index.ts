@@ -568,8 +568,10 @@ export interface GenerationPlan {
   completedPageIds: Identifier[];
   failedPageIds: Identifier[];
   jobIds: Identifier[];
+  activeJobIds?: Identifier[];
   currentJobId?: Identifier;
   lastJobId?: Identifier;
+  maxConcurrency?: number;
   budgetUsd: number;
   spentUsd: number;
   holdForReview: boolean;

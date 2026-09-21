@@ -494,6 +494,22 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .import-status-copy { min-height: 30px; max-width: 390px; }
 .import-success > span .loader { width: 24px; height: 24px; }
 .import-state-failed > span, .import-state-rejected > span { background: color-mix(in srgb, var(--red) 12%, var(--panel)); color: var(--red); }
+.import-activity { position: fixed; z-index: 80; right: 18px; bottom: 18px; width: min(430px, calc(100vw - 36px)); max-height: min(620px, calc(100dvh - 36px)); overflow: auto; padding: 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 54px rgba(0,0,0,.24); }
+.import-activity > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.import-activity h3 { margin: 3px 0 0; font-size: 14px; }
+.import-activity-file { margin: 8px 0 10px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.import-activity .import-progress { height: 10px; margin: 0 0 8px; }
+.import-progress-label { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 10px; margin-bottom: 10px; }
+.import-progress-label strong { color: var(--brand); font: 700 12px "IBM Plex Mono", monospace; }
+.import-progress-label span { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.import-activity dl { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 14px; margin: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.import-activity dl div { min-height: 26px; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.import-activity dt { color: var(--muted); font-size: 9px; }
+.import-activity dd { margin: 0; overflow: hidden; font: 9px "IBM Plex Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.import-activity .dialog-error { margin: 10px 0 0; }
+.import-activity > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; color: var(--muted); font-size: 9px; }
+.import-activity-loading { min-height: 70px; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 10px; }
+.import-activity-loading .loader { width: 22px; height: 22px; flex: 0 0 auto; }
 
 .empty-state { min-height: 100vh; display: grid; place-content: center; justify-items: center; text-align: center; padding: 30px; background: var(--canvas); }
 .empty-state h1 { margin: 10px 0 4px; font-size: 20px; }
@@ -508,6 +524,11 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .workspace-loader.compact { min-height: 180px; }
 .workspace-loader .loader { width: 22px; height: 22px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 640px) {
+  .import-activity { right: 8px; bottom: 8px; width: calc(100vw - 16px); max-height: min(70dvh, 620px); }
+  .import-activity dl { grid-template-columns: 1fr; }
+}
 
 @media (max-width: 1180px) {
   :root { --sidebar: 236px; }

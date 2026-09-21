@@ -49,6 +49,7 @@ export function App() {
   const [theme, setTheme] = useState<"light" | "dark">((localStorage.getItem("course-os-theme") as "light" | "dark") || "light");
   const [importOpen, setImportOpen] = useState(false);
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
+  const [activeImportId, setActiveImportId] = useState(readActiveImportId);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanel>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
@@ -142,6 +143,7 @@ export function App() {
       if (navigation.releaseId) setReleaseId(navigation.releaseId);
       setPageIndex(navigation.pageIndex);
       setMode(navigation.mode);
+      setActiveImportId(readActiveImportId());
     };
     window.addEventListener("hashchange", followHashNavigation);
     return () => window.removeEventListener("hashchange", followHashNavigation);
@@ -299,9 +301,22 @@ export function App() {
       if (record.materialVersionId && items.some((item) => item.id === record.materialVersionId)) {
         setReleaseId(record.materialVersionId);
         setPageIndex(0);
-        setMode("studio");
+        setMode("learn");
       }
     }).catch(() => undefined);
+  };
+
+  const trackImport = (importId?: string) => {
+    const navigation = new URLSearchParams(location.hash.slice(1));
+    if (importId) {
+      navigation.set("import", importId);
+      localStorage.setItem("course-os-active-import", importId);
+    } else {
+      navigation.delete("import");
+      localStorage.removeItem("course-os-active-import");
+    }
+    setActiveImportId(importId);
+    location.hash = navigation.toString();
   };
 
   const runTreeAction = async (action: () => Promise<unknown>, success: string, pending = "正在保存…", refresh = true) => {
@@ -402,7 +417,8 @@ export function App() {
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className="product-content empty-course-workspace"><span className="empty-logo">CO</span><h1>建立第一门课程</h1><p>先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></section></div>
      <MobileTreeDrawer tree={tree} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
-     {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onImported={handleImported} />}
+     {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); trackImport(record.id); setToast("材料已提交，正在后台处理"); }} />}
+    {activeImportId && <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
@@ -446,7 +462,8 @@ export function App() {
       </div>
 
       <MobileTreeDrawer tree={tree} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
-       {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onImported={handleImported} />}
+       {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); trackImport(record.id); setToast("材料已提交，正在后台处理"); }} />}
+      {activeImportId && <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
@@ -829,71 +846,28 @@ function WorkspaceLoader({ compact = false }: { compact?: boolean }) {
   return <div className={`workspace-loader ${compact ? "compact" : ""}`}><div className="loader" /><span>正在准备课程工具</span></div>;
 }
 
-function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses: WorkspaceTree["courses"]; parentNodeId?: string; onClose: () => void; onImported: (record: ImportRecord) => void }) {
+function ImportDialog({ courses, parentNodeId, onClose, onSubmitted }: { courses: WorkspaceTree["courses"]; parentNodeId?: string; onClose: () => void; onSubmitted: (record: ImportRecord) => void }) {
   const [file, setFile] = useState<File>();
   const [courseId, setCourseId] = useState(courses[0]?.id || "");
-  const [record, setRecord] = useState<ImportRecord>();
   const [qualityMode, setQualityMode] = useState(localStorage.getItem("course-os-budget") || "balanced");
   const [language, setLanguage] = useState(localStorage.getItem("course-os-language") || "zh-CN");
   const [autoGenerate, setAutoGenerate] = useState(true);
-  const [generationPlan, setGenerationPlan] = useState<GenerationPlan>();
-  const [generationJob, setGenerationJob] = useState<GenerationJob>();
-  const [generationCosts, setGenerationCosts] = useState<GenerationCostEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const completedNotified = useRef(false);
-  useEffect(() => {
-    if (!record || ["failed", "rejected"].includes(record.state)) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const updated = await api.importRecord(record.id);
-        if (cancelled) return;
-        setRecord(updated);
-        if (updated.state === "ready" && !completedNotified.current) {
-          completedNotified.current = true;
-          onImported(updated);
-        }
-        if (updated.generationPlanId) {
-          const [planResult, costs] = await Promise.all([
-            api.generationPlan(updated.generationPlanId),
-            api.costs(updated.materialVersionId ? { materialVersionId: updated.materialVersionId } : {})
-          ]);
-          if (!cancelled) {
-            setGenerationPlan(planResult.plan);
-            setGenerationJob(planResult.currentJob);
-            setGenerationCosts(costs.entries);
-          }
-        } else if (updated.generationJobId) {
-          const [job, costs] = await Promise.all([api.generationJob(updated.generationJobId), api.costs({ jobId: updated.generationJobId })]);
-          if (!cancelled) {
-            setGenerationPlan(undefined);
-            setGenerationJob(job);
-            setGenerationCosts(costs.entries);
-          }
-        }
-      } catch (reason) {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取导入与生成进度");
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [record?.id]);
   const upload = async () => {
     if (!file) return;
     setBusy(true);
     setError("");
     try {
       const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate });
-      setRecord(imported);
+      onSubmitted(imported);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "材料导入失败"); }
     finally { setBusy(false); }
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
       <header><div><span className="section-kicker">NEW MATERIAL</span><h2 id="import-title">导入课程材料</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
-      {!record ? <>
+      <>
         <label className={`drop-zone ${file ? "has-file" : ""}`}>
           <input type="file" accept=".pptx,.pdf,.md,.txt" onChange={(event) => setFile(event.target.files?.[0])} />
           <span className="drop-icon"><Icon name={file ? "check" : "upload"} /></span>
@@ -905,28 +879,77 @@ function ImportDialog({ courses, parentNodeId, onClose, onImported }: { courses:
         <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
         <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!file || busy} onClick={upload}><Icon name="sparkles" />{busy ? "正在安全检查" : "导入并开始解析"}</button></footer>
-      </> : <ImportProgress record={record} plan={generationPlan} job={generationJob} costs={generationCosts} onClose={onClose} />}
+      </>
     </section>
   </div>;
 }
 
-function ImportProgress({ record, plan, job, costs, onClose }: { record: ImportRecord; plan?: GenerationPlan; job?: GenerationJob; costs: GenerationCostEntry[]; onClose: () => void }) {
+function ImportActivityDock({ importId, onReady, onProgress, onClose }: { importId: string; onReady: (record: ImportRecord) => void; onProgress: () => void; onClose: () => void }) {
+  const [record, setRecord] = useState<ImportRecord>();
+  const [plan, setPlan] = useState<GenerationPlan>();
+  const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
+  const [costs, setCosts] = useState<GenerationCostEntry[]>([]);
+  const [error, setError] = useState("");
+  const readyNotified = useRef(false);
+  const progressRef = useRef(0);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const updated = await api.importRecord(importId);
+        if (cancelled) return;
+        setRecord(updated);
+        setError("");
+        if (updated.state === "ready" && !readyNotified.current) {
+          readyNotified.current = true;
+          onReady(updated);
+        }
+        if (updated.generationPlanId) {
+          const [planResult, costResult] = await Promise.all([
+            api.generationPlan(updated.generationPlanId),
+            api.costs(updated.materialVersionId ? { materialVersionId: updated.materialVersionId } : {})
+          ]);
+          if (cancelled) return;
+          setPlan(planResult.plan);
+          setActiveJobs(planResult.activeJobs ?? (planResult.currentJob && ["queued", "running", "pending_sync"].includes(planResult.currentJob.state) ? [planResult.currentJob] : []));
+          setCosts(costResult.entries);
+          const processed = planResult.plan.completedPageIds.length + planResult.plan.failedPageIds.length;
+          if (processed > progressRef.current) {
+            progressRef.current = processed;
+            onProgress();
+          }
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取后台任务进度");
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [importId]);
+  if (!record) return <aside className="import-activity" role="status"><div className="import-activity-loading"><span className="loader" /><span>{error || "正在恢复后台任务"}</span></div>{error && <button className="quiet-button" onClick={onClose}>关闭</button>}</aside>;
+  return <ImportProgress record={record} plan={plan} activeJobs={activeJobs} costs={costs} error={error} onClose={onClose} />;
+}
+
+function ImportProgress({ record, plan, activeJobs, costs, error, onClose }: { record: ImportRecord; plan?: GenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; error?: string; onClose: () => void }) {
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
-  const terminalJob = !auto || Boolean(planState && ["awaiting_review", "completed", "failed", "cancelled"].includes(planState)) || Boolean(!plan && job && ["completed", "failed", "cancelled"].includes(job.state));
+  const terminalJob = !auto || Boolean(planState && ["awaiting_review", "completed", "failed", "cancelled"].includes(planState));
   const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && terminalJob);
-  const generated = plan?.completedPageIds.length ?? job?.completedPageIds.length ?? 0;
-  const total = plan?.pageIds.length ?? job?.pageIds.length ?? record.pageIds?.length ?? 0;
-  const generationProgress = total ? generated / total : 0;
-  const progress = record.state === "ready" && auto ? 65 + generationProgress * 35 : importInfo.progress;
-  const failed = plan?.failedPageIds.length ?? job?.failedPageIds.length ?? 0;
+  const generated = plan?.completedPageIds.length ?? record.generationCompletedPageIds?.length ?? 0;
+  const failed = plan?.failedPageIds.length ?? record.generationFailedPageIds?.length ?? 0;
+  const processed = generated + failed;
+  const total = plan?.pageIds.length ?? record.pageIds?.length ?? 0;
+  const generationProgress = total ? processed / total : 0;
+  const progress = record.state === "ready" && auto ? 60 + generationProgress * 40 : importInfo.progress;
   const latestCost = costs.at(-1);
-  const spentUsd = plan?.spentUsd ?? job?.spentUsd ?? 0;
-  const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || job?.state === "failed";
-  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan && !job ? "正在建立整套生成任务" : planState === "awaiting_review" || planState === "completed" || job?.state === "completed" ? "讲解已经生成" : planState === "failed" || job?.state === "failed" ? "生成任务已停止" : planState === "cancelled" || job?.state === "cancelled" ? "生成任务已取消" : "正在逐页生成讲解";
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : plan ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : job ? `已完成 ${generated}/${total} 页${failed ? `，失败 ${failed} 页，可只重试失败页面` : ""}` : "转换结果已保存，正在建立唯一的幂等生成计划";
-  return <div className={`import-success import-state-${record.state}`}><span>{failedState ? <Icon name="warning" /> : finished ? <Icon name="check" /> : <span className="loader" />}</span><h3>{statusTitle}</h3><p>{record.originalName}</p><div className="import-progress" aria-label="导入与生成进度"><i style={{ width: `${progress}%` }} /></div><p className="import-status-copy">{statusDetail}</p><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "—"}</dd></div><div><dt>生成进度</dt><dd>{auto ? `${generated}/${total || "—"}` : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "尚未调用模型"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div><div><dt>课程切换</dt><dd>生成结果已保存，未切换正式课程</dd></div></dl>{record.issues.length > 0 && <p className="dialog-error"><Icon name="warning" />{record.issues.join(" · ")}</p>}<button className="primary-button" disabled={!finished} onClick={onClose}>{finished ? "打开课程工作区" : "正在处理"}</button></div>;
+  const spentUsd = plan?.spentUsd ?? 0;
+  const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed";
+  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan ? "正在建立生成队列" : planState === "completed" ? "全部讲解已经生成" : planState === "failed" ? "已处理全部页面，部分页面失败" : planState === "cancelled" ? "生成任务已取消" : "正在后台并行生成讲解";
+  const currentPages = activeJobs.map((job) => (job.batchIndex ?? 0) + 1).sort((a, b) => a - b);
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : plan ? `已处理 ${processed}/${total} 页，当前并行 ${activeJobs.length} 页${currentPages.length ? `，正在处理第 ${currentPages.join("、")} 页` : ""}` : "转换结果已经保存，正在建立页面任务";
+  return <aside className={`import-activity import-state-${record.state}`} aria-live="polite"><header><div><span className="section-kicker">后台任务</span><h3>{statusTitle}</h3></div>{finished && <button className="icon-button" onClick={onClose} aria-label="关闭后台任务"><span aria-hidden="true">×</span></button>}</header><p className="import-activity-file">{record.originalName}</p><div className="import-progress" role="progressbar" aria-label="导入与生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ width: `${progress}%` }} /></div><div className="import-progress-label"><strong>{Math.round(progress)}%</strong><span>{statusDetail}</span></div><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "转换中"}</dd></div><div><dt>页面进度</dt><dd>{auto ? `${processed}/${total || "—"}` : "未启用"}</dd></div><div><dt>并行任务</dt><dd>{plan ? `${activeJobs.length}/${plan.maxConcurrency ?? 1}` : "—"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "尚未调用模型"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div></dl>{(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}<footer><span>{finished ? failedState ? "任务已结束，可检查失败页面" : "任务已完成" : "可以继续使用页面，刷新后任务仍会恢复"}</span>{finished && <button className="primary-button" onClick={onClose}>完成</button>}</footer></aside>;
 }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {
@@ -1050,6 +1073,11 @@ function readNavigationHash(): { releaseId: string; pageIndex: number; hasExplic
     hasExplicitPage: hash.has("page"),
     mode: requestedMode === "studio" || requestedMode === "review" || requestedMode === "learn" ? requestedMode : "learn"
   };
+}
+
+function readActiveImportId(): string | undefined {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  return hash.get("import") || localStorage.getItem("course-os-active-import") || undefined;
 }
 
 function defaultRelease(items: CourseRelease[]): CourseRelease | undefined {

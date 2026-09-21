@@ -999,7 +999,7 @@ export function createApp(dependencies: AppDependencies): Express {
         holdForReview: pageNumbers !== undefined && request.body.holdForReview !== false
       }, dependencies);
       await rememberCandidateIdempotency(dependencies, idempotencyKey, candidate.id);
-      if (generation.job && (generation.created || generation.jobCreated)) startGenerationJob(generation.job.id, dependencies);
+      startCreatedGenerationPlanJobs(generation, dependencies);
       response.status(202).json({ candidate, generationPlan: generation.plan, generationJob: generation.job, draftIds: savedDrafts.map((draft) => draft.id) });
     } catch (error) { next(error); }
   });
@@ -1035,7 +1035,7 @@ export function createApp(dependencies: AppDependencies): Express {
         writingPolicySnapshotId: release.writingPolicySnapshotId,
         holdForReview: request.body.holdForReview === true
       }, dependencies);
-      if (result.job && (result.created || result.jobCreated)) startGenerationJob(result.job.id, dependencies);
+      startCreatedGenerationPlanJobs(result, dependencies);
       response.status(result.created ? 202 : 200).json({ plan: result.plan, currentJob: result.job });
     } catch (error) { next(error); }
   });
@@ -1046,8 +1046,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const snapshot = await dependencies.operations.read();
       const plan = snapshot.generationPlans.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
-      const currentJob = snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
-      response.json({ plan, currentJob });
+      const activeJobs = snapshot.jobs.filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
+      const currentJob = activeJobs[0] ?? snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
+      response.json({ plan, currentJob, activeJobs });
     } catch (error) { next(error); }
   });
 
@@ -2469,8 +2470,15 @@ interface CreateGenerationPlanInput {
 interface GenerationPlanResult {
   plan: GenerationPlan;
   job?: GenerationJob;
+  jobs?: GenerationJob[];
+  createdJobIds?: string[];
   created: boolean;
   jobCreated: boolean;
+}
+
+function generationPlanConcurrency(): number {
+  const configured = Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 8);
+  return Number.isFinite(configured) ? Math.max(1, Math.min(16, Math.trunc(configured))) : 8;
 }
 
 async function createGenerationPlan(input: CreateGenerationPlanInput, dependencies: AppDependencies): Promise<GenerationPlanResult> {
@@ -2498,6 +2506,8 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
       completedPageIds: [],
       failedPageIds: [],
       jobIds: [],
+      activeJobIds: [],
+      maxConcurrency: generationPlanConcurrency(),
       budgetUsd: input.budgetUsd,
       spentUsd: 0,
       holdForReview: input.holdForReview,
@@ -2510,58 +2520,70 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
     dependencies.operations.appendEvent(state, plan.id, "plan.queued", { pages: plan.pageIds.length, budgetUsd: plan.budgetUsd, holdForReview: plan.holdForReview, sourceImportId: plan.sourceImportId, writingPolicySnapshotId: plan.writingPolicySnapshotId, harnessSnapshotId: plan.harnessSnapshotId });
     return { plan: structuredClone(plan), created: true };
   });
-  const next = await queueNextGenerationPlanJob(persisted.plan.id, dependencies);
+  const queued = await queueGenerationPlanJobs(persisted.plan.id, dependencies);
   const plan = await getGenerationPlanSnapshot(persisted.plan.id, dependencies) || persisted.plan;
-  return { plan, job: next?.job || (plan.currentJobId ? (await dependencies.operations.read()).jobs.find((item) => item.id === plan.currentJobId) : plan.lastJobId ? (await dependencies.operations.read()).jobs.find((item) => item.id === plan.lastJobId) : undefined), created: persisted.created, jobCreated: Boolean(next?.created) };
+  const snapshot = await dependencies.operations.read();
+  const job = queued[0]?.job || (plan.currentJobId ? snapshot.jobs.find((item) => item.id === plan.currentJobId) : plan.lastJobId ? snapshot.jobs.find((item) => item.id === plan.lastJobId) : undefined);
+  return { plan, job, jobs: queued.map((item) => item.job), createdJobIds: queued.filter((item) => item.created).map((item) => item.job.id), created: persisted.created, jobCreated: queued.some((item) => item.created) };
+}
+
+function startCreatedGenerationPlanJobs(result: GenerationPlanResult, dependencies: AppDependencies): void {
+  for (const jobId of result.createdJobIds ?? []) startGenerationJob(jobId, dependencies);
 }
 
 async function getGenerationPlanSnapshot(planId: string, dependencies: AppDependencies): Promise<GenerationPlan | undefined> {
   return (await dependencies.operations.read()).generationPlans.find((item) => item.id === planId);
 }
 
-async function queueNextGenerationPlanJob(planId: string, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean } | undefined> {
+async function queueGenerationPlanJobs(planId: string, dependencies: AppDependencies): Promise<Array<{ job: GenerationJob; created: boolean }>> {
   const snapshot = await dependencies.operations.read();
   const plan = snapshot.generationPlans.find((item) => item.id === planId);
-  if (!plan || ["awaiting_review", "completed", "cancelled", "failed"].includes(plan.state)) return undefined;
-  const active = snapshot.jobs.find((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
-  if (active) return { job: active, created: false };
+  if (!plan || ["awaiting_review", "completed", "cancelled", "failed"].includes(plan.state)) return [];
+  const active = snapshot.jobs.filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
   const completed = new Set(snapshot.jobs.filter((item) => item.planId === plan.id).flatMap((item) => item.completedPageIds));
   const failed = new Set(snapshot.jobs.filter((item) => item.planId === plan.id).flatMap((item) => item.failedPageIds));
-  const remaining = plan.pageIds.filter((pageId) => !completed.has(pageId) && !failed.has(pageId));
-  if (remaining.length === 0) {
+  const assigned = new Set(snapshot.jobs.filter((item) => item.planId === plan.id).flatMap((item) => item.pageIds));
+  const remaining = plan.pageIds.filter((pageId) => !completed.has(pageId) && !failed.has(pageId) && !assigned.has(pageId));
+  if (remaining.length === 0 && active.length === 0) {
     await settleGenerationPlan(plan.id, dependencies);
-    return undefined;
+    return [];
   }
-  const batchIndex = plan.jobIds.length;
-  const pageId = remaining[0]!;
-  const result = await persistGenerationJob({
-    idempotencyKey: `generation-plan:${plan.id}:batch:${batchIndex}`,
-    workspaceId: plan.workspaceId,
-    materialVersionId: plan.materialVersionId,
-    pageIds: [pageId],
-    budgetUsd: plan.budgetUsd,
-    sourceImportId: plan.sourceImportId,
-    planId: plan.id,
-    batchIndex,
-    batchCount: plan.pageIds.length,
-    qualityMode: plan.qualityMode,
-    language: plan.language,
-    writingPolicySnapshotId: plan.writingPolicySnapshotId,
-    harnessSnapshotId: plan.harnessSnapshotId
-  }, dependencies);
-  const linked = await dependencies.operations.mutate((state) => {
-    const current = state.generationPlans.find((item) => item.id === plan.id);
-    if (!current) return false;
-    if (!current.jobIds.includes(result.job.id)) current.jobIds.push(result.job.id);
-    current.currentJobId = result.job.id;
-    current.lastJobId = result.job.id;
-    current.state = "queued";
-    current.updatedAt = new Date().toISOString();
-    syncImportGenerationPlan(state, current);
-    dependencies.operations.appendEvent(state, current.id, "plan.batch.queued", { jobId: result.job.id, batchIndex, pageId });
-    return true;
-  });
-  return linked ? result : undefined;
+  const slots = Math.max(0, (plan.maxConcurrency ?? generationPlanConcurrency()) - active.length);
+  const queued: Array<{ job: GenerationJob; created: boolean }> = [];
+  for (const pageId of remaining.slice(0, slots)) {
+    const batchIndex = plan.pageIds.indexOf(pageId);
+    const result = await persistGenerationJob({
+      idempotencyKey: `generation-plan:${plan.id}:batch:${batchIndex}`,
+      workspaceId: plan.workspaceId,
+      materialVersionId: plan.materialVersionId,
+      pageIds: [pageId],
+      budgetUsd: plan.budgetUsd,
+      sourceImportId: plan.sourceImportId,
+      planId: plan.id,
+      batchIndex,
+      batchCount: plan.pageIds.length,
+      qualityMode: plan.qualityMode,
+      language: plan.language,
+      writingPolicySnapshotId: plan.writingPolicySnapshotId,
+      harnessSnapshotId: plan.harnessSnapshotId
+    }, dependencies);
+    const linked = await dependencies.operations.mutate((state) => {
+      const current = state.generationPlans.find((item) => item.id === plan.id);
+      if (!current) return false;
+      if (!current.jobIds.includes(result.job.id)) current.jobIds.push(result.job.id);
+      const activeJobIds = current.activeJobIds ?? (current.activeJobIds = []);
+      if (!activeJobIds.includes(result.job.id)) activeJobIds.push(result.job.id);
+      current.currentJobId ||= result.job.id;
+      current.lastJobId = result.job.id;
+      current.state = "queued";
+      current.updatedAt = new Date().toISOString();
+      syncImportGenerationPlan(state, current);
+      dependencies.operations.appendEvent(state, current.id, "plan.batch.queued", { jobId: result.job.id, batchIndex, pageId });
+      return true;
+    });
+    if (linked) queued.push(result);
+  }
+  return queued;
 }
 
 async function settleGenerationPlan(planId: string, dependencies: AppDependencies): Promise<void> {
@@ -2572,15 +2594,20 @@ async function settleGenerationPlan(planId: string, dependencies: AppDependencie
     plan.completedPageIds = uniqueStrings(jobs.flatMap((item) => item.completedPageIds));
     plan.failedPageIds = uniqueStrings(jobs.flatMap((item) => item.failedPageIds));
     plan.spentUsd = roundGenerationMoney(jobs.reduce((sum, item) => sum + item.spentUsd, 0));
-    plan.currentJobId = undefined;
+    const activeJobs = jobs.filter((item) => ["queued", "running", "pending_sync"].includes(item.state));
+    plan.activeJobIds = activeJobs.map((item) => item.id);
+    plan.currentJobId = activeJobs[0]?.id;
     plan.lastJobId = jobs.at(-1)?.id || plan.lastJobId;
     plan.updatedAt = new Date().toISOString();
+    const assigned = new Set(jobs.flatMap((item) => item.pageIds));
+    const unassigned = plan.pageIds.filter((pageId) => !assigned.has(pageId));
     const remaining = plan.pageIds.filter((pageId) => !plan.completedPageIds.includes(pageId) && !plan.failedPageIds.includes(pageId));
-    if (remaining.length > 0) plan.state = "queued";
+    if (activeJobs.length > 0) plan.state = activeJobs.some((item) => item.state === "running") ? "running" : "queued";
+    else if (unassigned.length > 0) plan.state = "queued";
     else if (plan.failedPageIds.length > 0) plan.state = "failed";
     else plan.state = "completed";
     syncImportGenerationPlan(state, plan);
-    dependencies.operations.appendEvent(state, plan.id, `plan.${plan.state}`, { completedPageIds: plan.completedPageIds, failedPageIds: plan.failedPageIds, spentUsd: plan.spentUsd, remainingPages: remaining.length });
+    dependencies.operations.appendEvent(state, plan.id, `plan.${plan.state}`, { completedPageIds: plan.completedPageIds, failedPageIds: plan.failedPageIds, spentUsd: plan.spentUsd, remainingPages: remaining.length, activeJobIds: plan.activeJobIds });
   });
 }
 
@@ -2605,8 +2632,8 @@ async function advanceGenerationPlanForJob(jobId: string, dependencies: AppDepen
   await settleGenerationPlan(plan.id, dependencies);
   const updated = await getGenerationPlanSnapshot(plan.id, dependencies);
   if (!updated || updated.state !== "queued") return;
-  const next = await queueNextGenerationPlanJob(plan.id, dependencies);
-  if (next?.job && next.created) startGenerationJob(next.job.id, dependencies);
+  const next = await queueGenerationPlanJobs(plan.id, dependencies);
+  for (const item of next) if (item.created) startGenerationJob(item.job.id, dependencies);
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -2641,7 +2668,9 @@ export async function executeGenerationJob(jobId: string, dependencies: AppDepen
     if (job.planId) {
       const plan = state.generationPlans.find((item) => item.id === job.planId);
       if (plan) {
-        plan.currentJobId = job.id;
+        const activeJobIds = plan.activeJobIds ?? (plan.activeJobIds = []);
+        if (!activeJobIds.includes(job.id)) activeJobIds.push(job.id);
+        plan.currentJobId ||= job.id;
         plan.lastJobId = job.id;
         plan.state = "running";
         plan.updatedAt = new Date().toISOString();
@@ -3957,8 +3986,8 @@ export async function resumeIncompleteJobs(dependencies: AppDependencies): Promi
     await settleGenerationPlan(plan.id, dependencies);
     const refreshed = await getGenerationPlanSnapshot(plan.id, dependencies);
     if (refreshed?.state !== "queued") continue;
-    const next = await queueNextGenerationPlanJob(plan.id, dependencies);
-    if (next?.job && next.created) startGenerationJob(next.job.id, dependencies);
+    const next = await queueGenerationPlanJobs(plan.id, dependencies);
+    for (const item of next) if (item.created) startGenerationJob(item.job.id, dependencies);
   }
 }
 
@@ -4108,7 +4137,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.generationState = generationPlan?.plan.state || "not_requested";
       dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds, generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
-    if (generationPlan?.job && (generationPlan.created || generationPlan.jobCreated)) startGenerationJob(generationPlan.job.id, dependencies);
+    if (generationPlan) startCreatedGenerationPlanJobs(generationPlan, dependencies);
   } catch (error) {
     const issue = safeImportIssue(error);
     await dependencies.operations.mutate((state) => {
