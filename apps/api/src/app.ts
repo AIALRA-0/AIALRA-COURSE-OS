@@ -60,7 +60,7 @@ import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor, searchPriceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
 import { previousLessonContext } from "./teaching-plan.js";
-import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
+import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
 import { probeSearchConnection, searchTeachingEvidence, type CourseSearchConnection, type CourseSearchReceipt } from "./search-providers.js";
 
@@ -72,6 +72,12 @@ export interface AppDependencies {
   conversion: { enqueueAndWait(request: ConversionRequest): Promise<ConversionResult> };
   modelRouter?: ModelRouterClient;
   credentialVault?: SecretVault;
+}
+
+/** Keep the previous-page context used by the first attempt stable while later
+ * parallel pages finish and become visible in ReadWeave. */
+export function stablePreviousPageContext(savedCheckpoint: Pick<PlannedCheckpoint, "trace"> | undefined, currentContext: string | undefined): string | undefined {
+  return savedCheckpoint ? savedCheckpoint.trace.previousPageContext : currentContext;
 }
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
@@ -2818,11 +2824,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       const sourceText = buildGenerationSourceText(page);
+      const checkpointKey = `${jobId}:${page.id}`;
+      const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
       const previousPage = release.pages.find((candidate) => candidate.pageNumber === page.pageNumber - 1);
       const previousDraft = previousPage ? await dependencies.readweave.getDraftByPage(previousPage.id) : undefined;
       const previousTeaching = previousDraft?.status === "ready" && previousDraft.workspaceId === currentJob.workspaceId
         && previousDraft.sourceReleaseId === release.id ? previousDraft.page : previousPage;
-      const previousPageContext = previousLessonContext(previousTeaching);
+      const previousPageContext = stablePreviousPageContext(savedCheckpoint, previousLessonContext(previousTeaching));
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       await appendGenerationStageEvent(jobId, page.id, "atomize", "started", dependencies);
@@ -2832,13 +2840,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
-      const checkpointKey = `${jobId}:${page.id}`;
       const teachingFingerprint = createHash("sha256").update(JSON.stringify({ releaseId: release.id, pageId: page.id,
         sourceText, sourceImage: page.imageUrl, previousPageContext, blueprintSha256: blueprint.sha256,
         writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
         harnessSnapshotId: currentJob.harnessSnapshotId, language: currentJob.language || "zh-CN",
         qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd) })).digest("hex");
-      const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
       if (savedCheckpoint && savedCheckpoint.fingerprint !== teachingFingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
       const searchConfigured = await hasEnabledSearchRoute(dependencies);
       let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v12`, stage: "teach", maxCostUsd: pageCostLimitUsd,

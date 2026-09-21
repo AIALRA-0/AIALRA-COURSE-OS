@@ -89,14 +89,21 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
   }
   return [...groups].map(([field, fieldIssues]) => ({
     phase, field, issues: fieldIssues, expectedHash: repairHash(candidate[field]),
-    ...(field === "coverageEvidence" ? { atomIds: fieldIssues.flatMap(issue => {
+    ...(field === "coverageEvidence" ? { atomIds: [...new Set(fieldIssues.flatMap(issue => {
       const match = /^PLAN_(?:EVIDENCE_(?:QUOTE_MISSING|UNKNOWN_ATOM|UNKNOWN_FIELD|MISSING)|FACT_EVIDENCE_MISSING):(.+)$/u.exec(issue);
-      if (!match) return [];
+      if (!match) {
+        const indexed = /^result\.coverageEvidence\.(\d+)(?:[.:]|$)/u.exec(issue);
+        const claim = indexed && Array.isArray(candidate.coverageEvidence)
+          ? candidate.coverageEvidence[Number(indexed[1])]
+          : undefined;
+        const atomId = claim && typeof claim === "object" && "atomId" in claim ? String(claim.atomId) : "";
+        return atomId && (!knownAtomIds?.length || knownAtomIds.includes(atomId)) ? [atomId] : [];
+      }
       const raw = match[1]!;
       if (issue.startsWith("PLAN_EVIDENCE_UNKNOWN_ATOM:")) return [raw];
       if (knownAtomIds?.length) return knownAtomIds.filter(id => raw === id || raw.startsWith(`${id}:`));
       return [raw];
-    }) } : {}),
+    }))] } : {}),
     instruction: field === "coverageEvidence"
       ? "仅修正覆盖证据：atomId 必须真实存在，explanation 必须逐字摘录完整讲解中的连续原文，coveredFields 只能声明该引文真正解释的内容；不得改写正文或虚构证据"
       : `仅修正 ${field} 字段中列出的问题；保留其余已正确的事实、条件、数值、公式和段落，不输出其他字段。${fieldIssues.some(issue => issue.includes(":TERM_PAIR_MISSING")) ? "先验知识的知识点名称缺少对应英文：核对来源和计划中同一概念的英语原名，写成中文名称（English Name）：，不能猜译或把普通解释短语当正式名称；定义内部实际使用的专业术语也按相同规则配对。" : ""}${fieldIssues.some(issue => issue.includes(":BILINGUAL_TERM_SHAPE")) ? "中英文名称必须逐个一一对应：把‘中文 A 与中文 B（English A, English B）’拆成‘中文 A（English A）与中文 B（English B）’；使用全角中文括号，括号内不并列多个英文名称，不改变定义内容。" : ""}${fieldIssues.some(issue => /result\.questions\.\d+\.prompt:string/u.test(issue)) ? "四道题的每个对象都必须包含非空字符串 prompt；根据当前题目 focus、标准答案和解析补出明确题干，不能省略 prompt，也不能把题干写成数组或对象。" : ""}${fieldIssues.some(issue => /result\.questions\.\d+\.kind:enum/u.test(issue)) ? "题型只能填写 comprehension 或 multiple_choice；理解题使用 comprehension，选择题使用 multiple_choice，不能使用 understanding、choice 或中文别名。" : ""}${fieldIssues.some(issue => issue.includes(":ROLE_LABEL_MISSING")) ? "每处易错点必须依次保留四个段落，段首分别是错误理解：、错因：、正确判断：、核对方法：；只补齐标签与段落边界，不改事实。" : ""}${fieldIssues.some(issue => issue.includes(":ENGLISH_NAME_CASE")) ? `逐一处理这些具体的英文括号：${englishCaseTargets(candidate[field]).join("、")}。先判定它是不是有来源对应的正式名称；普通英文解释短语应删除英文、保留已经写明的中文意思，不能只改为标题式大小写伪装成术语；真正的英文名称才按官方或学术通用写法调整主要实词首字母。` : ""}只有纯公式独占一行时才使用居中的 $$ 公式块；包含文字的条目和段落保持左对齐；并列的符号解释、步骤和比较项分行列举，子项缩进；删除普通中文句号，长段落按语义换行，不改原始引文、代码和公式字符`

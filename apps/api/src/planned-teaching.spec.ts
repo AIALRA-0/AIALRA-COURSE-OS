@@ -7,7 +7,7 @@ import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalize
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
-import { applyTeachingPackage } from "./app.js";
+import { applyTeachingPackage, stablePreviousPageContext } from "./app.js";
 
 const quote = "先确定实际需要处理的对象，再观察处理前后的变化，这样才能把操作与结果对应起来";
 const usage = { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEquivalentUsd: 0.001, durationMs: 10 };
@@ -42,6 +42,27 @@ it("keeps incomplete provider fields available for Schema-guided Agent repair", 
   expect(() => normalizePlannedQuestionPunctuation(incomplete)).not.toThrow();
   expect(normalizePlannedQuestionPunctuation(incomplete).questions?.[0]).toMatchObject({ kind: "multiple_choice", options: ["正确项", null] });
   expect(() => normalizePlannedOpening({ priorKnowledge: [null], learningObjectives: [undefined] } as never)).not.toThrow();
+});
+it("targets the atom at an invalid coverage array index", () => {
+  const candidate = { ...explanation, coverageEvidence: [
+    explanation.coverageEvidence[0]!,
+    { atomId: "b", coveredFields: ["observation"] }
+  ] } as unknown as Partial<TeachingPackage>;
+  const [ticket] = generationRepairTickets("explanation", candidate,
+    ["result.coverageEvidence.1.explanation:required"], ["a", "b"]);
+  expect(ticket).toMatchObject({ field: "coverageEvidence", atomIds: ["b"] });
+  expect(applyGenerationRepair(candidate, ticket!, { coverageEvidence: [
+    { atomId: "b", coveredFields: ["observation"], explanation: quote }
+  ] }).coverageEvidence).toEqual([
+    explanation.coverageEvidence[0],
+    { atomId: "b", coveredFields: ["observation"], explanation: quote }
+  ]);
+});
+it("keeps retry context frozen even when a previous page finishes later", () => {
+  const checkpoint = { trace: { previousPageContext: "首次尝试使用的前页讲解" } } as Pick<import("./planned-teaching.js").PlannedCheckpoint, "trace">;
+  expect(stablePreviousPageContext(checkpoint, "稍后才完成的新讲解")).toBe("首次尝试使用的前页讲解");
+  expect(stablePreviousPageContext({ trace: {} } as typeof checkpoint, "稍后才出现的讲解")).toBeUndefined();
+  expect(stablePreviousPageContext(undefined, "首次读取到的讲解")).toBe("首次读取到的讲解");
 });
 it.each([
   ["缺少英文名称", "布局质量指标：衡量布局结果的多个数值", true],
