@@ -1,0 +1,88 @@
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_e7e96ddb6961a6 54
+apps/web/src/types.ts
+  s_e8850ef125fb32::t_a64de119bc4a07 1-2,4-5,7-29
+  s_e8850ef125fb32::t_01c76e8e04d0bc 3,6
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_38408c27edd3f2 187,195-197
+  s_e8850ef125fb32::t_70d1c40e360571 144,149-153
+  s_e8850ef125fb32::t_9d23567c539452 232-251,357,390
+  s_e8850ef125fb32::t_e7e96ddb6961a6 2,34-35,49,252,293,338,399-467
+apps/worker/src/worker.ts
+  s_e8850ef125fb32::t_e6879213a893d0 9
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_34b05cf55d0c9b 3
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_a38ce2a3d19c8f 78-82,153-174
+  s_36a381ab4bccf9::t_6ab71b4928fc1b 175
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_2a111c6326c05d 1121-1122,1124,1130-1131
+  s_e8850ef125fb32::t_79895f7f2cec02 124-130
+  s_e8850ef125fb32::t_32bf943c850fdb 1116-1120,1123,1125-1129,1188-1190
+  s_e8850ef125fb32::t_375e88e5f291d3 2629-2630
+  s_e8850ef125fb32::t_9cbda1ecf4bd20 109-115
+  s_e8850ef125fb32::t_a38ce2a3d19c8f 1268
+  s_e8850ef125fb32::t_0a4b6615f3926e 94
+  s_e8850ef125fb32::t_ce5106f3fc6f8b 2657-2658
+  s_e8850ef125fb32::t_2c5687cad488b1 62,83-93,95-108,116-123,131-139
+  s_e8850ef125fb32::t_5b98c6994210c8 2908,2919,2925,2927-2930,2964-2972,2982,2993-2995
+  s_e8850ef125fb32::t_6d14cf354779c6 3435-3443
+  s_36a381ab4bccf9::t_7bd47cb6b544a4 140-141
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_b6d59ba91a4635 1-112
+deploy/vps/compose.yaml
+  s_e8850ef125fb32::t_e6879213a893d0 43,98
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_e145484e441a75 570-571
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_a64de119bc4a07 1-122,125-130,133-138,142-180
+  s_e8850ef125fb32::t_7c0c1deac9d09c 123-124,131-132,139-140
+  s_e8850ef125fb32::t_cf34674149735e 141
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_68b5a500c4167c 9
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_1130b71010ebeb 499,532
+  s_e8850ef125fb32::t_d36837bd1b7727 498
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_e3c5815813804f 333,339,380-381,384,386,397,447,450,465
+  s_e8850ef125fb32::t_ca3eb190f97cff 15,249,261,279,395,431,434,461-462,531,536,546,551,558,563,572,577,597,599,669,671,675-677,681,688,731,735-737
+  s_e8850ef125fb32::t_e1814d3246df1e 502
+  s_e8850ef125fb32::t_1c2bd5e41a6c71 478-501,503-515
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_8dd8a136721bc0 439
+  s_e8850ef125fb32::t_46cc51bcbfebd3 438
+  s_e8850ef125fb32::t_81f9a7d5027b6c 433,436-437,440-441,828,834
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_a64de119bc4a07 35,218,230
+  s_e8850ef125fb32::t_df89fd7f68f98a 231
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_e8a27b4b5831a3 8,889-890,953
+  s_e8850ef125fb32::t_0153f04e7bc64c 6,959,974-982
+  s_e8850ef125fb32::t_6754ffe85195a2 420
+  s_e8850ef125fb32::t_cf34674149735e 964-967,972,983
+  s_e8850ef125fb32::t_dbe5ca79c541f3 454
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e428cff7b64a0b2928a19a853e4dace40509eeb6",
+  "prompts": {},
+  "sessions": {
+    "s_36a381ab4bccf9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a1a6-6503-79c1-8d40-f56fe9691ee6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
