@@ -50,7 +50,7 @@ import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
-import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
+import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
@@ -3269,6 +3269,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, state, dependencies);
       });
     } catch (error) {
+      const failureRoute = classifyGenerationFailure(error);
+      const autoRecoveryCandidate = shouldAutoRecoverGenerationFailure(error, currentJob.attempt, currentJob.spentUsd, currentJob.budgetUsd);
       const billedCalls = meter.groupedUsage();
       if (finalizedCost || billedCalls.length > 0 || error instanceof ModelRouterGenerationError) {
         const receipts = billedCalls.length ? billedCalls : [{ provider: (error as ModelRouterGenerationError).provider, model: (error as ModelRouterGenerationError).model, usage: (error as ModelRouterGenerationError).usage }];
@@ -3284,7 +3286,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           // the task or permit a stale worker to write a lesson draft.
           applyActualCost(job, failedCost, state, dependencies);
           if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
-          if (!job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
+          if ((!autoRecoveryCandidate || job.spentUsd > job.budgetUsd) && !job.failedPageIds.includes(pageId)) job.failedPageIds.push(pageId);
           dependencies.operations.appendEvent(state, job.id, "generation.page.cost_recorded", { pageId, status: "failed", actualMicrousd: failedCost.actualMicrousd });
           if (job.spentUsd > job.budgetUsd) {
             Object.assign(job, transitionJob(job, "failed"));
@@ -3293,8 +3295,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         });
         }
       }
+      if (autoRecoveryCandidate && await requeueGenerationPageForAgentRepair(jobId, pageId, safeGenerationIssue(error), failureRoute, dependencies, fenceToken)) {
+        startGenerationJob(jobId, dependencies);
+        continue;
+      }
       await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
-        failureRoute: classifyGenerationFailure(error),
+        failureRoute,
         ...(error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}),
         ...(persistenceStage ? { persistenceStage, backendFailureKind: safeReadWeaveFailureKind(error) } : {})
       }, fenceToken);
@@ -3312,6 +3318,32 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       Object.assign(job, transitionJob(job, "completed"));
       dependencies.operations.appendEvent(state, job.id, "job.completed", { completedPageIds: job.completedPageIds, failedPageIds: job.failedPageIds, spentUsd: job.spentUsd });
     }
+  });
+}
+
+async function requeueGenerationPageForAgentRepair(
+  jobId: string,
+  pageId: string,
+  issue: string,
+  failureRoute: ReturnType<typeof classifyGenerationFailure>,
+  dependencies: AppDependencies,
+  fenceToken: number
+): Promise<boolean> {
+  return dependencies.operations.mutate((state) => {
+    const job = state.jobs.find((item) => item.id === jobId);
+    if (!job || job.state !== "running" || job.lease?.fenceToken !== fenceToken
+      || !shouldAutoRecoverGenerationFailure(issue, job.attempt, job.spentUsd, job.budgetUsd)) return false;
+    job.failedPageIds = job.failedPageIds.filter((id) => id !== pageId);
+    job.lastErrorCode = issue;
+    Object.assign(job, transitionJob(job, "queued"), { pageIds: [pageId], completedPageIds: [], cancelRequested: false });
+    dependencies.operations.appendEvent(state, job.id, "generation.page.agent_repair_queued", {
+      pageId,
+      issue,
+      failureRoute,
+      completedPhases: state.generationCheckpoints[`${jobId}:${pageId}`]?.completedPhases ?? [],
+      nextAttempt: job.attempt + 1
+    });
+    return true;
   });
 }
 
@@ -3967,6 +3999,32 @@ export async function resumeIncompleteImports(dependencies: AppDependencies): Pr
 }
 
 export async function resumeIncompleteJobs(dependencies: AppDependencies): Promise<void> {
+  await dependencies.operations.mutate((state) => {
+    for (const job of state.jobs) {
+      if (job.state !== "failed" || !job.planId || !job.lastErrorCode
+        || !shouldAutoRecoverGenerationFailure(job.lastErrorCode, job.attempt, job.spentUsd, job.budgetUsd)) continue;
+      const plan = state.generationPlans.find((item) => item.id === job.planId);
+      if (!plan || !["queued", "running"].includes(plan.state)) continue;
+      const retryPageIds = job.failedPageIds.length ? [...job.failedPageIds] : [...job.pageIds];
+      Object.assign(job, transitionJob(job, "queued"), {
+        pageIds: retryPageIds,
+        completedPageIds: [],
+        failedPageIds: [],
+        cancelRequested: false
+      });
+      const activeJobIds = plan.activeJobIds ?? (plan.activeJobIds = []);
+      if (!activeJobIds.includes(job.id)) activeJobIds.push(job.id);
+      plan.currentJobId ||= job.id;
+      plan.state = "queued";
+      plan.updatedAt = new Date().toISOString();
+      syncImportGenerationPlan(state, plan);
+      dependencies.operations.appendEvent(state, job.id, "job.agent_repair_recovered", {
+        pageIds: retryPageIds,
+        issue: job.lastErrorCode,
+        nextAttempt: job.attempt + 1
+      });
+    }
+  });
   const pending = (await dependencies.operations.read()).jobs.filter((item) => ["queued", "running"].includes(item.state) && !item.cancelRequested);
   for (const job of pending) {
     if (job.state === "running") {

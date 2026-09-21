@@ -730,7 +730,29 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
-  it("includes successful generation usage when a later field repair fails", async () => {
+  it("automatically resumes a recoverable model-output failure and completes the page", async () => {
+    let calls = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        calls += 1;
+        if (calls === 1) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", "deepseek-v4.1-flash", {
+          inputTokens: 80, cachedInputTokens: 0, outputTokens: 20, apiEquivalentUsd: 0.002, durationMs: 50
+        }, "kuafu");
+        return testTeachingResult(0.004);
+      }
+    };
+    const { app, operations, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "agent-output-recovery")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    const job = await waitForJob(app, created.body.id);
+    expect(job).toMatchObject({ state: "completed", attempt: 2, completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(calls).toBe(2);
+    expect((await operations.read()).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ streamId: created.body.id, type: "generation.page.agent_repair_queued" })
+    ]));
+  }, 60_000);
+
+  it("keeps a failed field repair inside bounded Agent retries and records every billed call", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.005);
@@ -742,10 +764,10 @@ describe("Course OS API", () => {
     const {app,release} = await seededApp(modelRouter);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key","paid-then-failed").send({materialVersionId:release.id,pageIds:["page-1"],budgetUsd:1}).expect(202);
     const job = await waitForJob(app,created.body.id);
-    expect(job).toMatchObject({state:"failed",spentUsd:0.008});
+    expect(job).toMatchObject({state:"failed",attempt:3,spentUsd:0.024});
     const costs = await request(app).get(`/api/v1/costs?jobId=${job.id}`).expect(200);
-    expect(costs.body.entries.reduce((sum:number,item:{actualMicrousd:number})=>sum+item.actualMicrousd,0)).toBe(8000);
-  });
+    expect(costs.body.entries.reduce((sum:number,item:{actualMicrousd:number})=>sum+item.actualMicrousd,0)).toBe(24000);
+  }, 60_000);
 
   it("records already billed usage after cancellation without saving a stale draft", async () => {
     const beforeEnv = process.env.COURSE_OS_EXTERNAL_WORKER;

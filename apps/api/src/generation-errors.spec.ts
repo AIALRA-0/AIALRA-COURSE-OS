@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
+import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 
 describe("generation error classification", () => {
   it("routes content, transport, quota and storage failures to distinct recovery actions", () => {
@@ -17,6 +17,13 @@ describe("generation error classification", () => {
       retryable: false,
       safeMessage: "模型账户余额或额度已耗尽，请更换有效凭据后继续"
     });
+  });
+
+  it("keeps output and teaching-plan repair inside a bounded runtime retry", () => {
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID"), 1, 0.02, 4)).toBe(true);
+    expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 2, 0.04, 4)).toBe(true);
+    expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 3, 0.04, 4)).toBe(false);
+    expect(shouldAutoRecoverGenerationFailure(new Error("PROVIDER_AUTH"), 1, 0, 4)).toBe(false);
   });
   it("keeps a rejected provider request distinct from an internal failure", () => {
     expect(describeGenerationError(new Error("MODEL_PROVIDER_FAILED:invalid_request_error"))).toEqual({

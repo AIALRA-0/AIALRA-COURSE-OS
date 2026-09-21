@@ -29,6 +29,19 @@ export function classifyGenerationFailure(error: unknown): GenerationFailureRout
   return { category: "internal", action: "pause", code };
 }
 
+/** Keep recoverable model drift inside the runtime Agent instead of exposing it as a failed page. */
+export function shouldAutoRecoverGenerationFailure(
+  error: unknown,
+  attempt: number,
+  spentUsd: number,
+  budgetUsd: number,
+  maxAttempts = 3
+): boolean {
+  if (attempt >= Math.max(1, maxAttempts) || spentUsd >= budgetUsd) return false;
+  const route = classifyGenerationFailure(error);
+  return route.action === "retry_stage" || route.action === "repair_field" || route.action === "retry_readback";
+}
+
 const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE"]);
 
 export function describeGenerationError(error: unknown): GenerationErrorDescriptor {
