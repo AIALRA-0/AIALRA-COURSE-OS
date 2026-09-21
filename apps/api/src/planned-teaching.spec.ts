@@ -3,7 +3,7 @@ import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -61,6 +61,19 @@ it("rebinds a long coverage claim to its own exact explained line", () => {
   expect(original.coverageEvidence[0]?.explanation).toContain("继续解释");
   expect(bindExactCoverageLines({ ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] })).toEqual(
     { ...original, coverageEvidence: [{ ...original.coverageEvidence[0]!, explanation: "另一段完全无关的解释" }] });
+});
+it("fills omitted coverage fields from the authoritative requirement package before validation", () => {
+  const page = { id: "page-1", pageNumber: 1, title: "输入", blocks: [], atoms: [{ id: "a", kind: "text", text: quote, risk: "general" }],
+    anchors: [], coverageRequirements: [{ atomId: "a", requiredFields: ["observation", "meaning"], risk: "general" }], coverageClaims: [],
+    lessonSections: [], questionBank: [], quality: { highRiskCoverage: 1, generalCoverage: 1, mathValid: true, publishable: true, issues: [] } } as unknown as PageLesson;
+  const blueprint = buildTeachingBlueprint(page, quote, "zh-CN", "balanced", "writing-policy:test", true);
+  const input: Partial<TeachingPackage> = { coverageEvidence: [{ atomId: "a", explanation: quote } as TeachingPackage["coverageEvidence"][number]] };
+  const normalized = normalizePlannedCoverageFields(input, blueprint);
+  expect(normalized.coverageEvidence?.[0]?.coveredFields).toEqual(["observation", "meaning"]);
+  const existing = normalizePlannedCoverageFields({ coverageEvidence: [{ atomId: "a", explanation: quote, coveredFields: ["observation"] }] }, blueprint);
+  expect(existing.coverageEvidence?.[0]?.coveredFields).toEqual(["observation"]);
+  expect(() => normalizePlannedCoverageFields({ coverageEvidence: [null, "invalid"] } as never, blueprint)).not.toThrow();
+  expect(() => bindExactCoverageLines({ fullExplanationMarkdown: quote, coverageEvidence: [null, "invalid", { atomId: "a" }] } as never)).not.toThrow();
 });
 it("rebinds a citation after punctuation-only teaching repair", () => {
   const actual = "这一页要回答三个问题：它是什么；为什么需要它；怎样使用它";

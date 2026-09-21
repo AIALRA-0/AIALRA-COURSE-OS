@@ -250,6 +250,8 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
   };
   let changed = false;
   const coverageEvidence = content.coverageEvidence.map(evidence => {
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return evidence;
+    if (typeof evidence.explanation !== "string") return evidence;
     if (explanation.includes(evidence.explanation)) return evidence;
     const candidateLines = evidence.explanation.split(/\r?\n/u).map(line => line.trim()).filter(line => line.length >= 24)
       .sort((left, right) => right.length - left.length);

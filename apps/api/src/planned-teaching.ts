@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { TeachingBlueprint } from "@course-os/contracts";
 import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
@@ -115,6 +116,22 @@ export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPa
   if (!content.fullExplanationMarkdown) return content;
   const introduced = content.fullExplanationMarkdown.replace(/^([ \t]*)原文[：:][ \t]*$/gmu, "$1课件原文如下：");
   return { ...content, fullExplanationMarkdown: normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(introduced))) };
+}
+
+/** Reconcile a provider's omitted transport field with the authoritative requirement package. */
+export function normalizePlannedCoverageFields<T extends Partial<TeachingPackage>>(content: T, blueprint: TeachingBlueprint): T {
+  if (!Array.isArray(content.coverageEvidence)) return content;
+  const required = new Map(blueprint.requirementPackage.requirements.map((item) => [item.atomId, item.requiredFields]));
+  return {
+    ...content,
+    coverageEvidence: content.coverageEvidence.map((rawEvidence) => {
+      const evidence = rawEvidence as unknown;
+      if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) || "coveredFields" in evidence) return rawEvidence;
+      const atomId = "atomId" in evidence && typeof evidence.atomId === "string" ? evidence.atomId : undefined;
+      const fields = atomId ? required.get(atomId) : undefined;
+      return fields?.length ? { ...evidence, coveredFields: [...new Set(fields)] } : rawEvidence;
+    })
+  };
 }
 
 /** Check the actual phase output while its own fields can still be repaired. */
@@ -269,7 +286,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       partial = normalizePlannedQuestionPunctuation(partial);
       if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
     }
-    if (index === 1) partial = bindExactCoverageLines(normalizePlannedSourceIntroductions(partial));
+    if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
@@ -298,7 +315,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
           partial = normalizePlannedQuestionPunctuation(partial);
           if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
         }
-        if (index === 1) partial = bindExactCoverageLines(normalizePlannedSourceIntroductions(partial));
+        if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
       issues = schemaIssues(partial, schema);
