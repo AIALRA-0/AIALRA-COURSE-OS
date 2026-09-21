@@ -2917,6 +2917,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     const page = preparePageForGeneration(sourcePage);
     const meter = meterModelRouter(runtimeModelRouter);
     const pageModelRouter = meter.client;
+    const checkpointKey = `${jobId}:${page.id}`;
     let finalizedCost: GenerationCostEntry | undefined;
     const searchReceipts: CourseSearchReceipt[] = [];
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
@@ -2924,7 +2925,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       const sourceText = buildGenerationSourceText(page);
-      const checkpointKey = `${jobId}:${page.id}`;
       const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
       let previousPageContext = savedCheckpoint?.trace.previousPageContext;
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
@@ -3473,7 +3473,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       });
     } catch (error) {
       const failureRoute = classifyGenerationFailure(error);
-      const autoRecoveryCandidate = shouldAutoRecoverGenerationFailure(error, currentJob.attempt, currentJob.spentUsd, currentJob.budgetUsd);
+      const issue = safeGenerationIssue(error);
+      const failedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
+      const checkpointRecoveryCandidate = issue === "INTERNAL_FAILURE"
+        && currentJob.attempt < 3
+        && currentJob.spentUsd < currentJob.budgetUsd
+        && (failedCheckpoint?.completedPhases.length ?? 0) > 0;
+      const autoRecoveryCandidate = shouldAutoRecoverGenerationFailure(error, currentJob.attempt, currentJob.spentUsd, currentJob.budgetUsd)
+        || checkpointRecoveryCandidate;
       const billedCalls = meter.groupedUsage();
       if (finalizedCost || billedCalls.length > 0 || error instanceof ModelRouterGenerationError) {
         const receipts = billedCalls.length ? billedCalls : [{ provider: (error as ModelRouterGenerationError).provider, model: (error as ModelRouterGenerationError).model, usage: (error as ModelRouterGenerationError).usage }];
@@ -3498,7 +3505,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         });
         }
       }
-      if (autoRecoveryCandidate && await requeueGenerationPageForAgentRepair(jobId, pageId, safeGenerationIssue(error), failureRoute, dependencies, fenceToken)) {
+      if (autoRecoveryCandidate && await requeueGenerationPageForAgentRepair(jobId, pageId, issue, failureRoute, dependencies, fenceToken, checkpointRecoveryCandidate)) {
         startGenerationJob(jobId, dependencies);
         continue;
       }
@@ -3530,12 +3537,16 @@ async function requeueGenerationPageForAgentRepair(
   issue: string,
   failureRoute: ReturnType<typeof classifyGenerationFailure>,
   dependencies: AppDependencies,
-  fenceToken: number
+  fenceToken: number,
+  allowCheckpointRecovery = false
 ): Promise<boolean> {
   return dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
+    const checkpointRecovery = allowCheckpointRecovery && issue === "INTERNAL_FAILURE"
+      && job && job.attempt < 3 && job.spentUsd < job.budgetUsd
+      && (state.generationCheckpoints[`${jobId}:${pageId}`]?.completedPhases.length ?? 0) > 0;
     if (!job || job.state !== "running" || job.lease?.fenceToken !== fenceToken
-      || !shouldAutoRecoverGenerationFailure(issue, job.attempt, job.spentUsd, job.budgetUsd)) return false;
+      || (!checkpointRecovery && !shouldAutoRecoverGenerationFailure(issue, job.attempt, job.spentUsd, job.budgetUsd))) return false;
     job.failedPageIds = job.failedPageIds.filter((id) => id !== pageId);
     job.lastErrorCode = issue;
     Object.assign(job, transitionJob(job, "queued"), { pageIds: [pageId], completedPageIds: [], cancelRequested: false });
