@@ -1081,6 +1081,8 @@ export function createApp(dependencies: AppDependencies): Express {
           plan.harnessSnapshotId = harnessSnapshotId;
           for (const job of failedJobs) {
             job.harnessSnapshotId = harnessSnapshotId;
+            job.attempt = 0;
+            job.lastErrorCode = undefined;
             for (const pageId of job.failedPageIds) delete state.generationCheckpoints[`${job.id}:${pageId}`];
           }
         } else if (plan.harnessSnapshotId && plan.harnessSnapshotId !== harnessSnapshotId) {

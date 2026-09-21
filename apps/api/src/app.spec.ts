@@ -536,6 +536,8 @@ describe("Course OS API", () => {
     expect(retried.body.plan.harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
     expect(retried.body.jobs).toHaveLength(1);
     expect(retried.body.jobs[0].harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
+    expect(retried.body.jobs[0].attempt).toBe(0);
+    expect(retried.body.jobs[0].lastErrorCode).toBeUndefined();
     expect(Object.keys((await operations.read()).generationCheckpoints)).toHaveLength(0);
     const completed = await waitForPlan(app, failed.id);
     expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
