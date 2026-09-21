@@ -370,7 +370,8 @@ describe("planned teaching", () => {
     expect(() => applyGenerationRepair(explanation, ticket, { coverageEvidence: [], fullExplanationMarkdown: "changed" })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
     const preserved = { ...explanation, coverageEvidence: [...explanation.coverageEvidence, { atomId: "b", coveredFields: ["observation"], explanation: quote }] };
     const scoped = generationRepairTickets("explanation", preserved, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
-    expect(() => applyGenerationRepair(preserved, scoped, { coverageEvidence: [] })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+    expect(applyGenerationRepair(preserved, scoped, { coverageEvidence: [] }).coverageEvidence)
+      .toEqual([{ atomId: "b", coveredFields: ["observation"], explanation: quote }]);
   });
   it("accepts both scattered typography corrections and a fenced whole-field repair", () => {
     const original = `## 起点\n${"先看对象再判断结果".repeat(50)}。\n\n## 过程\n${"保持原有事实和条件".repeat(50)}。`;

@@ -94,7 +94,6 @@ export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candid
       const preservedAtomIds = new Set(beforeClaims.filter(item => !belongsToTicket(item)).map(item => item.atomId));
       changedClaims = afterClaims.filter(item => ticket.knownAtomIds!.includes(item.atomId) && !preservedAtomIds.has(item.atomId));
     }
-    if (changedClaims.length === 0) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
     const merged: TeachingPackage["coverageEvidence"] = [];
     let inserted = false;
     for (const item of beforeClaims) {
@@ -104,6 +103,9 @@ export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candid
       } else merged.push(item);
     }
     if (!inserted) merged.push(...changedClaims);
+    // An empty replacement is still a valid first repair step for an invented
+    // or malformed claim: remove the bad claim, then let the next validation
+    // round request the now-explicit missing evidence. Do not fail the page.
     // The model may return the whole array and rewrite unrelated claims. Only
     // the ticketed atom is applied; all other claims remain byte-for-byte.
     after = merged as typeof after;
