@@ -59,8 +59,16 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
   let candidate = value;
   if (phase.startsWith("plan") && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
+    const normalizeQuestionKind = (value: unknown): unknown => {
+      if (typeof value !== "string") return value;
+      const key = value.trim().toLocaleLowerCase().replace(/[\s-]+/gu, "_");
+      if (/选择|choice|multiple/u.test(key)) return "multiple_choice";
+      if (/理解|comprehension|understanding|short_answer|open_ended/u.test(key)) return "comprehension";
+      return value;
+    };
     candidate = {
       ...record,
+      prerequisites: Array.isArray(record.prerequisites) ? record.prerequisites.slice(0, 5) : record.prerequisites,
       facts: Array.isArray(record.facts) ? record.facts.map(item => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return item;
         const fact = item as Record<string, unknown>;
@@ -70,7 +78,12 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
           observation: fact.observation ?? fact.text ?? fact.statement,
           qualification: fact.qualification ?? fact.condition ?? fact.scope ?? ""
         };
-      }) : record.facts
+      }) : record.facts,
+      questions: Array.isArray(record.questions) ? record.questions.map(item => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+        const question = item as Record<string, unknown>;
+        return { ...question, kind: normalizeQuestionKind(question.kind ?? question.type) };
+      }) : record.questions
     };
   }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {

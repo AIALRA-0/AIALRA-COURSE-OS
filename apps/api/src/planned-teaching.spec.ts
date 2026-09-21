@@ -478,6 +478,17 @@ describe("planned teaching", () => {
     expect(normalized.facts[0]).toEqual(plan.facts[0]);
     expect(validateTeachingPlan(normalized, fixture().input.blueprint!)).toEqual([]);
   });
+  it("normalizes provider question kind aliases and caps prerequisite planning", () => {
+    const { plan } = fixture();
+    const drifted = {
+      ...plan,
+      prerequisites: [...plan.prerequisites, ...Array.from({ length: 7 }, (_, index) => ({ name: `补充${index}`, explanation: "只用于模拟供应商超额输出" }))],
+      questions: plan.questions.map((question, index) => ({ ...question, kind: index < 2 ? "理解题" : "multiple-choice" }))
+    };
+    const normalized = projectPlannedOutputToSchema(drifted, teachingPlanSchema, "plan") as TeachingPlan;
+    expect(normalized.prerequisites).toHaveLength(5);
+    expect(normalized.questions.map(question => question.kind)).toEqual(["comprehension", "comprehension", "multiple_choice", "multiple_choice"]);
+  });
   it("binds only missing provider fact IDs to real source requirements in order", () => {
     const { input, plan } = fixture();
     const missing = structuredClone(plan) as TeachingPlan;
