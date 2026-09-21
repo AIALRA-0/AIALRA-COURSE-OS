@@ -50,6 +50,14 @@ const fieldsByPhase = [
 const phases = ["opening", "explanation", "consolidation"];
 const partialSchema = (fields: readonly string[]) => ({ type: "object", properties: Object.fromEntries(fields.map(field => [field, (teachingPackageSchema.properties as Record<string, unknown>)[field]])), required: fields, additionalProperties: false });
 
+function normalizeQuestionKind(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const key = value.trim().toLocaleLowerCase().replace(/[\s-]+/gu, "_");
+  if (/选择|choice|multiple/u.test(key)) return "multiple_choice";
+  if (/理解|comprehension|understanding|short_answer|open_ended/u.test(key)) return "comprehension";
+  return value;
+}
+
 /**
  * Keep provider formatting drift from blocking an otherwise valid stage
  * result. The schema remains authoritative: unknown keys are removed, while
@@ -60,13 +68,6 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
   let candidate = value;
   if (phase.startsWith("plan") && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
-    const normalizeQuestionKind = (value: unknown): unknown => {
-      if (typeof value !== "string") return value;
-      const key = value.trim().toLocaleLowerCase().replace(/[\s-]+/gu, "_");
-      if (/选择|choice|multiple/u.test(key)) return "multiple_choice";
-      if (/理解|comprehension|understanding|short_answer|open_ended/u.test(key)) return "comprehension";
-      return value;
-    };
     candidate = {
       ...record,
       prerequisites: Array.isArray(record.prerequisites) ? record.prerequisites.slice(0, 5) : record.prerequisites,
@@ -88,7 +89,9 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
     };
   }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-    const record = candidate as Record<string, unknown>;
+    const original = candidate as Record<string, unknown>;
+    const kind = original.kind ?? original.type;
+    const record = schema.properties?.kind && kind !== undefined ? { ...original, kind: normalizeQuestionKind(kind) } : original;
     return Object.fromEntries(Object.entries(schema.properties ?? {})
       .filter(([key]) => key in record)
       .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(record[key], childSchema, phase)]));
@@ -277,7 +280,11 @@ export async function writePlannedLesson(input: ModelRouterInput,
     plan = alignPlanQuestionObjectives(plan);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
-  if (planIssues.length) throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);
+  if (planIssues.length) {
+    trace.plan = plan;
+    await save({ plan, content: {}, completedPhases: [] });
+    throw new Error(`TEACHING_PLAN_INVALID:${planIssues.join(",")}`);
+  }
   trace.plan = plan;
   let content: Partial<TeachingPackage> = resume ? structuredClone(resume.content) : {};
   const completedPhases = resume ? [...resume.completedPhases] : [];

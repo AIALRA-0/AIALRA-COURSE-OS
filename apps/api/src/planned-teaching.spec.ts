@@ -514,6 +514,28 @@ describe("planned teaching", () => {
     });
     expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation"]);
   });
+  it("persists the last invalid plan and resumes its repair without regenerating the plan", async () => {
+    const { input, plan } = fixture();
+    input.teachingFingerprint = "resume-invalid-plan";
+    let checkpoint: NonNullable<ModelRouterInput["resumeTeaching"]> | undefined;
+    input.onTeachingCheckpoint = async value => { checkpoint = structuredClone(value); };
+    const broken = { ...structuredClone(plan), facts: [] };
+    await expect(writePlannedLesson(input, async request => ({
+      content: request.phase.startsWith("plan") ? broken : opening,
+      provider: "deepseek", model: "flash", usage
+    }))).rejects.toThrow("TEACHING_PLAN_INVALID");
+    expect(checkpoint?.plan?.facts).toEqual([]);
+    expect(checkpoint?.completedPhases).toEqual([]);
+
+    input.resumeTeaching = checkpoint;
+    const calls: string[] = [];
+    await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: request.phase === "plan_repair" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["plan_repair", "opening", "explanation", "consolidation"]);
+  });
   it("removes provider metadata and maps a plan fact text alias without weakening validation", () => {
     const { plan } = fixture();
     const drifted = {
@@ -540,6 +562,28 @@ describe("planned teaching", () => {
     const normalized = projectPlannedOutputToSchema(drifted, teachingPlanSchema, "plan") as TeachingPlan;
     expect(normalized.prerequisites).toHaveLength(5);
     expect(normalized.questions.map(question => question.kind)).toEqual(["comprehension", "comprehension", "multiple_choice", "multiple_choice"]);
+  });
+  it("normalizes provider question kind aliases inside consolidation output", () => {
+    const schema = { type: "object", properties: {
+      questions: { type: "array", items: { type: "object", properties: {
+        kind: { type: "string", enum: ["comprehension", "multiple_choice"] },
+        prompt: { type: "string" }
+      }, required: ["kind", "prompt"], additionalProperties: false }
+    } }, required: ["questions"], additionalProperties: false };
+    expect(projectPlannedOutputToSchema({ questions: [
+      { kind: "understanding", prompt: "先说明原因" },
+      { type: "choice", prompt: "选择正确说法" }
+    ] }, schema, "consolidation")).toEqual({ questions: [
+      { kind: "comprehension", prompt: "先说明原因" },
+      { kind: "multiple_choice", prompt: "选择正确说法" }
+    ] });
+  });
+  it("does not inject an undefined optional research query kind", () => {
+    const { input, plan } = fixture("外部方法");
+    plan.researchQueries = [{ id: "rq1", atomId: "a", query: "official method terminology", reason: "课件缺少正式名称来源" }];
+    const normalized = projectPlannedOutputToSchema(plan, teachingPlanSchema, "plan") as TeachingPlan;
+    expect(normalized.researchQueries?.[0]).not.toHaveProperty("kind");
+    expect(validateTeachingPlan(normalized, input.blueprint!)).toEqual([]);
   });
   it("binds missing or invented provider fact IDs to real source requirements in order", () => {
     const { input, plan } = fixture();
