@@ -1327,18 +1327,20 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
   constructor(private readonly source: SettingsProviderSource) {}
 
   async repairTeachingFields(input: ModelRouterInput, fields: Array<keyof TeachingPackage>): Promise<TeachingGenerationResult> {
-    return this.runWithFallback("repair", input, (client) => client.repairTeachingFields(input, fields));
+    return this.runWithFallback("repair", input, (client, routedInput) => client.repairTeachingFields(routedInput, fields));
   }
 
   async auditTeachingPackage(input: ModelRouterInput & { teachingPackage: TeachingPackage }): Promise<SemanticAuditResult> {
-    return this.runWithFallback("semantic_audit", input, (client) => client.auditTeachingPackage(input));
+    return this.runWithFallback("semantic_audit", input,
+      (client, routedInput) => client.auditTeachingPackage({ ...routedInput, teachingPackage: input.teachingPackage }));
   }
 
   async generateTeachingPackage(input: ModelRouterInput): Promise<TeachingGenerationResult> {
-    return this.runWithFallback(input.stage || "teach", input, (client) => client.generateTeachingPackage(input));
+    return this.runWithFallback(input.stage || "teach", input, (client, routedInput) => client.generateTeachingPackage(routedInput));
   }
 
-  private async runWithFallback<T>(stage: GenerationStage | "qa", input: ModelRouterInput, execute: (client: HttpProviderTeachingClient) => Promise<T>): Promise<T> {
+  private async runWithFallback<T>(stage: GenerationStage | "qa", input: ModelRouterInput,
+    execute: (client: HttpProviderTeachingClient, routedInput: ModelRouterInput) => Promise<T>): Promise<T> {
     const { providers: savedProviders, policy, credential } = await this.source.load();
     const providers = withCurrentDeepSeekModels(savedProviders);
     const rule = policy.rules.find((candidate) => candidate.stage === stage && candidate.enabled)
@@ -1361,10 +1363,18 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         lastError = new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", candidate.modelId, emptyUsage(Date.now()), candidate.providerId);
         continue;
       }
-      if (input.sourceImageDataUrl && !model.supportsVision) {
+      const canUseExtractedSource = input.sourceText.trim().length > 0;
+      if (input.sourceImageDataUrl && !model.supportsVision && !canUseExtractedSource) {
         lastError = new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
         continue;
       }
+      // ReadWeave-style generation separates source perception from teaching:
+      // a text-only writing model receives the extracted source, atoms and
+      // blueprint instead of being skipped merely because the original page
+      // image is also available. Image-only pages still require a vision route.
+      const routedInput = input.sourceImageDataUrl && !model.supportsVision
+        ? { ...input, sourceImageDataUrl: undefined }
+        : input;
       const connection: ProviderConnection = {
         providerId: provider.id,
         baseUrl: provider.baseUrl,
@@ -1375,7 +1385,7 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         billingMode: model.billingMode
       };
       try {
-        return await execute(new HttpProviderTeachingClient(connection));
+        return await execute(new HttpProviderTeachingClient(connection), routedInput);
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
         // Only exhausted quota or rate limiting authorizes switching providers.

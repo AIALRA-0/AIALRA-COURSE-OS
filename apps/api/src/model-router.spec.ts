@@ -962,6 +962,68 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a text-only Kuafu route primary when extracted page source is available", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model: string; input: unknown };
+      expect(body.model).toBe("deepseek-v4.1-flash");
+      expect(typeof body.input).toBe("string");
+      expect(String(body.input)).toContain("来源内容");
+      expect(JSON.stringify(body)).not.toContain("input_image");
+      return Response.json({ model: body.model, output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: "kuafu", displayName: "Kuafu", baseUrl: "https://kuafu.test", enabled: true, credential: { configured: true },
+          models: [{ id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", protocol: "responses", supportsVision: false,
+            supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] },
+        { id: "opencode-go", displayName: "OpenCode", baseUrl: "https://opencode.test", enabled: true, credential: { configured: true },
+          models: [{ id: "vision", displayName: "Vision", protocol: "responses", supportsVision: true,
+            supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }] }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), routes: [
+          { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+          { providerId: "opencode-go", modelId: "vision", enabled: true }
+        ], rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage(providerInput("kuafu-extracted-source", true));
+    expect(result).toMatchObject({ provider: "kuafu", model: "deepseek-v4.1-flash" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps image-only pages on a vision-capable route", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model: string; input: Array<{ content: Array<{ type: string }> }> };
+      expect(body.model).toBe("vision");
+      expect(body.input[0]?.content.map((part) => part.type)).toContain("input_image");
+      return Response.json({ model: body.model, output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: "kuafu", displayName: "Kuafu", baseUrl: "https://kuafu.test", enabled: true, credential: { configured: true },
+          models: [{ id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", protocol: "responses", supportsVision: false,
+            supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] },
+        { id: "opencode-go", displayName: "OpenCode", baseUrl: "https://opencode.test", enabled: true, credential: { configured: true },
+          models: [{ id: "vision", displayName: "Vision", protocol: "responses", supportsVision: true,
+            supportsJsonSchema: true, supportsReasoning: true, billingMode: "subscription_quota" }] }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), routes: [
+          { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+          { providerId: "opencode-go", modelId: "vision", enabled: true }
+        ], rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage({ ...providerInput("image-only-fallback", true), sourceText: "" });
+    expect(result).toMatchObject({ provider: "opencode-go", model: "vision" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("follows every enabled route in visible priority order after quota failures", async () => {
     const providerIds = ["kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"];
     const fetchMock = vi.fn(async (url: string) => {
