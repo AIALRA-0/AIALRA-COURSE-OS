@@ -3480,6 +3480,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         pageId,
         issue,
         errorName: error instanceof Error ? error.name : typeof error,
+        providerErrorCode: error instanceof ModelRouterGenerationError ? safeDiagnosticCode(error.code) : undefined,
+        responseShape: error instanceof ModelRouterGenerationError ? error.responseShape : undefined,
         codeLocations: error instanceof Error
           ? (error.stack ?? "").split("\n").slice(1, 4).map((line) => line.trim().replace(/https?:\/\/\S+/gu, "[url]"))
           : [],
@@ -4193,6 +4195,14 @@ function applyActualCost(job: GenerationJob, cost: GenerationCostEntry, state: O
 function safeGenerationIssue(error: unknown): string {
   if (error instanceof ModelRouterGenerationError) return describeGenerationError(new Error(error.code)).code;
   return describeGenerationError(error).code;
+}
+
+function safeDiagnosticCode(value: string): string {
+  return value
+    .replace(/https?:\/\/\S+/gu, "[url]")
+    .replace(/\b(?:sk|amr)[-_][A-Za-z0-9_-]{8,}\b/gu, "[secret]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/gu, "[opaque]")
+    .slice(0, 240);
 }
 
 export function safeReadWeaveFailureKind(error: unknown): string {
