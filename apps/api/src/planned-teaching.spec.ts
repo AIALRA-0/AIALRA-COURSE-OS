@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions } from "./planned-teaching.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -461,6 +461,22 @@ describe("planned teaching", () => {
       return { content: outputs.shift(), provider: "deepseek", model: "flash", usage };
     });
     expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation"]);
+  });
+  it("removes provider metadata and maps a plan fact text alias without weakening validation", () => {
+    const { plan } = fixture();
+    const drifted = {
+      pageId: "page:16",
+      pageNumber: 16,
+      title: "EDGE-GNN: WHY?",
+      ...plan,
+      facts: plan.facts.map((fact, index) => index === 0
+        ? { id: fact.id, atomId: fact.atomId, text: fact.observation, qualification: fact.qualification, providerNote: "echo" }
+        : fact)
+    };
+    const normalized = projectPlannedOutputToSchema(drifted, teachingPlanSchema, "plan") as TeachingPlan;
+    expect(normalized).not.toHaveProperty("pageId");
+    expect(normalized.facts[0]).toEqual(plan.facts[0]);
+    expect(validateTeachingPlan(normalized, fixture().input.blueprint!)).toEqual([]);
   });
   it("uses one provider and bills all four actual calls without audit requests", async () => {
     const { input, plan } = fixture();

@@ -49,6 +49,39 @@ const fieldsByPhase = [
 const phases = ["opening", "explanation", "consolidation"];
 const partialSchema = (fields: readonly string[]) => ({ type: "object", properties: Object.fromEntries(fields.map(field => [field, (teachingPackageSchema.properties as Record<string, unknown>)[field]])), required: fields, additionalProperties: false });
 
+/**
+ * Keep provider formatting drift from blocking an otherwise valid stage
+ * result. The schema remains authoritative: unknown keys are removed, while
+ * missing required values and invalid values are still rejected by
+ * `schemaIssues` below.
+ */
+export function projectPlannedOutputToSchema(value: unknown, schema: any, phase = ""): unknown {
+  let candidate = value;
+  if (phase.startsWith("plan") && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    const record = candidate as Record<string, unknown>;
+    candidate = {
+      ...record,
+      facts: Array.isArray(record.facts) ? record.facts.map(item => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+        const fact = item as Record<string, unknown>;
+        return fact.observation === undefined && typeof fact.text === "string"
+          ? { ...fact, observation: fact.text }
+          : fact;
+      }) : record.facts
+    };
+  }
+  if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    const record = candidate as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(schema.properties ?? {})
+      .filter(([key]) => key in record)
+      .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(record[key], childSchema, phase)]));
+  }
+  if (schema?.type === "array" && Array.isArray(candidate)) {
+    return candidate.map(item => projectPlannedOutputToSchema(item, schema.items, phase));
+  }
+  return candidate;
+}
+
 /** Mechanical punctuation only; keep the answer text and matching options intact. */
 export function normalizePlannedQuestionPunctuation<T extends Partial<TeachingPackage>>(content: T): T {
   if (!content.questions) return content;
@@ -161,7 +194,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     }
     trace.phases.push({ phase: request.phase, provider: result.provider, model: result.model, usage: result.usage, attempt: input.generationAttempt });
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
-    return result.content;
+    return projectPlannedOutputToSchema(result.content, request.schema, request.phase);
   };
   const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}\n\n外部检索不是固定步骤。只有课件来源不足以核实正式术语、外部方法或时效性事实，且 externalSearchAvailable 为 true 时，才填写最多两项 researchQueries，并为每项选择 web、academic、terminology 或 temporal 类型；课件已经给出的事实、公式推导和页面之间的承接不得检索。没有真实缺口时省略 researchQueries 或返回空数组`,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
