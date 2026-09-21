@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generationHarnessFileSha256 } from "./generation-harness.js";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, resolvedSourceConflictVerdict, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
+import { HttpModelRouterClient, HttpProviderTeachingClient, ModelRouterGenerationError, modelInput, parseWrappedProviderJson, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, resolvedSourceConflictVerdict, supportedSourceCheckFormulaConsistent, teachingOutputTokenLimit, teachingPackageSchema, teachingRepairTargets, withCurrentDeepSeekModels, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 
 describe("generation harness", () => {
+  it("extracts the largest complete JSON object from provider wrapper text", () => {
+    expect(parseWrappedProviderJson('说明文字 {"status":"meta"} 正式结果 {"facts":[{"id":"f1"}],"steps":[{"id":"s1"}]} 结束'))
+      .toEqual({ facts: [{ id: "f1" }], steps: [{ id: "s1" }] });
+  });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
     expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.67", taskContract: "GENERATE + TEACHING" });

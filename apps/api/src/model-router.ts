@@ -1141,7 +1141,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const cost = this.usageCostUsd(usage);
     if (cost === undefined || cost > budget) throw new ModelRouterGenerationError(cost === undefined ? "MODEL_PROVIDER_COST_UNAVAILABLE" : "MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED", model, usage, this.connection.providerId, request.phase);
     let content: unknown;
-    try { const output = extractProviderOutput(received); content = typeof output === "string" ? parseProviderJson(output) : output; }
+    try { const output = extractProviderOutput(received); content = typeof output === "string" ? parseWrappedProviderJson(output) : output; }
     catch { throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", model, usage, this.connection.providerId, request.phase); }
     return { content, usage, model, provider: this.connection.providerId };
   }
@@ -1551,19 +1551,18 @@ function stripJsonFences(value: string): string {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
-function parseProviderJson(value: string): unknown {
-  const source = stripJsonFences(value);
-  try { return JSON.parse(source); }
+function parseJsonCandidate(candidate: string): unknown {
+  try { return JSON.parse(candidate); }
   catch {
     let inString = false;
     let escaped = false;
     let repaired = "";
-    for (let index = 0; index < source.length; index += 1) {
-      const character = source[index]!;
+    for (let index = 0; index < candidate.length; index += 1) {
+      const character = candidate[index]!;
       if (escaped) { repaired += character; escaped = false; continue; }
       if (character === '"') { inString = !inString; repaired += character; continue; }
       if (inString && character === "\\") {
-        const next = source[index + 1] || "";
+        const next = candidate[index + 1] || "";
         if (next && !/^["\\/bfnrtu]$/.test(next)) repaired += "\\";
         repaired += character;
         escaped = true;
@@ -1572,6 +1571,42 @@ function parseProviderJson(value: string): unknown {
       repaired += character;
     }
     return JSON.parse(repaired);
+  }
+}
+
+function parseProviderJson(value: string): unknown {
+  return parseJsonCandidate(stripJsonFences(value));
+}
+
+export function parseWrappedProviderJson(value: string): unknown {
+  const source = stripJsonFences(value);
+  try { return parseJsonCandidate(source); }
+  catch {
+    const candidates: Array<{ length: number; value: unknown }> = [];
+    for (let start = source.indexOf("{"); start >= 0; start = source.indexOf("{", start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < source.length; index += 1) {
+        const character = source[index]!;
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+          continue;
+        }
+        if (character === '"') { inString = true; continue; }
+        if (character === "{") depth += 1;
+        else if (character === "}" && --depth === 0) {
+          const candidate = source.slice(start, index + 1);
+          try { candidates.push({ length: candidate.length, value: parseJsonCandidate(candidate) }); } catch { /* keep scanning */ }
+          break;
+        }
+      }
+    }
+    const best = candidates.sort((left, right) => right.length - left.length)[0];
+    if (best) return best.value;
+    throw new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
   }
 }
 

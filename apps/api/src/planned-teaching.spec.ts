@@ -303,6 +303,12 @@ describe("planned teaching", () => {
     expect(repaired.facts).toEqual(plan.facts);
     expect(validateTeachingPlan(repaired, input.blueprint!)).toEqual([]);
   });
+  it("keeps an incomplete plan on the bounded repair path instead of crashing", () => {
+    const { input } = fixture();
+    const incomplete = { problem: "说明当前问题" } as TeachingPlan;
+    expect(() => removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(incomplete, input.blueprint!))).not.toThrow();
+    expect(validateTeachingPlan(incomplete, input.blueprint!)).toContain("result.facts:required");
+  });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {
     for (const issue of [
       "PLAN_EVIDENCE_QUOTE_MISSING:source-text-region:8",

@@ -134,6 +134,9 @@ export function assignUnplacedPlanFacts(plan: TeachingPlan): TeachingPlan {
 
 /** Remove invented transport references while preserving every real source fact. */
 export function removeUnknownPlanFactReferences(plan: TeachingPlan): TeachingPlan {
+  if (!plan || typeof plan !== "object"
+    || !Array.isArray((plan as Partial<TeachingPlan>).facts)
+    || !Array.isArray((plan as Partial<TeachingPlan>).steps)) return plan;
   const result = structuredClone(plan);
   const facts = new Set(result.facts.map(fact => fact.id));
   const assigned = new Set<string>();
