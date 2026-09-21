@@ -3,7 +3,7 @@ import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
+import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -74,6 +74,32 @@ it("fills omitted coverage fields from the authoritative requirement package bef
   expect(existing.coverageEvidence?.[0]?.coveredFields).toEqual(["observation"]);
   expect(() => normalizePlannedCoverageFields({ coverageEvidence: [null, "invalid"] } as never, blueprint)).not.toThrow();
   expect(() => bindExactCoverageLines({ fullExplanationMarkdown: quote, coverageEvidence: [null, "invalid", { atomId: "a" }] } as never)).not.toThrow();
+});
+it("projects a provider string into a string array without coercing non-string items", () => {
+  const schema = { type: "object", properties: { items: { type: "array", items: { type: "string" } } } };
+  expect(projectPlannedOutputToSchema({ items: "- 第一项\n第二项\n* 第三项" }, schema)).toEqual({ items: ["第一项", "第二项", "第三项"] });
+  expect(projectPlannedOutputToSchema({ items: ["保留", 7] }, schema)).toEqual({ items: ["保留", 7] });
+});
+it("fills observation only for a known atom without a requirement and preserves unknown atoms", () => {
+  const { input } = fixture();
+  const blueprint = { ...input.blueprint!, requirementPackage: { ...input.blueprint!.requirementPackage, requirements: [] } };
+  const normalized = normalizePlannedCoverageFields({ coverageEvidence: [
+    { atomId: "a", explanation: quote } as unknown as TeachingPackage["coverageEvidence"][number],
+    { atomId: "unknown", explanation: quote } as unknown as TeachingPackage["coverageEvidence"][number]
+  ] }, blueprint);
+  expect(normalized.coverageEvidence?.[0]?.coveredFields).toEqual(["observation"]);
+  expect(normalized.coverageEvidence?.[1]).toEqual({ atomId: "unknown", explanation: quote });
+});
+it("normalizes all opening fields with the existing deterministic typography pass", () => {
+  const normalized = normalizePlannedOpening({
+    chapterBridgeMarkdown: "上一页说明输入。\n\n本页继续说明 output（output）。",
+    priorKnowledge: ["输入（input）：处理开始前已经知道的信息。"],
+    learningObjectives: ["理解输入（input）如何得到结果。"]
+  });
+  expect(normalized.chapterBridgeMarkdown).not.toContain("。");
+  expect(normalized.priorKnowledge?.[0]).toContain("输入（Input）：");
+  expect(normalized.learningObjectives?.[0]).toContain("输入（Input）");
+  expect(plannedFormatIssues(normalized)).not.toContain("TEACHING_FORMAT:chapterBridgeMarkdown:WRITING_CHINESE_FULL_STOP_FORBIDDEN");
 });
 it("rebinds a citation after punctuation-only teaching repair", () => {
   const actual = "这一页要回答三个问题：它是什么；为什么需要它；怎样使用它";

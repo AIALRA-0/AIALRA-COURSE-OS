@@ -93,6 +93,13 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
       .filter(([key]) => key in record)
       .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(record[key], childSchema, phase)]));
   }
+  if (schema?.type === "array" && typeof candidate === "string" && candidate.trim()) {
+    const lines = candidate.split(/\r?\n/u)
+      .map(line => line.trim().replace(/^[-*+]\s+/u, "").replace(/^\d+[.)]\s+/u, ""))
+      .filter(Boolean);
+    const items = lines.length ? lines : [candidate.trim()];
+    return items.map(item => projectPlannedOutputToSchema(item, schema.items, phase));
+  }
   if (schema?.type === "array" && Array.isArray(candidate)) {
     return candidate.map(item => projectPlannedOutputToSchema(item, schema.items, phase));
   }
@@ -118,10 +125,22 @@ export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPa
   return { ...content, fullExplanationMarkdown: normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(introduced))) };
 }
 
+/** Apply the same deterministic Chinese typography pass to every opening field. */
+export function normalizePlannedOpening<T extends Partial<TeachingPackage>>(content: T): T {
+  const normalize = (value: string) => normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(value)));
+  return {
+    ...content,
+    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
+    priorKnowledge: content.priorKnowledge?.map(normalize),
+    learningObjectives: content.learningObjectives?.map(normalize)
+  };
+}
+
 /** Reconcile a provider's omitted transport field with the authoritative requirement package. */
 export function normalizePlannedCoverageFields<T extends Partial<TeachingPackage>>(content: T, blueprint: TeachingBlueprint): T {
   if (!Array.isArray(content.coverageEvidence)) return content;
   const required = new Map(blueprint.requirementPackage.requirements.map((item) => [item.atomId, item.requiredFields]));
+  const atomIds = new Set(blueprint.resourcePackage.atomIds);
   return {
     ...content,
     coverageEvidence: content.coverageEvidence.map((rawEvidence) => {
@@ -129,7 +148,8 @@ export function normalizePlannedCoverageFields<T extends Partial<TeachingPackage
       if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) || "coveredFields" in evidence) return rawEvidence;
       const atomId = "atomId" in evidence && typeof evidence.atomId === "string" ? evidence.atomId : undefined;
       const fields = atomId ? required.get(atomId) : undefined;
-      return fields?.length ? { ...evidence, coveredFields: [...new Set(fields)] } : rawEvidence;
+      if (fields?.length) return { ...evidence, coveredFields: [...new Set(fields)] };
+      return atomId && atomIds.has(atomId) ? { ...evidence, coveredFields: ["observation"] } : rawEvidence;
     })
   };
 }
@@ -282,6 +302,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     let partial = pendingContent
       ? structuredClone(pendingContent)
       : await run(request) as Partial<TeachingPackage>;
+    if (index === 0) partial = normalizePlannedOpening(partial);
     if (index === 2) {
       partial = normalizePlannedQuestionPunctuation(partial);
       if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
@@ -315,6 +336,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
           partial = normalizePlannedQuestionPunctuation(partial);
           if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
         }
+        if (index === 0) partial = normalizePlannedOpening(partial);
         if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
