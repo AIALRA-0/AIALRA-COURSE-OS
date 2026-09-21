@@ -1079,7 +1079,10 @@ export function createApp(dependencies: AppDependencies): Express {
           && planJobs.every((item) => item.completedPageIds.length === 0);
         if (mayAdoptHarness) {
           plan.harnessSnapshotId = harnessSnapshotId;
-          for (const job of failedJobs) job.harnessSnapshotId = harnessSnapshotId;
+          for (const job of failedJobs) {
+            job.harnessSnapshotId = harnessSnapshotId;
+            for (const pageId of job.failedPageIds) delete state.generationCheckpoints[`${job.id}:${pageId}`];
+          }
         } else if (plan.harnessSnapshotId && plan.harnessSnapshotId !== harnessSnapshotId) {
           throw new Error("GENERATION_HARNESS_SNAPSHOT_CHANGED");
         }

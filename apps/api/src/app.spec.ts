@@ -525,7 +525,10 @@ describe("Course OS API", () => {
     await operations.mutate((state) => {
       const plan = state.generationPlans.find((item) => item.id === failed.id)!;
       plan.harnessSnapshotId = "obsolete-harness";
-      for (const job of state.jobs.filter((item) => item.planId === failed.id)) job.harnessSnapshotId = "obsolete-harness";
+      for (const job of state.jobs.filter((item) => item.planId === failed.id)) {
+        job.harnessSnapshotId = "obsolete-harness";
+        state.generationCheckpoints[`${job.id}:page-1`] = { fingerprint: "obsolete-fingerprint", content: {}, completedPhases: [], trace: { version: 1, plan: undefined, phases: [] } } as never;
+      }
     });
     const retried = await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
       .set("Idempotency-Key", "failed-plan-retry-run")
@@ -533,6 +536,7 @@ describe("Course OS API", () => {
     expect(retried.body.plan.harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
     expect(retried.body.jobs).toHaveLength(1);
     expect(retried.body.jobs[0].harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
+    expect(Object.keys((await operations.read()).generationCheckpoints)).toHaveLength(0);
     const completed = await waitForPlan(app, failed.id);
     expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
     await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
