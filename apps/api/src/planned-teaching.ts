@@ -108,19 +108,26 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
 
 /** Mechanical punctuation only; keep the answer text and matching options intact. */
 export function normalizePlannedQuestionPunctuation<T extends Partial<TeachingPackage>>(content: T): T {
-  if (!content.questions) return content;
-  const normalizeAnswer = (value: string) => normalizePackedTeachingProse(normalizeHumanReadableChineseMarkdown(value));
-  return { ...content, questions: content.questions.map(question => ({ ...question,
-    prompt: normalizeAnswer(question.prompt),
-    options: question.options?.map(normalizeHumanReadableChineseMarkdown),
-    expectedAnswer: question.kind === "comprehension" ? normalizeAnswer(question.expectedAnswer)
-      : normalizeHumanReadableChineseMarkdown(question.expectedAnswer),
-    explanation: normalizeAnswer(question.explanation)
-  })) };
+  if (!Array.isArray(content.questions)) return content;
+  const normalizeAnswer = (value: unknown) => typeof value === "string"
+    ? normalizePackedTeachingProse(normalizeHumanReadableChineseMarkdown(value)) : value;
+  const questions = (content.questions as unknown[]).map(question => {
+    if (!question || typeof question !== "object" || Array.isArray(question)) return question;
+    const candidate = question as Record<string, unknown>;
+    return { ...candidate,
+      prompt: normalizeAnswer(candidate.prompt),
+      options: Array.isArray(candidate.options) ? candidate.options.map(option => typeof option === "string"
+        ? normalizeHumanReadableChineseMarkdown(option) : option) : candidate.options,
+      expectedAnswer: candidate.kind === "comprehension" ? normalizeAnswer(candidate.expectedAnswer)
+        : typeof candidate.expectedAnswer === "string" ? normalizeHumanReadableChineseMarkdown(candidate.expectedAnswer) : candidate.expectedAnswer,
+      explanation: normalizeAnswer(candidate.explanation)
+    };
+  });
+  return { ...content, questions: questions as TeachingPackage["questions"] };
 }
 
 export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPackage>>(content: T): T {
-  if (!content.fullExplanationMarkdown) return content;
+  if (typeof content.fullExplanationMarkdown !== "string") return content;
   const introduced = content.fullExplanationMarkdown.replace(/^([ \t]*)原文[：:][ \t]*$/gmu, "$1课件原文如下：");
   return { ...content, fullExplanationMarkdown: normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(introduced))) };
 }
@@ -130,9 +137,9 @@ export function normalizePlannedOpening<T extends Partial<TeachingPackage>>(cont
   const normalize = (value: string) => normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(value)));
   return {
     ...content,
-    chapterBridgeMarkdown: content.chapterBridgeMarkdown === undefined ? undefined : normalize(content.chapterBridgeMarkdown),
-    priorKnowledge: content.priorKnowledge?.map(normalize),
-    learningObjectives: content.learningObjectives?.map(normalize)
+    chapterBridgeMarkdown: typeof content.chapterBridgeMarkdown === "string" ? normalize(content.chapterBridgeMarkdown) : content.chapterBridgeMarkdown,
+    priorKnowledge: Array.isArray(content.priorKnowledge) ? content.priorKnowledge.map(value => typeof value === "string" ? normalize(value) : value) as string[] : content.priorKnowledge,
+    learningObjectives: Array.isArray(content.learningObjectives) ? content.learningObjectives.map(value => typeof value === "string" ? normalize(value) : value) as string[] : content.learningObjectives
   };
 }
 
@@ -262,11 +269,11 @@ export async function writePlannedLesson(input: ModelRouterInput,
       instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as TeachingPlan, blueprint);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
-  if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
+  if (planIssues.some(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
     plan = assignUnplacedPlanFacts(plan);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
-  if (planIssues.length && planIssues.every(issue => issue.startsWith("PLAN_OBJECTIVE_UNTESTED:"))) {
+  if (planIssues.some(issue => issue.startsWith("PLAN_OBJECTIVE_UNTESTED:"))) {
     plan = alignPlanQuestionObjectives(plan);
     planIssues = validateTeachingPlan(plan, blueprint);
   }
@@ -305,7 +312,8 @@ export async function writePlannedLesson(input: ModelRouterInput,
     if (index === 0) partial = normalizePlannedOpening(partial);
     if (index === 2) {
       partial = normalizePlannedQuestionPunctuation(partial);
-      if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+      if (Array.isArray(partial.misconceptions)) partial.misconceptions = partial.misconceptions
+        .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
     }
     if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
     let issues = schemaIssues(partial, schema);
@@ -334,7 +342,8 @@ export async function writePlannedLesson(input: ModelRouterInput,
         }
         if (index === 2) {
           partial = normalizePlannedQuestionPunctuation(partial);
-          if (partial.misconceptions) partial.misconceptions = partial.misconceptions.map(formatMisconception);
+          if (Array.isArray(partial.misconceptions)) partial.misconceptions = partial.misconceptions
+            .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
         }
         if (index === 0) partial = normalizePlannedOpening(partial);
         if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));

@@ -30,6 +30,19 @@ it("routes local typography findings to the field that can be repaired", () => {
   expect(generationRepairTickets("opening", { priorKnowledge: ["期望值（expected value）：用概率加权说明结果。"] }, issues)
     .map(ticket => ticket.field)).toEqual(["priorKnowledge"]);
 });
+it("tells the repair Agent how to split combined bilingual names one to one", () => {
+  const priorKnowledge = ["逻辑值与数字信号（Logic Value, Digital Signal）：说明两种相关对象"];
+  const issues = plannedFormatIssues({ priorKnowledge });
+  expect(issues.some(issue => issue.includes("BILINGUAL_TERM_SHAPE") && issue.includes("priorKnowledge"))).toBe(true);
+  expect(generationRepairTickets("opening", { priorKnowledge }, issues)[0]?.instruction)
+    .toContain("中文 A（English A）与中文 B（English B）");
+});
+it("keeps incomplete provider fields available for Schema-guided Agent repair", () => {
+  const incomplete = { questions: [{ kind: "multiple_choice", options: ["正确项", null] }] } as unknown as Partial<TeachingPackage>;
+  expect(() => normalizePlannedQuestionPunctuation(incomplete)).not.toThrow();
+  expect(normalizePlannedQuestionPunctuation(incomplete).questions?.[0]).toMatchObject({ kind: "multiple_choice", options: ["正确项", null] });
+  expect(() => normalizePlannedOpening({ priorKnowledge: [null], learningObjectives: [undefined] } as never)).not.toThrow();
+});
 it.each([
   ["缺少英文名称", "布局质量指标：衡量布局结果的多个数值", true],
   ["名称已有配对", "布局质量指标（Layout Quality Metrics）：衡量布局结果的多个数值", false],
@@ -528,7 +541,7 @@ describe("planned teaching", () => {
     expect(normalized.prerequisites).toHaveLength(5);
     expect(normalized.questions.map(question => question.kind)).toEqual(["comprehension", "comprehension", "multiple_choice", "multiple_choice"]);
   });
-  it("binds only missing provider fact IDs to real source requirements in order", () => {
+  it("binds missing or invented provider fact IDs to real source requirements in order", () => {
     const { input, plan } = fixture();
     const missing = structuredClone(plan) as TeachingPlan;
     delete (missing.facts[0] as Partial<TeachingPlan["facts"][number]>).atomId;
@@ -536,6 +549,10 @@ describe("planned teaching", () => {
     const bound = bindMissingPlanFactAtoms(missing, input.blueprint!);
     expect(bound.facts[0]).toMatchObject({ atomId: "a", qualification: "" });
     expect(validateTeachingPlan(bound, input.blueprint!)).toEqual([]);
+    const invented = structuredClone(plan) as TeachingPlan;
+    invented.facts[0]!.atomId = "provider-invented-atom";
+    expect(bindMissingPlanFactAtoms(invented, input.blueprint!).facts[0]?.atomId).toBe("a");
+    expect(validateTeachingPlan(bindMissingPlanFactAtoms(invented, input.blueprint!), input.blueprint!)).toEqual([]);
   });
   it("leaves a structurally incomplete plan for the bounded repair path instead of throwing", () => {
     const { input } = fixture();

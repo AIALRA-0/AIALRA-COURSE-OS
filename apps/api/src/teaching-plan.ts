@@ -159,7 +159,9 @@ export function bindMissingPlanFactAtoms(plan: TeachingPlan, blueprint: Teaching
   let nextRequired = 0;
   for (const fact of result.facts) {
     if (fact.qualification === undefined) fact.qualification = "";
-    if (fact.atomId !== undefined) continue;
+    // Provider-generated IDs are transport labels, not authority. Preserve a
+    // valid source binding, but repair a missing or invented ID by source order.
+    if (fact.atomId !== undefined && validAtomIds.has(fact.atomId)) continue;
     while (nextRequired < requiredAtomIds.length && alreadyBound.has(requiredAtomIds[nextRequired]!)) nextRequired++;
     const atomId = requiredAtomIds[nextRequired];
     if (!atomId) continue;
