@@ -1,7 +1,7 @@
 import type { ProviderHealth, SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 import type { TeachingResearchEvidence, TeachingResearchQuery } from "./teaching-plan.js";
 
-export type CourseSearchProviderId = "tinyfish" | "octen" | "openalex" | "parallel";
+export type CourseSearchProviderId = "tinyfish" | "octen" | "openalex" | "parallel" | "exa" | "jina" | "serper";
 
 export interface CourseSearchConnection {
   providerId: CourseSearchProviderId;
@@ -41,6 +41,15 @@ export function defaultCourseSearchProviders(): SearchProviderConfig[] {
       credential: { configured: false }, credentialRequired: false, vault, purposes: ["academic", "terminology"], maxResults: 10,
       pricing: { currency: "USD", perRequestMicrousd: 1_000, capturedAt, source: "provider-default" } },
     { id: "parallel", displayName: "Parallel Search", baseUrl: "https://api.parallel.ai", endpoint: "/v1/search", authType: "x-api-key", enabled: false,
+      credential: { configured: false }, vault, purposes: ["web", "terminology", "temporal"], maxResults: 8,
+      pricing: { currency: "USD", perRequestMicrousd: 1_000, capturedAt, source: "provider-default" } },
+    { id: "exa", displayName: "Exa", baseUrl: "https://api.exa.ai", endpoint: "/search", authType: "x-api-key", enabled: false,
+      credential: { configured: false }, vault, purposes: ["web", "terminology", "temporal"], maxResults: 8,
+      pricing: { currency: "USD", perRequestMicrousd: 7_000, capturedAt, source: "provider-default" } },
+    { id: "jina", displayName: "Jina Search", baseUrl: "https://s.jina.ai", authType: "bearer", enabled: false,
+      credential: { configured: false }, vault, purposes: ["web", "terminology", "temporal"], maxResults: 8,
+      pricing: { currency: "USD", perRequestMicrousd: 1_000, capturedAt, source: "provider-default" } },
+    { id: "serper", displayName: "Serper", baseUrl: "https://google.serper.dev", endpoint: "/search", authType: "x-api-key", enabled: false,
       credential: { configured: false }, vault, purposes: ["web", "terminology", "temporal"], maxResults: 8,
       pricing: { currency: "USD", perRequestMicrousd: 1_000, capturedAt, source: "provider-default" } }
   ];
@@ -96,7 +105,11 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs = 8_000): Pro
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     if (!response.ok) throw new Error(`SEARCH_PROVIDER_FAILED:${response.status}`);
-    return await response.json();
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("SEARCH_PROVIDER_INVALID_RESPONSE");
+    }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") throw new Error("SEARCH_PROVIDER_TIMEOUT");
     throw error;
@@ -109,6 +122,7 @@ function classifySearchFailure(error: unknown): Pick<CourseSearchReceipt, "error
   if (/SEARCH_PROVIDER_FAILED:(?:401|403)$/u.test(code)) return { errorCode: "SEARCH_PROVIDER_AUTH", retryable: false };
   if (/SEARCH_PROVIDER_FAILED:429$/u.test(code)) return { errorCode: "SEARCH_PROVIDER_RATE_LIMIT", retryable: true };
   if (/SEARCH_PROVIDER_FAILED:5\d\d$/u.test(code)) return { errorCode: "SEARCH_PROVIDER_RESPONSE", retryable: true };
+  if (code === "SEARCH_PROVIDER_INVALID_RESPONSE") return { errorCode: "SEARCH_PROVIDER_RESPONSE", retryable: false };
   if (/SEARCH_PROVIDER_FAILED:\d+$/u.test(code)) return { errorCode: "SEARCH_PROVIDER_RESPONSE", retryable: false };
   return { errorCode: "SEARCH_PROVIDER_NETWORK", retryable: true };
 }
@@ -133,6 +147,51 @@ async function executeSearch(connection: CourseSearchConnection, query: string, 
       advanced_settings: { max_results: Math.min(limit, Number(connection.parameters?.maxResults) || 8), excerpt_settings: { max_chars_per_result: 2_000 } }
     }) }) as { results?: Array<{ title?: string; url?: string; excerpts?: string[] | string }> };
     return normalizedResults((payload.results ?? []).map(row => ({ title: row.title, url: row.url, snippet: Array.isArray(row.excerpts) ? row.excerpts.join(" ") : row.excerpts })));
+  }
+  if (connection.providerId === "exa") {
+    const payload = await fetchJson(`${base}${connection.endpoint || "/search"}`, {
+      method: "POST",
+      headers: { "x-api-key": connection.apiKey!, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        type: connection.parameters?.type || "auto",
+        numResults: Math.min(limit, Number(connection.parameters?.numResults) || 8),
+        contents: { highlights: true, text: true }
+      })
+    }) as { results?: Array<{ title?: string; url?: string; text?: string; highlights?: string[]; publishedDate?: string }> };
+    return normalizedResults((payload.results ?? []).map(row => ({
+      title: row.title,
+      url: row.url,
+      snippet: row.text || row.highlights?.join(" ")
+    })));
+  }
+  if (connection.providerId === "jina") {
+    const url = new URL(`${base}/${encodeURIComponent(query)}`);
+    const payload = await fetchJson(url.toString(), {
+      headers: {
+        "Authorization": `Bearer ${connection.apiKey!}`,
+        "X-Respond-With": "no-content",
+        "X-Return-Format": "json"
+      }
+    }) as { data?: Array<{ title?: string; url?: string; description?: string; content?: string }> };
+    return normalizedResults((payload.data ?? []).map(row => ({
+      title: row.title,
+      url: row.url,
+      snippet: row.description || row.content
+    })));
+  }
+  if (connection.providerId === "serper") {
+    const payload = await fetchJson(`${base}${connection.endpoint || "/search"}`, {
+      method: "POST",
+      headers: { "X-API-KEY": connection.apiKey!, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query, num: Math.min(limit, Number(connection.parameters?.num) || 8) })
+    }) as { organic?: Array<{ title?: string; link?: string; snippet?: string }>; knowledgeGraph?: { title?: string; description?: string; website?: string } };
+    const rows = [...(payload.knowledgeGraph?.website ? [{
+      title: payload.knowledgeGraph.title,
+      url: payload.knowledgeGraph.website,
+      snippet: payload.knowledgeGraph.description
+    }] : []), ...(payload.organic ?? []).map(row => ({ title: row.title, url: row.link, snippet: row.snippet }))];
+    return normalizedResults(rows);
   }
   const url = new URL(`${base}${connection.endpoint || "/works"}`);
   url.searchParams.set("search", query);

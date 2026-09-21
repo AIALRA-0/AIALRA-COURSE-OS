@@ -1310,12 +1310,15 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
       || policy.rules.find((candidate) => candidate.stage === "teach" && candidate.enabled);
     if (!rule) throw new ModelRouterGenerationError("MODEL_PROVIDER_ROUTE_NOT_CONFIGURED", "unconfigured", emptyUsage(Date.now()), "course-os");
 
-    const candidates = [
+    const orderedRoutes = policy.routes?.filter((candidate) => candidate.enabled) ?? [];
+    const legacyRoutes = [
       { providerId: rule.providerId, modelId: rule.modelId },
       ...(policy.allowProviderFallback !== false && rule.fallbackProviderId && rule.fallbackModelId ? [{ providerId: rule.fallbackProviderId, modelId: rule.fallbackModelId }] : [])
     ];
+    const candidates = (Array.isArray(policy.routes) ? orderedRoutes : legacyRoutes)
+      .slice(0, policy.allowProviderFallback === false ? 1 : undefined);
     let lastError: ModelRouterGenerationError | undefined;
-    for (const candidate of candidates.slice(0, 2)) {
+    for (const candidate of candidates) {
       const provider = providers.find((item) => item.id === candidate.providerId && item.enabled);
       const model = provider?.models.find((item) => item.id === candidate.modelId);
       const apiKey = provider ? await credential(provider.id) : undefined;
@@ -1340,8 +1343,8 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         return await execute(new HttpProviderTeachingClient(connection));
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
-        // Only exhausted subscription quota authorizes switching to metered billing.
-        // Content, configuration and network failures retain the original provider.
+        // Only exhausted quota or rate limiting authorizes switching providers.
+        // Content, configuration and network failures retain the original error.
         if (error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
           && !/^MODEL_PROVIDER_FAILED:(?:429|rate_limited|quota_exhausted|rate_limit_exceeded)$/.test(error.code)) throw error;
         lastError = error;

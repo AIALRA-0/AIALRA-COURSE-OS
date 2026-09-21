@@ -811,9 +811,18 @@ export interface ModelRouteRule {
   enabled: boolean;
 }
 
+export interface ModelRouteCandidate {
+  providerId: Identifier;
+  modelId: Identifier;
+  enabled: boolean;
+}
+
 export interface ModelRoutePolicy {
   workspaceId: Identifier;
   rules: ModelRouteRule[];
+  /** Ordered provider chain shared by every generation stage. Older policies
+   * without this field continue to use their per-stage primary and fallback. */
+  routes?: ModelRouteCandidate[];
   /** Provider fallback is opt-in so a failed primary route is never hidden. */
   allowProviderFallback?: boolean;
   allowAialraEmergencyFallback: boolean;

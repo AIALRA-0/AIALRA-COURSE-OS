@@ -829,6 +829,15 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .route-editor-row { display: grid; grid-template-columns: 110px minmax(0, 150px) minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; }
 .route-editor-row strong { font-size: 12px; }
 .route-editor-row select, .route-editor-row input { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-strong); font-size: 12px; }
+.model-priority-list { display: grid; gap: 8px; }
+.model-priority-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-strong); }
+.model-priority-rank { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--soft); color: var(--brand-ink); font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 700; }
+.model-priority-controls { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(170px, 1.2fr); gap: 8px; min-width: 0; }
+.model-priority-controls label { display: grid; gap: 4px; min-width: 0; color: var(--muted); font-size: 10px; font-weight: 650; }
+.model-priority-controls select { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); font-size: 12px; }
+.model-priority-enabled { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.model-priority-actions { display: flex; gap: 5px; }
+.model-priority-actions .icon-button { width: 30px; height: 30px; font-size: 14px; }
 .search-provider-config { grid-template-columns: minmax(0, 1fr) 90px 120px auto auto; }
 .search-provider-config label { min-width: 0; }
 .search-provider-config input { width: 100%; min-width: 0; }
@@ -938,6 +947,10 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .search-route-row strong { grid-column: 1 / -1; }
   .search-route-row .provider-enabled { justify-self: start; }
   .route-editor-row { grid-template-columns: 1fr; gap: 5px; padding: 7px 0; }
+  .model-priority-row { grid-template-columns: 28px minmax(0, 1fr) auto; align-items: start; }
+  .model-priority-controls { grid-template-columns: 1fr; }
+  .model-priority-enabled { grid-column: 2; }
+  .model-priority-actions { grid-column: 3; grid-row: 1 / span 2; flex-direction: column; }
   .question-bank-editor { padding: 15px; }
   .cost-ledger-grid { grid-template-columns: 1fr; }
   .question-bank-editor-heading { align-items: stretch; flex-direction: column; gap: 12px; }

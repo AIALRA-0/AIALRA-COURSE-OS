@@ -1426,13 +1426,26 @@ describe("Course OS API", () => {
 
     const models = await request(app).get("/api/v1/model-providers").expect(200);
     expect(models.body.find((provider: { id: string }) => provider.id === "kuafu")).toMatchObject({ enabled: false, baseUrl: "https://api.kuafushe.cc/v1" });
+    expect(models.body.find((provider: { id: string }) => provider.id === "kimi-coding")).toMatchObject({
+      enabled: false, baseUrl: "https://api.kimi.com/coding/v1",
+      models: [expect.objectContaining({ id: "kimi-for-coding-highspeed", protocol: "chat_completions" })]
+    });
+    expect(models.body.find((provider: { id: string }) => provider.id === "codex")).toMatchObject({
+      enabled: false, baseUrl: "",
+      models: expect.arrayContaining([expect.objectContaining({ id: "gpt-5.6-luna", protocol: "responses" })])
+    });
+    expect(models.body.some((provider: { id: string }) => provider.id === "aialra-router")).toBe(false);
     expect(models.body.find((provider: { id: string }) => provider.id === "deepseek")).toMatchObject({
       credential: { configured: true, maskedValue: "••••" }, vault: { backend: "course_os_vault", state: "configured" }
     });
     expect(JSON.stringify(models.body)).not.toContain("synthetic-existing-deepseek-token");
+    const modelPolicy = await request(app).get("/api/v1/model-route-policy").expect(200);
+    expect(modelPolicy.body.routes.map((route: { providerId: string }) => route.providerId)).toEqual(["kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"]);
+    await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "invalid-duplicate-model-route")
+      .send({ ...modelPolicy.body, routes: [modelPolicy.body.routes[0], modelPolicy.body.routes[0]] }).expect(422);
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
-    expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel"]);
+    expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"]);
     expect(searches.body.find((provider: { id: string }) => provider.id === "tinyfish")).toMatchObject({
       credential: { configured: true, maskedValue: "••••" }, vault: { backend: "course_os_vault", state: "configured" }
     });

@@ -459,7 +459,16 @@ export function createApp(dependencies: AppDependencies): Express {
   app.put("/api/v1/model-route-policy", async (request, response, next) => {
     try {
       const policy = request.body as ModelRoutePolicy;
-      if (!policy || !Array.isArray(policy.rules) || typeof policy.allowAialraEmergencyFallback !== "boolean" || (policy.allowProviderFallback !== undefined && typeof policy.allowProviderFallback !== "boolean")) return sendError(request, response, 422, "MODEL_ROUTE_POLICY_INVALID", "模型路由规则结构无效", false);
+      const routesValid = policy?.routes === undefined || (Array.isArray(policy.routes) && policy.routes.length > 0
+        && policy.routes.length <= 12
+        && new Set(policy.routes.map(route => route.providerId)).size === policy.routes.length
+        && policy.routes.every(route => typeof route.providerId === "string" && route.providerId.length > 0
+          && typeof route.modelId === "string" && route.modelId.length > 0 && typeof route.enabled === "boolean"));
+      if (!policy || !Array.isArray(policy.rules) || !routesValid || typeof policy.allowAialraEmergencyFallback !== "boolean" || (policy.allowProviderFallback !== undefined && typeof policy.allowProviderFallback !== "boolean")) return sendError(request, response, 422, "MODEL_ROUTE_POLICY_INVALID", "模型路由规则结构无效", false);
+      const snapshot = await dependencies.operations.read();
+      if (policy.routes?.some(route => !snapshot.modelProviders.some(provider => provider.id === route.providerId && provider.models.some(model => model.id === route.modelId)))) {
+        return sendError(request, response, 422, "MODEL_ROUTE_TARGET_INVALID", "模型路由包含不存在的供应商或模型", false);
+      }
       const idempotencyKey = requireIdempotencyKey(request);
       const saved = await dependencies.operations.mutate(state => {
         if (!state.idempotency[idempotencyKey]) {
@@ -2345,7 +2354,7 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
 }
 
 function searchConnection(provider: SearchProviderConfig, apiKey?: string): CourseSearchConnection | undefined {
-  if (!["tinyfish", "octen", "openalex", "parallel"].includes(provider.id)) return undefined;
+  if (!["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"].includes(provider.id)) return undefined;
   return {
     providerId: provider.id as CourseSearchConnection["providerId"],
     baseUrl: provider.baseUrl,

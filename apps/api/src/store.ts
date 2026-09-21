@@ -5,7 +5,7 @@ import { writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
-import { defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults } from "./provider-settings.js";
+import { defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults, mergeCourseModelRoutePolicyDefaults } from "./provider-settings.js";
 
 export interface OperationalState {
   schemaVersion: "1.0.0";
@@ -174,9 +174,7 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     reviewSessions: Array.isArray(value?.reviewSessions) ? value.reviewSessions : [],
     attempts: Array.isArray(value?.attempts) ? value.attempts : [],
     modelProviders: mergeCourseModelProviderDefaults(Array.isArray(value?.modelProviders) ? value.modelProviders : []),
-    modelRoutePolicy: value?.modelRoutePolicy && Array.isArray(value.modelRoutePolicy.rules)
-      ? value.modelRoutePolicy
-      : defaultCourseModelRoutePolicy(),
+    modelRoutePolicy: mergeCourseModelRoutePolicyDefaults(value?.modelRoutePolicy),
     searchProviders: mergeCourseSearchProviderDefaults(Array.isArray(value?.searchProviders) ? value.searchProviders : []),
     searchRoutePolicy: value?.searchRoutePolicy && Array.isArray(value.searchRoutePolicy.rules)
       ? value.searchRoutePolicy

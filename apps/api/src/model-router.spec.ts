@@ -962,6 +962,28 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("follows every enabled route in visible priority order after quota failures", async () => {
+    const providerIds = ["kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"];
+    const fetchMock = vi.fn(async (url: string) => {
+      const providerId = new URL(url).hostname.split(".")[0]!;
+      if (providerId !== "kimi-coding") return Response.json({ error: { code: "quota_exhausted" } }, { status: 429 });
+      return Response.json({ model: "test-model", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: providerIds.map(id => ({ id, displayName: id, baseUrl: `https://${id}.test`, enabled: true,
+        credential: { configured: true }, models: [{ id: "test-model", displayName: "Test", protocol: "responses" as const,
+          supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const }] })),
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(),
+        routes: providerIds.map(providerId => ({ providerId, modelId: "test-model", enabled: true })),
+        rules: [{ stage: "teach", providerId: "deepseek", modelId: "test-model", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage(providerInput("ordered-route-test"));
+    expect(result.provider).toBe("kimi-coding");
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).hostname.split(".")[0])).toEqual(providerIds);
+  });
+
   it("preserves a zero-usage quota error across a planned-stage retry", async () => {
     const fetchMock = vi.fn(async () => Response.json({ error: { code: "429" } }, { status: 429 }));
     vi.stubGlobal("fetch", fetchMock);

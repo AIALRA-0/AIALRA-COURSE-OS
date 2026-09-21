@@ -23,9 +23,15 @@ describe("cost price snapshots", () => {
     expect(billingBreakdown("kuafu", "metered", 1_000)).toEqual({ cashCostMicrousd: 1_000, quotaConsumedMicrousd: 0 });
   });
 
+  it("keeps cost estimates available for the Codex and Kimi tail routes", () => {
+    expect(priceSnapshotFor("codex", "gpt-5.6-luna")).toMatchObject({ provider: "codex", outputMicrousdPerMillion: 1_200_000 });
+    expect(priceSnapshotFor("kimi-coding", "kimi-for-coding-highspeed")).toMatchObject({ provider: "kimi-coding", outputMicrousdPerMillion: 1_200_000 });
+  });
+
   it("exposes independent search request price snapshots", () => {
     expect(searchPriceSnapshotFor("octen")).toMatchObject({ provider: "octen", currency: "USD", perRequestMicrousd: 1_000 });
     expect(searchPriceSnapshotFor("openalex")).toMatchObject({ provider: "openalex", perRequestMicrousd: 1_000 });
+    expect(searchPriceSnapshotFor("exa")).toMatchObject({ provider: "exa", perRequestMicrousd: 7_000 });
     expect(searchPriceSnapshotFor("unknown")).toBeUndefined();
   });
 
