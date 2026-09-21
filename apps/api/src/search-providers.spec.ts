@@ -70,6 +70,26 @@ describe("native Course OS search providers", () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
+  it("accepts Jina Search indexed text responses when the service ignores the JSON header", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      "[1] Title: Graph Encoder",
+      "[1] URL Source: https://example.test/graph-encoder",
+      "[1] Description: A graph encoder turns graph structure into vectors.",
+      "[2] Title: Message Passing",
+      "[2] URL Source: https://example.test/message-passing",
+      "[2] Markdown Content:",
+      "Nodes exchange information with their neighbours.",
+      "The updated states are used by downstream layers."
+    ].join("\n"), { status: 200, headers: { "Content-Type": "text/plain" } })));
+    const result = await searchTeachingEvidence([{ id: "q1", atomId: "a1", query: "graph encoder", reason: "missing term" }], [
+      { providerId: "jina", baseUrl: "https://jina.test", apiKey: "synthetic-jina-key" }
+    ]);
+    expect(result.evidence).toEqual([
+      expect.objectContaining({ provider: "jina", title: "Graph Encoder", url: "https://example.test/graph-encoder", snippet: "A graph encoder turns graph structure into vectors." }),
+      expect.objectContaining({ provider: "jina", title: "Message Passing", url: "https://example.test/message-passing", snippet: "Nodes exchange information with their neighbours. The updated states are used by downstream layers." })
+    ]);
+  });
+
   it("calls Serper directly and includes a knowledge graph result before organic results", async () => {
     const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://serper.test/search");

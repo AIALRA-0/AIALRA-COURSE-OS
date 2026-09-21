@@ -116,6 +116,63 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs = 8_000): Pro
   } finally { clearTimeout(timeout); }
 }
 
+async function fetchText(url: string, init: RequestInit, timeoutMs = 8_000): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) throw new Error(`SEARCH_PROVIDER_FAILED:${response.status}`);
+    return await response.text();
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error("SEARCH_PROVIDER_TIMEOUT");
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+
+function parseJinaResponse(raw: string): RawSearchResult[] {
+  try {
+    const payload = JSON.parse(raw) as { data?: Array<{ title?: string; url?: string; description?: string; content?: string }> };
+    return normalizedResults((payload.data ?? []).map(row => ({
+      title: row.title,
+      url: row.url,
+      snippet: row.description || row.content
+    })));
+  } catch {
+    const records = new Map<string, { title?: string; url?: string; description?: string; content?: string }>();
+    let currentIndex: string | undefined;
+    let currentField: "description" | "content" | undefined;
+    for (const sourceLine of raw.split(/\r?\n/u)) {
+      const line = sourceLine.trim();
+      const field = line.match(/^\[(\d+)\]\s+(Title|URL Source|Description|Markdown Content|Content):\s*(.*)$/iu);
+      if (field) {
+        const index = field[1];
+        const sourceLabel = field[2];
+        const sourceValue = field[3];
+        if (!index || !sourceLabel || sourceValue === undefined) continue;
+        currentIndex = index;
+        const record = records.get(index) ?? {};
+        const label = sourceLabel.toLowerCase();
+        const value = sourceValue.trim();
+        if (label === "title") record.title = value;
+        else if (label === "url source") record.url = value;
+        else if (label === "description") record.description = value;
+        else record.content = value;
+        currentField = label === "description" ? "description" : label.includes("content") ? "content" : undefined;
+        records.set(index, record);
+        continue;
+      }
+      if (!line || !currentIndex || !currentField) continue;
+      const record = records.get(currentIndex)!;
+      record[currentField] = [record[currentField], line].filter(Boolean).join(" ");
+    }
+    return normalizedResults([...records.values()].map(record => ({
+      title: record.title,
+      url: record.url,
+      snippet: record.description || record.content
+    })));
+  }
+}
+
 function classifySearchFailure(error: unknown): Pick<CourseSearchReceipt, "errorCode" | "retryable"> {
   const code = error instanceof Error ? error.message : "SEARCH_PROVIDER_FAILED";
   if (code === "SEARCH_PROVIDER_TIMEOUT") return { errorCode: "SEARCH_PROVIDER_TIMEOUT", retryable: true };
@@ -167,18 +224,14 @@ async function executeSearch(connection: CourseSearchConnection, query: string, 
   }
   if (connection.providerId === "jina") {
     const url = new URL(`${base}/${encodeURIComponent(query)}`);
-    const payload = await fetchJson(url.toString(), {
+    const payload = await fetchText(url.toString(), {
       headers: {
         "Authorization": `Bearer ${connection.apiKey!}`,
         "X-Respond-With": "no-content",
         "X-Return-Format": "json"
       }
-    }) as { data?: Array<{ title?: string; url?: string; description?: string; content?: string }> };
-    return normalizedResults((payload.data ?? []).map(row => ({
-      title: row.title,
-      url: row.url,
-      snippet: row.description || row.content
-    })));
+    });
+    return parseJinaResponse(payload).slice(0, limit);
   }
   if (connection.providerId === "serper") {
     const payload = await fetchJson(`${base}${connection.endpoint || "/search"}`, {
