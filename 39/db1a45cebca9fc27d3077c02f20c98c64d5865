@@ -1,0 +1,44 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_e03da400e5a1ed 967,969
+  s_e8850ef125fb32::t_80c7f6c5b8baff 893-894,933-949,952,970
+  s_e8850ef125fb32::t_ca70dad378e408 971
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_2da671b0819851 25
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_4151469e25cc32 10-11
+  s_e8850ef125fb32::t_1c03e4e7e21b61 14
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_e03da400e5a1ed 232
+  s_e8850ef125fb32::t_80c7f6c5b8baff 230-231,233
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_dda51d4ede64a3 10,508-516,519-540
+  s_e8850ef125fb32::t_e5588b26f5ca6b 517-518
+  s_e8850ef125fb32::t_f6aeb48d20d1fc 541-542
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_9605b8123a03db 1055-1115
+apps/web/src/api.spec.ts
+  s_e8850ef125fb32::t_e03da400e5a1ed 47-48
+  s_e8850ef125fb32::t_80c7f6c5b8baff 32-46,49-51
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_2da671b0819851 11,29
+apps/api/src/generation-harness.ts
+  s_e8850ef125fb32::t_2da671b0819851 161-163
+packages/contracts/openapi/browser-api.yaml
+  s_e8850ef125fb32::t_6becd1624bf6a6 529-538
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "39db1a45cebca9fc27d3077c02f20c98c64d5865",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
