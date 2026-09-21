@@ -971,6 +971,27 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("uses the next configured route after a relay upstream failure", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: { code: "upstream_error", message: "relay upstream unavailable" } }, { status: 502 }))
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-flash", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 300 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: "kuafu", displayName: "Kuafu", baseUrl: "https://kuafu.test", enabled: true, credential: { configured: true }, models: [{ id: "deepseek-v4.1-flash", displayName: "Flash", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] },
+        { id: "deepseek", displayName: "DeepSeek", baseUrl: "https://deepseek.test", enabled: true, credential: { configured: true }, models: [{ id: "deepseek-flash", displayName: "Flash", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }] }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(), rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }], routes: [
+        { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+        { providerId: "deepseek", modelId: "deepseek-flash", enabled: true }
+      ] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage(providerInput("upstream-fallback"));
+    expect(result.provider).toBe("deepseek");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a text-only Kuafu route primary when extracted page source is available", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { model: string; input: unknown };

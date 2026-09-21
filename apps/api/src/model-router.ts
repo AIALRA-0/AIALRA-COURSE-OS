@@ -1389,10 +1389,12 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         return await execute(new HttpProviderTeachingClient(connection), routedInput);
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
-        // Only exhausted quota or rate limiting authorizes switching providers.
-        // Content, configuration and network failures retain the original error.
+        // Provider-local capacity and upstream failures may use the explicit
+        // ordered route list. Content and configuration failures must retain
+        // their original provider and error.
         if (error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
-          && !/^MODEL_PROVIDER_FAILED:(?:429|rate_limited|quota_exhausted|rate_limit_exceeded)$/.test(error.code)) throw error;
+          && !/^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|quota_exhausted|rate_limit_exceeded|upstream_error|response_failed)$/.test(error.code)
+          && error.code !== "MODEL_PROVIDER_NETWORK_FAILURE") throw error;
         lastError = error;
       }
     }
