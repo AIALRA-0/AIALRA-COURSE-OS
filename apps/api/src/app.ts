@@ -3474,6 +3474,17 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     } catch (error) {
       const failureRoute = classifyGenerationFailure(error);
       const issue = safeGenerationIssue(error);
+      console.error(JSON.stringify({
+        event: "generation.page.error",
+        jobId,
+        pageId,
+        issue,
+        errorName: error instanceof Error ? error.name : typeof error,
+        codeLocations: error instanceof Error
+          ? (error.stack ?? "").split("\n").slice(1, 4).map((line) => line.trim().replace(/https?:\/\/\S+/gu, "[url]"))
+          : [],
+        failureRoute
+      }));
       const failedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
       const checkpointRecoveryCandidate = issue === "INTERNAL_FAILURE"
         && currentJob.attempt < 3
