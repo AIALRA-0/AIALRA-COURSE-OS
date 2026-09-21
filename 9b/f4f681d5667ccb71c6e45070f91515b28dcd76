@@ -1,0 +1,37 @@
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_14c3e89597e6ba 229
+apps/worker/src/worker.ts
+  s_e8850ef125fb32::t_a113d678919221 9,43-44
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_8f857dcdeb6304 497-512,528-532
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_8f857dcdeb6304 1078-1082
+  s_e8850ef125fb32::t_a207cb3ed6223b 849,863,870,882,887-934,938,940-945,947-952
+  s_e8850ef125fb32::t_2067bc3c233d7c 52,146,304,309-321,420-421,465-466
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_3ca5a3dfc89cb9 1038,3989-3990,4140
+  s_e8850ef125fb32::t_a78d39a0cc6081 1002
+  s_e8850ef125fb32::t_2832a13b7aa3a7 1049-1051
+  s_e8850ef125fb32::t_86d4c1c8294407 2474,2527-2531
+  s_e8850ef125fb32::t_b9096d1b1cdad2 2473,2479-2483,2509-2510,2523,2525-2526,2538,2541-2542,2545-2547,2549,2551-2586,2597-2599,2602-2603,2605-2606,2610,2635-2636,2671-2673
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_b9096d1b1cdad2 571,574
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_0414bdb0fbe433 424-427,432-436
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9bf4f681d5667ccb71c6e45070f91515b28dcd76",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
