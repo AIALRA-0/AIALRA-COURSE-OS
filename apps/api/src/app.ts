@@ -1113,7 +1113,8 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
       const activeJobs = snapshot.jobs.filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
       const currentJob = activeJobs[0] ?? snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
-      const jobIds = new Set(snapshot.jobs.filter(item => item.planId === plan.id).map(item => item.id));
+      const planJobs = snapshot.jobs.filter(item => item.planId === plan.id);
+      const jobIds = new Set(planJobs.map(item => item.id));
       const repairCount = snapshot.events.filter(event => jobIds.has(event.streamId)
         && event.type === "generation.stage.completed"
         && (event.payload as { stage?: string }).stage === "repair").length;
@@ -1126,7 +1127,7 @@ export function createApp(dependencies: AppDependencies): Express {
         concurrency: { running: activeJobs.filter(job => job.state === "running").length, limit: plan.maxConcurrency ?? generationPlanConcurrency() },
         provider: route?.provider,
         model: route?.model,
-        costUsd: plan.spentUsd
+        costUsd: roundGenerationMoney(planJobs.reduce((sum, item) => sum + item.spentUsd, 0))
       };
       response.json({ plan: { ...plan, progress }, currentJob, activeJobs, progress });
     } catch (error) { next(error); }
