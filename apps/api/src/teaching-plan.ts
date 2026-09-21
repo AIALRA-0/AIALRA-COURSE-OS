@@ -197,6 +197,130 @@ export function fillMissingPlanObjectiveText(plan: TeachingPlan): TeachingPlan {
   return result;
 }
 
+function transportText(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const joined = value.map(item => transportText(item, "")).filter(Boolean).join("；");
+    return joined || fallback;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["text", "observation", "explanation", "outcome", "focus", "name", "label"]) {
+      const text = transportText(record[key], "");
+      if (text) return text;
+    }
+  }
+  return fallback;
+}
+
+function transportStrings(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(item => transportText(item, "")).filter(Boolean);
+  const text = transportText(value, "");
+  return text ? [text] : [];
+}
+
+/**
+ * Convert provider transport drift into the same source-grounded plan shape.
+ * Content still comes from the provider when present; missing bookkeeping is
+ * derived from the authoritative Blueprint so malformed JSON cannot block a
+ * page or trigger repeated model calls merely to restore IDs and labels.
+ */
+export function completeTeachingPlanTransport(value: unknown, blueprint: TeachingBlueprint): TeachingPlan {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const sourceLines = blueprint.resourcePackage.sourceText.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  const validAtoms = new Set(blueprint.resourcePackage.atomIds);
+  const requiredAtoms = [...new Set(blueprint.requirementPackage.requirements.map(item => item.atomId))];
+  const atomOrder = requiredAtoms.length ? requiredAtoms : blueprint.resourcePackage.atomIds;
+  const rawFacts = Array.isArray(raw.facts) ? raw.facts : [];
+  const facts: TeachingPlan["facts"] = rawFacts.slice(0, 48).map((item, index) => {
+    const fact = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const proposedAtom = transportText(fact.atomId ?? fact.sourceAtomId, "");
+    return {
+      id: transportText(fact.id, `fact-${index + 1}`),
+      atomId: validAtoms.has(proposedAtom) ? proposedAtom : atomOrder[index % Math.max(1, atomOrder.length)] ?? blueprint.resourcePackage.atomIds[0] ?? `source-${index + 1}`,
+      observation: transportText(fact.observation ?? fact.text ?? fact.statement, sourceLines[index % Math.max(1, sourceLines.length)] ?? blueprint.resourcePackage.pageTitle),
+      qualification: transportText(fact.qualification ?? fact.condition ?? fact.scope, "")
+    };
+  });
+  const factIds = new Set(facts.map(fact => fact.id));
+  for (const [index, atomId] of atomOrder.entries()) {
+    if (facts.some(fact => fact.atomId === atomId)) continue;
+    let id = `fact-${facts.length + 1}`;
+    while (factIds.has(id)) id += "-source";
+    factIds.add(id);
+    facts.push({ id, atomId,
+      observation: sourceLines[index % Math.max(1, sourceLines.length)] ?? blueprint.resourcePackage.pageTitle,
+      qualification: "" });
+  }
+  if (facts.length === 0) facts.push({ id: "fact-1", atomId: blueprint.resourcePackage.atomIds[0] ?? "page-source",
+    observation: blueprint.resourcePackage.sourceText || blueprint.resourcePackage.pageTitle, qualification: "" });
+
+  const rawSteps = Array.isArray(raw.steps) && raw.steps.length ? raw.steps : blueprint.steps.filter(step => step.required);
+  const steps: TeachingPlan["steps"] = rawSteps.slice(0, 16).map((item, index) => {
+    const step = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const blueprintStep = blueprint.steps[index % blueprint.steps.length];
+    const id = transportText(step.id, `step-${index + 1}`);
+    const selectedFacts = transportStrings(step.factIds).filter(factId => factIds.has(factId));
+    return { id,
+      factIds: selectedFacts.length ? [...new Set(selectedFacts)] : [facts[index % facts.length]!.id],
+      dependsOn: transportStrings(step.dependsOn).filter(dependency => dependency !== id),
+      explanation: transportText(step.explanation, blueprintStep?.objective ?? blueprint.requirementPackage.objective),
+      example: transportText(step.example, ""),
+      boundary: transportText(step.boundary, "") };
+  });
+  if (steps.length === 0) steps.push({ id: "step-1", factIds: facts.map(fact => fact.id), dependsOn: [],
+    explanation: blueprint.requirementPackage.objective, example: "", boundary: "只解释当前页面来源明确给出的内容" });
+  const stepIds = new Set(steps.map(step => step.id));
+  for (const [index, step] of steps.entries()) step.dependsOn = step.dependsOn.filter(id => stepIds.has(id) && steps.findIndex(item => item.id === id) < index);
+
+  const rawObjectives = Array.isArray(raw.objectives) && raw.objectives.length ? raw.objectives : [raw];
+  const objectives: TeachingPlan["objectives"] = rawObjectives.slice(0, 4).map((item, index) => {
+    const objective = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const selectedSteps = transportStrings(objective.stepIds).filter(stepId => stepIds.has(stepId));
+    const ownedSteps = selectedSteps.length ? selectedSteps : [steps[index % steps.length]!.id];
+    return { id: transportText(objective.id, `objective-${index + 1}`),
+      startingPoint: transportText(objective.startingPoint, transportText(raw.knownStartingPoint, "已经能够识别页面中的标题、文字、符号和图示")),
+      outcome: transportText(objective.outcome, ownedSteps.map(stepId => steps.find(step => step.id === stepId)?.explanation).filter(Boolean).join("；") || blueprint.requirementPackage.objective),
+      stepIds: ownedSteps };
+  });
+  const rawQuestions = Array.isArray(raw.questions) ? raw.questions : [];
+  const questions: TeachingPlan["questions"] = Array.from({ length: 4 }, (_, index) => {
+    const item = rawQuestions[index];
+    const question = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const proposedStep = transportText(question.stepId, "");
+    const stepId = stepIds.has(proposedStep) ? proposedStep : objectives[index % objectives.length]!.stepIds[0]!;
+    const objective = objectives.find(goal => goal.stepIds.includes(stepId)) ?? objectives[index % objectives.length]!;
+    return { objectiveId: objective.id, stepId,
+      kind: index < 2 ? "comprehension" : "multiple_choice",
+      focus: transportText(question.focus, objective.outcome) };
+  });
+  const rawPrerequisites = Array.isArray(raw.prerequisites) ? raw.prerequisites : [];
+  const prerequisites: TeachingPlan["prerequisites"] = rawPrerequisites.slice(0, 5).map((item, index) => {
+    const prerequisite = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    return { name: transportText(prerequisite.name, `基础概念 ${index + 1}`),
+      explanation: transportText(prerequisite.explanation, transportText(raw.knownStartingPoint, "先识别本页明确给出的对象")) };
+  });
+  if (prerequisites.length === 0) prerequisites.push({ name: "页面对象", explanation: transportText(raw.knownStartingPoint, "先识别本页明确给出的对象、符号和关系") });
+  const researchQueries = (Array.isArray(raw.researchQueries) ? raw.researchQueries : []).slice(0, 2).flatMap((item, index) => {
+    const query = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const atomId = transportText(query.atomId, "");
+    const text = transportText(query.query, "");
+    const reason = transportText(query.reason, "");
+    if (!validAtoms.has(atomId) || !text || !reason) return [];
+    const kind = ["web", "academic", "terminology", "temporal"].includes(String(query.kind))
+      ? query.kind as TeachingResearchQuery["kind"] : undefined;
+    return [{ id: transportText(query.id, `research-${index + 1}`), atomId, query: text, reason, ...(kind ? { kind } : {}) }];
+  });
+  return {
+    problem: transportText(raw.problem, blueprint.requirementPackage.objective),
+    knownStartingPoint: transportText(raw.knownStartingPoint, "已经能够识别页面中的标题、文字、符号和图示"),
+    scopeBoundary: transportText(raw.scopeBoundary, "只解释当前页面来源明确给出的内容，不延伸到后续章节"),
+    facts, prerequisites, steps, objectives, questions,
+    ...(researchQueries.length ? { researchQueries } : {})
+  };
+}
+
 /**
  * Provider adapters may omit the transport-only atomId while preserving the
  * source-ordered facts. Bind only missing IDs to the next still-uncovered

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, fillMissingPlanObjectiveText, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, completeTeachingPlanTransport, fillMissingPlanObjectiveText, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -221,6 +221,16 @@ it("fills omitted objective prose from existing plan text without a provider rep
   const normalized = fillMissingPlanObjectiveText(plan);
   expect(normalized.objectives[0]).toMatchObject({ startingPoint: "已有输入", outcome: "能够根据输入核对结果" });
 });
+it("completes a severely partial provider plan from the authoritative blueprint", () => {
+  const { input } = fixture("输入与输出");
+  const plan = completeTeachingPlanTransport({ knownStartingPoint: "已经知道输入是什么",
+    facts: [{ atomId: "invented", observation: { text: "输入经过规则处理" } }],
+    steps: [{ id: "s1", factIds: [1], explanation: { text: "说明输入怎样变成输出" } }] }, input.blueprint!);
+  const normalized = alignPlanQuestionObjectives(assignUnplacedPlanFacts(removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(plan, input.blueprint!))));
+  expect(validateTeachingPlan(normalized, input.blueprint!)).toEqual([]);
+  expect(normalized.facts[0]).toMatchObject({ id: "fact-1", atomId: "a", observation: "输入经过规则处理" });
+  expect(normalized.questions).toHaveLength(4);
+});
 it("does not demand a teaching quote for a title-only source fact", () => {
   const { input, plan } = fixture("术语");
   plan.facts[0]!.observation = "页面标题为 TERMINOLOGY";
@@ -318,18 +328,19 @@ describe("planned teaching", () => {
     expect(() => removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(incomplete, input.blueprint!))).not.toThrow();
     expect(validateTeachingPlan(incomplete, input.blueprint!)).toContain("result.facts:required");
   });
-  it("merges a bounded partial plan repair without discarding valid fields", async () => {
+  it("fills a missing plan heading locally without spending a provider repair", async () => {
     const { input, plan } = fixture();
     const broken = { ...plan, problem: undefined } as unknown as TeachingPlan;
     const result = await writePlannedLesson(input, async request => ({
       content: request.phase === "plan" ? broken
-        : request.phase === "plan_repair" ? { problem: plan.problem }
         : request.phase === "opening" ? opening
         : request.phase === "explanation" ? explanation
         : request.phase === "bridge" ? bridge : closing,
       provider: "deepseek", model: "flash", usage
     }));
-    expect(result.trace.plan).toEqual(plan);
+    expect(result.trace.phases.map(phase => phase.phase)).not.toContain("plan_repair");
+    expect(result.trace.plan.problem).toBe(input.blueprint!.requirementPackage.objective);
+    expect(result.trace.plan.facts).toEqual(plan.facts);
   });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {
     for (const issue of [
@@ -593,17 +604,17 @@ describe("planned teaching", () => {
     });
     expect(phases).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation", "bridge"]);
   });
-  it("repairs an unassigned plan fact before writing, within the same single repair budget", async () => {
+  it("assigns an unplaced plan fact locally without a provider repair", async () => {
     const { input, plan } = fixture();
     const broken = structuredClone(plan);
     broken.steps[0]!.factIds = [];
     const phases: string[] = [];
-    const outputs = [broken, plan, opening, explanation, closing, bridge];
+    const outputs = [broken, opening, explanation, closing, bridge];
     await writePlannedLesson(input, async request => {
       phases.push(request.phase);
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
-    expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation", "bridge"]);
+    expect(phases).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
   });
   it("realigns shared-step objective coverage without a provider repair", async () => {
     const { input, plan } = fixture();
@@ -617,27 +628,21 @@ describe("planned teaching", () => {
     });
     expect(calls).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
   });
-  it("persists the last invalid plan and resumes its repair without regenerating the plan", async () => {
+  it("persists a locally completed plan instead of blocking on provider transport omissions", async () => {
     const { input, plan } = fixture();
     input.teachingFingerprint = "resume-invalid-plan";
-    let checkpoint: NonNullable<ModelRouterInput["resumeTeaching"]> | undefined;
-    input.onTeachingCheckpoint = async value => { checkpoint = structuredClone(value); };
+    const checkpoints: Array<NonNullable<ModelRouterInput["resumeTeaching"]>> = [];
+    input.onTeachingCheckpoint = async value => { checkpoints.push(structuredClone(value)); };
     const broken = { ...structuredClone(plan), facts: [] };
-    await expect(writePlannedLesson(input, async request => ({
-      content: request.phase.startsWith("plan") ? broken : opening,
-      provider: "deepseek", model: "flash", usage
-    }))).rejects.toThrow("TEACHING_PLAN_INVALID");
-    expect(checkpoint?.plan?.facts).toEqual([]);
-    expect(checkpoint?.completedPhases).toEqual([]);
-
-    input.resumeTeaching = checkpoint;
     const calls: string[] = [];
     await writePlannedLesson(input, async request => {
       calls.push(request.phase);
-      return { content: request.phase === "plan_repair" ? plan : request.phase === "opening" ? opening
+      return { content: request.phase === "plan" ? broken : request.phase === "opening" ? opening
         : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan_repair", "opening", "explanation", "consolidation", "bridge"]);
+    expect(calls).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
+    expect(checkpoints[0]?.plan?.facts.length).toBeGreaterThan(0);
+    expect(checkpoints[0]?.completedPhases).toEqual([]);
   });
   it("removes provider metadata and maps a plan fact text alias without weakening validation", () => {
     const { plan } = fixture();

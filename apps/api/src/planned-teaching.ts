@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { TeachingBlueprint } from "@course-os/contracts";
 import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, fillMissingPlanObjectiveText, plannedCoverageIssues, removeUnknownPlanFactReferences, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, completeTeachingPlanTransport, fillMissingPlanObjectiveText, plannedCoverageIssues, removeUnknownPlanFactReferences, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -305,12 +305,14 @@ export async function writePlannedLesson(input: ModelRouterInput,
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements,
       externalSearchAvailable: Boolean(input.searchEvidence) }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
-  let plan = resume?.plan ?? alignPlanQuestionObjectives(fillMissingPlanObjectiveText(removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(await run(planRequest) as TeachingPlan, blueprint))));
+  const normalizePlan = (value: unknown) => alignPlanQuestionObjectives(fillMissingPlanObjectiveText(assignUnplacedPlanFacts(
+    removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(completeTeachingPlanTransport(value, blueprint), blueprint)))));
+  let plan = resume?.plan ?? normalizePlan(await run(planRequest));
   let planIssues = validateTeachingPlan(plan, blueprint);
   for (let round = 0; round < 2 && planIssues.length; round++) {
     const repairedPlan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
       instruction: "只修正列出的问题，保留已正确的事实和步骤；可以只返回需要替换的顶层字段；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as Partial<TeachingPlan>;
-    plan = alignPlanQuestionObjectives(fillMissingPlanObjectiveText(removeUnknownPlanFactReferences(bindMissingPlanFactAtoms({ ...plan, ...repairedPlan } as TeachingPlan, blueprint))));
+    plan = normalizePlan({ ...plan, ...repairedPlan });
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.some(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
