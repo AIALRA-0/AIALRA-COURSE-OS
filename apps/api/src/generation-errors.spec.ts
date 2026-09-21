@@ -29,6 +29,11 @@ describe("generation error classification", () => {
     expect(shouldAutoRecoverGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"), 1, 0.04, 4)).toBe(true);
     expect(shouldAutoRecoverGenerationFailure(new Error("PROVIDER_AUTH"), 1, 0, 4)).toBe(false);
   });
+  it("retries relay upstream failures instead of pausing the page", () => {
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error")))
+      .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error"), 1, 0, 4)).toBe(true);
+  });
   it("keeps a rejected provider request distinct from an internal failure", () => {
     expect(describeGenerationError(new Error("MODEL_PROVIDER_FAILED:invalid_request_error"))).toEqual({
       code: "PROVIDER_INVALID_REQUEST",
