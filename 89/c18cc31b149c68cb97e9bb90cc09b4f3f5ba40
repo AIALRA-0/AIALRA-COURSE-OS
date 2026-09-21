@@ -1,0 +1,21 @@
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_95184658fa01f5 62
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_95184658fa01f5 32-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "89c18cc31b149c68cb97e9bb90cc09b4f3f5ba40",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
