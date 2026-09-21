@@ -132,6 +132,25 @@ export function assignUnplacedPlanFacts(plan: TeachingPlan): TeachingPlan {
   return result;
 }
 
+/** Remove invented transport references while preserving every real source fact. */
+export function removeUnknownPlanFactReferences(plan: TeachingPlan): TeachingPlan {
+  const result = structuredClone(plan);
+  const facts = new Set(result.facts.map(fact => fact.id));
+  const assigned = new Set<string>();
+  for (const step of result.steps) {
+    const before = step.factIds;
+    step.factIds = [...new Set(before.filter(factId => facts.has(factId)))];
+    for (const factId of step.factIds) assigned.add(factId);
+    if (step.factIds.length > 0 || before.length === 0) continue;
+    const replacement = result.facts.find(fact => !assigned.has(fact.id));
+    if (replacement) {
+      step.factIds.push(replacement.id);
+      assigned.add(replacement.id);
+    }
+  }
+  return result;
+}
+
 /** Fix an objectiveId label only when the question already tests one of that objective's steps. */
 export function alignPlanQuestionObjectives(plan: TeachingPlan): TeachingPlan {
   const result = structuredClone(plan);

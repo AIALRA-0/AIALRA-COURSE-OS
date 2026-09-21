@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { TeachingBlueprint } from "@course-os/contracts";
 import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, removeUnknownPlanFactReferences, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { classifyGenerationFailure } from "./generation-errors.js";
@@ -91,6 +91,10 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
       }) : record.questions
     };
   }
+  if (schema?.type === "object" && typeof candidate === "string") {
+    const keys = Object.keys(schema.properties ?? {});
+    if (keys.length === 1) candidate = { [keys[0]!]: candidate };
+  }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const original = candidate as Record<string, unknown>;
     const kind = original.kind ?? original.type;
@@ -162,7 +166,8 @@ export function normalizePlannedCoverageFields<T extends Partial<TeachingPackage
     ...content,
     coverageEvidence: content.coverageEvidence.map((rawEvidence) => {
       const evidence = rawEvidence as unknown;
-      if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) || "coveredFields" in evidence) return rawEvidence;
+      if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return rawEvidence;
+      if ("coveredFields" in evidence && Array.isArray(evidence.coveredFields) && evidence.coveredFields.length > 0) return rawEvidence;
       const atomId = "atomId" in evidence && typeof evidence.atomId === "string" ? evidence.atomId : undefined;
       const fields = atomId ? required.get(atomId) : undefined;
       if (fields?.length) return { ...evidence, coveredFields: [...new Set(fields)] };
@@ -294,11 +299,11 @@ export async function writePlannedLesson(input: ModelRouterInput,
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements,
       externalSearchAvailable: Boolean(input.searchEvidence) }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
-  let plan = resume?.plan ?? bindMissingPlanFactAtoms(await run(planRequest) as TeachingPlan, blueprint);
+  let plan = resume?.plan ?? removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(await run(planRequest) as TeachingPlan, blueprint));
   let planIssues = validateTeachingPlan(plan, blueprint);
   for (let round = 0; round < 2 && planIssues.length; round++) {
-    plan = bindMissingPlanFactAtoms(await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
-      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as TeachingPlan, blueprint);
+    plan = removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
+      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as TeachingPlan, blueprint));
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.some(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {

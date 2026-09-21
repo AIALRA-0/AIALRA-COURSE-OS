@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -107,6 +107,8 @@ it("fills omitted coverage fields from the authoritative requirement package bef
   expect(normalized.coverageEvidence?.[0]?.coveredFields).toEqual(["observation", "meaning"]);
   const existing = normalizePlannedCoverageFields({ coverageEvidence: [{ atomId: "a", explanation: quote, coveredFields: ["observation"] }] }, blueprint);
   expect(existing.coverageEvidence?.[0]?.coveredFields).toEqual(["observation"]);
+  const empty = normalizePlannedCoverageFields({ coverageEvidence: [{ atomId: "a", explanation: quote, coveredFields: [] }] }, blueprint);
+  expect(empty.coverageEvidence?.[0]?.coveredFields).toEqual(["observation", "meaning"]);
   expect(() => normalizePlannedCoverageFields({ coverageEvidence: [null, "invalid"] } as never, blueprint)).not.toThrow();
   expect(() => bindExactCoverageLines({ fullExplanationMarkdown: quote, coverageEvidence: [null, "invalid", { atomId: "a" }] } as never)).not.toThrow();
 });
@@ -114,6 +116,11 @@ it("projects a provider string into a string array without coercing non-string i
   const schema = { type: "object", properties: { items: { type: "array", items: { type: "string" } } } };
   expect(projectPlannedOutputToSchema({ items: "- 第一项\n第二项\n* 第三项" }, schema)).toEqual({ items: ["第一项", "第二项", "第三项"] });
   expect(projectPlannedOutputToSchema({ items: ["保留", 7] }, schema)).toEqual({ items: ["保留", 7] });
+});
+it("wraps a plain provider string for a single-field phase object", () => {
+  const schema = { type: "object", properties: { chapterBridgeMarkdown: { type: "string" } }, required: ["chapterBridgeMarkdown"], additionalProperties: false };
+  expect(projectPlannedOutputToSchema("承接上一页以后进入当前问题", schema, "bridge"))
+    .toEqual({ chapterBridgeMarkdown: "承接上一页以后进入当前问题" });
 });
 it("fills observation only for a known atom without a requirement and preserves unknown atoms", () => {
   const { input } = fixture();
@@ -287,6 +294,14 @@ describe("planned teaching", () => {
     expect(placed.steps[0]?.factIds).toEqual(["f", "f11"]);
     expect(placed.facts).toEqual(plan.facts);
     expect(validateTeachingPlan(placed, input.blueprint!)).toEqual([]);
+  });
+  it("removes invented fact references and places every real fact once", () => {
+    const { input, plan } = fixture();
+    plan.steps[0]!.factIds = ["invented"];
+    const repaired = removeUnknownPlanFactReferences(plan);
+    expect(repaired.steps[0]?.factIds).toEqual(["f"]);
+    expect(repaired.facts).toEqual(plan.facts);
+    expect(validateTeachingPlan(repaired, input.blueprint!)).toEqual([]);
   });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {
     for (const issue of [
