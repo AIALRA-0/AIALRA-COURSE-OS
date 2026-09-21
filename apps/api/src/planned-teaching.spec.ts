@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, fillMissingPlanObjectiveText, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -198,7 +198,7 @@ it("splits a long comprehension answer into readable paragraphs before checking 
   expect(content.questions?.[0]?.expectedAnswer).toContain("\n\n");
   expect(plannedFormatIssues(content)).not.toContain("TEACHING_PRESENTATION:questions:PROSE_PACKED");
 });
-it("realigns a question label only when its existing step tests an uncovered objective", () => {
+it("realigns a question label to the objective that owns its existing step", () => {
   const plan: TeachingPlan = { problem: "比较结果", knownStartingPoint: "已有输入", scopeBoundary: "只看本页", facts: [], prerequisites: [],
     steps: [{ id: "s1", factIds: [], dependsOn: [], explanation: "解释输入", example: "", boundary: "" },
       { id: "s2", factIds: [], dependsOn: [], explanation: "解释输出", example: "", boundary: "" }],
@@ -211,6 +211,15 @@ it("realigns a question label only when its existing step tests an uncovered obj
   const unrelated = structuredClone(plan);
   unrelated.questions[1]!.stepId = "s1";
   expect(alignPlanQuestionObjectives(unrelated)).toEqual(unrelated);
+});
+it("fills omitted objective prose from existing plan text without a provider repair", () => {
+  const plan: TeachingPlan = { problem: "比较结果", knownStartingPoint: "已有输入", scopeBoundary: "只看本页", facts: [], prerequisites: [],
+    steps: [{ id: "s1", factIds: [], dependsOn: [], explanation: "能够根据输入核对结果", example: "", boundary: "" }],
+    objectives: [{ id: "o1", stepIds: ["s1"] } as TeachingPlan["objectives"][number]],
+    questions: [{ objectiveId: "o1", stepId: "s1", kind: "comprehension", focus: "核对结果" }]
+  };
+  const normalized = fillMissingPlanObjectiveText(plan);
+  expect(normalized.objectives[0]).toMatchObject({ startingPoint: "已有输入", outcome: "能够根据输入核对结果" });
 });
 it("does not demand a teaching quote for a title-only source fact", () => {
   const { input, plan } = fixture("术语");
@@ -596,19 +605,17 @@ describe("planned teaching", () => {
     });
     expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation", "bridge"]);
   });
-  it("makes a second bounded plan repair when an objective still has no question", async () => {
+  it("realigns shared-step objective coverage without a provider repair", async () => {
     const { input, plan } = fixture();
     const broken = structuredClone(plan);
     broken.objectives.push({ id: "second", startingPoint: "已有输出", outcome: "检查另一种条件", stepIds: ["s"] });
-    const corrected = structuredClone(broken);
-    corrected.questions[3]!.objectiveId = "second";
     const calls: string[] = [];
-    const outputs = [broken, broken, corrected, opening, explanation, closing, bridge];
+    const outputs = [broken, opening, explanation, closing, bridge];
     await writePlannedLesson(input, async request => {
       calls.push(request.phase);
       return { content: outputs.shift(), provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation", "bridge"]);
+    expect(calls).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
   });
   it("persists the last invalid plan and resumes its repair without regenerating the plan", async () => {
     const { input, plan } = fixture();

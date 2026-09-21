@@ -156,12 +156,43 @@ export function removeUnknownPlanFactReferences(plan: TeachingPlan): TeachingPla
 
 /** Fix an objectiveId label only when the question already tests one of that objective's steps. */
 export function alignPlanQuestionObjectives(plan: TeachingPlan): TeachingPlan {
+  if (!plan || typeof plan !== "object"
+    || !Array.isArray((plan as Partial<TeachingPlan>).objectives)
+    || !Array.isArray((plan as Partial<TeachingPlan>).questions)) return plan;
   const result = structuredClone(plan);
+  // A question is taught when its selected step belongs to the selected
+  // objective. Provider schemas occasionally preserve the right step but copy
+  // an adjacent objectiveId. The step is the more specific binding, so repair
+  // that transport label without asking the model to rewrite any teaching.
+  for (const question of result.questions) {
+    const owner = result.objectives.find(goal => goal.stepIds.includes(question.stepId));
+    if (owner) question.objectiveId = owner.id;
+  }
   for (const goal of result.objectives) {
     if (result.questions.some(question => question.objectiveId === goal.id)) continue;
     const candidate = result.questions.find(question => goal.stepIds.includes(question.stepId)
       && result.questions.filter(other => other.objectiveId === question.objectiveId).length > 1);
     if (candidate) candidate.objectiveId = goal.id;
+  }
+  return result;
+}
+
+/** Fill omitted objective prose from the plan itself, without inventing facts. */
+export function fillMissingPlanObjectiveText(plan: TeachingPlan): TeachingPlan {
+  if (!plan || typeof plan !== "object" || !Array.isArray((plan as Partial<TeachingPlan>).objectives)) return plan;
+  const result = structuredClone(plan) as TeachingPlan;
+  const steps = new Map((Array.isArray(result.steps) ? result.steps : []).map(step => [step.id, step]));
+  for (const objective of result.objectives) {
+    if (!objective || typeof objective !== "object") continue;
+    if (typeof objective.startingPoint !== "string" || !objective.startingPoint.trim()) {
+      objective.startingPoint = result.knownStartingPoint;
+    }
+    if (typeof objective.outcome !== "string" || !objective.outcome.trim()) {
+      const taught = (Array.isArray(objective.stepIds) ? objective.stepIds : [])
+        .map(stepId => steps.get(stepId)?.explanation?.trim())
+        .filter((value): value is string => Boolean(value));
+      objective.outcome = taught.join("；") || result.problem;
+    }
   }
   return result;
 }
