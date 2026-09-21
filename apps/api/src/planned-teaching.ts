@@ -69,6 +69,12 @@ function normalizeQuestionKind(value: unknown): unknown {
  */
 export function projectPlannedOutputToSchema(value: unknown, schema: any, phase = ""): unknown {
   let candidate = value;
+  if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    const entries = Object.entries(candidate as Record<string, unknown>);
+    const knownKeys = new Set(Object.keys(schema.properties ?? {}));
+    const wrapped = entries.length === 1 && !knownKeys.has(entries[0]![0]) ? entries[0]![1] : undefined;
+    if (wrapped && typeof wrapped === "object" && !Array.isArray(wrapped)) candidate = wrapped;
+  }
   if (phase.startsWith("plan") && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
     candidate = {

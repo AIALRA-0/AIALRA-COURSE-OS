@@ -635,6 +635,13 @@ describe("planned teaching", () => {
     expect(normalized.facts[0]).toEqual(plan.facts[0]);
     expect(validateTeachingPlan(normalized, fixture().input.blueprint!)).toEqual([]);
   });
+  it("unwraps one provider transport object before applying the stage schema", () => {
+    const { plan } = fixture();
+    expect(projectPlannedOutputToSchema({ plan }, teachingPlanSchema, "plan")).toEqual(plan);
+    const schema = { type: "object", properties: { mainContentMarkdown: { type: "string" } }, required: ["mainContentMarkdown"], additionalProperties: false };
+    expect(projectPlannedOutputToSchema({ result: { mainContentMarkdown: "- 结论" } }, schema, "consolidation_repair"))
+      .toEqual({ mainContentMarkdown: "- 结论" });
+  });
   it("normalizes provider question kind aliases and caps prerequisite planning", () => {
     const { plan } = fixture();
     const drifted = {
