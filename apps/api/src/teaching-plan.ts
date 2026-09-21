@@ -151,6 +151,7 @@ export function alignPlanQuestionObjectives(plan: TeachingPlan): TeachingPlan {
  * failures.
  */
 export function bindMissingPlanFactAtoms(plan: TeachingPlan, blueprint: TeachingBlueprint): TeachingPlan {
+  if (!plan || typeof plan !== "object" || !Array.isArray((plan as Partial<TeachingPlan>).facts)) return plan;
   const result = structuredClone(plan) as TeachingPlan & { facts: Array<TeachingPlan["facts"][number] & { atomId?: string; qualification?: string }> };
   const requiredAtomIds = [...new Set(blueprint.requirementPackage.requirements.map(requirement => requirement.atomId))];
   const validAtomIds = new Set(blueprint.resourcePackage.atomIds);

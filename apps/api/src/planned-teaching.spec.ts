@@ -487,6 +487,12 @@ describe("planned teaching", () => {
     expect(bound.facts[0]).toMatchObject({ atomId: "a", qualification: "" });
     expect(validateTeachingPlan(bound, input.blueprint!)).toEqual([]);
   });
+  it("leaves a structurally incomplete plan for the bounded repair path instead of throwing", () => {
+    const { input } = fixture();
+    const incomplete = { problem: "说明当前问题" } as TeachingPlan;
+    expect(() => bindMissingPlanFactAtoms(incomplete, input.blueprint!)).not.toThrow();
+    expect(validateTeachingPlan(bindMissingPlanFactAtoms(incomplete, input.blueprint!), input.blueprint!)).toContain("result.facts:required");
+  });
   it("uses one provider and bills all four actual calls without audit requests", async () => {
     const { input, plan } = fixture();
     const outputs = [plan, opening, explanation, closing];
