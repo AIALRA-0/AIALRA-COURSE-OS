@@ -433,13 +433,16 @@ export function createApp(dependencies: AppDependencies): Express {
   app.post(/^\/api\/v1\/model-providers\/[^/]+:test$/, async (request, response, next) => {
     try {
       const providerId = decodeURIComponent(request.path.slice("/api/v1/model-providers/".length, -":test".length));
-      const provider = (await dependencies.operations.read()).modelProviders.find((item) => item.id === providerId);
+      const snapshot = await dependencies.operations.read();
+      const provider = snapshot.modelProviders.find((item) => item.id === providerId);
       if (!provider) return sendError(request, response, 404, "MODEL_PROVIDER_NOT_FOUND", "没有找到这个模型供应商", false);
       const apiKey = await credentialVault.get(`model-provider:${providerId}`);
-      const model = provider.models[0];
+      const routedModelId = snapshot.modelRoutePolicy.routes?.find(route => route.enabled && route.providerId === providerId)?.modelId;
+      const model = provider.models.find(item => item.id === routedModelId) ?? provider.models[0];
       const health = !provider.baseUrl || !model
         ? { providerId, state: "unconfigured" as const, checkedAt: new Date().toISOString(), message: "供应商没有可测试的接口或模型" }
-        : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection, providerId === "kuafu");
+        : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection,
+          ["kuafu", "opencode-go", "deepseek"].includes(providerId));
       const [resolvedProvider] = await withVaultCredentialStatus([provider], "model-provider", credentialVault);
       response.json({ ...resolvedProvider, health });
     }

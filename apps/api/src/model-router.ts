@@ -557,22 +557,48 @@ export async function probeProviderConnection(connection: ProviderConnection, fu
     const models = catalog?.data?.flatMap((item) => typeof item.id === "string" ? [item.id] : []) ?? [];
     if (full && models.length && !models.includes(connection.model)) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `连接正常，但当前模型目录中没有 ${connection.model}` };
     if (!full) return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，已读取供应商模型目录" };
-    if (connection.protocol !== "responses") return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，模型目录可用；当前协议使用本地结构校验" };
     const capabilitySchema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+    const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrS8AAAAASUVORK5CYII=";
     const input = connection.supportsVision
-      ? [{ role: "user", content: [{ type: "input_text", text: "Return {\"ok\":true}." }, { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrS8AAAAASUVORK5CYII=" }] }]
+      ? [{ role: "user", content: [{ type: "input_text", text: "Return {\"ok\":true}." }, { type: "input_image", image_url: imageUrl }] }]
       : "Return {\"ok\":true}.";
-    const capability = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/responses`, {
+    const chat = connection.protocol === "chat_completions";
+    if (!chat && connection.protocol !== "responses") return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，模型目录可用；当前协议使用本地结构校验" };
+    const requestBody = chat ? {
+      model: connection.model,
+      max_tokens: 32,
+      temperature: 0,
+      thinking: { type: "disabled" },
+      messages: [
+        { role: "system", content: "Return only the JSON object {\"ok\":true}." },
+        { role: "user", content: connection.supportsVision
+          ? [{ type: "text", text: "Return {\"ok\":true}." }, { type: "image_url", image_url: { url: imageUrl } }]
+          : "Return {\"ok\":true}." }
+      ]
+    } : {
+      model: connection.model,
+      instructions: "Return only the requested structured object",
+      input,
+      max_output_tokens: 32,
+      reasoning: { effort: "none" },
+      text: { format: { type: "json_schema", name: "course_os_provider_probe", schema: capabilitySchema, strict: true } }
+    };
+    const capability = await fetch(`${connection.baseUrl.replace(/\/$/, "")}/${chat ? "chat/completions" : "responses"}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ model: connection.model, instructions: "Return only the requested structured object", input, max_output_tokens: 32,
-        reasoning: { effort: "none" }, text: { format: { type: "json_schema", name: "course_os_provider_probe", schema: capabilitySchema, strict: true } } }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal
     });
     if (capability.status === 401 || capability.status === 403) return { providerId: connection.providerId, state: "offline", checkedAt, message: "模型目录可用，但调用密钥没有生成权限" };
     if (!capability.ok) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `模型目录可用，但结构化调用返回 HTTP ${capability.status}` };
     const body = await capability.json().catch(() => undefined) as ProviderResponseBody | undefined;
-    if (!body || providerBodyFailed(body) || extractProviderOutput(body) === undefined) return { providerId: connection.providerId, state: "degraded", checkedAt, message: "模型目录可用，但结构化调用返回了无法识别的结果" };
+    const output = body && !providerBodyFailed(body) ? extractProviderOutput(body) : undefined;
+    let structured = false;
+    if (typeof output === "string") {
+      try { structured = (parseProviderJson(output) as { ok?: unknown }).ok === true; }
+      catch { structured = false; }
+    } else if (output && typeof output === "object") structured = (output as { ok?: unknown }).ok === true;
+    if (!structured) return { providerId: connection.providerId, state: "degraded", checkedAt, message: "模型目录可用，但结构化调用返回了无法识别的结果" };
     return { providerId: connection.providerId, state: "connected", checkedAt, message: connection.supportsVision ? "连接正常，模型目录、结构化输出和图片输入均可用" : "连接正常，模型目录和结构化输出均可用" };
   } catch (error) {
     const message = error instanceof Error && error.name === "AbortError" ? `连接检查超过 ${full ? 60 : 8} 秒，供应商没有及时响应` : "暂时无法连接供应商接口";

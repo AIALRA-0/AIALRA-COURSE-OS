@@ -1158,6 +1158,22 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(health).toMatchObject({ providerId: "kuafu", state: "connected", message: expect.stringContaining("图片输入") });
     expect(JSON.stringify(health)).not.toContain("synthetic-example-kuafu-probe-token");
   });
+
+  it("fully probes the routed OpenCode DeepSeek chat model with image input", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models")) return Response.json({ data: [{ id: "deepseek-v4-flash-vision-exp" }] });
+      expect(url).toBe("https://opencode.test/chat/completions");
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }>; thinking?: { type?: string } };
+      expect(body.thinking?.type).toBe("disabled");
+      expect(body.messages[1]?.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image_url" })]));
+      return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const health = await probeProviderConnection({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-opencode-probe-token",
+      model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true, billingMode: "subscription_quota" }, true);
+    expect(health).toMatchObject({ providerId: "opencode-go", state: "connected", message: expect.stringContaining("图片输入") });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 function providerInput(idempotencyKey: string, withImage = false) {
