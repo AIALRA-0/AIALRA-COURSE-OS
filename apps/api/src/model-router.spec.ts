@@ -8,6 +8,10 @@ describe("generation harness", () => {
     expect(parseWrappedProviderJson('说明文字 {"status":"meta"} 正式结果 {"facts":[{"id":"f1"}],"steps":[{"id":"s1"}]} 结束'))
       .toEqual({ facts: [{ id: "f1" }], steps: [{ id: "s1" }] });
   });
+  it("repairs literal control characters inside streamed JSON strings", () => {
+    expect(parseWrappedProviderJson('{"chapterBridgeMarkdown":"第一行\n第二行\t缩进"}'))
+      .toEqual({ chapterBridgeMarkdown: "第一行\n第二行\t缩进" });
+  });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
     expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.67", taskContract: "GENERATE + TEACHING" });

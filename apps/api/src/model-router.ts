@@ -1568,6 +1568,12 @@ function parseJsonCandidate(candidate: string): unknown {
         escaped = true;
         continue;
       }
+      // Some OpenAI-compatible relays preserve literal control characters in
+      // streamed JSON strings. They are valid model text but invalid JSON on
+      // the wire, so escape only those transport characters before parsing.
+      if (inString && character === "\n") { repaired += "\\n"; continue; }
+      if (inString && character === "\r") { repaired += "\\r"; continue; }
+      if (inString && character === "\t") { repaired += "\\t"; continue; }
       repaired += character;
     }
     return JSON.parse(repaired);

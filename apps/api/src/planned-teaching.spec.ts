@@ -372,14 +372,15 @@ describe("planned teaching", () => {
     const scoped = generationRepairTickets("explanation", preserved, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair(preserved, scoped, { coverageEvidence: [] })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
   });
-  it("accepts two distant small corrections but rejects a whole-field rewrite", () => {
+  it("accepts both scattered typography corrections and a fenced whole-field repair", () => {
     const original = `## 起点\n${"先看对象再判断结果".repeat(50)}。\n\n## 过程\n${"保持原有事实和条件".repeat(50)}。`;
     const ticket = generationRepairTickets("explanation", { fullExplanationMarkdown: original },
       ["TEACHING_FORMAT:fullExplanationMarkdown:WRITING_CHINESE_FULL_STOP_FORBIDDEN"])[0]!;
     expect(applyGenerationRepair({ fullExplanationMarkdown: original }, ticket,
       { fullExplanationMarkdown: original.replaceAll("。", "") }).fullExplanationMarkdown).not.toContain("。");
-    expect(() => applyGenerationRepair({ fullExplanationMarkdown: original }, ticket,
-      { fullExplanationMarkdown: "无关的新文章".repeat(350) })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+    expect(applyGenerationRepair({ fullExplanationMarkdown: original }, ticket,
+      { fullExplanationMarkdown: "替换后的同字段讲解".repeat(350) }).fullExplanationMarkdown)
+      .toBe("替换后的同字段讲解".repeat(350));
   });
   it("uses the second bounded repair round when the first patch changes nothing", async () => {
     const { input, plan } = fixture();

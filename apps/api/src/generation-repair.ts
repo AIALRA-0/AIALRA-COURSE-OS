@@ -29,38 +29,6 @@ function englishCaseTargets(value: unknown): string[] {
     .filter(name => name.split(/\s+/u).some((word, index) => /^[a-z]+$/u.test(word) && (index === 0 || !minorWords.has(word)))))];
 }
 
-/** Count disjoint changed passages instead of the entire span between distant edits. */
-function repairEditSize(before: string, after: string): number {
-  const changedSpan = (left: string, right: string) => {
-    let prefix = 0;
-    while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix++;
-    let suffix = 0;
-    while (suffix < left.length - prefix && suffix < right.length - prefix
-      && left[left.length - 1 - suffix] === right[right.length - 1 - suffix]) suffix++;
-    return Math.max(left.length - prefix - suffix, right.length - prefix - suffix);
-  };
-  const left = before.split("\n");
-  const right = after.split("\n");
-  if (left.length * right.length > 250_000) return changedSpan(before, after);
-  const width = right.length + 1;
-  const common = new Uint16Array((left.length + 1) * width);
-  for (let i = left.length - 1; i >= 0; i--) for (let j = right.length - 1; j >= 0; j--) {
-    common[i * width + j] = left[i] === right[j] ? common[(i + 1) * width + j + 1]! + 1
-      : Math.max(common[(i + 1) * width + j]!, common[i * width + j + 1]!);
-  }
-  let i = 0, j = 0, edited = 0;
-  let removed: string[] = [], inserted: string[] = [];
-  const flush = () => { edited += changedSpan(removed.join("\n"), inserted.join("\n")); removed = []; inserted = []; };
-  while (i < left.length || j < right.length) {
-    if (i < left.length && j < right.length && left[i] === right[j]) { flush(); i++; j++; }
-    else if (j === right.length || i < left.length && common[(i + 1) * width + j]! >= common[i * width + j + 1]!) removed.push(left[i++]!);
-    else inserted.push(right[j++]!);
-    if (edited > 1200) return edited;
-  }
-  flush();
-  return edited;
-}
-
 /** Turn every validation finding into a bounded field edit, never a phase rewrite. */
 export function generationRepairTickets(phase: string, candidate: Partial<TeachingPackage>, issues: string[], knownAtomIds?: readonly string[]): GenerationRepairTicket[] {
   const allowed = phase === "explanation" ? explanationFields : phase === "consolidation" ? closingFields : openingFields;
@@ -136,8 +104,10 @@ export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candid
     after = merged as typeof after;
   }
   if (repairHash(after) === ticket.expectedHash) throw new Error("GENERATION_REPAIR_NO_CHANGE");
-  if (typeof before === "string" && typeof after === "string") {
-    if (repairEditSize(before, after) > 1200) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
-  }
+  // The field boundary is the repair fence. A provider may legitimately
+  // rewrite one complete summary or explanation field while fixing several
+  // linked formatting findings. Rejecting that result after paying for it
+  // only causes whole-page retries; the phase and final quality validators
+  // still reject unrelated or semantically incomplete text.
   return { ...candidate, [ticket.field]: after };
 }
