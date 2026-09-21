@@ -144,6 +144,31 @@ export function alignPlanQuestionObjectives(plan: TeachingPlan): TeachingPlan {
   return result;
 }
 
+/**
+ * Provider adapters may omit the transport-only atomId while preserving the
+ * source-ordered facts. Bind only missing IDs to the next still-uncovered
+ * source requirement; invalid IDs and insufficient facts remain validation
+ * failures.
+ */
+export function bindMissingPlanFactAtoms(plan: TeachingPlan, blueprint: TeachingBlueprint): TeachingPlan {
+  const result = structuredClone(plan) as TeachingPlan & { facts: Array<TeachingPlan["facts"][number] & { atomId?: string; qualification?: string }> };
+  const requiredAtomIds = [...new Set(blueprint.requirementPackage.requirements.map(requirement => requirement.atomId))];
+  const validAtomIds = new Set(blueprint.resourcePackage.atomIds);
+  const alreadyBound = new Set(result.facts.map(fact => fact.atomId).filter((atomId): atomId is string => Boolean(atomId) && validAtomIds.has(atomId!)));
+  let nextRequired = 0;
+  for (const fact of result.facts) {
+    if (fact.qualification === undefined) fact.qualification = "";
+    if (fact.atomId !== undefined) continue;
+    while (nextRequired < requiredAtomIds.length && alreadyBound.has(requiredAtomIds[nextRequired]!)) nextRequired++;
+    const atomId = requiredAtomIds[nextRequired];
+    if (!atomId) continue;
+    fact.atomId = atomId;
+    alreadyBound.add(atomId);
+    nextRequired++;
+  }
+  return result as TeachingPlan;
+}
+
 /** Extract generated teaching only. OCR and images never become preceding knowledge. */
 export function previousLessonContext(page: PageLesson | undefined): string | undefined {
   if (!page?.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())) return undefined;

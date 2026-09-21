@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
-import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
+import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, plannedCoverageIssues, previousLessonContext, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
@@ -477,6 +477,15 @@ describe("planned teaching", () => {
     expect(normalized).not.toHaveProperty("pageId");
     expect(normalized.facts[0]).toEqual(plan.facts[0]);
     expect(validateTeachingPlan(normalized, fixture().input.blueprint!)).toEqual([]);
+  });
+  it("binds only missing provider fact IDs to real source requirements in order", () => {
+    const { input, plan } = fixture();
+    const missing = structuredClone(plan) as TeachingPlan;
+    delete (missing.facts[0] as Partial<TeachingPlan["facts"][number]>).atomId;
+    delete (missing.facts[0] as Partial<TeachingPlan["facts"][number]>).qualification;
+    const bound = bindMissingPlanFactAtoms(missing, input.blueprint!);
+    expect(bound.facts[0]).toMatchObject({ atomId: "a", qualification: "" });
+    expect(validateTeachingPlan(bound, input.blueprint!)).toEqual([]);
   });
   it("uses one provider and bills all four actual calls without audit requests", async () => {
     const { input, plan } = fixture();
