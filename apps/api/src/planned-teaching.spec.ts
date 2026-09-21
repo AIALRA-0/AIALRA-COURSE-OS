@@ -309,6 +309,19 @@ describe("planned teaching", () => {
     expect(() => removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(incomplete, input.blueprint!))).not.toThrow();
     expect(validateTeachingPlan(incomplete, input.blueprint!)).toContain("result.facts:required");
   });
+  it("merges a bounded partial plan repair without discarding valid fields", async () => {
+    const { input, plan } = fixture();
+    const broken = { ...plan, problem: undefined } as unknown as TeachingPlan;
+    const result = await writePlannedLesson(input, async request => ({
+      content: request.phase === "plan" ? broken
+        : request.phase === "plan_repair" ? { problem: plan.problem }
+        : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation
+        : request.phase === "bridge" ? bridge : closing,
+      provider: "deepseek", model: "flash", usage
+    }));
+    expect(result.trace.plan).toEqual(plan);
+  });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {
     for (const issue of [
       "PLAN_EVIDENCE_QUOTE_MISSING:source-text-region:8",

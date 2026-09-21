@@ -79,8 +79,8 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
     const record = candidate as Record<string, unknown>;
     candidate = {
       ...record,
-      prerequisites: Array.isArray(record.prerequisites) ? record.prerequisites.slice(0, 5) : record.prerequisites,
-      facts: Array.isArray(record.facts) ? record.facts.map(item => {
+      ...(Array.isArray(record.prerequisites) ? { prerequisites: record.prerequisites.slice(0, 5) } : {}),
+      ...(Array.isArray(record.facts) ? { facts: record.facts.map(item => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return item;
         const fact = item as Record<string, unknown>;
         return {
@@ -89,12 +89,12 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, phase 
           observation: fact.observation ?? fact.text ?? fact.statement,
           qualification: fact.qualification ?? fact.condition ?? fact.scope ?? ""
         };
-      }) : record.facts,
-      questions: Array.isArray(record.questions) ? record.questions.map(item => {
+      }) } : {}),
+      ...(Array.isArray(record.questions) ? { questions: record.questions.map(item => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return item;
         const question = item as Record<string, unknown>;
         return { ...question, kind: normalizeQuestionKind(question.kind ?? question.type) };
-      }) : record.questions
+      }) } : {})
     };
   }
   if (schema?.type === "object" && typeof candidate === "string") {
@@ -308,8 +308,9 @@ export async function writePlannedLesson(input: ModelRouterInput,
   let plan = resume?.plan ?? removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(await run(planRequest) as TeachingPlan, blueprint));
   let planIssues = validateTeachingPlan(plan, blueprint);
   for (let round = 0; round < 2 && planIssues.length; round++) {
-    plan = removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
-      instruction: "只修正列出的问题，保留已正确的事实和步骤；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as TeachingPlan, blueprint));
+    const repairedPlan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
+      instruction: "只修正列出的问题，保留已正确的事实和步骤；可以只返回需要替换的顶层字段；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as Partial<TeachingPlan>;
+    plan = removeUnknownPlanFactReferences(bindMissingPlanFactAtoms({ ...plan, ...repairedPlan } as TeachingPlan, blueprint));
     planIssues = validateTeachingPlan(plan, blueprint);
   }
   if (planIssues.some(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
