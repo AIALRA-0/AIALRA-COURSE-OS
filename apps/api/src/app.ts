@@ -2563,6 +2563,34 @@ interface PersistGenerationJobInput {
   harnessSnapshotId?: string;
 }
 
+function generationJobRecord(input: PersistGenerationJobInput, now = new Date().toISOString()): GenerationJob {
+  const harnessSnapshotId = input.harnessSnapshotId || currentGenerationHarness().aggregateSha256;
+  return {
+    id: randomUUID(),
+    workspaceId: input.workspaceId,
+    materialVersionId: input.materialVersionId,
+    sourceImportId: input.sourceImportId,
+    planId: input.planId,
+    batchIndex: input.batchIndex,
+    batchCount: input.batchCount,
+    qualityMode: input.qualityMode,
+    language: input.language,
+    writingPolicySnapshotId: input.writingPolicySnapshotId,
+    harnessSnapshotId,
+    state: "queued",
+    budgetUsd: input.budgetUsd,
+    spentUsd: 0,
+    pageIds: [...input.pageIds],
+    completedPageIds: [],
+    failedPageIds: [],
+    attempt: 0,
+    semanticKey: `${input.materialVersionId}:${input.pageIds.join(",")}:${input.writingPolicySnapshotId}:${harnessSnapshotId}`,
+    cancelRequested: false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
 async function persistGenerationJob(input: PersistGenerationJobInput, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean }> {
   return dependencies.operations.mutate((state) => {
     const replay = state.idempotency[input.idempotencyKey];
@@ -2570,32 +2598,7 @@ async function persistGenerationJob(input: PersistGenerationJobInput, dependenci
       const existing = state.jobs.find((item) => item.id === replay.objectId);
       if (existing) return { job: structuredClone(existing), created: false };
     }
-    const now = new Date().toISOString();
-    const harnessSnapshotId = input.harnessSnapshotId || currentGenerationHarness().aggregateSha256;
-    const job: GenerationJob = {
-      id: randomUUID(),
-      workspaceId: input.workspaceId,
-      materialVersionId: input.materialVersionId,
-      sourceImportId: input.sourceImportId,
-      planId: input.planId,
-      batchIndex: input.batchIndex,
-      batchCount: input.batchCount,
-      qualityMode: input.qualityMode,
-      language: input.language,
-      writingPolicySnapshotId: input.writingPolicySnapshotId,
-      harnessSnapshotId,
-      state: "queued",
-      budgetUsd: input.budgetUsd,
-      spentUsd: 0,
-      pageIds: [...input.pageIds],
-      completedPageIds: [],
-      failedPageIds: [],
-      attempt: 0,
-      semanticKey: `${input.materialVersionId}:${input.pageIds.join(",")}:${input.writingPolicySnapshotId}:${harnessSnapshotId}`,
-      cancelRequested: false,
-      createdAt: now,
-      updatedAt: now
-    };
+    const job = generationJobRecord(input);
     state.jobs.push(job);
     state.idempotency[input.idempotencyKey] = { kind: "job", objectId: job.id };
     dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: job.pageIds.length, budgetUsd: job.budgetUsd, sourceImportId: job.sourceImportId, writingPolicySnapshotId: job.writingPolicySnapshotId, harnessSnapshotId: job.harnessSnapshotId });
@@ -2699,42 +2702,59 @@ async function queueGenerationPlanJobs(planId: string, dependencies: AppDependen
     await settleGenerationPlan(plan.id, dependencies);
     return [];
   }
-  const slots = Math.max(0, (plan.maxConcurrency ?? generationPlanConcurrency()) - active.length);
-  const queued: Array<{ job: GenerationJob; created: boolean }> = [];
-  for (const pageId of remaining.slice(0, slots)) {
-    const batchIndex = plan.pageIds.indexOf(pageId);
-    const result = await persistGenerationJob({
-      idempotencyKey: `generation-plan:${plan.id}:batch:${batchIndex}`,
-      workspaceId: plan.workspaceId,
-      materialVersionId: plan.materialVersionId,
-      pageIds: [pageId],
-      budgetUsd: plan.budgetUsd,
-      sourceImportId: plan.sourceImportId,
-      planId: plan.id,
-      batchIndex,
-      batchCount: plan.pageIds.length,
-      qualityMode: plan.qualityMode,
-      language: plan.language,
-      writingPolicySnapshotId: plan.writingPolicySnapshotId,
-      harnessSnapshotId: plan.harnessSnapshotId
-    }, dependencies);
-    const linked = await dependencies.operations.mutate((state) => {
-      const current = state.generationPlans.find((item) => item.id === plan.id);
-      if (!current) return false;
-      if (!current.jobIds.includes(result.job.id)) current.jobIds.push(result.job.id);
+  return dependencies.operations.mutate((state) => {
+    const current = state.generationPlans.find((item) => item.id === plan.id);
+    if (!current || ["awaiting_review", "completed", "cancelled", "failed"].includes(current.state)) return [];
+    const currentActive = state.jobs.filter((item) => item.planId === current.id && ["queued", "running", "pending_sync"].includes(item.state));
+    const currentCompleted = new Set(state.jobs.filter((item) => item.planId === current.id).flatMap((item) => item.completedPageIds));
+    const currentFailed = new Set(state.jobs.filter((item) => item.planId === current.id).flatMap((item) => item.failedPageIds));
+    const currentAssigned = new Set(state.jobs.filter((item) => item.planId === current.id).flatMap((item) => item.pageIds));
+    const currentRemaining = current.pageIds.filter((pageId) => !currentCompleted.has(pageId) && !currentFailed.has(pageId) && !currentAssigned.has(pageId));
+    const slots = Math.max(0, (current.maxConcurrency ?? generationPlanConcurrency()) - currentActive.length);
+    const now = new Date().toISOString();
+    const queued: Array<{ job: GenerationJob; created: boolean }> = [];
+    for (const pageId of currentRemaining.slice(0, slots)) {
+      const batchIndex = current.pageIds.indexOf(pageId);
+      const idempotencyKey = `generation-plan:${current.id}:batch:${batchIndex}`;
+      const replay = state.idempotency[idempotencyKey];
+      let job = replay ? state.jobs.find((item) => item.id === replay.objectId) : undefined;
+      let created = false;
+      if (!job) {
+        job = generationJobRecord({
+          idempotencyKey,
+          workspaceId: current.workspaceId,
+          materialVersionId: current.materialVersionId,
+          pageIds: [pageId],
+          budgetUsd: current.budgetUsd,
+          sourceImportId: current.sourceImportId,
+          planId: current.id,
+          batchIndex,
+          batchCount: current.pageIds.length,
+          qualityMode: current.qualityMode,
+          language: current.language,
+          writingPolicySnapshotId: current.writingPolicySnapshotId,
+          harnessSnapshotId: current.harnessSnapshotId
+        }, now);
+        state.jobs.push(job);
+        state.idempotency[idempotencyKey] = { kind: "job", objectId: job.id };
+        dependencies.operations.appendEvent(state, job.id, "job.queued", { pages: 1, budgetUsd: job.budgetUsd, sourceImportId: job.sourceImportId, writingPolicySnapshotId: job.writingPolicySnapshotId, harnessSnapshotId: job.harnessSnapshotId });
+        created = true;
+      }
+      if (!current.jobIds.includes(job.id)) current.jobIds.push(job.id);
       const activeJobIds = current.activeJobIds ?? (current.activeJobIds = []);
-      if (!activeJobIds.includes(result.job.id)) activeJobIds.push(result.job.id);
-      current.currentJobId ||= result.job.id;
-      current.lastJobId = result.job.id;
+      if (!activeJobIds.includes(job.id)) activeJobIds.push(job.id);
+      current.currentJobId ||= job.id;
+      current.lastJobId = job.id;
+      dependencies.operations.appendEvent(state, current.id, "plan.batch.queued", { jobId: job.id, batchIndex, pageId });
+      queued.push({ job: structuredClone(job), created });
+    }
+    if (queued.length > 0) {
       current.state = "queued";
-      current.updatedAt = new Date().toISOString();
+      current.updatedAt = now;
       syncImportGenerationPlan(state, current);
-      dependencies.operations.appendEvent(state, current.id, "plan.batch.queued", { jobId: result.job.id, batchIndex, pageId });
-      return true;
-    });
-    if (linked) queued.push(result);
-  }
-  return queued;
+    }
+    return queued;
+  });
 }
 
 async function settleGenerationPlan(planId: string, dependencies: AppDependencies): Promise<void> {

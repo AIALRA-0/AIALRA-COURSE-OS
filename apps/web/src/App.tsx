@@ -965,7 +965,7 @@ function ImportProgress({ record, plan, activeJobs, costs, error, retryingFailed
   const crossPageRatio = summary.crossPage?.total ? summary.crossPage.completed / summary.crossPage.total
     : summary.crossPage?.total === 0 ? 1 : total ? processed / total : 0;
   const generationProgress = Math.min(1, coreRatio * 0.65 + crossPageRatio * 0.35);
-  const progress = record.state === "ready" && auto ? 60 + generationProgress * 40 : importInfo.progress;
+  const progress = record.state === "ready" && auto ? 85 + generationProgress * 15 : importInfo.progress;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed";
   const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan ? "正在建立生成队列" : retryingFailed ? "正在重试失败页面" : planState === "completed" ? "全部讲解已经生成" : planState === "failed" ? "已处理全部页面，部分页面失败" : planState === "cancelled" ? "生成任务已取消" : "正在后台并行生成讲解";
   const currentPages = activeJobs.map((job) => (job.batchIndex ?? 0) + 1).sort((a, b) => a - b);
