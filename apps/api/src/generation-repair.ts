@@ -10,6 +10,7 @@ export interface GenerationRepairTicket {
   expectedHash: string;
   instruction: string;
   atomIds?: string[];
+  knownAtomIds?: string[];
 }
 
 export function repairHash(value: unknown): string {
@@ -57,7 +58,7 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
   }
   return [...groups].map(([field, fieldIssues]) => ({
     phase, field, issues: fieldIssues, expectedHash: repairHash(candidate[field]),
-    ...(field === "coverageEvidence" ? { atomIds: [...new Set(fieldIssues.flatMap(issue => {
+    ...(field === "coverageEvidence" ? { knownAtomIds: knownAtomIds ? [...knownAtomIds] : undefined, atomIds: [...new Set(fieldIssues.flatMap(issue => {
       const match = /^PLAN_(?:EVIDENCE_(?:QUOTE_MISSING|UNKNOWN_ATOM|UNKNOWN_FIELD|MISSING)|FACT_EVIDENCE_MISSING):(.+)$/u.exec(issue);
       if (!match) {
         const indexed = /^result\.coverageEvidence\.(\d+)(?:[.:]|$)/u.exec(issue);
@@ -88,7 +89,11 @@ export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candid
     const afterClaims = after as TeachingPackage["coverageEvidence"];
     const belongsToTicket = (item: unknown) => Boolean(item && typeof item === "object" && "atomId" in item
       && ticket.atomIds!.includes(String(item.atomId)));
-    const changedClaims = afterClaims.filter(belongsToTicket);
+    let changedClaims = afterClaims.filter(belongsToTicket);
+    if (changedClaims.length === 0 && ticket.knownAtomIds?.length) {
+      const preservedAtomIds = new Set(beforeClaims.filter(item => !belongsToTicket(item)).map(item => item.atomId));
+      changedClaims = afterClaims.filter(item => ticket.knownAtomIds!.includes(item.atomId) && !preservedAtomIds.has(item.atomId));
+    }
     if (changedClaims.length === 0) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
     const merged: TeachingPackage["coverageEvidence"] = [];
     let inserted = false;

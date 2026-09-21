@@ -408,6 +408,17 @@ describe("planned teaching", () => {
       original.coverageEvidence[1]
     ]);
   });
+  it("accepts a valid atom replacement for an invalid evidence atom", () => {
+    const original = { ...explanation, coverageEvidence: [
+      { atomId: "invented", coveredFields: ["observation"], explanation: "旧的错误引文" }
+    ] };
+    const ticket = generationRepairTickets("explanation", original,
+      ["PLAN_EVIDENCE_UNKNOWN_ATOM:invented"], ["a", "b"])[0]!;
+    const result = applyGenerationRepair(original, ticket, { coverageEvidence: [
+      { atomId: "a", coveredFields: ["observation"], explanation: quote }
+    ] });
+    expect(result.coverageEvidence).toEqual([{ atomId: "a", coveredFields: ["observation"], explanation: quote }]);
+  });
   it("creates a scoped repair ticket when a required field is absent", () => {
     const ticket = generationRepairTickets("opening", {}, ["result.learningObjectives:required"])[0]!;
     expect(ticket.field).toBe("learningObjectives");
