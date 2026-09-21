@@ -903,8 +903,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const cas = await dependencies.cas.put(request.file.buffer);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const source = canonicalImportSource(String(request.body.source || "user_upload"));
+      const requestedAutoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
       let deduplicated = false;
-      const record = await dependencies.operations.mutate((state) => {
+      let record: ImportRecord = await dependencies.operations.mutate((state) => {
         const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256 && canonicalImportSource(item.source) === source);
         if (duplicate) {
           deduplicated = true;
@@ -913,7 +914,7 @@ export function createApp(dependencies: AppDependencies): Express {
           return structuredClone(duplicate);
         }
         const now = new Date().toISOString();
-        const autoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
+        const autoGenerate = requestedAutoGenerate;
         const item = {
           id: randomUUID(),
           workspaceId,
@@ -942,6 +943,54 @@ export function createApp(dependencies: AppDependencies): Express {
         return item;
       });
       if (record.state === "accepted") queueMicrotask(() => processImport(record.id, dependencies).catch(() => undefined));
+      if (deduplicated && requestedAutoGenerate && record.state === "ready" && record.materialVersionId && record.pageIds?.length) {
+        const snapshot = await dependencies.operations.read();
+        const exactPlan = record.generationPlanId
+          ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId)
+          : undefined;
+        const latestPlan = snapshot.generationPlans
+          .filter((item) => item.sourceImportId === record.id)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        const previousPlan = exactPlan ?? latestPlan;
+        if (!previousPlan || ["failed", "cancelled"].includes(previousPlan.state)) {
+          const completed = new Set(previousPlan?.completedPageIds ?? []);
+          const pendingPageIds = record.pageIds.filter((pageId) => !completed.has(pageId));
+          if (pendingPageIds.length > 0) {
+            const writingPolicy = await currentWritingPolicy();
+            const qualityMode = request.body.qualityMode === undefined
+              ? record.qualityMode || "balanced"
+              : normalizeQualityMode(request.body.qualityMode);
+            const generationPlan = await createGenerationPlan({
+              idempotencyKey: `import:${record.id}:generation-plan:reupload:${idempotencyKey}`,
+              workspaceId: record.workspaceId,
+              materialVersionId: record.materialVersionId,
+              pageIds: pendingPageIds,
+              budgetUsd: generationBudget(qualityMode),
+              sourceImportId: record.id,
+              qualityMode,
+              language: String(request.body.language || record.language || "zh-CN"),
+              writingPolicySnapshotId: writingPolicy.policySnapshotId,
+              holdForReview: false
+            }, dependencies);
+            record = await dependencies.operations.mutate((state) => {
+              const item = state.imports.find((candidate) => candidate.id === record.id);
+              if (!item) return record;
+              item.autoGenerate = true;
+              item.generationPlanId = generationPlan.plan.id;
+              item.generationJobIds = generationPlan.plan.jobIds;
+              item.generationJobId = generationPlan.job?.id;
+              item.generationCompletedPageIds = generationPlan.plan.completedPageIds;
+              item.generationFailedPageIds = generationPlan.plan.failedPageIds;
+              item.generationState = generationPlan.plan.state;
+              dependencies.operations.appendEvent(state, item.id, "import.generation_restarted", {
+                previousPlanId: previousPlan?.id, generationPlanId: generationPlan.plan.id, pageCount: pendingPageIds.length
+              });
+              return structuredClone(item);
+            });
+            startCreatedGenerationPlanJobs(generationPlan, dependencies);
+          }
+        }
+      }
       response.status(deduplicated ? 200 : inspection.accepted ? 201 : 422).json(record);
     } catch (error) { next(error); }
   });
@@ -951,7 +1000,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const snapshot = await dependencies.operations.read();
       const record = snapshot.imports.find((item) => item.id === request.params.id);
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
-      const plan = snapshot.generationPlans.find((item) => item.id === record.generationPlanId || item.sourceImportId === record.id);
+      const plan = (record.generationPlanId ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId) : undefined)
+        ?? snapshot.generationPlans.filter((item) => item.sourceImportId === record.id)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
       if (plan) {
         const jobId = plan.currentJobId || plan.lastJobId;
         response.json({ ...record, generationPlanId: plan.id, generationJobId: jobId, generationJobIds: plan.jobIds, generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, generationState: plan.state });

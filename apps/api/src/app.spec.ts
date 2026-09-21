@@ -561,6 +561,39 @@ describe("Course OS API", () => {
     expect(second.body.id).toBe(first.body.id);
   }, 45_000);
 
+  it("starts generation when a deduplicated ready source has no previous plan", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-api-deduplicated-generation-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    const dependencies = createDefaultDependencies(root, readweave);
+    const app = createApp(dependencies);
+    const source = Buffer.from("# Existing source\nGenerate its teaching page after conversion");
+    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "deduplicated-no-generation")
+      .field("autoGenerate", "false").attach("file", source, { filename: "existing.md", contentType: "text/markdown" }).expect(201);
+    await waitForImport(app, first.body.id);
+    const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "deduplicated-start-generation")
+      .field("autoGenerate", "true").attach("file", source, { filename: "existing.md", contentType: "text/markdown" }).expect(200);
+    expect(second.body.id).toBe(first.body.id);
+    expect(second.body.generationPlanId).toBeTruthy();
+    const terminal = await waitForPlan(app, second.body.generationPlanId);
+    if (!terminal || !["failed", "cancelled"].includes(terminal.state)) {
+      await dependencies.operations.mutate((state) => {
+        const plan = state.generationPlans.find((item) => item.id === second.body.generationPlanId);
+        if (plan) { plan.state = "cancelled"; plan.activeJobIds = []; }
+        for (const job of state.jobs.filter((item) => item.planId === second.body.generationPlanId)) {
+          job.state = "cancelled";
+          job.cancelRequested = true;
+        }
+      });
+    }
+    const third = await request(app).post("/api/v1/imports").set("Idempotency-Key", "deduplicated-restart-generation")
+      .field("autoGenerate", "true").attach("file", source, { filename: "existing.md", contentType: "text/markdown" }).expect(200);
+    expect(third.body.generationPlanId).not.toBe(second.body.generationPlanId);
+    const snapshot = await dependencies.operations.read();
+    expect(snapshot.imports).toHaveLength(1);
+    expect(snapshot.generationPlans).toHaveLength(2);
+    expect(snapshot.jobs).toHaveLength(2);
+  }, 45_000);
+
   it("rejects a generation plan when its release uses a different writing policy snapshot", async () => {
     const { app, release } = await seededApp();
     await request(app).post("/api/v1/generation-plans").set("Idempotency-Key", "policy-mismatch-plan").send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 2 }).expect(409).expect((response) => {
