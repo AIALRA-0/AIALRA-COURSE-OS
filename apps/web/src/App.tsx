@@ -890,6 +890,8 @@ function ImportActivityDock({ importId, onReady, onProgress, onClose }: { import
   const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
   const [costs, setCosts] = useState<GenerationCostEntry[]>([]);
   const [error, setError] = useState("");
+  const [retryingFailed, setRetryingFailed] = useState(false);
+  const [retryError, setRetryError] = useState("");
   const readyNotified = useRef(false);
   const progressRef = useRef(0);
   useEffect(() => {
@@ -928,10 +930,26 @@ function ImportActivityDock({ importId, onReady, onProgress, onClose }: { import
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [importId]);
   if (!record) return <aside className="import-activity" role="status"><div className="import-activity-loading"><span className="loader" /><span>{error || "正在恢复后台任务"}</span></div>{error && <button className="quiet-button" onClick={onClose}>关闭</button>}</aside>;
-  return <ImportProgress record={record} plan={plan} activeJobs={activeJobs} costs={costs} error={error} onClose={onClose} />;
+  const retryFailed = async () => {
+    if (!plan || retryingFailed || plan.state !== "failed" || plan.failedPageIds.length === 0) return;
+    setRetryingFailed(true);
+    setRetryError("");
+    try {
+      const result = await api.retryGenerationPlanFailed(plan.id);
+      setPlan(result.plan);
+      setActiveJobs(result.jobs.filter((job) => ["queued", "running", "pending_sync"].includes(job.state)));
+      progressRef.current = result.plan.completedPageIds.length + result.plan.failedPageIds.length;
+      onProgress();
+    } catch (reason) {
+      setRetryError(reason instanceof Error ? reason.message : "重试失败页面失败");
+    } finally {
+      setRetryingFailed(false);
+    }
+  };
+  return <ImportProgress record={record} plan={plan} activeJobs={activeJobs} costs={costs} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} />;
 }
 
-function ImportProgress({ record, plan, activeJobs, costs, error, onClose }: { record: ImportRecord; plan?: GenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; error?: string; onClose: () => void }) {
+function ImportProgress({ record, plan, activeJobs, costs, error, retryingFailed, onRetryFailed, onClose }: { record: ImportRecord; plan?: GenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void }) {
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
@@ -946,10 +964,11 @@ function ImportProgress({ record, plan, activeJobs, costs, error, onClose }: { r
   const latestCost = costs.at(-1);
   const spentUsd = plan?.spentUsd ?? 0;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed";
-  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan ? "正在建立生成队列" : planState === "completed" ? "全部讲解已经生成" : planState === "failed" ? "已处理全部页面，部分页面失败" : planState === "cancelled" ? "生成任务已取消" : "正在后台并行生成讲解";
+  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan ? "正在建立生成队列" : retryingFailed ? "正在重试失败页面" : planState === "completed" ? "全部讲解已经生成" : planState === "failed" ? "已处理全部页面，部分页面失败" : planState === "cancelled" ? "生成任务已取消" : "正在后台并行生成讲解";
   const currentPages = activeJobs.map((job) => (job.batchIndex ?? 0) + 1).sort((a, b) => a - b);
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : plan ? `已处理 ${processed}/${total} 页，当前并行 ${activeJobs.length} 页${currentPages.length ? `，正在处理第 ${currentPages.join("、")} 页` : ""}` : "转换结果已经保存，正在建立页面任务";
-  return <aside className={`import-activity import-state-${record.state}`} aria-live="polite"><header><div><span className="section-kicker">后台任务</span><h3>{statusTitle}</h3></div>{finished && <button className="icon-button" onClick={onClose} aria-label="关闭后台任务"><span aria-hidden="true">×</span></button>}</header><p className="import-activity-file">{record.originalName}</p><div className="import-progress" role="progressbar" aria-label="导入与生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ width: `${progress}%` }} /></div><div className="import-progress-label"><strong>{Math.round(progress)}%</strong><span>{statusDetail}</span></div><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "转换中"}</dd></div><div><dt>页面进度</dt><dd>{auto ? `${processed}/${total || "—"}` : "未启用"}</dd></div><div><dt>并行任务</dt><dd>{plan ? `${activeJobs.length}/${plan.maxConcurrency ?? 1}` : "—"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "尚未调用模型"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div></dl>{(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}<footer><span>{finished ? failedState ? "任务已结束，可检查失败页面" : "任务已完成" : "可以继续使用页面，刷新后任务仍会恢复"}</span>{finished && <button className="primary-button" onClick={onClose}>完成</button>}</footer></aside>;
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队，任务窗口会继续刷新状态" : plan ? `已处理 ${processed}/${total} 页，当前并行 ${activeJobs.length} 页${currentPages.length ? `，正在处理第 ${currentPages.join("、")} 页` : ""}` : "转换结果已经保存，正在建立页面任务";
+  const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
+  return <aside className={`import-activity import-state-${record.state}`} aria-live="polite"><header><div><span className="section-kicker">后台任务</span><h3>{statusTitle}</h3></div>{finished && <button className="icon-button" onClick={onClose} aria-label="关闭后台任务"><span aria-hidden="true">×</span></button>}</header><p className="import-activity-file">{record.originalName}</p><div className="import-progress" role="progressbar" aria-label="导入与生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ width: `${progress}%` }} /></div><div className="import-progress-label"><strong>{Math.round(progress)}%</strong><span>{statusDetail}</span></div><dl><div><dt>转换页数</dt><dd>{record.pageIds?.length ?? "转换中"}</dd></div><div><dt>页面进度</dt><dd>{auto ? `${processed}/${total || "—"}` : "未启用"}</dd></div><div><dt>并行任务</dt><dd>{plan ? `${activeJobs.length}/${plan.maxConcurrency ?? 1}` : "—"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div><div><dt>实际模型</dt><dd>{latestCost ? `${latestCost.provider} / ${latestCost.model}` : "尚未调用模型"}</dd></div><div><dt>累计成本</dt><dd>${spentUsd.toFixed(4)}</dd></div></dl>{(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}<footer><span>{finished ? failedState ? "任务已结束，可检查失败页面" : "任务已完成" : "可以继续使用页面，刷新后任务仍会恢复"}</span>{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}{finished && <button className="primary-button" onClick={onClose}>完成</button>}</footer></aside>;
 }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {

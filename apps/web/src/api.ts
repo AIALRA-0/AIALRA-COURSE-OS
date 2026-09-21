@@ -227,6 +227,10 @@ export const api = {
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd, ...options })
   }),
   generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
+  retryGenerationPlanFailed: (planId: string) => request<{ plan: GenerationPlan; jobs: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}:retry-failed`, {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() }
+  }),
   writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
   generationHarness: () => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current"),
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {

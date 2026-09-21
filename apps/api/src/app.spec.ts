@@ -7,7 +7,7 @@ import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/read
 import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
-import { ModelRouterGenerationError, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
+import { ModelRouterGenerationError, currentGenerationHarness, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -503,6 +503,41 @@ describe("Course OS API", () => {
     expect(keys[0]).toContain("test-release-v2-retry-candidate:page:1");
     expect(keys[1]).toContain("test-release-v2-retry-candidate:page:2");
     expect(keys[2]).toContain("test-release-v2-retry-candidate:page:1");
+  }, 60_000);
+
+  it("retries every failed page in one plan and safely adopts the current Harness before any page completed", async () => {
+    let calls = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("PROVIDER_AUTH");
+        return testTeachingResult(0.001);
+      }
+    };
+    const releaseWithCurrentPolicy = { ...testRelease(), writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" };
+    const { app, operations, release } = await seededApp(modelRouter, releaseWithCurrentPolicy);
+    const created = await request(app).post("/api/v1/generation-plans")
+      .set("Idempotency-Key", "failed-plan-retry-create")
+      .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    const failed = await waitForPlan(app, created.body.plan.id);
+    expect(failed).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });
+    await operations.mutate((state) => {
+      const plan = state.generationPlans.find((item) => item.id === failed.id)!;
+      plan.harnessSnapshotId = "obsolete-harness";
+      for (const job of state.jobs.filter((item) => item.planId === failed.id)) job.harnessSnapshotId = "obsolete-harness";
+    });
+    const retried = await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
+      .set("Idempotency-Key", "failed-plan-retry-run")
+      .expect(202);
+    expect(retried.body.plan.harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
+    expect(retried.body.jobs).toHaveLength(1);
+    expect(retried.body.jobs[0].harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
+    const completed = await waitForPlan(app, failed.id);
+    expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+    await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
+      .set("Idempotency-Key", "failed-plan-retry-run")
+      .expect(200);
   }, 60_000);
 
   it("deduplicates the same uploaded source even when the idempotency key changes", async () => {

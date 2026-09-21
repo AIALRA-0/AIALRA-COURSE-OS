@@ -526,6 +526,16 @@ paths:
       responses:
         '200': { description: Durable plan aggregate with completed, failed, current and historical child jobs; model routes are reported after generation calls }
         '404': { description: Generation plan not found }
+  /generation-plans/{id}:retry-failed:
+    post:
+      operationId: retryFailedGenerationPlanPages
+      parameters:
+        - $ref: '#/components/parameters/ObjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { description: Every failed page was queued again without re-uploading the source }
+        '200': { description: Idempotent replay of the same plan retry }
+        '409': { description: Plan is busy, has no failed pages or cannot safely mix Harness snapshots }
   /generation-jobs/{id}:cancel:
     post:
       operationId: cancelGenerationJob

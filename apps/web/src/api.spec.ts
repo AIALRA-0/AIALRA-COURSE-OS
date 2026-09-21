@@ -29,3 +29,23 @@ describe("search settings API", () => {
     expect(calls.at(2)?.body).toBe(JSON.stringify({ secret: "secret-value" }));
   });
 });
+
+describe("generation plan API", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("retries failed pages through the plan endpoint", async () => {
+    const calls: Array<{ url: string; method: string; body?: string; idempotencyKey?: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), method: init?.method || "GET", body: typeof init?.body === "string" ? init.body : undefined, idempotencyKey: headers.get("Idempotency-Key") || undefined });
+      return new Response(JSON.stringify({ plan: { id: "plan-1", failedPageIds: ["page-2"] }, jobs: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await api.retryGenerationPlanFailed("plan/1");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: "/api/v1/generation-plans/plan%2F1:retry-failed", method: "POST" });
+    expect(calls[0]?.body).toBeUndefined();
+    expect(calls[0]?.idempotencyKey).toBeTruthy();
+  });
+});

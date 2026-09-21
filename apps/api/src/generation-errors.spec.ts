@@ -8,6 +8,7 @@ describe("generation error classification", () => {
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_INSUFFICIENT_BALANCE"))).toMatchObject({ category: "provider", action: "switch_provider" });
     expect(classifyGenerationFailure(new Error("READWEAVE_DRAFT_READBACK_MISMATCH"))).toMatchObject({ category: "storage", action: "retry_readback" });
     expect(classifyGenerationFailure(new Error("LEASE_LOST"))).toMatchObject({ category: "internal", action: "retry_stage" });
+    expect(classifyGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"))).toMatchObject({ category: "content", action: "retry_stage" });
   });
   it("preserves the failing teaching phase without exposing details or misreading source IDs as HTTP codes", () => {
     expect(describeGenerationError(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:source-401,source-402"))).toMatchObject({ code: "TEACHING_PLAN_INVALID", retryable: false });
@@ -25,6 +26,7 @@ describe("generation error classification", () => {
     expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 2, 0.04, 4)).toBe(true);
     expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 3, 0.04, 4)).toBe(false);
     expect(shouldAutoRecoverGenerationFailure(new Error("LEASE_LOST"), 1, 0.04, 4)).toBe(true);
+    expect(shouldAutoRecoverGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"), 1, 0.04, 4)).toBe(true);
     expect(shouldAutoRecoverGenerationFailure(new Error("PROVIDER_AUTH"), 1, 0, 4)).toBe(false);
   });
   it("keeps a rejected provider request distinct from an internal failure", () => {

@@ -22,6 +22,7 @@ export function classifyGenerationFailure(error: unknown): GenerationFailureRout
   if (["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT"].includes(code)) return { category: "provider", action: "retry_stage", code };
   if (code === "READWEAVE_UNAVAILABLE" || code === "READWEAVE_HASH_MISMATCH") return { category: "storage", action: "retry_readback", code };
   if (code === "LEASE_LOST") return { category: "internal", action: "retry_stage", code };
+  if (code === "GENERATION_REPAIR_SCOPE_INVALID") return { category: "content", action: "retry_stage", code };
   if (phase) return { category: "content", action: "repair_field", code, phase };
   if (code === "FORMULA_INVALID" || code === "COVERAGE_GAP") return { category: "content", action: "repair_field", code };
   if (code === "MODEL_INVALID_OUTPUT" || code === "MODEL_OUTPUT_LIMIT") return { category: "output", action: "retry_stage", code };

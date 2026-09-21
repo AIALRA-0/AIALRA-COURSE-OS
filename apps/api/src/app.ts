@@ -1052,6 +1052,67 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.post(/^\/api\/v1\/generation-plans\/[^/]+:retry-failed$/, async (request, response, next) => {
+    try {
+      const planId = request.path.slice("/api/v1/generation-plans/".length, -":retry-failed".length);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const idempotencyKey = requireIdempotencyKey(request);
+      const harnessSnapshotId = currentGenerationHarness().aggregateSha256;
+      const retried = await dependencies.operations.mutate((state) => {
+        const replay = state.idempotency[idempotencyKey];
+        if (replay) {
+          if (replay.kind !== "generation_plan_retry" || replay.objectId !== planId) throw new Error("GENERATION_PLAN_IDEMPOTENCY_CONFLICT");
+          const replayPlan = state.generationPlans.find((item) => item.id === planId && item.workspaceId === workspaceId);
+          return replayPlan ? { plan: structuredClone(replayPlan), jobs: [] as GenerationJob[], replayed: true } : undefined;
+        }
+        const plan = state.generationPlans.find((item) => item.id === planId && item.workspaceId === workspaceId);
+        if (!plan) return undefined;
+        const planJobs = state.jobs.filter((item) => item.planId === plan.id);
+        if (planJobs.some((item) => ["queued", "running", "pending_sync"].includes(item.state))) throw new Error("GENERATION_PLAN_BUSY");
+        const failedJobs = planJobs.filter((item) => item.failedPageIds.length > 0);
+        if (failedJobs.length === 0) throw new Error("GENERATION_RETRY_HAS_NO_FAILED_PAGES");
+
+        // A fully failed plan has not committed mixed-Harness teaching content,
+        // so its retry may safely adopt the currently deployed Harness. Partial
+        // plans keep their original snapshot and remain protected from mixing.
+        const mayAdoptHarness = plan.completedPageIds.length === 0
+          && planJobs.every((item) => item.completedPageIds.length === 0);
+        if (mayAdoptHarness) {
+          plan.harnessSnapshotId = harnessSnapshotId;
+          for (const job of failedJobs) job.harnessSnapshotId = harnessSnapshotId;
+        } else if (plan.harnessSnapshotId && plan.harnessSnapshotId !== harnessSnapshotId) {
+          throw new Error("GENERATION_HARNESS_SNAPSHOT_CHANGED");
+        }
+
+        const queued: GenerationJob[] = [];
+        for (const job of failedJobs) {
+          const retryPageIds = [...job.failedPageIds];
+          Object.assign(job, transitionJob(job, "queued"), {
+            pageIds: retryPageIds,
+            completedPageIds: [],
+            failedPageIds: [],
+            cancelRequested: false
+          });
+          dependencies.operations.appendEvent(state, job.id, "job.retry.queued", { pageIds: retryPageIds, nextAttempt: job.attempt + 1, harnessSnapshotId: job.harnessSnapshotId });
+          queued.push(structuredClone(job));
+        }
+        plan.activeJobIds = queued.map((item) => item.id);
+        plan.currentJobId = queued[0]?.id;
+        plan.lastJobId = queued.at(-1)?.id || plan.lastJobId;
+        plan.failedPageIds = [];
+        plan.state = "queued";
+        plan.updatedAt = new Date().toISOString();
+        syncImportGenerationPlan(state, plan);
+        dependencies.operations.appendEvent(state, plan.id, "plan.retry.queued", { jobIds: plan.activeJobIds, pageIds: queued.flatMap((item) => item.pageIds), harnessSnapshotId: plan.harnessSnapshotId });
+        state.idempotency[idempotencyKey] = { kind: "generation_plan_retry", objectId: plan.id };
+        return { plan: structuredClone(plan), jobs: queued, replayed: false };
+      });
+      if (!retried) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
+      for (const job of retried.jobs) startGenerationJob(job.id, dependencies);
+      response.status(retried.replayed ? 200 : 202).json({ plan: retried.plan, jobs: retried.jobs });
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/v1/generation-jobs", async (request, response, next) => {
     try {
       const idempotencyKey = requireIdempotencyKey(request);
