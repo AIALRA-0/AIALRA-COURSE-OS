@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { TeachingBlueprint } from "@course-os/contracts";
 import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
@@ -30,6 +31,8 @@ export interface PlannedTrace {
   version: 1;
   plan: TeachingPlan;
   previousPageContext?: string;
+  coreFingerprint?: string;
+  previousCoreFingerprint?: string;
   phases: Array<{ phase: string; provider: string; model: string; usage: ModelRouterUsage; attempt?: number }>;
   researchEvidence?: TeachingResearchEvidence[];
 }
@@ -43,7 +46,7 @@ export interface PlannedCheckpoint {
 }
 
 const fieldsByPhase = [
-  ["chapterBridgeMarkdown", "priorKnowledge", "learningObjectives"],
+  ["priorKnowledge", "learningObjectives"],
   ["fullExplanationMarkdown", "coverageEvidence"],
   ["mainContentMarkdown", "misconceptions", "questions"]
 ] as const;
@@ -138,12 +141,16 @@ export function normalizePlannedSourceIntroductions<T extends Partial<TeachingPa
 /** Apply the same deterministic Chinese typography pass to every opening field. */
 export function normalizePlannedOpening<T extends Partial<TeachingPackage>>(content: T): T {
   const normalize = (value: string) => normalizePackedTeachingProse(normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(value)));
-  return {
+  const normalized = {
     ...content,
     chapterBridgeMarkdown: typeof content.chapterBridgeMarkdown === "string" ? normalize(content.chapterBridgeMarkdown) : content.chapterBridgeMarkdown,
     priorKnowledge: Array.isArray(content.priorKnowledge) ? content.priorKnowledge.map(value => typeof value === "string" ? normalize(value) : value) as string[] : content.priorKnowledge,
     learningObjectives: Array.isArray(content.learningObjectives) ? content.learningObjectives.map(value => typeof value === "string" ? normalize(value) : value) as string[] : content.learningObjectives
-  };
+  } as T;
+  if (content.chapterBridgeMarkdown === undefined) delete normalized.chapterBridgeMarkdown;
+  if (content.priorKnowledge === undefined) delete normalized.priorKnowledge;
+  if (content.learningObjectives === undefined) delete normalized.learningObjectives;
+  return normalized;
 }
 
 /** Reconcile a provider's omitted transport field with the authoritative requirement package. */
@@ -177,7 +184,7 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
   };
   const issues = Object.entries(visible).flatMap(([field, values]) => (values || []).flatMap(value =>
     validateHumanReadableChinese(value).map(issue => `TEACHING_FORMAT:${field}:${issue}`)));
-  issues.push(...validateTeachingPresentation({
+  const presentationIssues = validateTeachingPresentation({
     chapterBridgeMarkdown: content.chapterBridgeMarkdown,
     priorKnowledge: content.priorKnowledge || [],
     learningObjectives: content.learningObjectives || [],
@@ -185,7 +192,9 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
     mainContentMarkdown: content.mainContentMarkdown || "",
     misconceptions: content.misconceptions || [],
     questions: content.questions || []
-  }));
+  });
+  issues.push(...presentationIssues.filter(issue => content.chapterBridgeMarkdown !== undefined
+    || !issue.startsWith("TEACHING_PRESENTATION:chapterBridgeMarkdown:")));
   for (const prior of content.priorKnowledge || []) {
     const label = prior.trim().replace(/^[-*+]\s+/u, "").split("：", 1)[0] ?? "";
     if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z\s&/,，-]{1,80}）/u.test(label)) {
@@ -220,7 +229,27 @@ export function plannedContentIssues(content: TeachingPackage, input: ModelRoute
   return [...new Set(issues)];
 }
 
-/** Four bounded calls, with real prior output passed forward; no audit loop. */
+function plannedCoreContentIssues(content: Partial<TeachingPackage>, input: ModelRouterInput, plan?: TeachingPlan): string[] {
+  const coreFields = ["learningObjectives", "mainContentMarkdown", "priorKnowledge", "fullExplanationMarkdown",
+    "misconceptions", "coverageEvidence", "questions"] as const;
+  const issues = schemaIssues(content, partialSchema(coreFields));
+  if (issues.length) return issues;
+  const complete = content as TeachingPackage;
+  issues.push(...plannedCoverageIssues(complete, input.blueprint!, plan));
+  const values = [...complete.priorKnowledge, ...complete.learningObjectives, complete.fullExplanationMarkdown,
+    complete.mainContentMarkdown, ...complete.misconceptions,
+    ...complete.questions.flatMap(question => [question.prompt, ...question.options || [], question.expectedAnswer, question.explanation])];
+  for (const text of values) issues.push(...validateMarkdownMath(text));
+  if (complete.questions.filter(question => question.kind === "comprehension").length !== 2) issues.push("PLAN_QUESTION_MIX");
+  for (const question of complete.questions) {
+    const options = question.options || [];
+    if (question.kind === "comprehension" ? options.length !== 0
+      : options.length !== 4 || new Set(options).size !== 4 || !options.includes(question.expectedAnswer)) issues.push("PLAN_QUESTION_ANSWER_INVALID");
+  }
+  return [...new Set(issues)];
+}
+
+/** Bounded core calls followed by one dependency-aware bridge call; no audit loop. */
 export async function writePlannedLesson(input: ModelRouterInput,
   call: (request: PlannedCall) => Promise<{ content: unknown; provider: string; model: string; usage: ModelRouterUsage }>) {
   const blueprint = input.blueprint!;
@@ -261,7 +290,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
   };
   const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}\n\n外部检索不是固定步骤。只有课件来源不足以核实正式术语、外部方法或时效性事实，且 externalSearchAvailable 为 true 时，才填写最多两项 researchQueries，并为每项选择 web、academic、terminology 或 temporal 类型；课件已经给出的事实、公式推导和页面之间的承接不得检索。没有真实缺口时省略 researchQueries 或返回空数组`,
     prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
-      source: input.sourceText, previousTeaching: input.previousPageContext || "无前页讲解，不假定已有前页知识",
+      source: input.sourceText, previousTeaching: "正文核心独立生成，不读取前页；只根据本页来源建立教学结构",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements,
       externalSearchAvailable: Boolean(input.searchEvidence) }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
@@ -306,7 +335,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
         externalEvidenceRule: index === 1 && trace.researchEvidence?.length
           ? "搜索摘要只是候选外部背景，不是已核实的课件来源。只能在明确标注为外部背景时谨慎使用，并保留标题、网址和提供方；不得覆盖 SOURCE，不得写成课件原文或确定事实，证据不足时必须保留不确定性"
           : undefined,
-        instruction: index === 0 ? "先写承接和先验知识，再从已建立的对象描述学习目标"
+        instruction: index === 0 ? "只写先验知识和学习目标；从学习者已经具备的日常理解自然引入本页对象，不编写前页回顾或承接段"
           : index === 1 ? "前部知识已讲过，只应用，按计划逐步解释当前课件，不扩写后续章节；搜索摘要仅是候选外部背景，不能冒充 SOURCE"
           : "依据实际完整讲解生成总结、辨析和问题，遵守计划题目顺序，不引入正文未讲的结论" }),
       schema, maxOutputTokens: index === 1 ? 9000 : 5000 };
@@ -325,7 +354,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
     if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
-    if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
+    if (index === 2 && !issues.length) issues.push(...plannedCoreContentIssues({ ...content, ...partial }, input, plan));
     if (!issues.length) issues.push(...plannedFormatIssues(partial));
     if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     for (let round = 0; round < 2 && issues.length; round++) {
@@ -358,7 +387,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       }
       issues = schemaIssues(partial, schema);
       if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
-      if (index === 2 && !issues.length) issues.push(...plannedContentIssues({ ...content, ...partial } as TeachingPackage, input, plan));
+      if (index === 2 && !issues.length) issues.push(...plannedCoreContentIssues({ ...content, ...partial }, input, plan));
       if (!issues.length) issues.push(...plannedFormatIssues(partial));
       if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     }
@@ -367,5 +396,74 @@ export async function writePlannedLesson(input: ModelRouterInput,
     completedPhases.push(phases[index]!);
     await save({ plan, content, completedPhases });
   }
+
+  const coreFingerprint = createHash("sha256").update(JSON.stringify({
+    learningObjectives: content.learningObjectives,
+    priorKnowledge: content.priorKnowledge,
+    fullExplanationMarkdown: content.fullExplanationMarkdown,
+    mainContentMarkdown: content.mainContentMarkdown,
+    misconceptions: content.misconceptions,
+    coverageEvidence: content.coverageEvidence,
+    questions: content.questions
+  })).digest("hex");
+  trace.coreFingerprint = coreFingerprint;
+  const previous = input.resolvePreviousPageContext
+    ? await input.resolvePreviousPageContext()
+    : { context: input.previousPageContext, fingerprint: input.previousPageContext
+      ? createHash("sha256").update(input.previousPageContext).digest("hex") : undefined };
+  const dependencyChanged = completedPhases.includes("bridge")
+    && trace.previousCoreFingerprint !== previous.fingerprint;
+  if (dependencyChanged) {
+    completedPhases.splice(completedPhases.indexOf("bridge"), 1);
+    delete content.chapterBridgeMarkdown;
+  }
+  trace.previousPageContext = previous.context;
+  trace.previousCoreFingerprint = previous.fingerprint;
+  if (!completedPhases.includes("bridge")) {
+    const fields = ["chapterBridgeMarkdown"] as const;
+    const schema = partialSchema(fields);
+    const request: PlannedCall = {
+      phase: "bridge",
+      instructions: plannedInstructions(fields, input.language),
+      prompt: JSON.stringify({
+        language: input.language,
+        pageTitle: input.pageTitle,
+        previousTeaching: previous.context || "这是当前材料的第一页；从课程主题和本页要解决的问题自然起步，不虚构上一页",
+        currentPageCore: teachingSectionMemory(content),
+        fields,
+        instruction: "只写承上启下段。先用自然中文准确回收前页已经讲清的知识，再指出本页接着解决的问题；不得重复本页完整讲解，不得引入来源外的新结论；独立问题分行，中英文与标点严格遵守写作策略"
+      }),
+      schema,
+      maxOutputTokens: 2600
+    };
+    let partial = normalizePlannedOpening(await run(request) as Partial<TeachingPackage>);
+    let issues = [...schemaIssues(partial, schema), ...plannedFormatIssues(partial)];
+    for (let round = 0; round < 2 && issues.length; round++) {
+      const tickets = generationRepairTickets("bridge", partial, issues, blueprint.resourcePackage.atomIds);
+      if (tickets.length === 0) break;
+      for (const ticket of tickets) {
+        const patch = await run({
+          phase: "bridge_repair",
+          instructions: `${plannedInstructions([ticket.field], input.language)}\n${ticket.instruction}`,
+          prompt: JSON.stringify({ pageTitle: input.pageTitle, issue: ticket.issues, field: ticket.field,
+            currentField: partial[ticket.field], previousTeaching: previous.context,
+            currentPageCore: teachingSectionMemory(content) }),
+          schema: partialSchema([ticket.field]),
+          maxOutputTokens: 2600
+        }) as Partial<TeachingPackage>;
+        try { partial = normalizePlannedOpening(applyGenerationRepair(partial, ticket, patch)); }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
+        }
+      }
+      issues = [...schemaIssues(partial, schema), ...plannedFormatIssues(partial)];
+    }
+    if (issues.length) throw new Error(`TEACHING_BRIDGE_INVALID:${issues.join(",")}`);
+    content = { ...content, ...partial };
+    completedPhases.push("bridge");
+    await save({ plan, content, completedPhases });
+  }
+  const finalIssues = plannedContentIssues(content as TeachingPackage, input, plan);
+  if (finalIssues.length) throw new Error(`TEACHING_BRIDGE_INVALID:${finalIssues.join(",")}`);
   return { content: content as TeachingPackage, trace };
 }

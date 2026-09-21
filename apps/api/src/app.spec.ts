@@ -430,9 +430,15 @@ describe("Course OS API", () => {
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
     const running = await request(app).get(`/api/v1/generation-plans/${created.body.generationPlan.id}`).expect(200);
-    expect(running.body.plan).toMatchObject({ maxConcurrency: 8 });
+    expect(running.body.plan).toMatchObject({ maxConcurrency: 16 });
     expect(running.body.plan.jobIds).toHaveLength(3);
     expect(running.body.activeJobs).toHaveLength(3);
+    expect(running.body.progress).toMatchObject({
+      core: { completed: 0, total: 3 },
+      crossPage: { completed: 0, total: 2 },
+      concurrency: { running: 0, limit: 16 },
+      costUsd: 0
+    });
     releaseGeneration();
     const completed = await waitForPlan(app, created.body.generationPlan.id);
     expect(completed).toMatchObject({ state: "completed", pageIds: [
@@ -819,11 +825,13 @@ describe("Course OS API", () => {
     const pending = new Promise<TeachingGenerationResult>(resolve => { releaseModel = resolve; });
     try {
       const {app,release,dependencies,readweave} = await seededApp({generateTeachingPackage:async()=>{enteredModel();return pending;}});
+      const urgent = vi.spyOn(dependencies.operations,"urgentMutate");
       const save = vi.spyOn(readweave,"saveDraft");
       const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key","cancel-paid-job").send({materialVersionId:release.id,pageIds:["page-1"],budgetUsd:1}).expect(202);
       const execution = executeGenerationJob(created.body.id,dependencies);
       await entered;
       await request(app).post(`/api/v1/generation-jobs/${created.body.id}:cancel`).set("Idempotency-Key","cancel-paid-request").send({}).expect(200);
+      expect(urgent).toHaveBeenCalledTimes(1);
       releaseModel(testTeachingResult(0.005));
       await execution;
       const job = await request(app).get(`/api/v1/generation-jobs/${created.body.id}`).expect(200);

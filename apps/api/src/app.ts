@@ -59,7 +59,7 @@ import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConn
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor, searchPriceSnapshotFor } from "./pricing.js";
 import { buildGenerationSourceText, buildTeachingBlueprint, preparePageForGeneration, validateTeachingBlueprint } from "./teaching-blueprint.js";
-import { previousLessonContext } from "./teaching-plan.js";
+import { previousLessonContext, teachingSectionMemory } from "./teaching-plan.js";
 import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
 import { probeSearchConnection, searchTeachingEvidence, type CourseSearchConnection, type CourseSearchReceipt } from "./search-providers.js";
@@ -78,6 +78,65 @@ export interface AppDependencies {
  * parallel pages finish and become visible in ReadWeave. */
 export function stablePreviousPageContext(savedCheckpoint: Pick<PlannedCheckpoint, "trace"> | undefined, currentContext: string | undefined): string | undefined {
   return savedCheckpoint ? savedCheckpoint.trace.previousPageContext : currentContext;
+}
+
+async function waitForPreviousCoreContext(input: {
+  jobId: string;
+  fenceToken: number;
+  workspaceId: string;
+  planId?: string;
+  release: CourseRelease;
+  pageNumber: number;
+  dependencies: AppDependencies;
+}): Promise<{ context?: string; fingerprint?: string }> {
+  const previousPage = input.release.pages.find(candidate => candidate.pageNumber === input.pageNumber - 1);
+  if (!previousPage) {
+    const context = `这是模块“${input.release.moduleId}”的起始页；从课程主题和本页问题自然建立阅读起点`;
+    return { context, fingerprint: sha256Text(context) };
+  }
+  if (!input.planId) {
+    const draft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
+    const previous = draft?.status === "ready" && draft.workspaceId === input.workspaceId
+      && draft.sourceReleaseId === input.release.id ? draft.page : previousPage;
+    const context = previousLessonContext(previous);
+    return { context, fingerprint: context ? sha256Text(context) : undefined };
+  }
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline) {
+    await assertGenerationFence(input.jobId, input.fenceToken, input.dependencies);
+    const snapshot = await input.dependencies.operations.read();
+    const predecessorJobs = snapshot.jobs.filter(job => job.planId === input.planId && job.pageIds.includes(previousPage.id));
+    if (predecessorJobs.length === 0) {
+      const draft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
+      const previous = draft?.status === "ready" && draft.workspaceId === input.workspaceId
+        && draft.sourceReleaseId === input.release.id ? draft.page : previousPage;
+      const context = previousLessonContext(previous);
+      return { context, fingerprint: draft?.contentHash || (context ? `source:${sha256Text(context)}` : "unavailable:not_scheduled") };
+    }
+    for (const predecessor of predecessorJobs) {
+      const checkpoint = snapshot.generationCheckpoints[`${predecessor.id}:${previousPage.id}`];
+      if (checkpoint?.completedPhases.includes("consolidation")) {
+        const context = JSON.stringify(teachingSectionMemory(checkpoint.content));
+        const fingerprint = checkpoint.trace.coreFingerprint || sha256Text(stableStringify(checkpoint.content));
+        return { context, fingerprint };
+      }
+    }
+    if (predecessorJobs.some(job => job.state === "completed")) {
+      const draft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
+      if (draft?.status === "ready" && draft.workspaceId === input.workspaceId && draft.sourceReleaseId === input.release.id) {
+        const context = previousLessonContext(draft.page);
+        return { context, fingerprint: draft.contentHash || (context ? sha256Text(context) : undefined) };
+      }
+    }
+    const terminal = predecessorJobs.find(job => ["failed", "cancelled"].includes(job.state));
+    if (terminal) {
+      const context = previousLessonContext(previousPage);
+      return { context, fingerprint: context ? `source:${sha256Text(context)}` : `unavailable:${terminal.state}` };
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  const context = previousLessonContext(previousPage);
+  return { context, fingerprint: context ? `source:${sha256Text(context)}` : "unavailable:timeout" };
 }
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
@@ -1054,7 +1113,22 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
       const activeJobs = snapshot.jobs.filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
       const currentJob = activeJobs[0] ?? snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
-      response.json({ plan, currentJob, activeJobs });
+      const jobIds = new Set(snapshot.jobs.filter(item => item.planId === plan.id).map(item => item.id));
+      const repairCount = snapshot.events.filter(event => jobIds.has(event.streamId)
+        && event.type === "generation.stage.completed"
+        && (event.payload as { stage?: string }).stage === "repair").length;
+      const route = plan.modelRoutes?.at(-1);
+      const crossPageIds = new Set(plan.pageIds.slice(1));
+      const progress = {
+        core: { completed: plan.coreCompletedPageIds?.length ?? plan.completedPageIds.length, total: plan.pageIds.length },
+        crossPage: { completed: (plan.bridgeCompletedPageIds ?? plan.completedPageIds).filter(pageId => crossPageIds.has(pageId)).length, total: crossPageIds.size },
+        repairCount,
+        concurrency: { running: activeJobs.filter(job => job.state === "running").length, limit: plan.maxConcurrency ?? generationPlanConcurrency() },
+        provider: route?.provider,
+        model: route?.model,
+        costUsd: plan.spentUsd
+      };
+      response.json({ plan: { ...plan, progress }, currentJob, activeJobs, progress });
     } catch (error) { next(error); }
   });
 
@@ -1111,6 +1185,9 @@ export function createApp(dependencies: AppDependencies): Express {
         plan.currentJobId = queued[0]?.id;
         plan.lastJobId = queued.at(-1)?.id || plan.lastJobId;
         plan.failedPageIds = [];
+        const retryPageIds = new Set(queued.flatMap(item => item.pageIds));
+        plan.coreCompletedPageIds = (plan.coreCompletedPageIds ?? []).filter(pageId => !retryPageIds.has(pageId));
+        plan.bridgeCompletedPageIds = (plan.bridgeCompletedPageIds ?? []).filter(pageId => !retryPageIds.has(pageId));
         plan.state = "queued";
         plan.updatedAt = new Date().toISOString();
         syncImportGenerationPlan(state, plan);
@@ -1188,7 +1265,7 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const jobId = request.path.slice("/api/v1/generation-jobs/".length, -":cancel".length);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const job = await dependencies.operations.mutate((state) => {
+      const job = await dependencies.operations.urgentMutate((state) => {
         const current = state.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId);
         if (!current) return undefined;
         if (["completed", "cancelled"].includes(current.state)) return current;
@@ -2549,8 +2626,8 @@ interface GenerationPlanResult {
 }
 
 function generationPlanConcurrency(): number {
-  const configured = Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 8);
-  return Number.isFinite(configured) ? Math.max(1, Math.min(16, Math.trunc(configured))) : 8;
+  const configured = Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 16);
+  return Number.isFinite(configured) ? Math.max(1, Math.min(32, Math.trunc(configured))) : 16;
 }
 
 async function createGenerationPlan(input: CreateGenerationPlanInput, dependencies: AppDependencies): Promise<GenerationPlanResult> {
@@ -2577,6 +2654,8 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
       pageIds: [...input.pageIds],
       completedPageIds: [],
       failedPageIds: [],
+      coreCompletedPageIds: [],
+      bridgeCompletedPageIds: [],
       jobIds: [],
       activeJobIds: [],
       maxConcurrency: generationPlanConcurrency(),
@@ -2826,11 +2905,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const sourceText = buildGenerationSourceText(page);
       const checkpointKey = `${jobId}:${page.id}`;
       const savedCheckpoint = (await dependencies.operations.read()).generationCheckpoints[checkpointKey];
-      const previousPage = release.pages.find((candidate) => candidate.pageNumber === page.pageNumber - 1);
-      const previousDraft = previousPage ? await dependencies.readweave.getDraftByPage(previousPage.id) : undefined;
-      const previousTeaching = previousDraft?.status === "ready" && previousDraft.workspaceId === currentJob.workspaceId
-        && previousDraft.sourceReleaseId === release.id ? previousDraft.page : previousPage;
-      const previousPageContext = stablePreviousPageContext(savedCheckpoint, previousLessonContext(previousTeaching));
+      let previousPageContext = savedCheckpoint?.trace.previousPageContext;
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       await appendGenerationStageEvent(jobId, page.id, "atomize", "started", dependencies);
@@ -2841,14 +2916,18 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
       const teachingFingerprint = createHash("sha256").update(JSON.stringify({ releaseId: release.id, pageId: page.id,
-        sourceText, sourceImage: page.imageUrl, previousPageContext, blueprintSha256: blueprint.sha256,
+        sourceText, sourceImage: page.imageUrl, blueprintSha256: blueprint.sha256,
         writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
         harnessSnapshotId: currentJob.harnessSnapshotId, language: currentJob.language || "zh-CN",
         qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd) })).digest("hex");
       if (savedCheckpoint && savedCheckpoint.fingerprint !== teachingFingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
       const searchConfigured = await hasEnabledSearchRoute(dependencies);
-      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v12`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, previousPageContext, sourceImageDataUrl, blueprint, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v13`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         teachingFingerprint, generationAttempt: currentJob.attempt, resumeTeaching: savedCheckpoint,
+        resolvePreviousPageContext: () => waitForPreviousCoreContext({
+          jobId, fenceToken, workspaceId: currentJob.workspaceId, planId: currentJob.planId,
+          release, pageNumber: page.pageNumber, dependencies
+        }),
         searchEvidence: searchConfigured ? async queries => {
           await appendGenerationStageEvent(jobId, page.id, "search", "started", dependencies, { queryCount: queries.length });
           const branches = await Promise.all(queries.slice(0, 2).map(async query => {
@@ -2882,6 +2961,15 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             const existing = state.generationCheckpoints[checkpointKey];
             if (existing && existing.fingerprint !== checkpoint.fingerprint) throw new Error("GENERATION_CHECKPOINT_MISMATCH");
             state.generationCheckpoints[checkpointKey] = checkpoint;
+            const plan = job?.planId ? state.generationPlans.find(item => item.id === job.planId) : undefined;
+            if (plan) {
+              const coreCompletedPageIds = plan.coreCompletedPageIds ?? (plan.coreCompletedPageIds = []);
+              const bridgeCompletedPageIds = plan.bridgeCompletedPageIds ?? (plan.bridgeCompletedPageIds = []);
+              if (checkpoint.completedPhases.includes("consolidation") && !coreCompletedPageIds.includes(page.id)) coreCompletedPageIds.push(page.id);
+              if (checkpoint.completedPhases.includes("bridge") && !bridgeCompletedPageIds.includes(page.id)) bridgeCompletedPageIds.push(page.id);
+              plan.updatedAt = new Date().toISOString();
+              syncImportGenerationPlan(state, plan);
+            }
             dependencies.operations.appendEvent(state, jobId, "generation.page.checkpoint", {
               pageId: page.id, completedPhases: checkpoint.completedPhases, pendingPhase: checkpoint.pending?.phase,
               fingerprint: checkpoint.fingerprint });
@@ -2891,6 +2979,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           await assertGenerationFence(jobId, fenceToken, dependencies);
           await appendGenerationStageEvent(jobId, page.id, phase === "plan" ? "atomize" : phase.endsWith("_repair") ? "repair" : "teach", state, dependencies, { phase, ...usage });
         } });
+      previousPageContext = generation.teachingTrace?.previousPageContext || previousPageContext;
       if (!generation.teachingTrace) {
         generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
         generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
@@ -2901,7 +2990,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (issues.length) throw new ModelRouterGenerationError(`TEACHING_PLAN_CONTENT_INVALID:${issues[0]}`, generation.model, generation.usage, generation.provider);
         await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, {
           planningMode: "source-plan", plan: generation.teachingTrace.plan, phases: generation.teachingTrace.phases,
-          previousPageId: previousPageContext ? previousPage?.id : undefined });
+          previousPageId: previousPageContext ? release.pages.find(candidate => candidate.pageNumber === page.pageNumber - 1)?.id : undefined,
+          coreFingerprint: generation.teachingTrace.coreFingerprint,
+          previousCoreFingerprint: generation.teachingTrace.previousCoreFingerprint });
       }
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
       let rejectedNarrativeIssues: string[] = [];
@@ -3341,6 +3432,15 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           return;
         }
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
+        if (job.planId) {
+          const plan = state.generationPlans.find(item => item.id === job.planId);
+          if (plan) {
+            const coreCompletedPageIds = plan.coreCompletedPageIds ?? (plan.coreCompletedPageIds = []);
+            const bridgeCompletedPageIds = plan.bridgeCompletedPageIds ?? (plan.bridgeCompletedPageIds = []);
+            if (!coreCompletedPageIds.includes(page.id)) coreCompletedPageIds.push(page.id);
+            if (!bridgeCompletedPageIds.includes(page.id)) bridgeCompletedPageIds.push(page.id);
+          }
+        }
         delete state.generationCheckpoints[checkpointKey];
         dependencies.operations.appendEvent(state, job.id, "generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable });
         if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {

@@ -12,6 +12,7 @@ import { applyTeachingPackage, stablePreviousPageContext } from "./app.js";
 const quote = "先确定实际需要处理的对象，再观察处理前后的变化，这样才能把操作与结果对应起来";
 const usage = { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEquivalentUsd: 0.001, durationMs: 10 };
 const opening = { chapterBridgeMarkdown: "前页已经说明输入是开始处理时掌握的信息\n\n本页继续说明怎样从输入得到可以核对的结果", priorKnowledge: ["输入（Input）：它是处理开始前已经具备的信息；它为当前操作提供具体对象；规则读取这些信息后才决定结果；开始计算前需要先确认输入；输入与处理结束后的输出不同"], learningObjectives: ["给定输入以后，能够按顺序说明它怎样变成结果"] };
+const bridge = { chapterBridgeMarkdown: opening.chapterBridgeMarkdown };
 const explanation = { fullExplanationMarkdown: `### 从具体对象开始\n\n${quote}\n\n处理之前先保留输入的数值和条件，随后只执行材料允许的操作，再把得到的结果与目标比较\n\n### 核对结果\n\n如果输入条件发生变化，应当重新计算对应结果，而不能把之前得到的结论直接用在新的对象上，比较时也要保持其他条件相同`, coverageEvidence: [{ atomId: "a", coveredFields: ["observation"], explanation: quote }] };
 const closing = { mainContentMarkdown: "- 输入提供具体对象，规则决定允许的变化\n- 结果需要在相同条件下与原目标进行比较", misconceptions: ["错误理解：输入变化后可以保留原结果\n\n错因：忽略了结果依赖输入\n\n正确判断：应当重新计算\n\n核对方法：逐项检查输入条件"], questions: [0, 1, 2, 3].map(index => ({ kind: index < 2 ? "comprehension" : "multiple_choice", prompt: `第 ${index + 1} 个练习应当怎样核对输入条件`, options: index < 2 ? [] : ["核对输入", "只看输出", "改变规则", "删除条件"], expectedAnswer: "核对输入", explanation: "因为结果依赖输入，必须先确认输入条件相同，再按照规则计算和比较结果" })) };
 
@@ -245,7 +246,7 @@ describe("planned teaching", () => {
         expect(request.instructions).toContain(fullFile.trim());
       }
       return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
-        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+        : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
   });
   it("searches only declared evidence gaps and carries normalized evidence into writing", async () => {
@@ -257,7 +258,7 @@ describe("planned teaching", () => {
     await writePlannedLesson(input, async request => {
       if (request.phase !== "plan") writingPrompts.push(JSON.parse(request.prompt) as Record<string, unknown>);
       return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
-        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+        : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
     expect(searchEvidence).toHaveBeenCalledOnce();
     expect(searchEvidence).toHaveBeenCalledWith(plan.researchQueries);
@@ -275,7 +276,7 @@ describe("planned teaching", () => {
     const searchEvidence = vi.fn(async () => []);
     input.searchEvidence = searchEvidence;
     await writePlannedLesson(input, async request => ({ content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
-      : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage }));
+      : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage }));
     expect(searchEvidence).not.toHaveBeenCalled();
   });
   it("places a source fact omitted from step assignments without changing its text", () => {
@@ -329,13 +330,13 @@ describe("planned teaching", () => {
   it("uses the second bounded repair round when the first patch changes nothing", async () => {
     const { input, plan } = fixture();
     const badOpening = { ...opening, priorKnowledge: [opening.priorKnowledge[0]!.replace("输入（Input）：", "输入：")] };
-    const responses = [plan, badOpening, { priorKnowledge: badOpening.priorKnowledge }, { priorKnowledge: opening.priorKnowledge }, explanation, closing];
+    const responses = [plan, badOpening, { priorKnowledge: badOpening.priorKnowledge }, { priorKnowledge: opening.priorKnowledge }, explanation, closing, bridge];
     const calls: string[] = [];
     await writePlannedLesson(input, async request => {
       calls.push(request.phase);
       return { content: responses.shift(), provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "opening", "opening_repair", "opening_repair", "explanation", "consolidation"]);
+    expect(calls).toEqual(["plan", "opening", "opening_repair", "opening_repair", "explanation", "consolidation", "bridge"]);
   });
   it("applies only the ticketed evidence when a model also rewrites protected claims", () => {
     const original = { ...explanation, coverageEvidence: [
@@ -376,12 +377,13 @@ describe("planned teaching", () => {
     calls.length = 0;
     const result = await writePlannedLesson(input, async request => {
       calls.push(request.phase);
-      return { content: request.phase === "explanation_repair" ? { coverageEvidence: explanation.coverageEvidence } : closing,
+      return { content: request.phase === "explanation_repair" ? { coverageEvidence: explanation.coverageEvidence }
+        : request.phase === "bridge" ? bridge : closing,
         provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["explanation_repair", "consolidation"]);
+    expect(calls).toEqual(["explanation_repair", "consolidation", "bridge"]);
     expect(result.content.fullExplanationMarkdown).toBe(explanation.fullExplanationMarkdown);
-    expect(checkpoint?.completedPhases).toEqual(["opening", "explanation", "consolidation"]);
+    expect(checkpoint?.completedPhases).toEqual(["opening", "explanation", "consolidation", "bridge"]);
   });
   it("retries a transient provider failure only for the current stage", async () => {
     const { input, plan } = fixture();
@@ -390,9 +392,9 @@ describe("planned teaching", () => {
       calls.push(request.phase);
       if (request.phase === "opening" && calls.filter(phase => phase === "opening").length === 1) throw new Error("MODEL_PROVIDER_FAILED:429");
       return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
-        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+        : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "opening", "opening", "explanation", "consolidation"]);
+    expect(calls).toEqual(["plan", "opening", "opening", "explanation", "consolidation", "bridge"]);
     expect(result.content.fullExplanationMarkdown).toBe(explanation.fullExplanationMarkdown);
   });
   it("saves each accepted patch before a later repair call fails", async () => {
@@ -426,10 +428,10 @@ describe("planned teaching", () => {
       calls.push(request.phase);
       const content = request.phase === "plan" ? plan : request.phase === "opening" ? opening
         : request.phase === `${phase}_repair` ? patch
-          : request.phase === phase ? bad : request.phase === "explanation" ? explanation : closing;
+          : request.phase === phase ? bad : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing;
       return { content, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "opening", "explanation", ...(phase === "explanation" ? ["explanation_repair", "consolidation"] : ["consolidation", "consolidation_repair"])]);
+    expect(calls).toEqual(["plan", "opening", "explanation", ...(phase === "explanation" ? ["explanation_repair", "consolidation", "bridge"] : ["consolidation", "consolidation_repair", "bridge"])]);
     expect(result.content).toMatchObject({ ...opening, ...explanation, ...closing,
       misconceptions: closing.misconceptions.map(formatMisconception) });
   });
@@ -442,10 +444,10 @@ describe("planned teaching", () => {
         : request.phase === "explanation" ? { ...explanation, coverageEvidence: [] }
           : request.phase === "explanation_repair" ? { coverageEvidence: explanation.coverageEvidence }
             : request.phase === "consolidation" ? { ...closing, mainContentMarkdown: "总结公式 \\(x" }
-              : { mainContentMarkdown: closing.mainContentMarkdown };
+              : request.phase === "bridge" ? bridge : { mainContentMarkdown: closing.mainContentMarkdown };
       return { content, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation", "consolidation_repair"]);
+    expect(calls).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation", "consolidation_repair", "bridge"]);
     expect(result.content.mainContentMarkdown).toBe(closing.mainContentMarkdown);
   });
   it("keeps repair capacity for explanation after opening repair, matching page 12", async () => {
@@ -456,10 +458,11 @@ describe("planned teaching", () => {
       const content = request.phase === "plan" ? plan : request.phase === "opening" ? { ...opening, learningObjectives: [] }
         : request.phase === "opening_repair" ? { learningObjectives: opening.learningObjectives }
           : request.phase === "explanation" ? { ...explanation, coverageEvidence: [] }
-            : request.phase === "explanation_repair" ? { coverageEvidence: explanation.coverageEvidence } : closing;
+            : request.phase === "explanation_repair" ? { coverageEvidence: explanation.coverageEvidence }
+              : request.phase === "bridge" ? bridge : closing;
       return { content, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "opening", "opening_repair", "explanation", "explanation_repair", "consolidation"]);
+    expect(calls).toEqual(["plan", "opening", "opening_repair", "explanation", "explanation_repair", "consolidation", "bridge"]);
     expect(result.content.coverageEvidence).toEqual(explanation.coverageEvidence);
   });
   it("uses generated previous teaching without OCR or images", () => {
@@ -471,6 +474,44 @@ describe("planned teaching", () => {
     expect(context).toContain("前页实际教授的内容");
     expect(context).not.toContain("OCR_MUST");
     expect(context).not.toContain("imageUrl");
+  });
+  it("finishes every core phase before waiting for the previous-page dependency", async () => {
+    const { input, plan } = fixture();
+    let releaseDependency!: (value: { context: string; fingerprint: string }) => void;
+    input.resolvePreviousPageContext = () => new Promise(resolve => { releaseDependency = resolve; });
+    const calls: string[] = [];
+    const running = writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing,
+      provider: "deepseek", model: "flash", usage };
+    });
+    await vi.waitFor(() => expect(calls).toEqual(["plan", "opening", "explanation", "consolidation"]));
+    releaseDependency({ context: "前页已经完成正文核心", fingerprint: "previous-core-v1" });
+    const result = await running;
+    expect(calls).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
+    expect(result.trace.previousCoreFingerprint).toBe("previous-core-v1");
+    expect(result.trace.coreFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+  });
+  it("regenerates only the bridge when the predecessor core fingerprint changes", async () => {
+    const { input, plan } = fixture();
+    input.teachingFingerprint = "same-page-core";
+    input.resumeTeaching = {
+      fingerprint: "same-page-core",
+      plan,
+      content: { ...opening, ...explanation, ...closing } as TeachingPackage,
+      completedPhases: ["opening", "explanation", "consolidation", "bridge"],
+      trace: { version: 1, plan, previousPageContext: "旧前页正文", previousCoreFingerprint: "old-core", phases: [] }
+    };
+    input.resolvePreviousPageContext = async () => ({ context: "新前页正文", fingerprint: "new-core" });
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: bridge, provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["bridge"]);
+    expect(result.trace.previousCoreFingerprint).toBe("new-core");
+    expect(result.content.fullExplanationMarkdown).toBe(explanation.fullExplanationMarkdown);
   });
   it("rejects missing sources, cycles and untested objectives while allowing application of an earlier fact", () => {
     const { input, plan } = fixture();
@@ -487,12 +528,12 @@ describe("planned teaching", () => {
   it.each(["公式与运算", "表格对比", "流程与代码"])("passes real preceding output through four phases for %s", async title => {
     const { input, plan } = fixture(title);
     const calls: any[] = [];
-    const outputs = [plan, opening, explanation, closing];
+    const outputs = [plan, opening, explanation, closing, bridge];
     const result = await writePlannedLesson(input, async request => {
       calls.push(request);
       return { content: outputs[calls.length - 1], provider: "deepseek", model: "model", usage };
     });
-    expect(calls.map(call => call.phase)).toEqual(["plan", "opening", "explanation", "consolidation"]);
+    expect(calls.map(call => call.phase)).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
     expect(calls.filter(call => call.image)).toHaveLength(1);
     expect(JSON.parse(calls[2].prompt).precedingSections.alreadyIntroduced).toEqual(opening.priorKnowledge);
     expect(JSON.parse(calls[3].prompt).precedingSections.explanation).toBe(explanation.fullExplanationMarkdown);
@@ -502,24 +543,24 @@ describe("planned teaching", () => {
   it("allows one local repair without regenerating preceding sections", async () => {
     const { input, plan } = fixture();
     const phases: string[] = [];
-    const outputs = [plan, opening, { ...explanation, coverageEvidence: [] }, { coverageEvidence: explanation.coverageEvidence }, closing];
+    const outputs = [plan, opening, { ...explanation, coverageEvidence: [] }, { coverageEvidence: explanation.coverageEvidence }, closing, bridge];
     await writePlannedLesson(input, async request => {
       phases.push(request.phase);
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
-    expect(phases).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation"]);
+    expect(phases).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation", "bridge"]);
   });
   it("repairs an unassigned plan fact before writing, within the same single repair budget", async () => {
     const { input, plan } = fixture();
     const broken = structuredClone(plan);
     broken.steps[0]!.factIds = [];
     const phases: string[] = [];
-    const outputs = [broken, plan, opening, explanation, closing];
+    const outputs = [broken, plan, opening, explanation, closing, bridge];
     await writePlannedLesson(input, async request => {
       phases.push(request.phase);
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
-    expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation"]);
+    expect(phases).toEqual(["plan", "plan_repair", "opening", "explanation", "consolidation", "bridge"]);
   });
   it("makes a second bounded plan repair when an objective still has no question", async () => {
     const { input, plan } = fixture();
@@ -528,12 +569,12 @@ describe("planned teaching", () => {
     const corrected = structuredClone(broken);
     corrected.questions[3]!.objectiveId = "second";
     const calls: string[] = [];
-    const outputs = [broken, broken, corrected, opening, explanation, closing];
+    const outputs = [broken, broken, corrected, opening, explanation, closing, bridge];
     await writePlannedLesson(input, async request => {
       calls.push(request.phase);
       return { content: outputs.shift(), provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation"]);
+    expect(calls).toEqual(["plan", "plan_repair", "plan_repair", "opening", "explanation", "consolidation", "bridge"]);
   });
   it("persists the last invalid plan and resumes its repair without regenerating the plan", async () => {
     const { input, plan } = fixture();
@@ -553,9 +594,9 @@ describe("planned teaching", () => {
     await writePlannedLesson(input, async request => {
       calls.push(request.phase);
       return { content: request.phase === "plan_repair" ? plan : request.phase === "opening" ? opening
-        : request.phase === "explanation" ? explanation : closing, provider: "deepseek", model: "flash", usage };
+        : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
-    expect(calls).toEqual(["plan_repair", "opening", "explanation", "consolidation"]);
+    expect(calls).toEqual(["plan_repair", "opening", "explanation", "consolidation", "bridge"]);
   });
   it("removes provider metadata and maps a plan fact text alias without weakening validation", () => {
     const { plan } = fixture();
@@ -625,26 +666,26 @@ describe("planned teaching", () => {
     expect(() => bindMissingPlanFactAtoms(incomplete, input.blueprint!)).not.toThrow();
     expect(validateTeachingPlan(bindMissingPlanFactAtoms(incomplete, input.blueprint!), input.blueprint!)).toContain("result.facts:required");
   });
-  it("uses one provider and bills all four actual calls without audit requests", async () => {
+  it("uses one provider and bills all five actual calls without audit requests", async () => {
     const { input, plan } = fixture();
-    const outputs = [plan, opening, explanation, closing];
+    const outputs = [plan, opening, explanation, closing, bridge];
     const fetcher = vi.fn(async () => Response.json({ model: "deepseek-v4-flash", output_text: JSON.stringify(outputs.shift()), usage: { input_tokens: 100, output_tokens: 200, cost: 0.001 } }));
     vi.stubGlobal("fetch", fetcher);
     const result = await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "responses" }).generateTeachingPackage(input);
-    expect(fetcher).toHaveBeenCalledTimes(4);
-    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.004);
-    expect(result.teachingTrace?.phases).toHaveLength(4);
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.005);
+    expect(result.teachingTrace?.phases).toHaveLength(5);
   });
   it("bounds planned chat calls without unbounded reasoning", async () => {
     const { input, plan } = fixture();
-    const outputs = [plan, opening, explanation, closing];
+    const outputs = [plan, opening, explanation, closing, bridge];
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       expect(JSON.parse(init.body as string)).toMatchObject({ thinking: { type: "disabled" } });
       return Response.json({ model: "deepseek-v4-flash", choices: [{ message: { content: JSON.stringify(outputs.shift()) } }], usage: { prompt_tokens: 100, completion_tokens: 200, cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetcher);
     await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "chat_completions" }).generateTeachingPackage(input);
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(5);
   });
   it("sends only the current section responsibilities with the versioned formatting contract", () => {
     const prompt = plannedInstructions(["fullExplanationMarkdown", "coverageEvidence"]);
@@ -687,12 +728,12 @@ describe("planned teaching", () => {
   });
   it("retries invalid JSON only once and retains the failed call in costs and the trace", async () => {
     const { input, plan } = fixture();
-    const outputs = [JSON.stringify(plan), "not JSON", JSON.stringify(opening), JSON.stringify(explanation), JSON.stringify(closing)];
+    const outputs = [JSON.stringify(plan), "not JSON", JSON.stringify(opening), JSON.stringify(explanation), JSON.stringify(closing), JSON.stringify(bridge)];
     const fetcher = vi.fn(async () => Response.json({ model: "deepseek-v4-flash", output_text: outputs.shift(), usage: { input_tokens: 100, output_tokens: 200, cost: 0.001 } }));
     vi.stubGlobal("fetch", fetcher);
     const result = await new HttpProviderTeachingClient({ providerId: "opencode-go", model: "deepseek-v4-flash", baseUrl: "https://test.invalid", apiKey: "test", protocol: "responses" }).generateTeachingPackage(input);
-    expect(fetcher).toHaveBeenCalledTimes(5);
-    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.005);
-    expect(result.teachingTrace?.phases.map(phase => phase.phase)).toEqual(["plan", "opening_invalid_json", "opening_json_repair", "explanation", "consolidation"]);
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.006);
+    expect(result.teachingTrace?.phases.map(phase => phase.phase)).toEqual(["plan", "opening_invalid_json", "opening_json_repair", "explanation", "consolidation", "bridge"]);
   });
 });

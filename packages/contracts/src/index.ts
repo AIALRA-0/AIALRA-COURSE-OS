@@ -567,6 +567,8 @@ export interface GenerationPlan {
   pageIds: Identifier[];
   completedPageIds: Identifier[];
   failedPageIds: Identifier[];
+  coreCompletedPageIds?: Identifier[];
+  bridgeCompletedPageIds?: Identifier[];
   jobIds: Identifier[];
   activeJobIds?: Identifier[];
   currentJobId?: Identifier;

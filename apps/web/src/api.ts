@@ -32,6 +32,7 @@ import type {
   WritingPolicyCurrent,
   GenerationHarnessCurrent
 } from "@course-os/contracts";
+import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 export type { SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 
@@ -214,7 +215,7 @@ export const api = {
     body.append("autoGenerate", String(options.autoGenerate !== false));
     return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
   },
-  importRecord: (importId: string) => request<ImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`),
+  importRecord: (importId: string) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`),
   createGenerationJob: (materialVersionId: string, pageIds: string[], budgetUsd: number) => request<GenerationJob>("/api/v1/generation-jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -226,8 +227,8 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd, ...options })
   }),
-  generationPlan: (planId: string) => request<{ plan: GenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
-  retryGenerationPlanFailed: (planId: string) => request<{ plan: GenerationPlan; jobs: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}:retry-failed`, {
+  generationPlan: (planId: string) => request<{ plan: WebGenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
+  retryGenerationPlanFailed: (planId: string) => request<{ plan: WebGenerationPlan; jobs: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}:retry-failed`, {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),

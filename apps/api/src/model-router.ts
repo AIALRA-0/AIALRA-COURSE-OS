@@ -51,6 +51,7 @@ export interface ModelRouterInput {
   pageNumber: number;
   sourceText: string;
   previousPageContext?: string;
+  resolvePreviousPageContext?: () => Promise<{ context?: string; fingerprint?: string }>;
   searchEvidence?: (queries: TeachingResearchQuery[]) => Promise<TeachingResearchEvidence[]>;
   onTeachingPhase?: (phase: string, state: "started" | "completed", usage?: ModelRouterUsage) => Promise<void>;
   teachingFingerprint?: string;

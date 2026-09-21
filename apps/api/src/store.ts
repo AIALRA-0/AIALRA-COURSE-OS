@@ -75,6 +75,11 @@ export class OperationalStore {
     return result;
   }
 
+  /** Bypass accumulated background writes for user control actions. */
+  async urgentMutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
+    return this.mutate(change);
+  }
+
   appendEvent<T>(state: OperationalState, streamId: string, type: string, payload: T): OrderedEvent<T> {
     const event: OrderedEvent<T> = {
       id: state.events.length === 0 ? 1 : (state.events.at(-1)?.id ?? 0) + 1,
@@ -143,6 +148,29 @@ export class PostgresOperationalStore extends OperationalStore {
     await this.postgresWriteChain;
     for (const event of emitted) this.bus.emit(event.streamId, event);
     return result;
+  }
+
+  override async urgentMutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
+    await this.ready;
+    const client = await this.pool.connect();
+    let emitted: OrderedEvent[] = [];
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<{ state: Partial<OperationalState> }>("SELECT state FROM operational_state WHERE id = 1 FOR UPDATE");
+      const state = normalizeOperationalState(locked.rows[0]?.state);
+      const before = state.events.length;
+      const result = await change(state);
+      emitted = state.events.slice(before);
+      await client.query("UPDATE operational_state SET state = $1::jsonb, updated_at = now() WHERE id = 1", [JSON.stringify(state)]);
+      await client.query("COMMIT");
+      for (const event of emitted) this.bus.emit(event.streamId, event);
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async close(): Promise<void> {
