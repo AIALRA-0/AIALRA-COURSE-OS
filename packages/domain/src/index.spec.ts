@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssessmentAttempt, GenerationJob } from "@course-os/contracts";
-import { applyAttempt, budgetState, claimGenerationLease, isGenerationLeaseCurrent, registerCost, transitionJob } from "./index.js";
+import { applyAttempt, budgetState, claimGenerationLease, isGenerationLeaseCurrent, registerCost, renewGenerationLease, transitionJob } from "./index.js";
 
 const job: GenerationJob = {
   id: "job-1",
@@ -36,6 +36,15 @@ describe("generation job", () => {
     const second = claimGenerationLease({ ...first, state: "running" }, "worker-b", new Date("2026-08-28T00:01:00.000Z"));
     expect(isGenerationLeaseCurrent(second, "worker-a", first.lease!.fenceToken, new Date("2026-08-28T00:02:00.000Z"))).toBe(false);
     expect(isGenerationLeaseCurrent(second, "worker-b", second.lease!.fenceToken, new Date("2026-08-28T00:02:00.000Z"))).toBe(true);
+  });
+
+  it("renews a current lease without changing its fence token", () => {
+    const running = transitionJob(job, "running");
+    const claimed = claimGenerationLease(running, "worker-a", new Date("2026-08-28T00:00:00.000Z"));
+    const renewed = renewGenerationLease(claimed, "worker-a", claimed.lease!.fenceToken, new Date("2026-08-28T00:05:00.000Z"));
+    expect(renewed.lease?.fenceToken).toBe(claimed.lease?.fenceToken);
+    expect(renewed.lease?.expiresAt).toBe("2026-08-28T00:20:00.000Z");
+    expect(() => renewGenerationLease(renewed, "worker-b", renewed.lease!.fenceToken)).toThrow("GENERATION_LEASE_NOT_CURRENT");
   });
 });
 

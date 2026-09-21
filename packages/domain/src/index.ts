@@ -41,6 +41,11 @@ export function claimGenerationLease(job: GenerationJob, owner: string, now = ne
   return { ...job, lease, updatedAt: now.toISOString() };
 }
 
+export function renewGenerationLease(job: GenerationJob, owner: string, fenceToken: number, now = new Date(), ttlMs = 15 * 60_000): GenerationJob {
+  if (!isGenerationLeaseCurrent(job, owner, fenceToken, now)) throw new Error("GENERATION_LEASE_NOT_CURRENT");
+  return { ...job, lease: { ...job.lease!, expiresAt: new Date(now.getTime() + ttlMs).toISOString() }, updatedAt: now.toISOString() };
+}
+
 export function isGenerationLeaseCurrent(job: GenerationJob | undefined, owner: string, fenceToken: number, now = new Date()): boolean {
   return Boolean(job?.state === "running" && !job.cancelRequested && job.lease?.owner === owner && job.lease.fenceToken === fenceToken && Date.parse(job.lease.expiresAt) > now.getTime());
 }

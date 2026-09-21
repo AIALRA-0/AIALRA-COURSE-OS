@@ -48,7 +48,7 @@ import type {
 } from "@course-os/contracts";
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
-import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
+import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
@@ -2661,10 +2661,11 @@ function startGenerationJob(jobId: string, dependencies: AppDependencies): void 
 }
 
 export async function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const leaseOwner = `course-os-worker:${process.pid}`;
   const fenceToken = await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job || job.state !== "queued" || job.cancelRequested) return undefined;
-    Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, `course-os-worker:${process.pid}`));
+    Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, leaseOwner));
     if (job.planId) {
       const plan = state.generationPlans.find((item) => item.id === job.planId);
       if (plan) {
@@ -2681,12 +2682,21 @@ export async function executeGenerationJob(jobId: string, dependencies: AppDepen
     return job.lease!.fenceToken;
   });
   if (fenceToken === undefined) return;
+  const leaseHeartbeat = setInterval(() => {
+    void dependencies.operations.mutate((state) => {
+      const job = state.jobs.find((item) => item.id === jobId);
+      if (!job || !isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
+      Object.assign(job, renewGenerationLease(job, leaseOwner, fenceToken));
+    }).catch(() => undefined);
+  }, 5 * 60_000);
+  leaseHeartbeat.unref();
   try {
     await runLocalJob(jobId, dependencies, fenceToken);
   } catch (error) {
     const issue = safeGenerationIssue(error);
     if (issue !== "LEASE_LOST") await failGenerationJob(jobId, issue, dependencies, fenceToken);
   } finally {
+    clearInterval(leaseHeartbeat);
     await advanceGenerationPlanForJob(jobId, dependencies);
   }
 }
