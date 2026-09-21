@@ -1,0 +1,38 @@
+apps/api/src/teaching-plan.ts
+  s_e8850ef125fb32::t_de013e346615d6 254
+  s_e8850ef125fb32::t_e667d060825820 253
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_de013e346615d6 6,65-69,72
+  s_e8850ef125fb32::t_80e47161e79f48 70-71
+  s_e8850ef125fb32::t_e667d060825820 73-76
+  s_36a381ab4bccf9::t_add1384d9af665 77
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_de013e346615d6 121-126,133-136,289,318
+  s_e8850ef125fb32::t_e8697bce3c3ddb 127-129,132
+  s_e8850ef125fb32::t_e667d060825820 130-131
+  s_e8850ef125fb32::t_80e47161e79f48 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a56100c484e24e676849fc7869ebcaaf5fdb8046",
+  "prompts": {},
+  "sessions": {
+    "s_36a381ab4bccf9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a1a6-6503-79c1-8d40-f56fe9691ee6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
