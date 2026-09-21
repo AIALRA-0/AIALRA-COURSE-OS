@@ -1,0 +1,27 @@
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_d1b26ac9c8e2d7 6,308,313
+apps/api/src/teaching-plan.ts
+  s_e8850ef125fb32::t_bdb9f3797013f6 159-161
+  s_e8850ef125fb32::t_d1b26ac9c8e2d7 163-170,180-196
+  s_e8850ef125fb32::t_fb4de32e9ecdb5 197-199
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_38ec790a111612 608,613,618
+  s_e8850ef125fb32::t_9d3f8fe8b02ec3 5,201,215-222
+  s_e8850ef125fb32::t_7d1f1dfe2ca956 223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21c3e8bb5493a689b229eebba316a9f6d3bc2c99",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
