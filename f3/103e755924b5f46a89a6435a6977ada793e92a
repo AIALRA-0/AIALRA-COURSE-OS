@@ -1,0 +1,27 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_e86787fce7e041 1411
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_ff94d1789f97be 586-594,597
+apps/api/src/provider-settings.spec.ts
+  s_e8850ef125fb32::t_ff94d1789f97be 54-61
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_ff94d1789f97be 1167-1169
+apps/api/src/provider-settings.ts
+  s_e8850ef125fb32::t_ff94d1789f97be 45-47,50-52,65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f3103e755924b5f46a89a6435a6977ada793e92a",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
