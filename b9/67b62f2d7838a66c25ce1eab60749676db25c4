@@ -1,0 +1,21 @@
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_06705b2db342d7 72-73
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_06705b2db342d7 211
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b967b62f2d7838a66c25ce1eab60749676db25c4",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
