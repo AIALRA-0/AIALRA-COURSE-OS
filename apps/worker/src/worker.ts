@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { workerDispatchHeaders } from "./dispatch.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for the production worker");
@@ -34,15 +35,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { 
 
 while (!stopping) {
   try {
-    const queued = await pool.query<{ id: string }>(`
-      SELECT job->>'id' AS id
+    const queued = await pool.query<{ id: string; workspaceId: string }>(`
+      SELECT job->>'id' AS id, job->>'workspaceId' AS "workspaceId"
       FROM operational_state, jsonb_array_elements(state->'jobs') AS job
       WHERE job->>'state' = 'queued'
         AND COALESCE((job->>'cancelRequested')::boolean, false) = false
       ORDER BY job->>'createdAt'
       LIMIT $1
     `, [generationConcurrency]);
-    await Promise.all(queued.rows.map((job) => dispatch(job.id)));
+    await Promise.all(queued.rows.map((job) => dispatch(job.id, job.workspaceId)));
   } catch (error) {
     process.stderr.write(`worker poll failed: ${error instanceof Error ? error.message : String(error)}\n`);
   }
@@ -51,13 +52,13 @@ while (!stopping) {
 
 await pool.end();
 
-async function dispatch(jobId: string): Promise<void> {
+async function dispatch(jobId: string, workspaceId: string): Promise<void> {
   try {
     const response = await fetch(`${apiBaseUrl}/api/internal/worker/jobs/${encodeURIComponent(jobId)}/run`, {
       method: "POST",
-      headers: { "X-Course-Worker-Token": workerToken }
+      headers: workerDispatchHeaders(workerToken, workspaceId)
     });
-    if (!response.ok && response.status !== 404) process.stderr.write(`worker dispatch failed for ${jobId}: HTTP ${response.status}\n`);
+    if (!response.ok) process.stderr.write(`worker dispatch failed for ${jobId}: HTTP ${response.status}\n`);
   } catch (error) {
     process.stderr.write(`worker dispatch failed for ${jobId}: ${error instanceof Error ? error.message : String(error)}\n`);
   }
