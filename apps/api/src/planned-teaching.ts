@@ -208,7 +208,7 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
     || !issue.startsWith("TEACHING_PRESENTATION:chapterBridgeMarkdown:")));
   for (const prior of content.priorKnowledge || []) {
     const label = prior.trim().replace(/^[-*+]\s+/u, "").split("：", 1)[0] ?? "";
-    if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z\s&/,，-]{1,80}）/u.test(label)) {
+    if (/\p{Script=Han}/u.test(label) && !/（[A-Za-z][A-Za-z0-9\s&/,，.'’-]{1,80}）/u.test(label)) {
       issues.push("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
     }
   }

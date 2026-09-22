@@ -69,6 +69,8 @@ it.each([
   ["缺少英文名称", "布局质量指标：衡量布局结果的多个数值", true],
   ["名称已有配对", "布局质量指标（Layout Quality Metrics）：衡量布局结果的多个数值", false],
   ["官方大小写", "方法名称（eBay）：保留官方名称", false],
+  ["带撇号的正式英文名称", "欧姆定律（Ohm's Law）：说明电压、电流和电阻的关系", false],
+  ["带弯撇号的正式英文名称", "泊松分布（Poisson’s Distribution）：说明计数的概率分布", false],
   ["英文全称与缩写", "最差负时序裕量（Worst Negative Slack，WNS）：指最严重的时序违例", false],
   ["定义内遗漏不靠猜译补齐", "拥塞（Congestion）：它影响布局质量", false],
   ["来源标签不能冒充名称", "网表（Netlist）：记录模块之间的连接", false]
