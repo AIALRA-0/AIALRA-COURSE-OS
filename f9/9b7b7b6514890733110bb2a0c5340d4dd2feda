@@ -1,0 +1,41 @@
+apps/web/src/types.ts
+  s_e8850ef125fb32::t_e75c3c88e3079f 6-13
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_fc631538112909 36,257
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_b0e6bb867b70b1 9,65,150,152,157-158,165,368
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_567bed72c430ac 45-46
+  s_e8850ef125fb32::t_e3fc1d388e2fb4 1,6,53-62,161-163,165,196-216
+  s_e8850ef125fb32::t_15e5cd1a70d08f 217-218
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_57d2bdf37d80be 4,8-22
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_39871f42fa83f1 1115-1116
+  s_e8850ef125fb32::t_1cce100d6c408c 1074-1076
+  s_e8850ef125fb32::t_9f1e86f75b9468 1067-1073,1091-1093,1097-1098
+  s_e8850ef125fb32::t_f1d7f89c3812cf 1077-1090
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_26eb85de3e6fb4 1482
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_14757c90c221b7 7,36-39,41-48,50-52
+  s_e8850ef125fb32::t_744b620814b642 40,49
+packages/contracts/openapi/browser-api.yaml
+  s_e8850ef125fb32::t_017b87c86d67c8 395-399,417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f99b7b7b6514890733110bb2a0c5340d4dd2feda",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
