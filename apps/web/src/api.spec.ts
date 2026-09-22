@@ -49,3 +49,30 @@ describe("generation plan API", () => {
     expect(calls[0]?.idempotencyKey).toBeTruthy();
   });
 });
+
+describe("self retelling API", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("loads per-release answers and uses the persistent answer and card review routes", async () => {
+    const calls: Array<{ url: string; method: string; body?: string; headers: Headers }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method || "GET", body: typeof init?.body === "string" ? init.body : undefined, headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify({ workspaceId: "personal", releaseId: "release one", pageId: "page one", answer: "用自己的话解释" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await api.selfRetellings("release one");
+    await api.saveSelfRetelling("release one", "page one", "用自己的话解释", "retelling-key");
+    await api.reviewSelfRetelling("release one", "page one", "remembered");
+
+    expect(calls.map(({ method, url }) => `${method} ${url}`)).toEqual([
+      "GET /api/v1/self-retellings?releaseId=release%20one",
+      "PUT /api/v1/self-retellings/release%20one/page%20one",
+      "POST /api/v1/self-retellings/release%20one/page%20one/review"
+    ]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({ answer: "用自己的话解释" });
+    expect(calls[1]!.headers.get("Idempotency-Key")).toBe("retelling-key");
+    expect(calls[2]!.headers.get("Idempotency-Key")).toBeTruthy();
+    expect(calls[2]!.headers.get("X-Actor")).toBe("personal-user");
+    expect(calls[2]!.headers.get("X-Workspace-Id")).toBe("personal");
+  });
+});

@@ -1,9 +1,12 @@
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { createApp, createDefaultDependencies, resumeIncompleteImports, resumeIncompleteJobs } from "./app.js";
 import { HttpModelRouterClient } from "./model-router.js";
+import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
+import { EtapiSettingsRuntime, registerEtapiSettingsRoutes } from "./etapi-settings-routes.js";
+import { SecretVault } from "./secret-vault.js";
 
 const host = process.env.COURSE_OS_HOST || "127.0.0.1";
 const port = Number(process.env.COURSE_OS_PORT || 4100);
@@ -19,18 +22,39 @@ if (!process.env.COURSE_OS_WORKER_TOKEN) process.env.COURSE_OS_WORKER_TOKEN = aw
 const token = process.env.READWEAVE_API_TOKEN_FILE
   ? (await readFile(process.env.READWEAVE_API_TOKEN_FILE, "utf8")).trim()
   : process.env.READWEAVE_API_TOKEN || "";
-const readweave = process.env.READWEAVE_MODE === "etapi"
-  ? new EtapiReadWeaveCourseApi({
+const fallbackReadweave = () => process.env.READWEAVE_MODE === "http"
+  ? new HttpReadWeaveCourseApi(process.env.READWEAVE_BASE_URL || "http://127.0.0.1:37840/api/course/v1", token, fetch, process.env.READWEAVE_PUBLIC_URL)
+  : process.env.READWEAVE_MODE === "etapi"
+    ? new EtapiReadWeaveCourseApi({
+        baseUrl: process.env.READWEAVE_BASE_URL || "http://127.0.0.1:37840",
+        token: "",
+        parentNoteId: process.env.READWEAVE_ROOT_NOTE_ID || "root",
+        publicUrl: process.env.READWEAVE_PUBLIC_URL,
+        workspaceId: process.env.COURSE_OS_WORKSPACE_ID || "personal",
+        seedStatePath: resolve(dataDir, "readweave-course-store.json")
+      })
+  : new FileReadWeaveCourseApi(resolve(dataDir, "readweave-course-store.json"), process.env.READWEAVE_PUBLIC_URL);
+const initialEtapiConfig = process.env.READWEAVE_MODE === "etapi"
+  ? {
       baseUrl: process.env.READWEAVE_BASE_URL || "http://127.0.0.1:37840",
       token,
       parentNoteId: process.env.READWEAVE_ROOT_NOTE_ID || "root",
       publicUrl: process.env.READWEAVE_PUBLIC_URL,
       workspaceId: process.env.COURSE_OS_WORKSPACE_ID || "personal",
       seedStatePath: resolve(dataDir, "readweave-course-store.json")
-    })
-  : process.env.READWEAVE_MODE === "http"
-    ? new HttpReadWeaveCourseApi(process.env.READWEAVE_BASE_URL || "http://127.0.0.1:37840/api/course/v1", token, fetch, process.env.READWEAVE_PUBLIC_URL)
-    : new FileReadWeaveCourseApi(resolve(dataDir, "readweave-course-store.json"), process.env.READWEAVE_PUBLIC_URL);
+    }
+  : undefined;
+const initialReadweave = initialEtapiConfig ? new EtapiReadWeaveCourseApi(initialEtapiConfig) : fallbackReadweave();
+const credentialVault = new SecretVault(join(dataDir, "settings-secrets.json"));
+const etapiSettings = new EtapiSettingsRuntime({
+  dataDir,
+  workspaceId: process.env.COURSE_OS_WORKSPACE_ID || "personal",
+  vault: credentialVault,
+  initialAdapter: initialReadweave,
+  initialConfig: initialEtapiConfig,
+  fallbackAdapter: fallbackReadweave
+});
+const readweave = await etapiSettings.initialize();
 const modelRouterToken = process.env.MODEL_ROUTER_API_KEY || await loadSecretFile(process.env.MODEL_ROUTER_API_KEY_FILE);
 const emergencyRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" && process.env.MODEL_ROUTER_URL && modelRouterToken
   ? new HttpModelRouterClient(process.env.MODEL_ROUTER_URL, modelRouterToken)
@@ -41,10 +65,14 @@ const emergencyRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" 
 const modelRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" ? emergencyRouter : undefined;
 
 const dependencies = createDefaultDependencies(dataDir, readweave, modelRouter);
+dependencies.credentialVault = credentialVault;
+etapiSettings.bind(adapter => { dependencies.readweave = adapter; });
 if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {
   await dependencies.operations.whenReady();
 }
 const app = createApp(dependencies);
+registerSelfRetellingRoutes(app, dependencies);
+registerEtapiSettingsRoutes(app, dependencies, etapiSettings);
 app.listen(port, host, () => {
   process.stdout.write(`Course OS API ready at http://${host}:${port}\n`);
   void resumeIncompleteImports(dependencies);

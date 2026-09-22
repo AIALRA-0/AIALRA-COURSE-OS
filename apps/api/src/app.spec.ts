@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
@@ -366,6 +366,53 @@ describe("Course OS API", () => {
     expect(draft).toMatchObject({ status: "needs_review", revision: 1 });
     expect(draft?.page.imageUrl).toMatch(/^\/api\/v1\/media\/[a-f0-9]{64}$/);
     expect((await request(app).get("/healthz").expect(200)).body.status).toBe("ok");
+  }, 45_000);
+
+  it("imports an inserted slide through the upload API without rewriting unrelated teaching drafts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-api-incremental-upload-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    const dependencies = createDefaultDependencies(root, readweave);
+    let conversionCount = 0;
+    dependencies.conversion = { enqueueAndWait: async (input) => {
+      conversionCount += 1;
+      const titles = conversionCount === 1 ? ["Alpha", "Beta", "Gamma"] : ["Alpha", "Inserted", "Beta", "Gamma"];
+      await mkdir(input.outputDir, { recursive: true });
+      const pages = await Promise.all(titles.map(async (title, index) => {
+        const imagePath = join(input.outputDir, `page-${index + 1}.svg`);
+        await writeFile(imagePath, `<svg xmlns="http://www.w3.org/2000/svg"><text>${title}</text></svg>`);
+        return { pageNumber: index + 1, title, text: `${title} source content`, imagePath, imageMediaType: "image/svg+xml" as const };
+      }));
+      return { requestId: input.id, state: "completed" as const, pages, issues: [], startedAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+    } };
+    const app = createApp(dependencies);
+    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-first")
+      .field("autoGenerate", "false").attach("file", Buffer.from("# first version"), { filename: "slides.md", contentType: "text/markdown" }).expect(201);
+    const original = await waitForImport(app, first.body.id);
+    expect(original.state).toBe("ready");
+    const originalGamma = (await readweave.getDraftByPage(original.pageIds[2]))!;
+    originalGamma.page.blocks[0]!.markdown = "Original verified Gamma teaching";
+    const savedGamma = await readweave.saveDraft(originalGamma, originalGamma.revision, {
+      idempotencyKey: "gamma-teaching", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "gamma-teaching"
+    });
+    const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-second")
+      .field("autoGenerate", "false").field("courseId", original.courseId)
+      .field("previousMaterialVersionId", original.materialVersionId)
+      .attach("file", Buffer.from("# second version with inserted page"), { filename: "slides.md", contentType: "text/markdown" }).expect(201);
+    const updated = await waitForImport(app, second.body.id);
+    expect(updated.state).toBe("ready");
+    expect(updated.pageIds).toHaveLength(4);
+    const newGamma = await readweave.getDraftByPage(updated.pageIds[3]);
+    expect(newGamma?.page.blocks[0]?.markdown).toBe(savedGamma.page.blocks[0]?.markdown);
+    expect(newGamma?.status).toBe(savedGamma.status);
+    const event = (await dependencies.operations.read()).events.find(item => item.streamId === updated.id && item.type === "import.ready");
+    expect(event?.payload).toMatchObject({ insertedPageIds: [updated.pageIds[1]], regeneratedPageIds: updated.pageIds.slice(0, 3),
+      preservedPageIds: expect.arrayContaining([{ previousPageId: original.pageIds[2], pageId: updated.pageIds[3] }]) });
+    const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-second")
+      .field("autoGenerate", "false").field("courseId", original.courseId)
+      .field("previousMaterialVersionId", original.materialVersionId)
+      .attach("file", Buffer.from("# second version with inserted page"), { filename: "slides.md", contentType: "text/markdown" }).expect(200);
+    expect(replay.body.id).toBe(updated.id);
+    expect(conversionCount).toBe(2);
   }, 45_000);
 
   it("creates one idempotent draft generation job after an import without publishing a release", async () => {
@@ -1526,6 +1573,31 @@ describe("Course OS API", () => {
     });
   });
 
+  it("creates, edits, reads and deletes a provider without resurrecting its default or credential", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-provider-crud-"));
+    const dependencies = createDefaultDependencies(root, new FileReadWeaveCourseApi(join(root, "readweave.json")));
+    const app = createApp(dependencies);
+    const model = { id: "sample-model", displayName: "Sample Model", protocol: "responses", supportsVision: true,
+      supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" };
+    const created = await request(app).post("/api/v1/model-providers").set("Idempotency-Key", "provider-add")
+      .send({ id: "sample-provider", displayName: "Sample", baseUrl: "https://api.example.org/v1", enabled: true, models: [model] }).expect(201);
+    expect(created.body).toMatchObject({ id: "sample-provider", displayName: "Sample" });
+    const replay = await request(app).post("/api/v1/model-providers").set("Idempotency-Key", "provider-add")
+      .send({ id: "sample-provider", displayName: "Sample", baseUrl: "https://api.example.org/v1", enabled: true, models: [model] }).expect(201);
+    expect(replay.body.id).toBe(created.body.id);
+    await request(app).patch("/api/v1/model-providers/sample-provider").set("Idempotency-Key", "provider-edit")
+      .send({ displayName: "Edited", models: [{ ...model, displayName: "Edited Model" }] }).expect(200);
+    await request(app).put("/api/v1/model-providers/sample-provider/credential").set("Idempotency-Key", "provider-key")
+      .send({ secret: "synthetic-provider-secret" }).expect(200);
+    expect((await request(app).get("/api/v1/model-providers").expect(200)).body.find((item: { id: string }) => item.id === "sample-provider"))
+      .toMatchObject({ displayName: "Edited", credential: { configured: true } });
+    await request(app).delete("/api/v1/model-providers/sample-provider").set("Idempotency-Key", "provider-delete").expect(204);
+    await request(app).delete("/api/v1/model-providers/sample-provider").set("Idempotency-Key", "provider-delete").expect(204);
+    expect((await request(app).get("/api/v1/model-providers").expect(200)).body.some((item: { id: string }) => item.id === "sample-provider")).toBe(false);
+    expect(await dependencies.credentialVault!.get("model-provider:sample-provider")).toBeUndefined();
+    expect((await dependencies.operations.read()).modelProviders.find(item => item.id === "sample-provider")?.archived).toBe(true);
+  });
+
   it("keeps native model and search routing inside Course OS instead of the ReadWeave adapter", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-native-providers-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
@@ -1553,9 +1625,11 @@ describe("Course OS API", () => {
     });
     expect(JSON.stringify(models.body)).not.toContain("synthetic-existing-deepseek-token");
     const modelPolicy = await request(app).get("/api/v1/model-route-policy").expect(200);
-    expect(modelPolicy.body.routes.map((route: { providerId: string }) => route.providerId)).toEqual(["kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"]);
+    expect(modelPolicy.body.routes.map((route: { providerId: string }) => route.providerId)).toEqual(["kuafu", "kuafu-backup", "opencode-go", "deepseek", "codex", "kimi-coding"]);
     await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "invalid-duplicate-model-route")
       .send({ ...modelPolicy.body, routes: [modelPolicy.body.routes[0], modelPolicy.body.routes[0]] }).expect(422);
+    await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "valid-kuafu-backup-route")
+      .send({ ...modelPolicy.body, routes: modelPolicy.body.routes.slice(0, 2) }).expect(200);
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
     expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"]);

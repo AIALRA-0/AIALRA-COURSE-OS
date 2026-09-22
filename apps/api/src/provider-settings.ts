@@ -15,9 +15,13 @@ export function defaultCourseModelProviders(): ModelProviderConfig[] {
       { id: "deepseek-v4-flash-vision-exp", displayName: "DeepSeek V4 Flash Vision Exp", protocol: "responses", supportsVision: true, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" },
       { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }
     ] },
-    { id: "kuafu", displayName: "夸父社 V4.1 专线", baseUrl: "https://api.kuafushe.cc/v1", enabled: false, credential: { configured: false },
+    { id: "kuafu", displayName: "夸父社 DS 主线路", baseUrl: "https://api.kuafushe.cc/v1", enabled: false, credential: { configured: false },
       vault: { backend: "course_os_vault", state: "missing" }, models: [
         { id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }
+      ] },
+    { id: "kuafu-backup", displayName: "夸父社 DS 备用线路", baseUrl: "https://api.kuafushe.cc/v1", enabled: false, credential: { configured: false },
+      vault: { backend: "course_os_vault", state: "missing" }, models: [
+        { id: "deepseek-v4.1-flash-expires-on-0910", displayName: "DeepSeek V4.1 Flash 备用线路", protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" }
       ] },
     { id: "codex", displayName: "Codex", baseUrl: "", enabled: false, credential: { configured: false },
       vault: { backend: "course_os_vault", state: "missing" }, models: [
@@ -42,15 +46,25 @@ export function mergeCourseModelProviderDefaults(saved: ModelProviderConfig[]): 
 export function mergeCourseModelRoutePolicyDefaults(saved?: ModelRoutePolicy): ModelRoutePolicy {
   const defaults = defaultCourseModelRoutePolicy(saved?.workspaceId || "personal");
   if (!saved || !Array.isArray(saved.rules)) return defaults;
-  const routes = Array.isArray(saved.routes) && saved.routes.length > 0
+  const routes = Array.isArray(saved.routes)
     ? structuredClone(saved.routes)
-    : structuredClone(defaults.routes);
+    : structuredClone(defaults.routes ?? []);
+  const selected = routes.findIndex(route => route.providerId === "kuafu" || route.providerId === "kuafu-backup");
+  if (selected >= 0) {
+    const primary = routes[selected]!;
+    const backup = primary.providerId === "kuafu"
+      ? { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: primary.enabled }
+      : { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: primary.enabled };
+    if (!routes.some(route => route.providerId === backup.providerId)) {
+      routes.splice(selected + 1, 0, backup);
+    }
+  }
   return {
     ...structuredClone(saved),
     routes: routes?.map(route => route.providerId === "deepseek" && route.modelId === "deepseek-v4-flash-vision-exp"
       ? { ...route, modelId: "deepseek-flash" }
       : route),
-    allowProviderFallback: Array.isArray(saved.routes) && saved.routes.length > 0
+    allowProviderFallback: Array.isArray(saved.routes)
       ? saved.allowProviderFallback ?? defaults.allowProviderFallback
       : defaults.allowProviderFallback
   };
@@ -61,6 +75,7 @@ export function defaultCourseModelRoutePolicy(workspaceId = "personal"): ModelRo
     workspaceId,
     routes: [
       { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+      { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: true },
       { providerId: "opencode-go", modelId: "deepseek-v4-flash-vision-exp", enabled: true },
       { providerId: "deepseek", modelId: "deepseek-flash", enabled: true },
       { providerId: "codex", modelId: "gpt-5.6-luna", enabled: true },

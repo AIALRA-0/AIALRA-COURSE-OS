@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, OrderedEvent, ReviewPlan, ReviewSession, SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
+import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, OrderedEvent, ReviewPlan, ReviewSession, SearchProviderConfig, SearchRoutePolicy, SelfRetelling } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
@@ -17,6 +17,7 @@ export interface OperationalState {
   reviewPlans: ReviewPlan[];
   reviewSessions: ReviewSession[];
   attempts: AssessmentAttempt[];
+  selfRetellings: Record<string, SelfRetelling>;
   modelProviders: ModelProviderConfig[];
   modelRoutePolicy: ModelRoutePolicy;
   searchProviders: SearchProviderConfig[];
@@ -35,6 +36,7 @@ export const EMPTY: OperationalState = {
   reviewPlans: [],
   reviewSessions: [],
   attempts: [],
+  selfRetellings: {},
   modelProviders: mergeCourseModelProviderDefaults([]),
   modelRoutePolicy: defaultCourseModelRoutePolicy(),
   searchProviders: mergeCourseSearchProviderDefaults([]),
@@ -201,6 +203,7 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     reviewPlans: Array.isArray(value?.reviewPlans) ? value.reviewPlans : [],
     reviewSessions: Array.isArray(value?.reviewSessions) ? value.reviewSessions : [],
     attempts: Array.isArray(value?.attempts) ? value.attempts : [],
+    selfRetellings: value?.selfRetellings && typeof value.selfRetellings === "object" && !Array.isArray(value.selfRetellings) ? value.selfRetellings : {},
     modelProviders: mergeCourseModelProviderDefaults(Array.isArray(value?.modelProviders) ? value.modelProviders : []),
     modelRoutePolicy: mergeCourseModelRoutePolicyDefaults(value?.modelRoutePolicy),
     searchProviders: mergeCourseSearchProviderDefaults(Array.isArray(value?.searchProviders) ? value.searchProviders : []),

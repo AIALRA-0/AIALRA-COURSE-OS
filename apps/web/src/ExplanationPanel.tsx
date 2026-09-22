@@ -3,6 +3,7 @@ import type { CourseRelease, LessonSection, PageLesson, PageQuestion, PseudoCode
 import { formatMisconception } from "@course-os/quality";
 import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
+import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
 
 export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null } }) {
   const sections = useMemo(() => normalizeSections(page), [page]);
@@ -54,6 +55,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>
+      <SelfRetellingPanel release={release} page={page} />
       <article className="lesson-block random-questions"><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
       <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>
     </>}

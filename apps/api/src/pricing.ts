@@ -36,6 +36,7 @@ const DEFAULT_PRICES: PriceDefinition[] = [
   // Course OS keeps this as its own versioned profile. Deployment pricing can
   // replace it through COURSE_OS_PRICING_SNAPSHOT_JSON before enabling Kuafu.
   { provider: "kuafu", model: "deepseek-v4.1-flash", inputMicrousdPerMillion: 225_000, outputMicrousdPerMillion: 675_000, cachedInputMicrousdPerMillion: 7_500 },
+  { provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910", inputMicrousdPerMillion: 225_000, outputMicrousdPerMillion: 675_000, cachedInputMicrousdPerMillion: 7_500 },
   { provider: "codex", model: "gpt-5.6-luna", inputMicrousdPerMillion: 200_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 20_000 },
   { provider: "kimi-coding", model: "kimi-for-coding-highspeed", inputMicrousdPerMillion: 200_000, outputMicrousdPerMillion: 1_200_000, cachedInputMicrousdPerMillion: 20_000 }
 ];
@@ -62,7 +63,7 @@ export function priceSnapshotFor(provider: string, model: string, at = new Date(
   const defaultPrice = DEFAULT_PRICES.find((item) => item.provider === provider && item.model === pricedModel);
   const definition = custom ?? defaultPrice;
   if (!definition) return undefined;
-  const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : provider === "kuafu" ? KUAFU_SOURCE : provider === "codex" ? CODEX_SOURCE : provider === "kimi-coding" ? KIMI_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");
+  const source = configuration.source || (provider === "opencode-go" ? OPENCODE_SOURCE : provider === "deepseek" ? DEEPSEEK_SOURCE : provider === "kuafu" || provider === "kuafu-backup" ? KUAFU_SOURCE : provider === "codex" ? CODEX_SOURCE : provider === "kimi-coding" ? KIMI_SOURCE : "COURSE_OS_PRICING_SNAPSHOT_JSON");
   const capturedAt = configuration.capturedAt || (provider === "opencode-go" ? "2026-09-15T13:00:00.000Z" : DEFAULT_CAPTURED_AT);
   // OpenCode's published DeepSeek schedule uses UTC, not the server timezone.
   // Explicit deployment rate cards remain authoritative and are never discounted.
@@ -103,7 +104,7 @@ export function billingBreakdown(provider: string, billingMode: BillingMode, cos
 export function billingModeForProvider(provider: string, fallback: BillingMode = "unknown"): BillingMode {
   if (provider === "opencode-go") return "subscription_quota";
   if (provider === "deepseek") return "metered";
-  if (provider === "kuafu") return "metered";
+  if (provider === "kuafu" || provider === "kuafu-backup") return "metered";
   if (provider === "codex" || provider === "kimi-coding") return "metered";
   if (provider === "deterministic-local-fallback") return "free";
   return fallback;

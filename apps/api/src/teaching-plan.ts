@@ -38,7 +38,7 @@ const strings = { type: "array", items: string };
 const object = (properties: Record<string, unknown>, optional: string[] = []) => ({ type: "object", properties, required: Object.keys(properties).filter(key => !optional.includes(key)), additionalProperties: false });
 const array = (items: unknown, minItems: number, maxItems: number) => ({ type: "array", items, minItems, maxItems });
 export const teachingPlanSchema = object({
-  problem: string, knownStartingPoint: string, scopeBoundary: string,
+  problem: string, knownStartingPoint: string, scopeBoundary: { type: "string" },
   facts: array(object({ id: string, atomId: string, observation: string, qualification: { type: "string" } }), 1, 48),
   prerequisites: array(object({ name: string, explanation: string }), 1, 5),
   steps: array(object({ id: string, factIds: strings, dependsOn: strings, explanation: string, example: { type: "string" }, boundary: { type: "string" } }), 1, 16),
@@ -270,7 +270,7 @@ export function completeTeachingPlanTransport(value: unknown, blueprint: Teachin
       boundary: transportText(step.boundary, "") };
   });
   if (steps.length === 0) steps.push({ id: "step-1", factIds: facts.map(fact => fact.id), dependsOn: [],
-    explanation: blueprint.requirementPackage.objective, example: "", boundary: "只解释当前页面来源明确给出的内容" });
+    explanation: blueprint.requirementPackage.objective, example: "", boundary: "" });
   const stepIds = new Set(steps.map(step => step.id));
   for (const [index, step] of steps.entries()) step.dependsOn = step.dependsOn.filter(id => stepIds.has(id) && steps.findIndex(item => item.id === id) < index);
 
@@ -315,7 +315,9 @@ export function completeTeachingPlanTransport(value: unknown, blueprint: Teachin
   return {
     problem: transportText(raw.problem, blueprint.requirementPackage.objective),
     knownStartingPoint: transportText(raw.knownStartingPoint, "已经能够识别页面中的标题、文字、符号和图示"),
-    scopeBoundary: transportText(raw.scopeBoundary, "只解释当前页面来源明确给出的内容，不延伸到后续章节"),
+    // Scope is useful only when the source establishes a boundary that changes
+    // how the learner should interpret this page. An empty value is valid.
+    scopeBoundary: transportText(raw.scopeBoundary, ""),
     facts, prerequisites, steps, objectives, questions,
     ...(researchQueries.length ? { researchQueries } : {})
   };
@@ -376,7 +378,18 @@ export function compressText(text: string, budget: number): string {
 
 export function teachingSectionMemory(content: Partial<TeachingPackage>) {
   return {
-    alreadyIntroduced: content.priorKnowledge ?? [],
+    sectionResponsibilities: {
+      priorKnowledge: "只补本页理解所需的前提并完成必要定义；完整讲解应用这些知识，不重复整段定义",
+      learningObjectives: "只说明读完后能完成什么；不提前讲解步骤和答案",
+      chapterBridgeMarkdown: "只连接前页已建立的知识与本页问题；不复述前页正文或本页讲解",
+      fullExplanationMarkdown: "唯一完整教学路径，按具体对象、关系、机制逐步深入",
+      mainContentMarkdown: "只压缩完整讲解的核心结论，不重新解释定义、推导或例子",
+      misconceptions: "只指出具体误解、成因、正确判断和核对方式，不重讲整段正文",
+      questions: "只检验已讲内容的理解与迁移，不把答案复制成讲解"
+    },
+    // Later stages need the concepts already introduced, not another copy of
+    // their full definitions. The plan and source still carry the facts.
+    alreadyIntroduced: (content.priorKnowledge ?? []).map(item => item.split(/[：:]/u, 1)[0]?.trim() || item),
     bridge: content.chapterBridgeMarkdown ?? "",
     objectives: content.learningObjectives ?? [],
     explanation: compressText(content.fullExplanationMarkdown ?? "", 6500),

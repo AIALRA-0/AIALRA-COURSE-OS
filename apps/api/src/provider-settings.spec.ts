@@ -35,19 +35,19 @@ describe("Course OS native model provider defaults", () => {
     expect(merged.find((item) => item.id === "deepseek")?.baseUrl).toBe("https://api.deepseek.com");
   });
 
-  it("registers only the five supported model suppliers in the default priority order", () => {
+  it("registers the two credential-scoped Kuafu lines in priority order", () => {
     expect(defaultCourseModelProviders().map((provider) => provider.id)).toEqual([
-      "opencode-go", "deepseek", "kuafu", "codex", "kimi-coding"
+      "opencode-go", "deepseek", "kuafu", "kuafu-backup", "codex", "kimi-coding"
     ]);
     expect(defaultCourseModelRoutePolicy().routes?.map((route) => route.providerId)).toEqual([
-      "kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"
+      "kuafu", "kuafu-backup", "opencode-go", "deepseek", "codex", "kimi-coding"
     ]);
   });
 
   it("upgrades an older per-stage policy with the ordered provider chain", () => {
     const legacy = { ...defaultCourseModelRoutePolicy(), routes: undefined, allowProviderFallback: false };
     const merged = mergeCourseModelRoutePolicyDefaults(legacy);
-    expect(merged.routes?.map((route) => route.providerId)).toEqual(["kuafu", "opencode-go", "deepseek", "codex", "kimi-coding"]);
+    expect(merged.routes?.map((route) => route.providerId)).toEqual(["kuafu", "kuafu-backup", "opencode-go", "deepseek", "codex", "kimi-coding"]);
     expect(merged.allowProviderFallback).toBe(true);
   });
 
@@ -57,6 +57,21 @@ describe("Course OS native model provider defaults", () => {
       ? { ...route, modelId: "deepseek-v4-flash-vision-exp" }
       : route);
     expect(mergeCourseModelRoutePolicyDefaults(saved).routes?.find((route) => route.providerId === "deepseek")?.modelId).toBe("deepseek-flash");
+  });
+
+  it("adds the backup provider beside either saved primary without changing the existing credential", () => {
+    const saved = defaultCourseModelProviders().filter(provider => provider.id !== "kuafu-backup").map(provider => provider.id === "kuafu"
+      ? { ...provider, credential: { configured: true, maskedValue: "••••1234" } } : provider);
+    const merged = mergeCourseModelProviderDefaults(saved);
+    expect(merged.find(provider => provider.id === "kuafu-backup")?.models.map(model => model.id)).toEqual(["deepseek-v4.1-flash-expires-on-0910"]);
+    expect(merged.find(provider => provider.id === "kuafu")?.credential.maskedValue).toBe("••••1234");
+    for (const primaryProvider of ["kuafu", "kuafu-backup"]) {
+      const policy = defaultCourseModelRoutePolicy();
+      policy.routes = [{ providerId: primaryProvider, modelId: primaryProvider === "kuafu"
+        ? "deepseek-v4.1-flash" : "deepseek-v4.1-flash-expires-on-0910", enabled: true }];
+      const routes = mergeCourseModelRoutePolicyDefaults(policy).routes!;
+      expect(routes.map(route => route.providerId)).toEqual([primaryProvider, primaryProvider === "kuafu" ? "kuafu-backup" : "kuafu"]);
+    }
   });
 
   it("removes the retired ambiguous emergency provider from persisted settings", () => {

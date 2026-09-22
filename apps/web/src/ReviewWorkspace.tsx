@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CourseRelease, QuestionBankItem, ReviewMap, ReviewPlan, ReviewSession } from "@course-os/contracts";
 import { api } from "./api.js";
 import { Icon } from "./Icon.js";
+import { SelfRetellingReview } from "./SelfRetellingReview.js";
 
 type ReviewObjective = ReviewMap["objectives"][number];
 type PendingReviewResult = { feedback: string; correct: boolean; session: ReviewSession };
@@ -34,6 +35,7 @@ export function ReviewWorkspace({ releases, reviewMap, onOpenPage, onReviewChang
   const [pendingResult, setPendingResult] = useState<PendingReviewResult>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [selfRetellingReviewOpen, setSelfRetellingReviewOpen] = useState(false);
 
   const objectives = reviewMap?.objectives ?? [];
   const items = useMemo(() => objectives.filter((objective) => {
@@ -212,6 +214,7 @@ export function ReviewWorkspace({ releases, reviewMap, onOpenPage, onReviewChang
   };
 
   const currentPage = sessionObjective ? releases.find((release) => release.id === sessionObjective.releaseId)?.pages.find((page) => page.id === sessionObjective.pageId) : undefined;
+  if (selfRetellingReviewOpen) return <SelfRetellingReview releases={releases} onClose={() => setSelfRetellingReviewOpen(false)} />;
   if (session && sessionObjective && (session.status === "active" || pendingResult)) return <ReviewSessionView objective={sessionObjective} question={sessionQuestion} page={currentPage} answer={answer} hintLevel={hintLevel} feedback={feedback} resultShown={Boolean(pendingResult)} resultCorrect={pendingResult?.correct ?? false} nextLabel={pendingResult?.session.currentObjectiveId ? "下一道复习题" : "完成复习"} busy={busy} error={error} onAnswer={setAnswer} onHint={() => setHintLevel((level) => Math.min(6, level + 1))} onSubmit={submitAnswer} onNext={advanceAfterResult} onSkip={skip} onOpenPage={() => onOpenPage(sessionObjective.releaseId, sessionObjective.pageId)} />;
   if (session?.status === "completed" && !pendingResult) return <div className="review-complete"><span className="review-complete-icon"><Icon name="check" /></span><h1>这次复习完成了</h1><p>你完成了 {session.objectiveIds.length} 个目标，结果已经写入 ReadWeave</p><div className="review-complete-actions"><button className="primary-button" data-action="review-return-map" onClick={() => { setSession(undefined); setSessionObjective(undefined); setSessionQuestion(undefined); setPlan(undefined); setSelectedObjectiveIds([]); writeReviewHash(); }}>回到掌握地图</button><button className="quiet-button" data-action="review-open-first-page" onClick={() => { const objective = objectives.find((item) => item.objectiveId === session.objectiveIds[0]); if (objective) onOpenPage(objective.releaseId, objective.pageId); }}>打开教学页</button></div></div>;
 
@@ -223,7 +226,7 @@ export function ReviewWorkspace({ releases, reviewMap, onOpenPage, onReviewChang
   return <div className="review-workspace">
     <header className="review-header">
       <div><span className="section-kicker">REVIEW CENTER</span><h1>把学过的内容真正留下来</h1><p>先选择要复习的目标，再准备内容，最后开始复习，不在打开页面时自动生成</p></div>
-      <div className="review-date"><span>今天</span><strong>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(new Date())}</strong></div>
+      <div className="review-header-actions"><button className="quiet-button" data-action="review-open-self-retelling-cards" onClick={() => setSelfRetellingReviewOpen(true)}>自我重述卡片</button><div className="review-date"><span>今天</span><strong>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(new Date())}</strong></div></div>
     </header>
 
     <section className="review-stats">

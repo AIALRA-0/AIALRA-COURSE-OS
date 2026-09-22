@@ -30,11 +30,23 @@ import type {
   ReviewSession,
   ReviewAttemptResult,
   WritingPolicyCurrent,
-  GenerationHarnessCurrent
+  GenerationHarnessCurrent,
+  SelfRetelling
 } from "@course-os/contracts";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 export type { SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
+
+export interface ReadWeaveEtapiSettings {
+  enabled: boolean;
+  baseUrl: string;
+  parentNoteId: string;
+  publicUrl: string;
+  credential: { configured: boolean; maskedValue?: string; updatedAt?: string };
+}
+
+export type ReadWeaveEtapiSettingsUpdate = Partial<Pick<ReadWeaveEtapiSettings, "enabled" | "baseUrl" | "parentNoteId" | "publicUrl">> & { token?: string };
+export type ModelProviderCreate = Pick<ModelProviderConfig, "id" | "displayName" | "baseUrl" | "enabled" | "models">;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const WORKSPACE_ID = "personal";
@@ -145,10 +157,19 @@ export const api = {
     body: JSON.stringify(settings)
   }),
   modelProviders: () => request<ModelProviderConfig[]>("/api/v1/model-providers"),
-  updateModelProvider: (providerId: string, patch: { baseUrl?: string; enabled?: boolean }) => request<ModelProviderConfig>(`/api/v1/model-providers/${encodeURIComponent(providerId)}`, {
+  createModelProvider: (provider: ModelProviderCreate) => request<ModelProviderConfig>("/api/v1/model-providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(provider)
+  }),
+  updateModelProvider: (providerId: string, patch: Partial<ModelProviderCreate>) => request<ModelProviderConfig>(`/api/v1/model-providers/${encodeURIComponent(providerId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(patch)
+  }),
+  deleteModelProvider: (providerId: string) => request<void>(`/api/v1/model-providers/${encodeURIComponent(providerId)}`, {
+    method: "DELETE",
+    headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
   saveProviderCredential: (providerId: string, secret: string) => request<Pick<ModelProviderConfig, "id" | "credential">>(`/api/v1/model-providers/${encodeURIComponent(providerId)}/credential`, {
     method: "PUT",
@@ -180,9 +201,26 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(policy)
   }),
+  readweaveEtapiSettings: () => request<ReadWeaveEtapiSettings>("/api/v1/readweave/etapi-settings"),
+  updateReadweaveEtapiSettings: (settings: ReadWeaveEtapiSettingsUpdate) => request<ReadWeaveEtapiSettings>("/api/v1/readweave/etapi-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(settings)
+  }),
+  deleteReadweaveEtapiSettings: () => request<void>("/api/v1/readweave/etapi-settings", {
+    method: "DELETE",
+    headers: { "Idempotency-Key": crypto.randomUUID() }
+  }),
   releases: () => request<CourseRelease[]>("/api/v1/releases?view=index"),
   release: (id: string) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`),
   lesson: (pageId: string) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`),
+  selfRetellings: (releaseId?: string) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`),
+  saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ answer })
+  }),
+  reviewSelfRetelling: (releaseId: string, pageId: string, result: "again" | "remembered") => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}/review`, {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ result })
+  }),
   readweaveQuestions: (pageId: string) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`),
   draft: (pageId: string) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`),
   saveDraft: (draft: LessonDraft, page: LessonDraft["page"], changedBlockIds: string[]) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(draft.pageId)}/draft`, {
@@ -203,7 +241,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseReleaseId })
   }),
-  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean } = {}) => {
+  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean; previousMaterialVersionId?: string } = {}) => {
     const body = new FormData();
     body.append("file", file);
     body.append("source", "course-os-studio");
@@ -212,6 +250,7 @@ export const api = {
     if (options.qualityMode) body.append("qualityMode", options.qualityMode);
     if (options.language) body.append("language", options.language);
     if (options.parentNodeId) body.append("parentNodeId", options.parentNodeId);
+    if (options.previousMaterialVersionId) body.append("previousMaterialVersionId", options.previousMaterialVersionId);
     body.append("autoGenerate", String(options.autoGenerate !== false));
     return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
   },

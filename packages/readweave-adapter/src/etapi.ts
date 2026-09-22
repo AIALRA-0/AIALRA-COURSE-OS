@@ -183,6 +183,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     this.requestTimeoutMs = Math.max(1_000, config.requestTimeoutMs ?? 15_000);
   }
 
+  /** Verify credentials and access to the configured root without changing remote data. */
+  async verifyConnection(): Promise<void> {
+    await this.raw(`/notes/${encodeURIComponent(this.config.parentNoteId)}`);
+  }
+
   async listCourses(): Promise<CourseProject[]> {
     const state = await this.readStateReference();
     return mergeReleaseCourses(state.courses, state.releases, this.workspaceId);

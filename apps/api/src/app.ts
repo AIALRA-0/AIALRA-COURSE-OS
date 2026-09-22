@@ -63,6 +63,7 @@ import { previousLessonContext, teachingSectionMemory } from "./teaching-plan.js
 import { plannedContentIssues, planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
 import { probeSearchConnection, searchTeachingEvidence, type CourseSearchConnection, type CourseSearchReceipt } from "./search-providers.js";
+import { prepareIncrementalVersion } from "./incremental-import.js";
 
 export interface AppDependencies {
   dataDir: string;
@@ -440,15 +441,38 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/model-providers", async (_request, response, next) => {
     try {
-      const providers = withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders);
+      const providers = withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders.filter(provider => !provider.archived));
       response.json(await withVaultCredentialStatus(providers, "model-provider", credentialVault));
     }
     catch (error) { next(error); }
   });
 
+  app.post("/api/v1/model-providers", async (request, response, next) => {
+    try {
+      const candidate = request.body as Partial<ModelProviderConfig>;
+      if (!validModelProviderInput(candidate)) return sendError(request, response, 422, "MODEL_PROVIDER_INVALID", "模型供应商配置不完整或包含无效字段", false);
+      const idempotencyKey = requireIdempotencyKey(request);
+      const saved = await dependencies.operations.mutate(state => {
+        const replay = state.idempotency[idempotencyKey];
+        if (replay) return structuredClone(state.modelProviders.find(item => item.id === replay.objectId)!);
+        const existing = state.modelProviders.find(item => item.id === candidate.id);
+        if (existing && !existing.archived) throw new Error("MODEL_PROVIDER_ALREADY_EXISTS");
+        const provider: ModelProviderConfig = {
+          id: candidate.id!, displayName: candidate.displayName!, baseUrl: candidate.baseUrl!,
+          enabled: candidate.enabled!, models: structuredClone(candidate.models!), credential: { configured: false }
+        };
+        if (existing) Object.assign(existing, provider, { archived: false });
+        else state.modelProviders.push(provider);
+        state.idempotency[idempotencyKey] = { kind: "model_provider_config", objectId: provider.id };
+        return structuredClone(existing ?? provider);
+      });
+      response.status(201).json(saved);
+    } catch (error) { next(error); }
+  });
+
   app.patch("/api/v1/model-providers/:id", async (request, response, next) => {
     try {
-      const patch: { baseUrl?: string; enabled?: boolean } = {};
+      const patch: Partial<Pick<ModelProviderConfig, "baseUrl" | "enabled" | "displayName" | "models">> = {};
       if (request.body.baseUrl !== undefined) {
         if (typeof request.body.baseUrl !== "string") return sendError(request, response, 422, "MODEL_PROVIDER_BASE_URL_INVALID", "接口地址必须是文本", false);
         const baseUrl = request.body.baseUrl.trim();
@@ -459,11 +483,19 @@ export function createApp(dependencies: AppDependencies): Express {
         if (typeof request.body.enabled !== "boolean") return sendError(request, response, 422, "MODEL_PROVIDER_ENABLED_INVALID", "供应商启用状态必须是布尔值", false);
         patch.enabled = request.body.enabled;
       }
+      if (request.body.displayName !== undefined) {
+        if (typeof request.body.displayName !== "string" || !request.body.displayName.trim()) return sendError(request, response, 422, "MODEL_PROVIDER_NAME_INVALID", "供应商名称不能为空", false);
+        patch.displayName = request.body.displayName.trim().slice(0, 100);
+      }
+      if (request.body.models !== undefined) {
+        if (!validModelProviderModels(request.body.models)) return sendError(request, response, 422, "MODEL_PROVIDER_MODELS_INVALID", "模型列表结构无效", false);
+        patch.models = structuredClone(request.body.models);
+      }
       if (Object.keys(patch).length === 0) return sendError(request, response, 422, "MODEL_PROVIDER_PATCH_EMPTY", "没有提供要修改的供应商设置", false);
       const idempotencyKey = requireIdempotencyKey(request);
       const saved = await dependencies.operations.mutate(state => {
         const provider = state.modelProviders.find(item => item.id === request.params.id);
-        if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+        if (!provider || provider.archived) throw new Error("MODEL_PROVIDER_NOT_FOUND");
         if (!state.idempotency[idempotencyKey]) {
           Object.assign(provider, patch);
           state.idempotency[idempotencyKey] = { kind: "model_provider_config", objectId: provider.id };
@@ -474,16 +506,38 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.delete("/api/v1/model-providers/:id", async (request, response, next) => {
+    try {
+      const idempotencyKey = requireIdempotencyKey(request);
+      const providerId = request.params.id;
+      await dependencies.operations.mutate(state => {
+        if (state.idempotency[idempotencyKey]) return;
+        const provider = state.modelProviders.find(item => item.id === providerId && !item.archived);
+        if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+        provider.archived = true;
+        provider.enabled = false;
+        provider.credential = { configured: false };
+        provider.vault = { backend: "course_os_vault", state: "missing" };
+        state.modelRoutePolicy.routes = state.modelRoutePolicy.routes?.filter(route => route.providerId !== providerId);
+        state.idempotency[idempotencyKey] = { kind: "model_provider_delete", objectId: providerId };
+      });
+      await credentialVault.delete(`model-provider:${providerId}`);
+      response.status(204).end();
+    } catch (error) { next(error); }
+  });
+
   app.put("/api/v1/model-providers/:id/credential", async (request, response, next) => {
     try {
       const secret = String(request.body.secret || "").trim();
       if (!secret) return sendError(request, response, 422, "MODEL_PROVIDER_CREDENTIAL_REQUIRED", "请填写接口密钥", false);
+      const configuredProvider = (await dependencies.operations.read()).modelProviders.find(item => item.id === request.params.id && !item.archived);
+      if (!configuredProvider) return sendError(request, response, 404, "MODEL_PROVIDER_NOT_FOUND", "没有找到这个模型供应商", false);
       await credentialVault.set(`model-provider:${request.params.id}`, secret);
       const credential = { configured: true, maskedValue: `••••${secret.slice(-4)}`, updatedAt: new Date().toISOString() };
       const idempotencyKey = requireIdempotencyKey(request);
       const saved = await dependencies.operations.mutate(state => {
         const provider = state.modelProviders.find(item => item.id === request.params.id);
-        if (!provider) throw new Error("MODEL_PROVIDER_NOT_FOUND");
+        if (!provider || provider.archived) throw new Error("MODEL_PROVIDER_NOT_FOUND");
         if (!state.idempotency[idempotencyKey]) {
           provider.credential = credential;
           provider.vault = { backend: "course_os_vault", state: "configured", secretRef: `model-provider:${provider.id}`, maskedValue: credential.maskedValue, updatedAt: credential.updatedAt };
@@ -500,14 +554,14 @@ export function createApp(dependencies: AppDependencies): Express {
       const providerId = decodeURIComponent(request.path.slice("/api/v1/model-providers/".length, -":test".length));
       const snapshot = await dependencies.operations.read();
       const provider = snapshot.modelProviders.find((item) => item.id === providerId);
-      if (!provider) return sendError(request, response, 404, "MODEL_PROVIDER_NOT_FOUND", "没有找到这个模型供应商", false);
+      if (!provider || provider.archived) return sendError(request, response, 404, "MODEL_PROVIDER_NOT_FOUND", "没有找到这个模型供应商", false);
       const apiKey = await credentialVault.get(`model-provider:${providerId}`);
       const routedModelId = snapshot.modelRoutePolicy.routes?.find(route => route.enabled && route.providerId === providerId)?.modelId;
       const model = provider.models.find(item => item.id === routedModelId) ?? provider.models[0];
       const health = !provider.baseUrl || !model
         ? { providerId, state: "unconfigured" as const, checkedAt: new Date().toISOString(), message: "供应商没有可测试的接口或模型" }
         : await probeProviderConnection({ providerId, baseUrl: provider.baseUrl, apiKey: apiKey || "", model: model.id, protocol: model.protocol, supportsVision: model.supportsVision, billingMode: model.billingMode } satisfies ProviderConnection,
-          ["kuafu", "opencode-go", "deepseek"].includes(providerId));
+          ["kuafu", "kuafu-backup", "opencode-go", "deepseek"].includes(providerId));
       const [resolvedProvider] = await withVaultCredentialStatus([provider], "model-provider", credentialVault);
       response.json({ ...resolvedProvider, health });
     }
@@ -515,7 +569,7 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/model-providers/models", async (_request, response, next) => {
-    try { response.json(withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
+    try { response.json(withCurrentDeepSeekModels((await dependencies.operations.read()).modelProviders.filter(provider => !provider.archived)).flatMap((provider) => provider.models.map((model) => ({ ...model, providerId: provider.id })))); }
     catch (error) { next(error); }
   });
 
@@ -902,11 +956,25 @@ export function createApp(dependencies: AppDependencies): Express {
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       const cas = await dependencies.cas.put(request.file.buffer);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const incrementalFromMaterialVersionId = asOptionalString(request.body.previousMaterialVersionId);
+      const previousSource = incrementalFromMaterialVersionId
+        ? await getWorkspaceRelease(dependencies.readweave, incrementalFromMaterialVersionId, workspaceId)
+        : undefined;
+      if (incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source")) {
+        return sendError(request, response, 422, "INCREMENTAL_SOURCE_INVALID", "请选择当前工作区已有的原始课件版本", false);
+      }
+      if (previousSource && asOptionalString(request.body.courseId) && request.body.courseId !== previousSource.courseId) {
+        return sendError(request, response, 422, "INCREMENTAL_COURSE_MISMATCH", "新版课件必须属于原课程", false);
+      }
+      if (previousSource && previousSource.manifestHash === cas.sha256) {
+        return sendError(request, response, 422, "INCREMENTAL_SOURCE_UNCHANGED", "新旧课件文件相同，没有可插入或追加的页面", false);
+      }
       const source = canonicalImportSource(String(request.body.source || "user_upload"));
       const requestedAutoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
       let deduplicated = false;
       let record: ImportRecord = await dependencies.operations.mutate((state) => {
-        const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256 && canonicalImportSource(item.source) === source);
+        const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256
+          && item.incrementalFromMaterialVersionId === incrementalFromMaterialVersionId && canonicalImportSource(item.source) === source);
         if (duplicate) {
           deduplicated = true;
           state.idempotency[idempotencyKey] = { kind: "import", objectId: duplicate.id };
@@ -918,8 +986,9 @@ export function createApp(dependencies: AppDependencies): Express {
         const item = {
           id: randomUUID(),
           workspaceId,
-           courseId: asOptionalString(request.body.courseId),
+           courseId: previousSource?.courseId ?? asOptionalString(request.body.courseId),
            parentNodeId: asOptionalString(request.body.parentNodeId),
+          incrementalFromMaterialVersionId,
           originalName: request.file!.originalname,
           mediaType: inspection.detectedMediaType || request.file!.mimetype,
           kind: inspection.kind || "syllabus" as const,
@@ -4279,6 +4348,24 @@ function isAllowedProviderBaseUrl(value: string): boolean {
   }
 }
 
+function validModelProviderModels(value: unknown): value is ModelProviderConfig["models"] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 30) return false;
+  if (new Set(value.map(model => model?.id)).size !== value.length) return false;
+  return value.every(model => model && typeof model.id === "string" && /^[a-zA-Z0-9._:-]{1,100}$/u.test(model.id)
+    && typeof model.displayName === "string" && model.displayName.trim().length > 0
+    && ["responses", "messages", "chat_completions"].includes(model.protocol)
+    && typeof model.supportsVision === "boolean" && typeof model.supportsJsonSchema === "boolean"
+    && typeof model.supportsReasoning === "boolean"
+    && ["metered", "subscription_quota", "free", "unknown"].includes(model.billingMode));
+}
+
+function validModelProviderInput(value: Partial<ModelProviderConfig> | undefined): boolean {
+  return !!value && typeof value.id === "string" && /^[a-z][a-z0-9-]{1,63}$/u.test(value.id)
+    && typeof value.displayName === "string" && value.displayName.trim().length > 0
+    && typeof value.baseUrl === "string" && isAllowedProviderBaseUrl(value.baseUrl)
+    && typeof value.enabled === "boolean" && validModelProviderModels(value.models);
+}
+
 export async function resumeIncompleteImports(dependencies: AppDependencies): Promise<void> {
   const pending = (await dependencies.operations.read()).imports.filter((item) => ["accepted", "processing", "syncing"].includes(item.state));
   await Promise.allSettled(pending.map((item) => processImport(item.id, dependencies)));
@@ -4377,11 +4464,16 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     const parentCourseId = resolveParentCourseId(parentNode, treeNodes, record.courseId);
     const course = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies);
     const materialVersionId = `material-version:${record.id}`;
-    const moduleId = parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`;
+    const previousSource = record.incrementalFromMaterialVersionId
+      ? await getWorkspaceRelease(dependencies.readweave, record.incrementalFromMaterialVersionId, record.workspaceId)
+      : undefined;
+    if (record.incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source"
+      || previousSource.courseId !== course.id)) throw new Error("INCREMENTAL_SOURCE_INVALID");
+    const moduleId = previousSource?.moduleId ?? (parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`);
     const createdAt = new Date().toISOString();
     const writingPolicy = await currentWritingPolicy();
     if (writingPolicy.validator.status !== "passed") throw new Error("WRITING_POLICY_VALIDATION_FAILED");
-    const sourceRelease: CourseRelease = {
+    let sourceRelease: CourseRelease = {
       id: materialVersionId,
       courseId: course.id,
       courseTitle: course.title,
@@ -4399,6 +4491,19 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       costUsd: 0,
       lifecycle: "draft_source"
     };
+    const prepared = previousSource ? prepareIncrementalVersion({
+      previous: previousSource,
+      previousDrafts: (await Promise.all(previousSource.pageIds.map((pageId) => dependencies.readweave.getDraftByPage(pageId))))
+        .filter((draft): draft is LessonDraft => Boolean(draft)),
+      incoming: convertedPages.map(({ page, sha256 }) => ({ title: page.title, text: page.anchors.find((anchor) => anchor.kind === "text")?.text ?? "", imageSha256: sha256 })),
+      newSourcePages: convertedPages.map(({ page }) => page),
+      newReleaseId: materialVersionId,
+      newManifestHash: record.sha256,
+      workspaceId: record.workspaceId,
+      createdAt
+    }) : undefined;
+    if (prepared && prepared.insertedPageIds.length === 0) throw new Error("INCREMENTAL_NO_NEW_PAGES");
+    if (prepared) sourceRelease = prepared.sourceRelease;
     await dependencies.operations.mutate((state) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (item) item.state = "syncing";
@@ -4415,25 +4520,26 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       await dependencies.readweave.registerDraftSource(sourceRelease, systemWriteContext(`import:${importId}:source`, record.workspaceId));
     }
     const savedDrafts: LessonDraft[] = [];
-    for (const converted of convertedPages) {
-      const existingDraft = await dependencies.readweave.getDraftByPage(converted.page.id);
+    for (const [index, converted] of convertedPages.entries()) {
+      const page = sourceRelease.pages[index]!;
+      const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
       if (existingDraft) {
         if (existingDraft.sourceReleaseId !== materialVersionId || existingDraft.courseId !== course.id) throw new Error("READWEAVE_IMPORT_DRAFT_CONFLICT");
         savedDrafts.push(existingDraft);
         continue;
       }
-      const draft: LessonDraft = {
+      const draft: LessonDraft = prepared?.drafts[index] ?? {
         id: `draft:${converted.page.id}`,
         workspaceId: record.workspaceId,
         courseId: course.id,
         moduleId,
         sourceReleaseId: materialVersionId,
-        pageId: converted.page.id,
+        pageId: page.id,
         revision: 0,
         status: "needs_review",
-        page: converted.page,
-        changedBlockIds: converted.page.blocks.map((block) => block.id),
-        contentHash: sha256Text(stableStringify(converted.page)),
+        page,
+        changedBlockIds: page.blocks.map((block) => block.id),
+        contentHash: sha256Text(stableStringify(page)),
         updatedAt: createdAt
       };
       const saved = await dependencies.readweave.saveDraft(
@@ -4442,7 +4548,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         systemWriteContext(`import:${importId}:draft:${converted.page.pageNumber}`, record.workspaceId),
         {
           sha256: converted.sha256,
-          fileName: `page-${String(converted.page.pageNumber).padStart(3, "0")}.${converted.mediaType === "image/png" ? "png" : "svg"}`,
+          fileName: `page-${String(page.pageNumber).padStart(3, "0")}.${converted.mediaType === "image/png" ? "png" : "svg"}`,
           mediaType: converted.mediaType,
           bytes: converted.bytes
         }
@@ -4452,11 +4558,12 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         dependencies.operations.appendEvent(state, importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
     }
-    const generationPlan = record.autoGenerate === true ? await createGenerationPlan({
+    const generationPageIds = prepared?.generationPageIds ?? sourceRelease.pageIds;
+    const generationPlan = record.autoGenerate === true && generationPageIds.length > 0 ? await createGenerationPlan({
       idempotencyKey: `import:${importId}:generation-plan`,
       workspaceId: record.workspaceId,
       materialVersionId,
-      pageIds: convertedPages.map((entry) => entry.page.id),
+      pageIds: generationPageIds,
       budgetUsd: generationBudget(record.qualityMode),
       sourceImportId: importId,
       qualityMode: record.qualityMode || "balanced",
@@ -4469,7 +4576,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       if (!item) return;
       item.courseId = course.id;
       item.materialVersionId = materialVersionId;
-      item.pageIds = convertedPages.map((entry) => entry.page.id);
+      item.pageIds = sourceRelease.pageIds;
       item.draftIds = savedDrafts.map((draft) => draft.id);
       item.convertedAt = conversion.completedAt;
       item.state = "ready";
@@ -4479,7 +4586,9 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.generationCompletedPageIds = generationPlan?.plan.completedPageIds;
       item.generationFailedPageIds = generationPlan?.plan.failedPageIds;
       item.generationState = generationPlan?.plan.state || "not_requested";
-      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds, generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
+      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds,
+        insertedPageIds: prepared?.insertedPageIds, regeneratedPageIds: generationPageIds, preservedPageIds: prepared?.preservedPageIds,
+        generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
     if (generationPlan) startCreatedGenerationPlanJobs(generationPlan, dependencies);
   } catch (error) {

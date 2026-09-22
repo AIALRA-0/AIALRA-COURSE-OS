@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
+import type { ImportTaskState } from "./import-progress.js";
+
+export type CourseTreeTask = { id: string; title: string; detail: string; state: ImportTaskState };
 
 export interface CourseTreeActions {
   createModule?: (course: CourseTreeNode) => void;
@@ -21,9 +24,12 @@ export interface CourseTreeActions {
 
 type TreeMenuState = { node: CourseTreeNode; x: number; y: number };
 
-export function CourseTree({ tree, selectedPageId, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
+export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], onSelectTask, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
+  selectedTaskId?: string;
+  backgroundTasks?: CourseTreeTask[];
+  onSelectTask?: (taskId: string) => void;
   collapsed?: boolean;
   onCollapse?: () => void;
   sidebarWidth?: number;
@@ -145,6 +151,21 @@ export function CourseTree({ tree, selectedPageId, collapsed = false, onCollapse
       {visibleNodes.length === 0 && <div className="tree-empty"><Icon name="search" /><span>{query ? "没有匹配的课程或材料" : "还没有课程或材料"}</span></div>}
       {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query)} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
       {tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query)} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
+      {backgroundTasks.length > 0 && <section className="tree-task-section" aria-label="后台任务">
+        <div className="tree-task-heading"><span>后台任务</span><span>{backgroundTasks.length}</span></div>
+        <div className="tree-task-list">{backgroundTasks.filter((task) => !query || task.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map((task) => <button
+          type="button"
+          className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
+          data-action="tree-open-task"
+          data-task-id={task.id}
+          data-task-state={task.state}
+          key={task.id}
+          onClick={() => onSelectTask?.(task.id)}
+          aria-current={selectedTaskId === task.id ? "page" : undefined}
+          aria-label={`${task.title}，${task.detail}`}
+          title={`${task.title} · ${task.detail}`}
+        ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small>{task.detail}</small></span><Icon name="chevronRight" /></button>)}</div>
+      </section>}
     </nav>
 
     <div className="sidebar-footer">

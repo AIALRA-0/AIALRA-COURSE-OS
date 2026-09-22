@@ -805,7 +805,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .settings-main-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 15px; border-bottom: 1px solid var(--line); }
 .settings-main-header h3 { margin: 5px 0 0; font-size: 21px; }
 .settings-main-content { overflow-y: auto; padding: 22px; }
-.settings-section { max-width: 650px; }
+.settings-section { width: 100%; max-width: 900px; }
 .settings-section-heading { margin-bottom: 18px; }
 .settings-section-heading h4 { margin: 0 0 5px; font-size: 17px; }
 .settings-section-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
@@ -825,6 +825,12 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .settings-connection span:last-child { color: var(--muted); font-size: 11px; }
 .provider-list { display: grid; gap: 12px; }
 .provider-card { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-strong); }
+.settings-provider-create { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
+.settings-provider-create input { min-width: 0; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-strong); }
+.settings-provider-create button { justify-self: start; }
+.settings-edit-grid { display: grid; gap: 6px; margin-top: 16px; }
+.settings-action-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.provider-delete { margin-top: 10px; }
 .provider-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .provider-card > header > div { min-width: 0; display: grid; gap: 4px; }
 .provider-card > header strong { font-size: 14px; }
@@ -860,9 +866,12 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .model-priority-controls label { display: grid; gap: 4px; min-width: 0; color: var(--muted); font-size: 10px; font-weight: 650; }
 .model-priority-controls select { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); font-size: 12px; }
 .model-priority-enabled { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.model-priority-actions { display: flex; gap: 5px; }
+.model-priority-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
 .model-priority-actions .icon-button { width: 30px; height: 30px; font-size: 14px; }
-.search-provider-config { grid-template-columns: minmax(0, 1fr) 90px 120px auto auto; }
+.settings-add-route { margin-top: 12px; }
+.search-provider-config { grid-template-columns: minmax(0, 1fr) minmax(85px, .35fr) minmax(100px, .4fr); }
+.search-provider-config .provider-enabled { grid-column: 2; }
+.search-provider-config > button { grid-column: 3; }
 .search-provider-config label { min-width: 0; }
 .search-provider-config input { width: 100%; min-width: 0; }
 .search-route-editor { display: grid; gap: 8px; }
@@ -967,6 +976,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .search-provider-config { grid-template-columns: 1fr 1fr; align-items: center; }
   .search-provider-config label:first-child { grid-column: 1 / -1; }
   .search-provider-config .provider-enabled { grid-column: 1; }
+  .search-provider-config > button { grid-column: 2; }
   .search-route-row { grid-template-columns: 1fr 1fr; align-items: center; }
   .search-route-row strong { grid-column: 1 / -1; }
   .search-route-row .provider-enabled { justify-self: start; }
@@ -1466,3 +1476,56 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .lesson-table-scroll th, .lesson-table-scroll td { border: 1px solid var(--border); padding: .5rem .75rem; }
 .choice-copy { min-width: 0; overflow-wrap: anywhere; }
 .choice-copy .katex { font-size: 1em; }
+
+/* Background tasks live in the tree; the task page occupies the workspace instead of covering it. */
+.tree-task-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tree-task-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 9px 7px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.tree-task-heading > span:last-child { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--soft); color: var(--faint); text-align: center; font: 10px "IBM Plex Mono", monospace; }
+.tree-task-list { display: grid; gap: 3px; }
+.tree-task-row { width: 100%; min-width: 0; min-height: 48px; display: grid; grid-template-columns: 9px minmax(0, 1fr) 14px; align-items: center; gap: 9px; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); text-align: left; cursor: pointer; }
+.tree-task-row:hover, .tree-task-row:focus-visible { border-color: var(--line); background: var(--soft); outline: none; }
+.tree-task-row.selected { border-color: color-mix(in srgb, var(--brand) 26%, var(--line)); background: var(--brand-soft); color: var(--brand-ink); }
+.tree-task-row > svg { width: 13px; height: 13px; color: var(--faint); }
+.tree-task-copy { min-width: 0; display: grid; gap: 3px; }
+.tree-task-copy strong { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.tree-task-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.task-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.task-state-queued { background: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent); }
+.task-state-running { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 15%, transparent); animation: task-pulse 1.6s ease-in-out infinite; }
+.task-state-completed { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 14%, transparent); }
+.task-state-failed { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent); }
+.task-state-cancelled, .task-state-paused { background: var(--faint); }
+.task-state-awaiting_review { background: var(--blue); }
+@keyframes task-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--amber) 5%, transparent); opacity: .75; } }
+
+.empty-course-workspace.task-page-open { display: block; place-content: initial; padding: 0; text-align: left; }
+.import-task-workspace { width: min(900px, 100%); height: 100%; min-height: 0; overflow: auto; margin: 0 auto; padding: clamp(20px, 3vw, 40px); background: var(--panel); }
+.import-task-page-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 0 16px; border-bottom: 1px solid var(--line); }
+.import-task-page-header h2 { margin: 5px 0 0; font-size: 21px; line-height: 1.35; }
+.import-task-workspace .import-activity-file { margin: 18px 0 12px; font-size: 13px; }
+.import-task-workspace .import-progress { height: 10px; margin: 0 0 9px; }
+.import-task-workspace .import-progress i { background: var(--brand); }
+.import-progress.is-indeterminate i { width: 30%; animation: task-progress-sweep 1.5s ease-in-out infinite alternate; }
+.import-progress.is-stale { background: color-mix(in srgb, var(--amber) 18%, var(--line)); }
+.import-progress.is-stale i { background: var(--amber); }
+@keyframes task-progress-sweep { from { transform: translateX(0); } to { transform: translateX(230%); } }
+.import-task-workspace .import-progress-label { min-height: 46px; margin: 0 0 17px; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.import-task-workspace .import-progress-label strong { min-width: 80px; font: 700 13px "IBM Plex Mono", monospace; }
+.import-task-workspace .import-progress-label span { display: grid; gap: 5px; color: var(--text); font-size: 12px; }
+.import-task-workspace .import-progress-label small { color: var(--muted); font-size: 10px; }
+.import-task-workspace dl { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; padding: 14px 16px; }
+.import-task-workspace dl div { min-height: 32px; }
+.import-task-workspace dt { font-size: 11px; }
+.import-task-workspace dd { font-size: 11px; }
+.import-task-workspace > footer { margin-top: 16px; font-size: 11px; }
+.import-task-workspace .import-activity-loading { min-height: 180px; justify-content: center; font-size: 13px; }
+@media (max-width: 640px) {
+  .tree-task-heading { padding-inline: 8px; }
+  .tree-task-row { min-height: 52px; }
+  .import-task-workspace { padding: 18px 14px; }
+  .import-task-page-header h2 { font-size: 18px; }
+  .import-task-workspace dl { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-state-running, .import-progress.is-indeterminate i { animation: none; }
+}

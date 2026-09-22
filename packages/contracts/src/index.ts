@@ -225,6 +225,18 @@ export interface PageLesson {
   };
 }
 
+/** One learner-authored answer per page in a release; review dates share this record. */
+export interface SelfRetelling {
+  workspaceId: Identifier;
+  releaseId: Identifier;
+  pageId: Identifier;
+  answer: string;
+  answeredAt: ISODateTime;
+  updatedAt: ISODateTime;
+  reviewedAt?: ISODateTime;
+  nextReviewAt?: ISODateTime;
+}
+
 export interface TeachingResourcePackage {
   version: "2.0.0";
   pageId: Identifier;
@@ -453,6 +465,7 @@ export interface ImportRecord {
   workspaceId: Identifier;
   courseId?: Identifier;
   parentNodeId?: Identifier;
+  incrementalFromMaterialVersionId?: Identifier;
   originalName: string;
   mediaType: string;
   kind: "pptx" | "pdf" | "syllabus";
@@ -798,6 +811,8 @@ export interface ModelProviderConfig {
   displayName: string;
   baseUrl: string;
   enabled: boolean;
+  /** Retain a tombstone so built-in defaults are not restored after deletion. */
+  archived?: boolean;
   credential: CredentialStatus;
   /** Optional for old persisted states; new defaults use the Course OS vault status. */
   vault?: ProviderVaultStatus;

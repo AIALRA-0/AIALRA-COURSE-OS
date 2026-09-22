@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,5 +45,23 @@ describe("settings secret vault", () => {
     await vault.set("model-provider:deepseek", "secret-value");
     expect(await vault.get("model-provider:deepseek")).toBe("secret-value");
     expect(await vault.has("model-provider:deepseek")).toBe(true);
+  });
+
+  it("deletes only the selected credential and treats repeated deletion as safe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-vault-delete-"));
+    const filePath = join(root, "secrets.json");
+    const vault = new SecretVault(filePath, "test-deployment-key");
+    await Promise.all([
+      vault.set("readweave:first", "first-secret-value"),
+      vault.set("readweave:second", "second-secret-value")
+    ]);
+
+    expect(await vault.delete("readweave:first")).toBe(true);
+    expect(await vault.delete("readweave:first")).toBe(false);
+    expect(await vault.get("readweave:first")).toBeUndefined();
+    expect(await vault.get("readweave:second")).toBe("second-secret-value");
+    const persisted = await readFile(filePath, "utf8");
+    expect(persisted).not.toContain("first-secret-value");
+    expect(persisted).not.toContain("second-secret-value");
   });
 });

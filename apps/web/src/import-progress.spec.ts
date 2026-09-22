@@ -1,6 +1,6 @@
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { formatProgressCount, summarizeImportProgress } from "./import-progress.js";
+import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importTaskStateLabel, summarizeImportProgress } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
@@ -108,5 +108,84 @@ describe("import progress summary", () => {
     expect(result.concurrency).toBeUndefined();
     expect(result.costUsd).toBeUndefined();
     expect(formatProgressCount(result.crossPage)).toBe("—");
+  });
+
+  it("classifies importing, queued, active, completed, failed and stopped tasks distinctly", () => {
+    expect(getImportTaskState(record({ state: "processing" }))).toBe("running");
+    expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "queued" }))).toBe("queued");
+    expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "running" }))).toBe("running");
+    expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "completed" }))).toBe("completed");
+    expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "failed" }))).toBe("failed");
+    expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "cancelled" }))).toBe("cancelled");
+    expect(importTaskStateLabel("running")).toBe("正在处理");
+  });
+
+  it("does not invent a percentage when active work has no persisted counters", () => {
+    const result = getImportActivity(
+      record({ state: "ready", autoGenerate: true, generationState: "running", updatedAt: "2026-09-22T10:00:00.000Z" }),
+      plan({ id: "plan-1", state: "running", pageIds: ["p1", "p2"], updatedAt: "2026-09-22T10:00:20.000Z" }),
+      [{ id: "job-1", state: "running", updatedAt: "2026-09-22T10:00:30.000Z" }] as GenerationJob[],
+      [],
+      Date.parse("2026-09-22T10:01:00.000Z")
+    );
+
+    expect(result.stage).toBe("生成页面讲解");
+    expect(result.progressPercent).toBeUndefined();
+    expect(result.ageSeconds).toBe(30);
+    expect(result.stale).toBe(false);
+  });
+
+  it("shows an exact conversion-stage percentage only when page counters are available", () => {
+    const result = getImportActivity(
+      record({
+        state: "processing",
+        progress: { conversion: { completed: 3, total: 8 } },
+        updatedAt: "2026-09-22T10:00:00.000Z"
+      }),
+      undefined,
+      [],
+      [],
+      Date.parse("2026-09-22T10:00:10.000Z")
+    );
+    expect(result.stage).toBe("页面转换");
+    expect(result.progressPercent).toBe(38);
+    expect(result.progressScope).toBe("页面转换");
+  });
+
+  it("uses actual completed core and bridge page counts and flags a stale heartbeat", () => {
+    const result = getImportActivity(
+      record({ state: "ready", autoGenerate: true, generationState: "running" }),
+      plan({
+        id: "plan-1",
+        state: "running",
+        pageIds: ["p1", "p2", "p3", "p4"],
+        coreCompletedPageIds: ["p1", "p2", "p3", "p4"],
+        bridgeCompletedPageIds: ["p1", "p2"],
+        updatedAt: "2026-09-22T09:56:00.000Z"
+      }),
+      [],
+      [],
+      Date.parse("2026-09-22T10:00:00.000Z")
+    );
+
+    expect(result.stage).toBe("生成跨页承接");
+    expect(result.progressPercent).toBe(75);
+    expect(result.ageSeconds).toBe(240);
+    expect(result.stale).toBe(true);
+    expect(formatActivityAge(result.ageSeconds)).toBe("4 分钟前");
+  });
+
+  it("marks a completed plan complete and keeps failed progress from implying success", () => {
+    const completed = getImportActivity(
+      record({ state: "ready", autoGenerate: true }),
+      plan({ id: "plan-1", state: "completed", pageIds: ["p1"] }), [], [], 0
+    );
+    const failed = getImportActivity(
+      record({ state: "ready", autoGenerate: true }),
+      plan({ id: "plan-2", state: "failed", pageIds: ["p1"] }), [], [], 0
+    );
+    expect(completed.progressPercent).toBe(100);
+    expect(failed.progressPercent).toBeUndefined();
+    expect(failed.stage).toBe("生成失败");
   });
 });

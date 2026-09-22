@@ -644,7 +644,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         && this.connection.protocol === "chat_completions" && typeof init.body === "string"
         ? JSON.stringify({ thinking: { type: "disabled" }, ...JSON.parse(init.body) })
         : init.body;
-      const useResponsesStream = ["deepseek", "kuafu", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
+      const useResponsesStream = ["deepseek", "kuafu", "kuafu-backup", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
       const requestBody = useResponsesStream
         ? JSON.stringify({ ...(JSON.parse(rawBody as string) as Record<string, unknown>), stream: true })
@@ -748,7 +748,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const responseRequest = { model: this.connection.model,
           instructions: `${professorInstructions(input.language)}\n\n只修复指定字段，只返回这些字段的 JSON，不重写其他字段，不增添来源没有给出的事实。${fields.includes("coverageEvidence") ? "从 evidenceSpans 选择真正解释对应来源对象的片段编号，explanation 只填 excerpt: 编号，不自行摘录、拼接或改写正文。" : coverageQuoteInstruction}；atomId 和 coveredFields 也须与来源及正文一致。完整讲解的覆盖原句不得丢失；先验知识逐项保持单冒号和三至五个完整分句。若修复完整讲解，字符数必须严格低于输入中的 maximumExplanationCharacters，删除页码、页脚与版式点评，只保留有效教学内容；原图中的英文标签可以逐字加引号保留，普通英文必须依照写作策略配中文。独立英文缩写首次出现时写出中文名称、经核实的英文全称与缩写；正式名称内部已有缩写时保留原名并就近说明其中文含义与有依据的英文全称；后文优先使用中文，无法核实时只保留准确中文并说明原图标签。若问题涉及符号权重和结果变化方向，必须写清权重符号与其他输入固定的条件；来源未给条件时不能写无条件单调结论。\n本次成文要求：${fields.map(field => teachingCompositionContract[field as keyof typeof teachingCompositionContract] || "只绑定真实来源对象与正文片段").join("\n")}\n${fields.includes("questions") ? "题库修复必须删除无助于理解的原文英文复述，改用准确中文表达；不要把已能准确用中文表达的原文标签再次作为题目解释中的普通英文。只有程序标识、数学变量或题目确实要求辨认的原始对象才保留原样，并在对象外用中文解释。理解题的 expectedAnswer 若含独立比较项，必须直接写成多行 Markdown 列表；不能只给 explanation 换行而漏掉标准答案。" : ""}`,
           input: content, max_output_tokens: fields.includes("fullExplanationMarkdown") ? 4_500 : 2_500,
-          ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
+          ...(["deepseek", "kuafu", "kuafu-backup"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
             : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_field_repair", schema, strict: true } },
@@ -927,7 +927,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const request = this.connection.protocol === "responses" ? {
       url: `${baseUrl}/responses`,
       body: { model: this.connection.model, instructions: "你是严格的课程事实核验员。只返回符合 JSON Schema 的对象，不添加正文。", input: userInput,
-        max_output_tokens: 4_500, ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
+        max_output_tokens: 4_500, ...(["deepseek", "kuafu", "kuafu-backup"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
           : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "low" } }
           : { temperature: 0 }),
         text: { format: { type: "json_schema", name: "course_os_semantic_audit", schema: auditSchema, strict: true } },
@@ -1118,7 +1118,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       model: this.connection.model, instructions: request.instructions,
       input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
       max_output_tokens: maxTokens,
-      ...(["deepseek", "kuafu", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+      ...(["deepseek", "kuafu", "kuafu-backup", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
       text: { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
     } : protocol === "messages" ? {
       model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
@@ -1211,7 +1211,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
           instructions: instruction,
           input: text,
           max_output_tokens: teachingOutputTokenLimit(input.qualityMode),
-          ...(["deepseek", "kuafu"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
+          ...(["deepseek", "kuafu", "kuafu-backup"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } }
             : this.connection.providerId === "opencode-go" ? { reasoning: { effort: "medium" } }
             : { temperature: 0.2 }),
           text: { format: { type: "json_schema", name: "course_os_teaching_package", schema: teachingPackageSchema, strict: true } },
@@ -1389,10 +1389,14 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         return await execute(new HttpProviderTeachingClient(connection), routedInput);
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
+        const nextCandidate = candidates[candidates.indexOf(candidate) + 1];
+        const kuafuPeer = nextCandidate && ["kuafu", "kuafu-backup"].includes(candidate.providerId)
+          && ["kuafu", "kuafu-backup"].includes(nextCandidate.providerId) && nextCandidate.providerId !== candidate.providerId;
+        const peerAuthFailure = kuafuPeer && /^MODEL_PROVIDER_FAILED:(?:401|403|invalid_api_key|insufficient_quota)$/u.test(error.code);
         // Provider-local capacity and upstream failures may use the explicit
         // ordered route list. Content and configuration failures must retain
         // their original provider and error.
-        if (error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
+        if (!peerAuthFailure && error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
           && !/^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|quota_exhausted|rate_limit_exceeded|upstream_error|response_failed)$/.test(error.code)
           && error.code !== "MODEL_PROVIDER_NETWORK_FAILURE") throw error;
         lastError = error;

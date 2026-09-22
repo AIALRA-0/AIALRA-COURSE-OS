@@ -3,7 +3,7 @@ import { formatMisconception, validateMarkdownMath } from "@course-os/quality";
 import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, completeTeachingPlanTransport, fillMissingPlanObjectiveText, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
-import { writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
+import { planningPrompt, plannedWritingPrompt, writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
 import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
@@ -220,6 +220,32 @@ it("fills omitted objective prose from existing plan text without a provider rep
   };
   const normalized = fillMissingPlanObjectiveText(plan);
   expect(normalized.objectives[0]).toMatchObject({ startingPoint: "已有输入", outcome: "能够根据输入核对结果" });
+});
+it("keeps absent scope metadata empty instead of manufacturing a boundary statement", () => {
+  const { input, plan } = fixture();
+  const normalized = completeTeachingPlanTransport({ ...plan, scopeBoundary: "" }, input.blueprint!);
+  expect(normalized.scopeBoundary).toBe("");
+  expect(validateTeachingPlan(normalized, input.blueprint!)).toEqual([]);
+});
+it("gives each teaching section a distinct role and uses prior sections as short dependencies", () => {
+  const memory = teachingSectionMemory({ ...opening, ...explanation, ...closing } as TeachingPackage);
+  expect(memory.sectionResponsibilities.priorKnowledge).toContain("不重复整段定义");
+  expect(memory.sectionResponsibilities.fullExplanationMarkdown).toContain("逐步深入");
+  expect(memory.sectionResponsibilities.mainContentMarkdown).toContain("只压缩");
+  expect(memory.sectionResponsibilities.misconceptions).toContain("不重讲整段正文");
+  expect(memory.alreadyIntroduced).toEqual(["输入（Input）"]);
+});
+it("keeps absence inventories and evidence-boundary narration out of the planned lesson", () => {
+  expect(planningPrompt).toContain("没有这种边界时返回空字符串");
+  expect(planningPrompt).toContain("不要把“本页没有定义、没有分类、没有判定标准、后续才讲”等缺失项列成事实");
+  expect(plannedWritingPrompt).toContain("不得把来源标签、审计过程或“本页没有定义、分类、判定标准”“后续才讲”等缺失清单写成主体内容");
+  expect(plannedWritingPrompt).toContain("只有当明确缺少的前提会使当前推理无法成立或可能被误读时");
+});
+it("instructs generation to progress between sections without copying definitions", () => {
+  expect(plannedWritingPrompt).toContain("各字段承担不同工作");
+  expect(plannedWritingPrompt).toContain("不要在新章节重新完整解释同一个定义");
+  expect(plannedWritingPrompt).toContain("每段都推进理解");
+  expect(plannedWritingPrompt).toContain("mainContentMarkdown：只写二至五条高层总结");
 });
 it("completes a severely partial provider plan from the authoritative blueprint", () => {
   const { input } = fixture("输入与输出");
@@ -602,7 +628,8 @@ describe("planned teaching", () => {
     });
     expect(calls.map(call => call.phase)).toEqual(["plan", "opening", "explanation", "consolidation", "bridge"]);
     expect(calls.filter(call => call.image)).toHaveLength(1);
-    expect(JSON.parse(calls[2].prompt).precedingSections.alreadyIntroduced).toEqual(opening.priorKnowledge);
+    expect(JSON.parse(calls[2].prompt).precedingSections.alreadyIntroduced).toEqual(["输入（Input）"]);
+    expect(JSON.parse(calls[2].prompt).precedingSections.sectionResponsibilities.fullExplanationMarkdown).toContain("逐步深入");
     expect(JSON.parse(calls[3].prompt).precedingSections.explanation).toBe(explanation.fullExplanationMarkdown);
     expect(result.content.questions).toHaveLength(4);
     expect(result.trace.plan.problem).toBe(`解释${title}`);

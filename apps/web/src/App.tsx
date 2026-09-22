@@ -1,9 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
-import { api, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
-import { CourseTree, type CourseTreeActions } from "./CourseTree.js";
+import { api, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
+import { CourseTree, type CourseTreeActions, type CourseTreeTask } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
-import { formatProgressCount, summarizeImportProgress } from "./import-progress.js";
+import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importTaskStateLabel, summarizeImportProgress } from "./import-progress.js";
+import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
@@ -17,7 +18,7 @@ type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
 
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_DEFAULT_WIDTH = 276;
+export const SIDEBAR_DEFAULT_WIDTH = 320;
 const OFFLINE_SYNC: ReadWeaveSyncStatus = { state: "offline", authority: "readweave", mode: "http", pendingWrites: 0, conflicts: 0, message: "ReadWeave 暂时不可访问" };
 
 function clampSidebarWidth(value: number): number {
@@ -28,9 +29,27 @@ function readablePageTitle(title: string): string {
   return title.split(/\s{12,}/, 1)[0]?.trim() || title;
 }
 
+export function normalizeSidebarWidth(savedValue: string | null): number {
+  const saved = Number(savedValue);
+  return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH ? clampSidebarWidth(saved) : SIDEBAR_DEFAULT_WIDTH;
+}
+
+export function sourceReleasesForCourse(releases: CourseRelease[], courseId: string): CourseRelease[] {
+  if (!courseId) return [];
+  return releases.filter((release) => release.courseId === courseId && release.lifecycle === "draft_source");
+}
+
 function readSidebarWidth(): number {
-  const saved = Number(localStorage.getItem("course-os-sidebar-width"));
-  return Number.isFinite(saved) ? clampSidebarWidth(saved) : SIDEBAR_DEFAULT_WIDTH;
+  return normalizeSidebarWidth(localStorage.getItem("course-os-sidebar-width"));
+}
+
+function readTrackedImportIds(): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem("course-os-import-tasks") || "[]");
+    const ids = Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+    const legacy = localStorage.getItem("course-os-active-import");
+    return [...new Set([...ids, ...(legacy ? [legacy] : [])])].slice(-12);
+  } catch { return []; }
 }
 
 export function App() {
@@ -52,6 +71,8 @@ export function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
   const [activeImportId, setActiveImportId] = useState(readActiveImportId);
+  const [trackedImportIds, setTrackedImportIds] = useState(readTrackedImportIds);
+  const [taskRecords, setTaskRecords] = useState<ImportRecord[]>([]);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanel>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
@@ -59,6 +80,7 @@ export function App() {
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const sidebarResizeCleanup = useRef<(() => void) | undefined>(undefined);
+  const metadataReadyImports = useRef(new Set<string>());
   const [historyNode, setHistoryNode] = useState<CourseTreeNode>();
   const [moveNode, setMoveNode] = useState<CourseTreeNode>();
   const [textAction, setTextAction] = useState<TreeTextAction>();
@@ -129,6 +151,34 @@ export function App() {
       if (workspaceSettings.theme === "light" || workspaceSettings.theme === "dark") setTheme(workspaceSettings.theme);
     }
   }, [refreshSyncStatus]);
+
+  useEffect(() => {
+    localStorage.setItem("course-os-import-tasks", JSON.stringify(trackedImportIds));
+    const pollIds = trackedImportIds.filter((id) => id !== activeImportId);
+    if (pollIds.length === 0) return;
+    let active = true;
+    let timer = 0;
+    const refresh = async () => {
+      try {
+        const results = await Promise.allSettled(pollIds.map((id) => api.importRecord(id)));
+        if (!active) return;
+        const records = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        setTaskRecords((current) => {
+          const byId = new Map(current.map((record) => [record.id, record]));
+          records.forEach((record) => byId.set(record.id, record));
+          return [...byId.values()].filter((record) => trackedImportIds.includes(record.id));
+        });
+        if (records.some((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id))) {
+          records.filter((record) => record.state === "ready").forEach((record) => metadataReadyImports.current.add(record.id));
+          void refreshMetadata().catch(() => undefined);
+        }
+      } finally {
+        if (active) timer = window.setTimeout(() => void refresh(), 4000);
+      }
+    };
+    void refresh();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [trackedImportIds, activeImportId, refreshMetadata]);
 
   useEffect(() => {
     Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
@@ -284,6 +334,7 @@ export function App() {
     const nextRelease = releases.find((item) => item.id === nextReleaseId);
     const nextIndex = nextRelease?.pages.findIndex((item) => item.id === pageId) ?? -1;
     if (nextRelease && nextIndex >= 0) {
+      trackImport(undefined);
       initialNavigation.current.hasExplicitPage = true;
       setReleaseId(nextRelease.id);
       setPageIndex(nextIndex);
@@ -300,12 +351,14 @@ export function App() {
   const handleImported = (record: ImportRecord) => {
     Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
       setReleases(items);
-      if (record.materialVersionId && items.some((item) => item.id === record.materialVersionId)) {
-        setReleaseId(record.materialVersionId);
-        setPageIndex(0);
-        setMode("learn");
-      }
+      setTaskRecords((current) => current.map((item) => item.id === record.id ? record : item));
     }).catch(() => undefined);
+  };
+
+  const rememberImport = (record: ImportRecord) => {
+    setTaskRecords((current) => [record, ...current.filter((item) => item.id !== record.id)]);
+    setTrackedImportIds((current) => [...new Set([...current, record.id])].slice(-12));
+    void refreshMetadata().catch(() => undefined);
   };
 
   const trackImport = (importId?: string) => {
@@ -320,6 +373,17 @@ export function App() {
     setActiveImportId(importId);
     location.hash = navigation.toString();
   };
+
+  const backgroundTasks = useMemo(() => taskRecords.map((record) => {
+    const completed = record.generationCompletedPageIds?.length ?? 0;
+    const failed = record.generationFailedPageIds?.length ?? 0;
+    const total = record.pageIds?.length ?? 0;
+    const state = getImportTaskState(record);
+    const detail = record.autoGenerate === false || record.generationState === "not_requested"
+      ? `${importTaskStateLabel(state)}${total > 0 ? ` · 已转换 ${total} 页` : ""}`
+      : `${importTaskStateLabel(state)}${total > 0 ? ` · ${completed + failed}/${total} 页${failed > 0 ? ` · 失败 ${failed}` : ""}` : ""}`;
+    return { id: record.id, title: record.originalName, detail, state };
+  }), [taskRecords]);
 
   const runTreeAction = async (action: () => Promise<unknown>, success: string, pending = "正在保存…", refresh = true) => {
     setToast(pending);
@@ -417,9 +481,9 @@ export function App() {
   if (loading) return <main className="empty-state"><div className="loader" /><h1>正在建立课程工作区</h1><p>正在读取 ReadWeave、课程树和固定发布版本</p></main>;
   if (!release || !page) return <div className="product-shell" style={shellStyle}>
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
-       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className="product-content empty-course-workspace">{activeImportId && <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} />}<span className="empty-logo">CO</span><h1>建立第一门课程</h1><p>先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></section></div>
-     <MobileTreeDrawer tree={tree} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
-     {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); trackImport(record.id); setToast("材料已提交，正在后台处理"); }} />}
+       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
+      <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
+      {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
@@ -449,22 +513,21 @@ export function App() {
       </header>
 
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
-        <CourseTree tree={tree} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
+        <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className="product-content">
-          {activeImportId && <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} />}
-          <Suspense fallback={<WorkspaceLoader />}>
+          {activeImportId ? <ImportActivityDock importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {!pageDetailReady && release.lifecycle !== "draft_source" && <WorkspaceLoader />}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
             {mode === "learn" && release.lifecycle === "draft_source" && !(candidatePreview?.pageId === page.id && candidatePreview.page)
               ? <div className="workspace-loader" role="status">{!candidatePreview?.error && <div className="loader" />}<span>{candidatePreview?.pageId === page.id && candidatePreview.error ? candidatePreview.error : "正在载入候选讲解"}</span>{candidatePreview?.pageId === page.id && candidatePreview.error && <button type="button" onClick={() => setCandidatePreviewReload((value) => value + 1)}>重试</button>}</div>
               : pageDetailReady && mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
-          </Suspense>
+          </Suspense>}
         </section>
       </div>
 
-      <MobileTreeDrawer tree={tree} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
-       {importOpen && <ImportDialog courses={tree?.courses ?? []} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); trackImport(record.id); setToast("材料已提交，正在后台处理"); }} />}
+      <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
+       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
@@ -479,9 +542,12 @@ function ModeButton({ actionId, active, icon, label, onClick }: { actionId: stri
   return <button className={active ? "active" : ""} data-action={actionId} onClick={onClick}><Icon name={icon} />{label}</button>;
 }
 
-function MobileTreeDrawer({ tree, selectedPageId, actions, open, onClose, onSelectPage, onImport, onCreateCourse, onSettings }: {
+function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTasks, onSelectTask, actions, open, onClose, onSelectPage, onImport, onCreateCourse, onSettings }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
+  selectedTaskId?: string;
+  backgroundTasks: CourseTreeTask[];
+  onSelectTask: (taskId: string) => void;
   actions: CourseTreeActions;
   open: boolean;
   onClose: () => void;
@@ -493,7 +559,7 @@ function MobileTreeDrawer({ tree, selectedPageId, actions, open, onClose, onSele
   if (!open) return null;
   return <div className="mobile-tree-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="mobile-tree-drawer" role="dialog" aria-modal="true" aria-label="课程项目树" onMouseDown={(event) => event.stopPropagation()}>
-      <CourseTree tree={tree} selectedPageId={selectedPageId} collapsed={false} onCollapse={onClose} onSelectPage={onSelectPage} onImport={onImport} onCreateCourse={onCreateCourse} onSettings={onSettings} actions={actions} />
+      <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} selectedPageId={selectedPageId} collapsed={false} onCollapse={onClose} onSelectPage={onSelectPage} onImport={onImport} onCreateCourse={onCreateCourse} onSettings={onSettings} actions={actions} />
     </div>
   </div>;
 }
@@ -618,12 +684,16 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
   const [searchSecrets, setSearchSecrets] = useState<Record<string, string>>({});
   const [searchAvailable, setSearchAvailable] = useState(true);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [etapi, setEtapi] = useState<ReadWeaveEtapiSettings>();
+  const [etapiToken, setEtapiToken] = useState("");
+  const [newProvider, setNewProvider] = useState({ id: "", displayName: "", baseUrl: "", modelId: "" });
   const [trashCount, setTrashCount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
+    api.readweaveEtapiSettings().then(setEtapi).catch((reason) => setError(reason instanceof Error ? reason.message : "ReadWeave 设置读取失败"));
     Promise.all([api.settings(), api.modelProviders(), api.modelRoutePolicy(), api.trash()]).then(([loadedSettings, loadedProviders, loadedPolicy, trash]) => {
       setSettings(loadedSettings);
       if (loadedSettings.theme === "light" || loadedSettings.theme === "dark") onTheme(loadedSettings.theme);
@@ -680,10 +750,52 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
   const saveProvider = async (provider: ModelProviderConfig) => {
     setBusy(true); setError("");
     try {
-      const saved = await api.updateModelProvider(provider.id, { baseUrl: provider.baseUrl, enabled: provider.enabled });
+      const saved = await api.updateModelProvider(provider.id, { displayName: provider.displayName, baseUrl: provider.baseUrl, enabled: provider.enabled });
       setProviders((current) => current.map((item) => item.id === provider.id ? saved : item));
       setNotice(`${provider.displayName} 设置已保存`);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "供应商设置保存失败"); }
+    finally { setBusy(false); }
+  };
+
+  const createProvider = async () => {
+    setBusy(true); setError("");
+    try {
+      const model: ModelProviderCreate["models"][number] = { id: newProvider.modelId.trim(), displayName: newProvider.modelId.trim(), protocol: "responses", supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" };
+      const created = await api.createModelProvider({ id: newProvider.id.trim(), displayName: newProvider.displayName.trim(), baseUrl: newProvider.baseUrl.trim(), enabled: false, models: [model] });
+      setProviders((current) => [...current.filter((item) => item.id !== created.id), created]);
+      setNewProvider({ id: "", displayName: "", baseUrl: "", modelId: "" });
+      setNotice("模型供应商已新增；请保存密钥并测试连接后再启用路由");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "新增供应商失败"); }
+    finally { setBusy(false); }
+  };
+
+  const deleteProvider = async (providerId: string) => {
+    if (!window.confirm("删除该供应商及已保存的密钥，并移除对应路由？")) return;
+    setBusy(true); setError("");
+    try {
+      await api.deleteModelProvider(providerId);
+      setProviders((current) => current.filter((item) => item.id !== providerId));
+      setPolicy((current) => ({ ...current, routes: current.routes?.filter((route) => route.providerId !== providerId) }));
+      setNotice("供应商、密钥和对应路由已删除");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "删除供应商失败"); }
+    finally { setBusy(false); }
+  };
+
+  const saveEtapi = async () => {
+    if (!etapi) return;
+    setBusy(true); setError("");
+    try {
+      const saved = await api.updateReadweaveEtapiSettings({ enabled: etapi.enabled, baseUrl: etapi.baseUrl, parentNoteId: etapi.parentNoteId, publicUrl: etapi.publicUrl, ...(etapiToken.trim() ? { token: etapiToken.trim() } : {}) });
+      setEtapi(saved); setEtapiToken(""); setNotice("ReadWeave 连接已更新并通过检查");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "ReadWeave 连接更新失败，原设置已保留"); }
+    finally { setBusy(false); }
+  };
+
+  const deleteEtapi = async () => {
+    if (!window.confirm("删除 ETAPI 连接会使 Course OS 暂时无法读写 ReadWeave，确定继续？")) return;
+    setBusy(true); setError("");
+    try { await api.deleteReadweaveEtapiSettings(); setEtapi((current) => current ? { ...current, enabled: false, credential: { configured: false } } : current); setNotice("ETAPI 配置已删除，ReadWeave 连接已停用"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "删除 ETAPI 配置失败"); }
     finally { setBusy(false); }
   };
 
@@ -755,6 +867,9 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
     });
   };
 
+  const canAddModelRoute = (policy.routes?.length || 0) < 12 && providers.some((provider) =>
+    provider.models.length > 0 && !(policy.routes || []).some((route) => route.providerId === provider.id));
+
   const updateSetting = <K extends keyof WorkspaceSettings>(key: K, value: WorkspaceSettings[K]) => setSettings((current) => ({ ...current, [key]: value }));
   const tabs: Array<[SettingsTab, string]> = [["general", "通用"], ["appearance", "外观与字号"], ["learning", "学习偏好"], ["readweave", "ReadWeave"], ["providers", "模型供应商"], ["search", "搜索供应商"], ["routing", "模型路由"], ["data", "数据与版本"], ["diagnostics", "诊断"]];
   return <div className="settings-page">
@@ -765,10 +880,34 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
         {tab === "general" && <SettingsSection title="工作区行为" description="这些设置会影响新导入材料和整个课程播放器"><SettingsField label="内容语言"><select value={settings.language} onChange={(event) => updateSetting("language", event.target.value as WorkspaceSettings["language"])}><option value="zh-CN">简体中文</option><option value="en">English</option></select></SettingsField><SettingsField label="默认生成质量"><select value={settings.defaultQualityMode} onChange={(event) => updateSetting("defaultQualityMode", event.target.value as WorkspaceSettings["defaultQualityMode"])}><option value="economy">经济：优先节省额度</option><option value="balanced">平衡：默认选择</option><option value="quality">质量：更长讲解和更严格评审</option></select></SettingsField><SettingsSaveButton busy={busy} onClick={saveSettings} /></SettingsSection>}
         {tab === "appearance" && <SettingsSection title="让内容更容易看清" description="字体比例保存在个人工作区，不会改变课程发布内容"><SettingsField label="界面主题"><select value={settings.theme === "system" ? theme : settings.theme} onChange={(event) => { const next = event.target.value as WorkspaceSettings["theme"]; updateSetting("theme", next); if (next !== "system") onTheme(next); }}><option value="light">亮色</option><option value="dark">暗色</option><option value="system">跟随系统</option></select></SettingsField><SettingsField label="正文大小"><select value={settings.baseFontScale} onChange={(event) => updateSetting("baseFontScale", Number(event.target.value) as WorkspaceSettings["baseFontScale"])}><option value="1">标准</option><option value="1.1">较大</option><option value="1.2">大字</option><option value="1.3">特大</option></select></SettingsField><SettingsField label="显示英文辅助标签"><input type="checkbox" checked={settings.showEnglishLabels} onChange={(event) => updateSetting("showEnglishLabels", event.target.checked)} />保留英文术语标签</SettingsField><SettingsSaveButton busy={busy} onClick={saveSettings} /></SettingsSection>}
         {tab === "learning" && <SettingsSection title="学习节奏" description="学习位置、缩放和未提交答案会在刷新后恢复"><SettingsField label="学习完成一页后自动进入下一页"><input type="checkbox" checked={settings.learningAutoAdvance} onChange={(event) => updateSetting("learningAutoAdvance", event.target.checked)} />开启自动翻页</SettingsField><div className="settings-callout"><Icon name="target" /><span>完整答案不会直接生成掌握证据，系统还需要无提示和延迟或迁移题表现</span></div><SettingsSaveButton busy={busy} onClick={saveSettings} /></SettingsSection>}
-        {tab === "readweave" && <SettingsSection title="ReadWeave 权威连接" description="正式讲解、问答、题库、掌握状态和复习记录统一保存在 ReadWeave"><div className={`settings-connection ${sync?.state || "offline"}`}><span className="live-dot" /><div><strong>{sync?.state === "connected" ? "连接正常" : "当前无法确认连接"}</strong><span>{sync?.message || "等待 Course OS 读取连接状态"}</span></div></div><SettingsRow label="公开跳转" value="由服务器验证" /><SettingsRow label="浏览器密钥" value="不会下发" /><SettingsRow label="当前待写入" value={String(sync?.pendingWrites ?? 0)} /><SettingsRow label="未解决冲突" value={String(sync?.conflicts ?? 0)} /></SettingsSection>}
-        {tab === "providers" && <SettingsSection title="模型供应商" description="密钥只提交给服务端加密保存，浏览器只看到配置状态和末尾四位"><div className="provider-list">{providers.map((provider) => <article className="provider-card" key={provider.id}><header><div><strong>{provider.displayName}</strong><span>{provider.baseUrl || "应急路由，默认关闭"}</span></div><span className={`provider-status ${provider.credential.configured ? "configured" : "unconfigured"}`}>{provider.credential.configured ? provider.credential.maskedValue || "已配置" : "未配置"}</span></header><div className="provider-models">{provider.models.map((model) => <span key={model.id}>{model.displayName} · {model.protocol} · {model.billingMode === "subscription_quota" ? "套餐额度" : model.billingMode === "metered" ? "按量计费" : "未标记"}</span>)}</div><div className="provider-capabilities">{Array.from(new Set(provider.models.flatMap((model) => [model.supportsVision ? "图像输入" : "", model.supportsJsonSchema ? "结构化输出" : "", model.supportsReasoning ? "推理" : ""].filter(Boolean)))).map((capability) => <span key={capability}>{capability}</span>)}</div><div className="provider-config"><label><span>接口地址</span><input value={provider.baseUrl} disabled={provider.id === "aialra-router"} placeholder="https://..." onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, baseUrl: event.target.value } : item))} /></label><label className="provider-enabled"><input type="checkbox" checked={provider.enabled} onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, enabled: event.target.checked } : item))} />允许路由使用</label><button className="quiet-button" disabled={busy} onClick={() => void saveProvider(provider)}>保存配置</button></div><div className="provider-actions"><input type="password" value={secrets[provider.id] || ""} placeholder={provider.credential.configured ? "输入新密钥以替换" : "粘贴接口密钥"} onChange={(event) => setSecrets((current) => ({ ...current, [provider.id]: event.target.value }))} autoComplete="new-password" /><button className="quiet-button" disabled={busy || !secrets[provider.id]?.trim()} onClick={() => void saveSecret(provider.id)}>保存密钥</button><button className="quiet-button" disabled={busy} onClick={() => void testProvider(provider.id)}>测试连接</button></div>{provider.health && <p className="provider-health"><span className={`settings-health health-${provider.health.state}`} />{provider.health.message}</p>}</article>)}</div></SettingsSection>}
+        {tab === "readweave" && <SettingsSection title="ReadWeave 权威连接" description="连接配置只保存在服务端；修改前检查新连接，密钥不会回显"><div className={`settings-connection ${sync?.state || "offline"}`}><span className="live-dot" /><div><strong>{sync?.state === "connected" ? "连接正常" : "当前无法确认连接"}</strong><span>{sync?.message || "等待 Course OS 读取连接状态"}</span></div></div><SettingsRow label="当前待写入" value={String(sync?.pendingWrites ?? 0)} /><SettingsRow label="未解决冲突" value={String(sync?.conflicts ?? 0)} />{etapi && <div className="settings-edit-grid"><SettingsField label="启用 ETAPI"><input type="checkbox" checked={etapi.enabled} onChange={(event) => setEtapi((current) => current ? { ...current, enabled: event.target.checked } : current)} /></SettingsField><SettingsField label="服务端地址"><input value={etapi.baseUrl} onChange={(event) => setEtapi((current) => current ? { ...current, baseUrl: event.target.value } : current)} /></SettingsField><SettingsField label="根笔记 ID"><input value={etapi.parentNoteId} onChange={(event) => setEtapi((current) => current ? { ...current, parentNoteId: event.target.value } : current)} /></SettingsField><SettingsField label="公开跳转地址"><input value={etapi.publicUrl} onChange={(event) => setEtapi((current) => current ? { ...current, publicUrl: event.target.value } : current)} /></SettingsField><SettingsField label="ETAPI 密钥"><input type="password" value={etapiToken} placeholder={etapi.credential.configured ? "已配置；留空不变" : "输入密钥"} onChange={(event) => setEtapiToken(event.target.value)} autoComplete="new-password" /></SettingsField><div className="settings-action-row"><button className="primary-button" disabled={busy} onClick={() => void saveEtapi()}>保存并测试连接</button><button className="quiet-button danger-button" disabled={busy} onClick={() => void deleteEtapi()}>删除 ETAPI 配置</button></div></div>}</SettingsSection>}
+        {tab === "providers" && <SettingsSection title="模型供应商" description="密钥只提交给服务端加密保存，浏览器只看到配置状态和末尾四位"><div className="settings-provider-create"><input aria-label="供应商 ID" placeholder="供应商 ID" value={newProvider.id} onChange={(event) => setNewProvider((current) => ({ ...current, id: event.target.value }))} /><input aria-label="供应商名称" placeholder="名称" value={newProvider.displayName} onChange={(event) => setNewProvider((current) => ({ ...current, displayName: event.target.value }))} /><input aria-label="供应商接口地址" placeholder="https://..." value={newProvider.baseUrl} onChange={(event) => setNewProvider((current) => ({ ...current, baseUrl: event.target.value }))} /><input aria-label="模型 ID" placeholder="模型 ID" value={newProvider.modelId} onChange={(event) => setNewProvider((current) => ({ ...current, modelId: event.target.value }))} /><button className="quiet-button" disabled={busy || !newProvider.id || !newProvider.displayName || !newProvider.baseUrl || !newProvider.modelId} onClick={() => void createProvider()}>新增供应商</button></div><div className="provider-list">{providers.map((provider) => <article className="provider-card" key={provider.id}><header><div><strong>{provider.displayName}</strong><span>{provider.baseUrl || "应急路由，默认关闭"}</span></div><span className={`provider-status ${provider.credential.configured ? "configured" : "unconfigured"}`}>{provider.credential.configured ? provider.credential.maskedValue || "已配置" : "未配置"}</span></header><div className="provider-models">{provider.models.map((model) => <span key={model.id}>{model.displayName} · {model.protocol} · {model.billingMode === "subscription_quota" ? "套餐额度" : model.billingMode === "metered" ? "按量计费" : "未标记"}</span>)}</div><div className="provider-capabilities">{Array.from(new Set(provider.models.flatMap((model) => [model.supportsVision ? "图像输入" : "", model.supportsJsonSchema ? "结构化输出" : "", model.supportsReasoning ? "推理" : ""].filter(Boolean)))).map((capability) => <span key={capability}>{capability}</span>)}</div><div className="provider-config"><label><span>供应商名称</span><input value={provider.displayName} onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, displayName: event.target.value } : item))} /></label><label><span>接口地址</span><input value={provider.baseUrl} disabled={provider.id === "aialra-router"} placeholder="https://..." onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, baseUrl: event.target.value } : item))} /></label><label className="provider-enabled"><input type="checkbox" checked={provider.enabled} onChange={(event) => setProviders((current) => current.map((item) => item.id === provider.id ? { ...item, enabled: event.target.checked } : item))} />允许路由使用</label><button className="quiet-button" disabled={busy} onClick={() => void saveProvider(provider)}>保存配置</button></div><div className="provider-actions"><input type="password" value={secrets[provider.id] || ""} placeholder={provider.credential.configured ? "输入新密钥以替换" : "粘贴接口密钥"} onChange={(event) => setSecrets((current) => ({ ...current, [provider.id]: event.target.value }))} autoComplete="new-password" /><button className="quiet-button" disabled={busy || !secrets[provider.id]?.trim()} onClick={() => void saveSecret(provider.id)}>保存密钥</button><button className="quiet-button" disabled={busy} onClick={() => void testProvider(provider.id)}>测试连接</button></div><button className="quiet-button danger-button provider-delete" disabled={busy} onClick={() => void deleteProvider(provider.id)}>删除供应商</button>{provider.health && <p className="provider-health"><span className={`settings-health health-${provider.health.state}`} />{provider.health.message}</p>}</article>)}</div></SettingsSection>}
         {tab === "search" && <SearchSettingsSection providers={searchProviders} policy={searchPolicy} secrets={searchSecrets} available={searchAvailable} busy={busy} onProviderChange={(providerId, patch) => setSearchProviders((current) => current.map((provider) => provider.id === providerId ? { ...provider, ...patch } : provider))} onPolicyChange={setSearchPolicy} onSecretChange={(providerId, value) => setSearchSecrets((current) => ({ ...current, [providerId]: value }))} onSaveProvider={saveSearchProvider} onSaveSecret={saveSearchSecret} onTestProvider={testSearchProvider} onRuleChange={updateSearchRule} onSavePolicy={saveSearchPolicy} />}
-        {tab === "routing" && <SettingsSection title="模型调用优先级" description="Course OS 按这里的顺序直连供应商；只有额度不足或限流才会切换到下一条已启用线路"><div className="model-priority-list">{(policy.routes || []).map((route, index) => { const provider = providers.find((item) => item.id === route.providerId); return <div className="model-priority-row" key={route.providerId}><span className="model-priority-rank">{index + 1}</span><div className="model-priority-controls"><label><span>供应商</span><select value={route.providerId} onChange={(event) => { const nextProvider = providers.find((item) => item.id === event.target.value); updateModelRoute(index, { providerId: event.target.value, modelId: nextProvider?.models[0]?.id || "" }); }}>{providers.filter((item) => item.models.length > 0 && (item.id === route.providerId || !(policy.routes || []).some((other, otherIndex) => otherIndex !== index && other.providerId === item.id))).map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label><label><span>模型</span><select value={route.modelId} onChange={(event) => updateModelRoute(index, { modelId: event.target.value })}>{provider?.models.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></label></div><label className="model-priority-enabled"><input type="checkbox" checked={route.enabled} onChange={(event) => updateModelRoute(index, { enabled: event.target.checked })} />启用</label><div className="model-priority-actions"><button className="icon-button" disabled={index === 0} onClick={() => moveModelRoute(index, -1)} aria-label={`上移 ${provider?.displayName || route.providerId}`}>↑</button><button className="icon-button" disabled={index === (policy.routes?.length || 0) - 1} onClick={() => moveModelRoute(index, 1)} aria-label={`下移 ${provider?.displayName || route.providerId}`}>↓</button></div></div>; })}</div><label className="settings-checkbox"><input type="checkbox" checked={policy.allowProviderFallback ?? false} onChange={(event) => setPolicy((current) => ({ ...current, allowProviderFallback: event.target.checked }))} />额度不足或限流时，按顺序尝试下一条线路</label><div className="settings-callout"><Icon name="target" /><span>当前顺序适用于提取、原子化、讲解、评审、局部修复、题目补全和问答；不启用隐藏备用线路。</span></div><SettingsSaveButton busy={busy} onClick={savePolicy} /></SettingsSection>}
+        {tab === "routing" && <SettingsSection title="模型调用优先级" description="按顺序直连已启用线路；可新增、查看、修改、删除并保存">
+          <div className="model-priority-list">{(policy.routes || []).map((route, index) => {
+            const provider = providers.find((item) => item.id === route.providerId);
+            return <div className="model-priority-row" key={route.providerId}>
+              <span className="model-priority-rank">{index + 1}</span>
+              <div className="model-priority-controls">
+                <label><span>供应商</span><select value={route.providerId} disabled={busy} onChange={(event) => {
+                  const nextProvider = providers.find((item) => item.id === event.target.value);
+                  updateModelRoute(index, { providerId: event.target.value, modelId: nextProvider?.models[0]?.id || "" });
+                }}>{providers.filter((item) => item.models.length > 0 && (item.id === route.providerId || !(policy.routes || []).some((other, otherIndex) => otherIndex !== index && other.providerId === item.id))).map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+                <label><span>模型</span><select value={route.modelId} disabled={busy} onChange={(event) => updateModelRoute(index, { modelId: event.target.value })}>{provider?.models.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></label>
+              </div>
+              <label className="model-priority-enabled"><input type="checkbox" checked={route.enabled} disabled={busy} onChange={(event) => updateModelRoute(index, { enabled: event.target.checked })} />启用</label>
+              <div className="model-priority-actions">
+                <button className="icon-button" disabled={busy || index === 0} onClick={() => moveModelRoute(index, -1)} aria-label={`上移 ${provider?.displayName || route.providerId}`}>↑</button>
+                <button className="icon-button" disabled={busy || index === (policy.routes?.length || 0) - 1} onClick={() => moveModelRoute(index, 1)} aria-label={`下移 ${provider?.displayName || route.providerId}`}>↓</button>
+                <button className="quiet-button danger-button" disabled={busy || (policy.routes?.length || 0) <= 1} onClick={() => setPolicy((current) => removeModelRoute(current, index))} aria-label={`删除 ${provider?.displayName || route.providerId} 线路`}>删除</button>
+              </div>
+            </div>;
+          })}</div>
+          <button className="quiet-button settings-add-route" data-action="settings-add-model-route" disabled={busy || !canAddModelRoute} onClick={() => setPolicy((current) => addModelRoute(current, providers))}>新增线路</button>
+          <label className="settings-checkbox"><input type="checkbox" checked={policy.allowProviderFallback ?? false} disabled={busy} onChange={(event) => setPolicy((current) => ({ ...current, allowProviderFallback: event.target.checked }))} />线路失败时，按顺序尝试下一条已启用线路</label>
+          <div className="settings-callout"><Icon name="target" /><span>修改保存后立即用于后续模型调用；现有页面内容不受影响</span></div>
+          <SettingsSaveButton busy={busy} onClick={savePolicy} />
+        </SettingsSection>}
         {tab === "data" && <SettingsSection title="数据与版本" description="正式版本不可原位修改，删除默认进入 ReadWeave 回收站"><SettingsRow label="权威内容" value="ReadWeave" /><SettingsRow label="回收站记录" value={`${trashCount} 条`} /><SettingsRow label="正式发布" value="不可变，可回滚" /><SettingsRow label="原始材料" value="私有、内容寻址、去重保存" /><div className="settings-callout"><Icon name="archive" /><span>测试课程、黄金样本和旧发布版本仍用于回归，但不会混入正式课程树</span></div><button className="quiet-button settings-trash-button" data-action="settings-open-trash" onClick={onOpenTrash}>打开回收站<Icon name="arrowRight" /></button></SettingsSection>}
         {tab === "diagnostics" && <SettingsSection title="连接与诊断" description="这里显示可核对的状态，不显示密钥"><SettingsRow label="Course OS API" value="已载入当前页面" /><SettingsRow label="ReadWeave" value={sync?.state === "connected" ? "已连接" : "离线或待检查"} /><SettingsRow label="同步队列" value={`${sync?.pendingWrites ?? 0} 条待处理`} /><SettingsRow label="冲突" value={`${sync?.conflicts ?? 0} 条`} /><button className="primary-button" data-action="settings-reload" aria-describedby="settings-reload-reason" disabled={busy} onClick={() => window.location.reload()}>重新载入并重试</button><span id="settings-reload-reason" className="sr-only">{busy ? "当前有设置操作正在保存" : "重新载入页面并重新检查连接"}</span></SettingsSection>}
         {notice && <p className="settings-notice"><Icon name="check" />{notice}</p>}
@@ -847,20 +986,22 @@ function WorkspaceLoader({ compact = false }: { compact?: boolean }) {
   return <div className={`workspace-loader ${compact ? "compact" : ""}`}><div className="loader" /><span>正在准备课程工具</span></div>;
 }
 
-function ImportDialog({ courses, parentNodeId, onClose, onSubmitted }: { courses: WorkspaceTree["courses"]; parentNodeId?: string; onClose: () => void; onSubmitted: (record: ImportRecord) => void }) {
+function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }: { courses: WorkspaceTree["courses"]; releases: CourseRelease[]; parentNodeId?: string; onClose: () => void; onSubmitted: (record: ImportRecord) => void }) {
   const [file, setFile] = useState<File>();
   const [courseId, setCourseId] = useState(courses[0]?.id || "");
+  const [previousMaterialVersionId, setPreviousMaterialVersionId] = useState("");
   const [qualityMode, setQualityMode] = useState(localStorage.getItem("course-os-budget") || "balanced");
   const [language, setLanguage] = useState(localStorage.getItem("course-os-language") || "zh-CN");
   const [autoGenerate, setAutoGenerate] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const updateSources = sourceReleasesForCourse(releases, courseId);
   const upload = async () => {
     if (!file) return;
     setBusy(true);
     setError("");
     try {
-      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate });
+      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate, previousMaterialVersionId: previousMaterialVersionId || undefined });
       onSubmitted(imported);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "材料导入失败"); }
     finally { setBusy(false); }
@@ -876,7 +1017,7 @@ function ImportDialog({ courses, parentNodeId, onClose, onSubmitted }: { courses
           <p>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 将先执行安全检查` : "原始材料保持私有，上传后先隔离检查再进入解析"}</p>
           <span className="file-types">PPTX · PDF · MD · TXT</span>
         </label>
-        <div className="import-options"><label><span>目标课程</span><select value={courseId} onChange={(event) => setCourseId(event.target.value)}><option value="">暂不归类</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label><label><span>生成质量</span><select value={qualityMode} onChange={(event) => setQualityMode(event.target.value)}><option value="economy">经济</option><option value="balanced">平衡</option><option value="quality">质量</option></select></label><label><span>内容语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
+        <div className="import-options"><label><span>目标课程</span><select value={courseId} onChange={(event) => { setCourseId(event.target.value); setPreviousMaterialVersionId(""); }}><option value="">暂不归类</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label><label><span>更新现有材料</span><select value={previousMaterialVersionId} disabled={!courseId || updateSources.length === 0} onChange={(event) => setPreviousMaterialVersionId(event.target.value)}><option value="">作为新材料导入</option>{updateSources.map((release) => <option key={release.id} value={release.id}>{release.moduleTitle} · v{release.version} · {release.pages.length} 页</option>)}</select></label><label><span>生成质量</span><select value={qualityMode} onChange={(event) => setQualityMode(event.target.value)}><option value="economy">经济</option><option value="balanced">平衡</option><option value="quality">质量</option></select></label><label><span>内容语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
         <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
         <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!file || busy} onClick={upload}><Icon name="sparkles" />{busy ? "正在安全检查" : "导入并开始解析"}</button></footer>
@@ -897,6 +1038,7 @@ function ImportActivityDock({ importId, onReady, onProgress, onClose }: { import
   const progressRef = useRef(0);
   useEffect(() => {
     let cancelled = false;
+    let timer = 0;
     const refresh = async () => {
       try {
         const updated = await api.importRecord(importId);
@@ -924,13 +1066,14 @@ function ImportActivityDock({ importId, onReady, onProgress, onClose }: { import
         }
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取后台任务进度");
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void refresh(), 2000);
       }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [importId]);
-  if (!record) return <aside className="import-activity" role="status"><div className="import-activity-loading"><span className="loader" /><span>{error || "正在恢复后台任务"}</span></div>{error && <button className="quiet-button" onClick={onClose}>关闭</button>}</aside>;
+  if (!record) return <section className="import-task-workspace" role="status"><header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>正在恢复任务状态</h2></div><button className="quiet-button" onClick={onClose}>返回课程</button></header><div className="import-activity-loading"><span className="loader" /><span>{error || "正在读取已保存的任务状态"}</span></div></section>;
   const retryFailed = async () => {
     if (!plan || retryingFailed || plan.state !== "failed" || plan.failedPageIds.length === 0) return;
     setRetryingFailed(true);
@@ -954,23 +1097,31 @@ function ImportProgress({ record, plan, activeJobs, costs, error, retryingFailed
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
+  const taskState = getImportTaskState(record);
   const terminalJob = !auto || Boolean(planState && ["awaiting_review", "completed", "failed", "cancelled"].includes(planState));
-  const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && terminalJob);
+  const taskFinished = ["completed", "failed", "cancelled", "paused", "awaiting_review"].includes(taskState);
+  const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && (terminalJob || taskFinished));
   const summary = summarizeImportProgress(record, plan, activeJobs, costs);
-  const generated = plan?.completedPageIds.length ?? record.generationCompletedPageIds?.length ?? 0;
+  const activity = getImportActivity(record, plan, activeJobs, costs);
   const failed = plan?.failedPageIds.length ?? record.generationFailedPageIds?.length ?? 0;
-  const processed = generated + failed;
-  const total = plan?.pageIds.length ?? record.pageIds?.length ?? 0;
-  const coreRatio = summary.core?.total ? summary.core.completed / summary.core.total : total ? processed / total : 0;
-  const crossPageRatio = summary.crossPage?.total ? summary.crossPage.completed / summary.crossPage.total
-    : summary.crossPage?.total === 0 ? 1 : total ? processed / total : 0;
-  const generationProgress = Math.min(1, coreRatio * 0.65 + crossPageRatio * 0.35);
-  const progress = record.state === "ready" && auto ? 85 + generationProgress * 15 : importInfo.progress;
+  const progress = activity.progressPercent;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed";
-  const cancelledState = planState === "cancelled";
-  const statusTitle = record.state !== "ready" ? importInfo.title : !auto ? "材料已经导入" : !plan ? "正在建立生成队列" : retryingFailed ? "正在重试失败页面" : planState === "completed" ? "全部讲解已经生成" : planState === "failed" ? "已处理全部页面，部分页面失败" : planState === "cancelled" ? "生成任务已取消" : "正在后台并行生成讲解";
+  const cancelledState = planState === "cancelled" || taskState === "cancelled";
+  const statusTitle = record.state !== "ready" ? importInfo.title
+    : !auto ? "材料已经导入"
+      : retryingFailed ? "正在重试失败页面"
+        : failedState ? "讲解生成失败"
+          : cancelledState ? "生成任务已取消"
+            : taskState === "paused" ? "生成任务已暂停"
+              : taskState === "awaiting_review" ? "等待检查"
+                : planState === "completed" || taskState === "completed" ? "全部讲解已经生成"
+                  : !plan ? "正在建立生成队列"
+                    : "正在后台并行生成讲解";
   const currentPages = activeJobs.map((job) => (job.batchIndex ?? 0) + 1).sort((a, b) => a - b);
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队，任务窗口会继续刷新状态" : plan ? `正文 ${formatProgressCount(summary.core)}，承接 ${formatProgressCount(summary.crossPage)}，当前并行 ${activeJobs.length} 页${currentPages.length ? `，正在处理第 ${currentPages.join("、")} 页` : ""}` : "转换结果已经保存，正在建立页面任务";
+  const stageCount = activity.stage === "页面转换" ? ` · 页面 ${formatProgressCount(summary.conversion)}`
+    : plan ? ` · 正文 ${formatProgressCount(summary.core)} · 跨页承接 ${formatProgressCount(summary.crossPage)}` : "";
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : `${activity.stage}${stageCount}${activeJobs.length ? ` · 并行处理 ${activeJobs.length} 页${currentPages.length ? `（第 ${currentPages.join("、")} 页）` : ""}` : ""}`;
+  const indeterminate = progress === undefined && activity.busy && !activity.stale;
   const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
   const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model || "尚未调用模型";
   const concurrency = summary.concurrency?.running !== undefined && summary.concurrency.limit !== undefined
@@ -981,15 +1132,17 @@ function ImportProgress({ record, plan, activeJobs, costs, error, retryingFailed
         ? `—/${summary.concurrency.limit}`
         : "—";
   const cost = summary.costUsd === undefined ? "未知" : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
-  return <aside className={`import-activity import-activity-page import-state-${record.state}`} aria-live="polite"><header><div><span className="section-kicker">后台任务</span><h3>{statusTitle}</h3></div>{finished && <button className="icon-button" onClick={onClose} aria-label="关闭后台任务"><span aria-hidden="true">×</span></button>}</header><p className="import-activity-file">{record.originalName}</p><div className="import-progress" role="progressbar" aria-label="导入与生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ width: `${progress}%` }} /></div><div className="import-progress-label"><strong>{Math.round(progress)}%</strong><span>{statusDetail}</span></div><dl><div><dt>转换</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文核心完成</dt><dd>{auto ? formatProgressCount(summary.core) : "未启用"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "未启用"}</dd></div><div><dt>修复数</dt><dd>{summary.repairCount === undefined ? "—" : summary.repairCount}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>供应商 / 模型</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>{(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}<footer><span>{finished ? failedState ? "任务已结束，可检查失败页面" : cancelledState ? "任务已取消，重新上传同一材料即可继续" : "任务已完成" : "可以继续使用页面，刷新后任务仍会恢复"}</span>{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}{finished && <button className="primary-button" onClick={onClose}>完成</button>}</footer></aside>;
+  return <section className={`import-task-workspace import-state-${record.state} ${activity.stale ? "task-stale" : ""}`} aria-live="polite"><header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>{statusTitle}</h2></div><button className="quiet-button" data-action="close-import-task" onClick={onClose}>返回课程</button></header><p className="import-activity-file">{record.originalName}</p><div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale ? "is-stale" : ""}`} role="progressbar" aria-label={`${activity.progressScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progress === undefined ? `${activity.stage}，${activity.stale ? "状态长时间未更新" : "进度百分比暂不可核对"}` : `${activity.progressScope || activity.stage} ${progress}%`}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div><div className="import-progress-label"><strong>{progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—" : `${progressScopeLabel(activity.progressScope)}${progress}%`}</strong><span>{statusDetail}<small>{activity.stale ? "状态已超过 2 分钟未更新，请留意任务是否仍在推进" : `最近状态更新：${formatActivityAge(activity.ageSeconds)}`}</small></span></div><dl><div><dt>当前阶段</dt><dd>{activity.stage}</dd></div><div><dt>阶段更新时间</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文核心完成</dt><dd>{auto ? formatProgressCount(summary.core) : "未启用"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "未启用"}</dd></div><div><dt>修复数</dt><dd>{summary.repairCount === undefined ? "—" : summary.repairCount}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>供应商 / 模型</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>{(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}<footer><span>{finished ? failedState ? "任务已结束，可查看失败页面" : cancelledState ? "任务已取消" : taskState === "awaiting_review" ? "任务等待检查" : taskState === "paused" ? "任务已暂停" : "任务已完成" : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer></section>;
 }
 
-function importStatus(state: ImportRecord["state"]): { title: string; detail: string; progress: number } {
-  if (state === "accepted" || state === "quarantined") return { title: "安全检查已通过", detail: "材料正在进入无网络转换环境", progress: 20 };
-  if (state === "processing") return { title: "正在逐页离线转换", detail: "系统正在生成原始页面图片并提取页面文字", progress: 55 };
-  if (state === "syncing") return { title: "正在写入 ReadWeave", detail: "逐页草稿、来源锚点和原始页面图正在同步", progress: 82 };
-  if (state === "ready") return { title: "材料草稿已经就绪", detail: "可以继续逐页编辑、生成讲解和执行质量审核", progress: 100 };
-  return { title: "材料没有完成导入", detail: "系统已经停止处理，请根据下方错误修复材料后重试", progress: 100 };
+function progressScopeLabel(scope?: string): string { return scope && scope !== "整体流程" ? `${scope} ` : ""; }
+
+function importStatus(state: ImportRecord["state"]): { title: string; detail: string } {
+  if (state === "accepted" || state === "quarantined") return { title: "材料已进入处理队列", detail: "等待安全检查和转换状态更新" };
+  if (state === "processing") return { title: "正在转换材料", detail: "正在等待转换页面计数更新" };
+  if (state === "syncing") return { title: "正在保存课程材料", detail: "正在等待 ReadWeave 写入状态更新" };
+  if (state === "ready") return { title: "材料已导入", detail: "材料可以打开学习或继续生成讲解" };
+  return { title: "材料处理已停止", detail: "请查看错误信息后重试" };
 }
 
 function CreateCourseDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {

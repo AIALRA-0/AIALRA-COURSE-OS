@@ -992,6 +992,37 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["kuafu", "deepseek-v4.1-flash", "kuafu-backup", "deepseek-v4.1-flash-expires-on-0910", 502],
+    ["kuafu-backup", "deepseek-v4.1-flash-expires-on-0910", "kuafu", "deepseek-v4.1-flash", 502],
+    ["kuafu", "deepseek-v4.1-flash", "kuafu-backup", "deepseek-v4.1-flash-expires-on-0910", 401],
+    ["kuafu-backup", "deepseek-v4.1-flash-expires-on-0910", "kuafu", "deepseek-v4.1-flash", 401]
+  ])("uses the other Kuafu line when %s fails with %s", async (firstProvider, first, secondProvider, second, status) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: { code: status === 401 ? "invalid_api_key" : "upstream_error" } }, { status }))
+      .mockResolvedValueOnce(Response.json({ model: second, output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 200 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [
+        { id: firstProvider, displayName: firstProvider, baseUrl: "https://kuafu.test", enabled: true, credential: { configured: true }, models: [first].map(id => ({
+          id, displayName: id, protocol: "responses" as const, supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const
+        })) },
+        { id: secondProvider, displayName: secondProvider, baseUrl: "https://kuafu.test", enabled: true, credential: { configured: true }, models: [second].map(id => ({
+          id, displayName: id, protocol: "responses" as const, supportsVision: false, supportsJsonSchema: true, supportsReasoning: true, billingMode: "metered" as const
+        })) }
+      ],
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false, updatedAt: new Date(0).toISOString(),
+        rules: [{ stage: "teach", providerId: firstProvider, modelId: first, enabled: true }], routes: [
+          { providerId: firstProvider, modelId: first, enabled: true }, { providerId: secondProvider, modelId: second, enabled: true }
+        ] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage(providerInput(`kuafu-${first}-backup`));
+    expect(result).toMatchObject({ provider: secondProvider, model: second });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)).model)).toEqual([first, second]);
+  });
+
   it("keeps a text-only Kuafu route primary when extracted page source is available", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { model: string; input: unknown };
