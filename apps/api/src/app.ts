@@ -3055,7 +3055,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       if (blueprintIssues.length > 0) throw new Error(`BLUEPRINT_INVALID:${blueprintIssues.join(",")}`);
       await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, { atomCount: page.atoms.length, anchorCount: page.anchors.length, requirementCount: page.coverageRequirements.length, blueprintVersion: blueprint.version, blueprintSha256: blueprint.sha256, blueprintStepCount: blueprint.steps.length });
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
-      const pageCostLimitUsd = Math.min(0.06, currentJob.budgetUsd - currentJob.spentUsd);
+      const pageCostLimitUsd = currentJob.budgetUsd - currentJob.spentUsd;
       const teachingFingerprint = createHash("sha256").update(JSON.stringify({ releaseId: release.id, pageId: page.id,
         sourceText, sourceImage: page.imageUrl, blueprintSha256: blueprint.sha256,
         writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,

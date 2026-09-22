@@ -1383,6 +1383,21 @@ describe("Course OS API", () => {
     expect(await readweave.getDraftByPage("page-1")).toMatchObject({ status: "needs_review", page: { quality: { publishable: false } } });
   }, 60_000);
 
+  it("uses the requested batch budget for a page instead of a hidden fixed cap", async () => {
+    const limits: number[] = [];
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async (input) => {
+        limits.push(input.maxCostUsd ?? -1);
+        return testTeachingResult(0.08);
+      }
+    };
+    const { app, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "selected-budget-job")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 2 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], spentUsd: 0.08 });
+    expect(limits[0]).toBe(2);
+  }, 60_000);
+
   it("records the call and stops a job when actual cost crosses its hard budget", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.02)
