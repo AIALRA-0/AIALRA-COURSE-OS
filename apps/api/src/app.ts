@@ -3741,6 +3741,7 @@ function finalizeGenerationJob(job: GenerationJob, state: OperationalState, depe
     dependencies.operations.appendEvent(state, job.id, "job.failed", { failedPageIds: job.failedPageIds });
   } else {
     Object.assign(job, transitionJob(job, "completed"));
+    if (job.failedPageIds.length === 0) job.lastErrorCode = undefined;
     dependencies.operations.appendEvent(state, job.id, "job.completed", { completedPageIds: job.completedPageIds, failedPageIds: job.failedPageIds, spentUsd: job.spentUsd });
   }
 }

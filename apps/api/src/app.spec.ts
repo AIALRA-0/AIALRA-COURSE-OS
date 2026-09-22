@@ -873,6 +873,7 @@ describe("Course OS API", () => {
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     const job = await waitForJob(app, created.body.id);
     expect(job).toMatchObject({ state: "completed", attempt: 2, completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(job.lastErrorCode).toBeUndefined();
     expect(calls).toBe(2);
     expect((await operations.read()).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ streamId: created.body.id, type: "generation.page.agent_repair_queued" })
