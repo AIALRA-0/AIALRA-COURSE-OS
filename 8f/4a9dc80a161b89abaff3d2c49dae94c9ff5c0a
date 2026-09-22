@@ -1,0 +1,25 @@
+apps/worker/src/dispatch.ts
+  s_e8850ef125fb32::t_1955b25ec9d0da 1-6
+apps/worker/src/dispatch.spec.ts
+  s_e8850ef125fb32::t_1955b25ec9d0da 1-15
+apps/worker/src/worker.ts
+  s_e8850ef125fb32::t_517a0a4988fd93 61
+  s_e8850ef125fb32::t_dd280426646ed5 38-39,46,55
+  s_e8850ef125fb32::t_1955b25ec9d0da 4,59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8f4a9dc80a161b89abaff3d2c49dae94c9ff5c0a",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
