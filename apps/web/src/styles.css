@@ -490,7 +490,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .import-success dt { color: var(--muted); font-size: 9px; }
 .import-success dd { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 9px; }
 .import-progress { width: 100%; height: 7px; margin: 4px 0 10px; overflow: hidden; border-radius: 999px; background: var(--line); }
-.import-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--brand), #6f8cff); transition: width .35s ease; }
+.import-progress i { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--brand), #6f8cff); transition: width .35s ease; }
 .import-status-copy { min-height: 30px; max-width: 390px; }
 .import-success > span .loader { width: 24px; height: 24px; }
 .import-state-failed > span, .import-state-rejected > span { background: color-mix(in srgb, var(--red) 12%, var(--panel)); color: var(--red); }
@@ -1506,6 +1506,9 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .import-task-workspace .import-activity-file { margin: 18px 0 12px; font-size: 13px; }
 .import-task-workspace .import-progress { height: 10px; margin: 0 0 9px; }
 .import-task-workspace .import-progress i { background: var(--brand); }
+.import-task-workspace .import-progress.is-failed { background: color-mix(in srgb, var(--red) 16%, var(--line)); }
+.import-task-workspace .import-progress.is-failed i { background: var(--red); }
+.import-task-workspace:has(.import-progress.is-failed) .import-progress-label strong { color: var(--red); }
 .import-progress.is-indeterminate i { width: 30%; animation: task-progress-sweep 1.5s ease-in-out infinite alternate; }
 .import-progress.is-stale { background: color-mix(in srgb, var(--amber) 18%, var(--line)); }
 .import-progress.is-stale i { background: var(--amber); }
@@ -1514,10 +1517,10 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .import-task-workspace .import-progress-label strong { min-width: 80px; font: 700 13px "IBM Plex Mono", monospace; }
 .import-task-workspace .import-progress-label span { display: grid; gap: 5px; color: var(--text); font-size: 12px; }
 .import-task-workspace .import-progress-label small { color: var(--muted); font-size: 10px; }
-.import-task-workspace dl { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; padding: 14px 16px; }
-.import-task-workspace dl div { min-height: 32px; }
-.import-task-workspace dt { font-size: 11px; }
-.import-task-workspace dd { font-size: 11px; }
+.import-task-workspace dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.import-task-workspace dl div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; min-height: 32px; padding: 5px 0; }
+.import-task-workspace dt { color: var(--muted); font-size: 11px; }
+.import-task-workspace dd { min-width: 0; margin: 0; overflow-wrap: anywhere; text-align: right; font-size: 11px; }
 .import-task-workspace > footer { margin-top: 16px; font-size: 11px; }
 .import-task-workspace .import-activity-loading { min-height: 180px; justify-content: center; font-size: 13px; }
 @media (max-width: 640px) {

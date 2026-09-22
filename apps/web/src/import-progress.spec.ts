@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importTaskStateLabel, summarizeImportProgress } from "./import-progress.js";
@@ -110,6 +111,25 @@ describe("import progress summary", () => {
     expect(formatProgressCount(result.crossPage)).toBe("—");
   });
 
+  it("does not report an old generated lesson as free when its cost ledger is missing", () => {
+    const result = summarizeImportProgress(
+      record({ state: "ready", autoGenerate: true, pageIds: ["p1"] }),
+      plan({ pageIds: ["p1"], completedPageIds: ["p1"], failedPageIds: [], spentUsd: 0 }),
+      [], []
+    );
+    expect(result.costUsd).toBeUndefined();
+  });
+
+  it("uses recorded usage when a completed plan retained a zero spent counter", () => {
+    const result = summarizeImportProgress(
+      record({ state: "ready", autoGenerate: true, pageIds: ["p1"] }),
+      plan({ pageIds: ["p1"], completedPageIds: ["p1"], failedPageIds: [], spentUsd: 0 }),
+      [], [cost("teach", "2026-09-22T10:00:00.000Z", { costBasis: "price_snapshot", estimatedMicrousd: 15_000 })]
+    );
+    expect(result.costUsd).toBe(0.015);
+    expect(result.costBasis).toBe("estimated");
+  });
+
   it("classifies importing, queued, active, completed, failed and stopped tasks distinctly", () => {
     expect(getImportTaskState(record({ state: "processing" }))).toBe("running");
     expect(getImportTaskState(record({ state: "ready", autoGenerate: true, generationState: "queued" }))).toBe("queued");
@@ -187,5 +207,12 @@ describe("import progress summary", () => {
     expect(completed.progressPercent).toBe(100);
     expect(failed.progressPercent).toBeUndefined();
     expect(failed.stage).toBe("生成失败");
+  });
+
+  it("does not paint an unknown or failed percentage as a full success bar", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(/\.import-progress i\s*\{[^}]*width:\s*0\s*;/);
+    expect(css).toMatch(/\.import-task-workspace dl\s*\{[^}]*display:\s*grid\s*;/);
+    expect(css).toContain(".import-task-workspace .import-progress.is-failed");
   });
 });
