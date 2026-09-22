@@ -6,7 +6,7 @@ import { Icon } from "./Icon.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importTaskStateLabel, summarizeImportProgress } from "./import-progress.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
-import type { WebGenerationPlan, WebImportRecord } from "./types.js";
+import type { ImportTaskSummary, WebGenerationPlan, WebImportRecord } from "./types.js";
 
 const ExplanationPanel = lazy(() => import("./ExplanationPanel.js").then((module) => ({ default: module.ExplanationPanel })));
 const ReviewWorkspace = lazy(() => import("./ReviewWorkspace.js").then((module) => ({ default: module.ReviewWorkspace })));
@@ -43,15 +43,6 @@ function readSidebarWidth(): number {
   return normalizeSidebarWidth(localStorage.getItem("course-os-sidebar-width"));
 }
 
-function readTrackedImportIds(): string[] {
-  try {
-    const saved = JSON.parse(localStorage.getItem("course-os-import-tasks") || "[]");
-    const ids = Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
-    const legacy = localStorage.getItem("course-os-active-import");
-    return [...new Set([...ids, ...(legacy ? [legacy] : [])])].slice(-12);
-  } catch { return []; }
-}
-
 export function App() {
   const initialNavigation = useRef(readNavigationHash());
   const [releases, setReleases] = useState<CourseRelease[]>([]);
@@ -71,8 +62,7 @@ export function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
   const [activeImportId, setActiveImportId] = useState(readActiveImportId);
-  const [trackedImportIds, setTrackedImportIds] = useState(readTrackedImportIds);
-  const [taskRecords, setTaskRecords] = useState<ImportRecord[]>([]);
+  const [taskRecords, setTaskRecords] = useState<ImportTaskSummary[]>([]);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanel>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
@@ -153,32 +143,26 @@ export function App() {
   }, [refreshSyncStatus]);
 
   useEffect(() => {
-    localStorage.setItem("course-os-import-tasks", JSON.stringify(trackedImportIds));
-    const pollIds = trackedImportIds.filter((id) => id !== activeImportId);
-    if (pollIds.length === 0) return;
     let active = true;
     let timer = 0;
     const refresh = async () => {
       try {
-        const results = await Promise.allSettled(pollIds.map((id) => api.importRecord(id)));
+        const records = await api.importTasks();
         if (!active) return;
-        const records = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-        setTaskRecords((current) => {
-          const byId = new Map(current.map((record) => [record.id, record]));
-          records.forEach((record) => byId.set(record.id, record));
-          return [...byId.values()].filter((record) => trackedImportIds.includes(record.id));
-        });
+        setTaskRecords(records);
         if (records.some((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id))) {
           records.filter((record) => record.state === "ready").forEach((record) => metadataReadyImports.current.add(record.id));
           void refreshMetadata().catch(() => undefined);
         }
+      } catch {
+        // Keep the last visible task list during a transient connection failure.
       } finally {
         if (active) timer = window.setTimeout(() => void refresh(), 4000);
       }
     };
     void refresh();
     return () => { active = false; window.clearTimeout(timer); };
-  }, [trackedImportIds, activeImportId, refreshMetadata]);
+  }, [refreshMetadata]);
 
   useEffect(() => {
     Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
@@ -357,7 +341,6 @@ export function App() {
 
   const rememberImport = (record: ImportRecord) => {
     setTaskRecords((current) => [record, ...current.filter((item) => item.id !== record.id)]);
-    setTrackedImportIds((current) => [...new Set([...current, record.id])].slice(-12));
     void refreshMetadata().catch(() => undefined);
   };
 
@@ -382,7 +365,7 @@ export function App() {
     const detail = record.autoGenerate === false || record.generationState === "not_requested"
       ? `${importTaskStateLabel(state)}${total > 0 ? ` · 已转换 ${total} 页` : ""}`
       : `${importTaskStateLabel(state)}${total > 0 ? ` · ${completed + failed}/${total} 页${failed > 0 ? ` · 失败 ${failed}` : ""}` : ""}`;
-    return { id: record.id, title: record.originalName, detail, state };
+    return { id: record.id, courseId: record.courseId, parentNodeId: record.parentNodeId, title: record.originalName, detail, state };
   }), [taskRecords]);
 
   const runTreeAction = async (action: () => Promise<unknown>, success: string, pending = "正在保存…", refresh = true) => {

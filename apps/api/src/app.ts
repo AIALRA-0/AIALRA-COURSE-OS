@@ -1064,10 +1064,38 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.get("/api/v1/imports", async (request, response, next) => {
+    try {
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const snapshot = await dependencies.operations.read();
+      response.json(snapshot.imports
+        .filter((item) => item.workspaceId === workspaceId)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .map((item) => {
+          const plan = snapshot.generationPlans.find((candidate) => candidate.id === item.generationPlanId);
+          return {
+            id: item.id,
+            workspaceId: item.workspaceId,
+            courseId: item.courseId,
+            parentNodeId: item.parentNodeId,
+            originalName: item.originalName,
+            state: item.state,
+            autoGenerate: item.autoGenerate,
+            generationState: plan?.state ?? item.generationState,
+            pageIds: item.pageIds,
+            generationCompletedPageIds: plan?.completedPageIds ?? item.generationCompletedPageIds,
+            generationFailedPageIds: plan?.failedPageIds ?? item.generationFailedPageIds,
+            createdAt: item.createdAt
+          };
+        }));
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/v1/imports/:id", async (request, response, next) => {
     try {
       const snapshot = await dependencies.operations.read();
-      const record = snapshot.imports.find((item) => item.id === request.params.id);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const record = snapshot.imports.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
       const plan = (record.generationPlanId ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId) : undefined)
         ?? snapshot.generationPlans.filter((item) => item.sourceImportId === record.id)
@@ -1084,7 +1112,8 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.delete("/api/v1/imports/:id", async (request, response, next) => {
     try {
-      const record = (await dependencies.operations.read()).imports.find((item) => item.id === request.params.id);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const record = (await dependencies.operations.read()).imports.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!record) return response.status(204).end();
       if (!["failed", "rejected"].includes(record.state)) return sendError(request, response, 409, "IMPORT_DELETE_DENIED", "只能清理失败或被隔离的导入记录", false);
       const sourceReleaseId = record.materialVersionId || `material-version:${record.id}`;

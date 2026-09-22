@@ -1479,6 +1479,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 
 /* Background tasks live in the tree; the task page occupies the workspace instead of covering it. */
 .tree-task-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tree-task-section.tree-task-nested { margin: 0 0 6px 20px; padding: 0; border: 0; border-left: 1px solid var(--line); }
 .tree-task-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 9px 7px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .tree-task-heading > span:last-child { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--soft); color: var(--faint); text-align: center; font: 10px "IBM Plex Mono", monospace; }
 .tree-task-list { display: grid; gap: 3px; }

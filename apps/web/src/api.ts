@@ -33,7 +33,7 @@ import type {
   GenerationHarnessCurrent,
   SelfRetelling
 } from "@course-os/contracts";
-import type { WebGenerationPlan, WebImportRecord } from "./types.js";
+import type { ImportTaskSummary, WebGenerationPlan, WebImportRecord } from "./types.js";
 
 export type { SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 
@@ -254,6 +254,7 @@ export const api = {
     body.append("autoGenerate", String(options.autoGenerate !== false));
     return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
   },
+  importTasks: () => request<ImportTaskSummary[]>("/api/v1/imports"),
   importRecord: (importId: string) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`),
   createGenerationJob: (materialVersionId: string, pageIds: string[], budgetUsd: number) => request<GenerationJob>("/api/v1/generation-jobs", {
     method: "POST",

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import type { CourseRelease, IdempotentWriteContext, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import type { CourseRelease, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { ModelRouterGenerationError, currentGenerationHarness, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
@@ -33,6 +33,23 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
 }
 
 describe("Course OS API", () => {
+  it("restores import tasks from the server without leaking another workspace or a private path", async () => {
+    const { app, operations } = await seededApp();
+    const base: ImportRecord = {
+      id: "import-personal", workspaceId: "personal", courseId: "course-1", originalName: "Lecture.pdf",
+      mediaType: "application/pdf", kind: "pdf", sizeBytes: 10, sha256: "sha", casPath: "/synthetic/source.pdf",
+      source: "user_upload", license: "private_course_material", sensitivity: "private",
+      state: "processing", issues: [], createdAt: "2026-09-22T10:00:00.000Z"
+    };
+    await operations.mutate((state) => { state.imports.push(base, { ...base, id: "import-other", workspaceId: "other" }); });
+    const first = await request(app).get("/api/v1/imports").set("X-Workspace-Id", "personal").expect(200);
+    const afterRefresh = await request(app).get("/api/v1/imports").set("X-Workspace-Id", "personal").expect(200);
+    expect(first.body).toEqual(afterRefresh.body);
+    expect(first.body).toMatchObject([{ id: "import-personal", courseId: "course-1", state: "processing" }]);
+    expect(JSON.stringify(first.body)).not.toContain("/synthetic/source.pdf");
+    await request(app).get("/api/v1/imports/import-other").set("X-Workspace-Id", "personal").expect(404);
+    expect((await request(app).get("/api/v1/imports").set("X-Workspace-Id", "other").expect(200)).body).toHaveLength(1);
+  });
   it("records a safe ReadWeave failure kind without exposing a private response", () => {
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_503:private response"))).toBe("http_503");
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_NETWORK:This operation was aborted"))).toBe("timeout");

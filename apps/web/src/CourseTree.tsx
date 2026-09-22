@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
 import type { ImportTaskState } from "./import-progress.js";
 
-export type CourseTreeTask = { id: string; title: string; detail: string; state: ImportTaskState };
+export type CourseTreeTask = { id: string; courseId?: string; parentNodeId?: string; title: string; detail: string; state: ImportTaskState };
 
 export interface CourseTreeActions {
   createModule?: (course: CourseTreeNode) => void;
@@ -42,15 +42,24 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   actions?: CourseTreeActions;
 }) {
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const rootNodes = useMemo(() => [...(tree?.courses ?? []), ...(tree?.rootMaterials ?? [])], [tree]);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(rootNodes.flatMap((node) => [node.id, ...collectExpandable(node)])));
   const [menu, setMenu] = useState<TreeMenuState>();
   const [focusedNodeId, setFocusedNodeId] = useState<string>();
   const [draggingNodeId, setDraggingNodeId] = useState<string>();
   const [pointerDraggingNodeId, setPointerDraggingNodeId] = useState<string>();
   const [dropTargetId, setDropTargetId] = useState<string>();
   const [dragAnnouncement, setDragAnnouncement] = useState("");
-  const rootNodes = useMemo(() => [...(tree?.courses ?? []), ...(tree?.rootMaterials ?? [])], [tree]);
-  const visibleNodes = useMemo(() => filterTree(rootNodes, query), [query, rootNodes]);
+  const visibleNodes = useMemo(() => {
+    const filtered = filterTree(rootNodes, query);
+    if (!query) return filtered;
+    const matchesTask = (node: CourseTreeNode) => backgroundTasks.some((task) =>
+      (task.courseId === node.id || task.parentNodeId === node.id) && task.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    return [...filtered, ...rootNodes.filter((node) => !filtered.some((item) => item.id === node.id) && matchesTask(node))];
+  }, [query, rootNodes, backgroundTasks]);
+  const taskRootId = (task: CourseTreeTask): string | undefined => rootNodes.find((node) =>
+    task.courseId === node.id || task.parentNodeId === node.id ||
+    (task.parentNodeId && collectExpandable(node).includes(task.parentNodeId)))?.id;
 
   useEffect(() => {
     if (!tree) return;
@@ -149,23 +158,11 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
 
     <nav className="tree-scroll" aria-label="正式课程">
       {visibleNodes.length === 0 && <div className="tree-empty"><Icon name="search" /><span>{query ? "没有匹配的课程或材料" : "还没有课程或材料"}</span></div>}
-      {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query)} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
+      {visibleNodes.map((node) => <Fragment key={node.id}><TreeNode node={node} allNodes={allNodes} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query)} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />
+        {(expanded.has(node.id) || query) && <TaskRows tasks={backgroundTasks.filter((task) => taskRootId(task) === node.id)} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} nested />}
+      </Fragment>)}
       {tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query)} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
-      {backgroundTasks.length > 0 && <section className="tree-task-section" aria-label="后台任务">
-        <div className="tree-task-heading"><span>后台任务</span><span>{backgroundTasks.length}</span></div>
-        <div className="tree-task-list">{backgroundTasks.filter((task) => !query || task.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map((task) => <button
-          type="button"
-          className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
-          data-action="tree-open-task"
-          data-task-id={task.id}
-          data-task-state={task.state}
-          key={task.id}
-          onClick={() => onSelectTask?.(task.id)}
-          aria-current={selectedTaskId === task.id ? "page" : undefined}
-          aria-label={`${task.title}，${task.detail}`}
-          title={`${task.title} · ${task.detail}`}
-        ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small>{task.detail}</small></span><Icon name="chevronRight" /></button>)}</div>
-      </section>}
+      <TaskRows tasks={backgroundTasks.filter((task) => !taskRootId(task))} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
     </nav>
 
     <div className="sidebar-footer">
@@ -194,6 +191,29 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     <div className="sr-only" aria-live="polite" id="tree-drag-status">{dragAnnouncement}</div>
     {menu && actions && <TreeContextMenu menu={menu} actions={actions} onClose={() => setMenu(undefined)} />}
   </aside>;
+}
+
+function TaskRows({ tasks, query, selectedTaskId, onSelectTask, nested = false }: {
+  tasks: CourseTreeTask[]; query: string; selectedTaskId?: string;
+  onSelectTask?: (taskId: string) => void; nested?: boolean;
+}) {
+  const visible = tasks.filter((task) => !query || task.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  if (visible.length === 0) return null;
+  return <section className={`tree-task-section ${nested ? "tree-task-nested" : ""}`} aria-label={nested ? "课程后台任务" : "未归类后台任务"}>
+    {!nested && <div className="tree-task-heading"><span>后台任务</span><span>{visible.length}</span></div>}
+    <div className="tree-task-list">{visible.map((task) => <button
+          type="button"
+          className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
+          data-action="tree-open-task"
+          data-task-id={task.id}
+          data-task-state={task.state}
+          key={task.id}
+          onClick={() => onSelectTask?.(task.id)}
+          aria-current={selectedTaskId === task.id ? "page" : undefined}
+          aria-label={`${task.title}，${task.detail}`}
+          title={`${task.title} · ${task.detail}`}
+        ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small>{task.detail}</small></span><Icon name="chevronRight" /></button>)}</div>
+  </section>;
 }
 
 function TreeNode({ node, allNodes, depth, expanded, selectedPageId, focusedNodeId, onFocus, onToggle, onSelectPage, onOpenMenu, forceOpen, actions, draggingNodeId, pointerDraggingNodeId, dropTargetId, onDragStart, onPointerDragStart, onDragOver, onDrop, onDragEnd }: {

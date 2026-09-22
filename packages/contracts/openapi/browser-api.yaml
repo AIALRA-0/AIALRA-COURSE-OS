@@ -392,6 +392,11 @@ paths:
       responses:
         '200': { description: Conflict resolved without discarding either version }
   /imports:
+    get:
+      operationId: listImports
+      description: List persistent background tasks in the authenticated workspace without private source paths
+      responses:
+        '200': { description: Workspace-scoped import task summaries, newest first }
     post:
       operationId: createImport
       parameters:
@@ -409,6 +414,7 @@ paths:
                 license: { type: string }
                 courseId: { type: string }
                 parentNodeId: { type: string, description: Course or material parent for the imported material }
+                previousMaterialVersionId: { type: string, description: Previous source release for an incremental insert or append }
                 qualityMode: { type: string, enum: [economy, balanced, quality] }
                 language: { type: string }
                 autoGenerate: { type: boolean, default: true, description: Create one durable full-material draft generation plan after conversion }
