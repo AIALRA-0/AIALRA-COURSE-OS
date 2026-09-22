@@ -1,0 +1,29 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_f1bdfea1984d0e 1118-1132
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_ed0a71199e22d9 1,211-216
+  s_e8850ef125fb32::t_32ab134c80706a 123-132,217
+  s_e8850ef125fb32::t_64ea37ff5aad90 114-122
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_2678dc770d9fc6 1509-1511
+  s_e8850ef125fb32::t_d04cb435074654 493,1520-1523
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_a22c9edf8b0201 164-167,171
+  s_e8850ef125fb32::t_8b66dad0904ef7 168-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "56c5613ad185bd7de4b91779de4e3362996913ba",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
