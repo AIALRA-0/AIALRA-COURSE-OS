@@ -4,6 +4,8 @@ import { meterModelRouter } from "./model-usage-meter.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { gzip } from "node:zlib";
+import { promisify } from "node:util";
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
@@ -76,6 +78,46 @@ export interface AppDependencies {
   conversion: { enqueueAndWait(request: ConversionRequest): Promise<ConversionResult> };
   modelRouter?: ModelRouterClient;
   credentialVault?: SecretVault;
+}
+
+const gzipAsync = promisify(gzip);
+
+function acceptsGzip(acceptEncoding: string | undefined): boolean {
+  if (!acceptEncoding) return false;
+  let gzipQuality: number | undefined;
+  let wildcardQuality: number | undefined;
+  for (const item of acceptEncoding.split(",")) {
+    const [rawCoding, ...parameters] = item.trim().split(";");
+    const coding = rawCoding?.trim().toLowerCase();
+    if (!coding) continue;
+    let quality = 1;
+    let valid = true;
+    for (const parameter of parameters) {
+      const [rawName, rawValue] = parameter.trim().split("=", 2);
+      if (rawName?.trim().toLowerCase() !== "q") continue;
+      const value = rawValue?.trim();
+      if (value === undefined || !/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(value)) {
+        valid = false;
+        break;
+      }
+      quality = Number(value);
+    }
+    if (!valid) continue;
+    if (coding === "gzip") gzipQuality = Math.max(gzipQuality ?? 0, quality);
+    else if (coding === "*") wildcardQuality = Math.max(wildcardQuality ?? 0, quality);
+  }
+  return (gzipQuality ?? wildcardQuality ?? 0) > 0;
+}
+
+function jsonResponseBody(response: Response, value: unknown): string {
+  const replacer = response.app.get("json replacer");
+  const spaces = response.app.get("json spaces");
+  let body = JSON.stringify(value, replacer, spaces);
+  if (body === undefined) throw new TypeError("API response could not be serialized as JSON");
+  if (response.app.get("json escape")) {
+    body = body.replace(/[<>&]/g, (character) => ({ "<": "\\u003c", ">": "\\u003e", "&": "\\u0026" })[character]!);
+  }
+  return body;
 }
 
 /** Keep the previous-page context used by the first attempt stable while later
@@ -839,7 +881,14 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/releases", async (request, response, next) => {
     try {
       if (request.query.view === "index") {
-        response.json(await listWorkspaceReleaseIndexes(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));
+        response.vary("Accept-Encoding");
+        const indexes = await listWorkspaceReleaseIndexes(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id));
+        if (acceptsGzip(request.header("Accept-Encoding"))) {
+          const compressed = await gzipAsync(Buffer.from(jsonResponseBody(response, indexes), "utf8"));
+          response.type("json").set("Content-Encoding", "gzip").send(compressed);
+        } else {
+          response.json(indexes);
+        }
         return;
       }
       response.json(await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));

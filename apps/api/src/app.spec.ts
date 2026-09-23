@@ -1,6 +1,9 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzip } from "node:zlib";
+import { promisify } from "node:util";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
@@ -11,6 +14,8 @@ import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+const gunzipAsync = promisify(gunzip);
 
 async function testApp() {
   const root = await mkdtemp(join(tmpdir(), "course-os-api-"));
@@ -430,6 +435,44 @@ describe("Course OS API", () => {
     expect(JSON.stringify(index.body)).not.toContain("atom body");
     expect(JSON.stringify(index.body)).not.toContain("原始讲解");
     expect(JSON.stringify(index.body).length).toBeLessThan(JSON.stringify(full.body).length);
+  });
+
+  it("gzips the release index only when accepted and preserves its JSON bytes", async () => {
+    const { app } = await seededApp();
+    const server = app.listen(0);
+    try {
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("TEST_SERVER_ADDRESS_UNAVAILABLE");
+      const getIndex = (acceptEncoding?: string) => new Promise<{ headers: import("node:http").IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/api/v1/releases?view=index",
+          headers: acceptEncoding === undefined ? undefined : { "Accept-Encoding": acceptEncoding }
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      const plain = await getIndex();
+      const compressed = await getIndex("gzip");
+      const refused = await getIndex("gzip;q=0");
+      const varyTokens = (plain.headers.vary ?? "").split(",").map((token) => token.trim().toLowerCase());
+      expect(varyTokens).toContain("accept-encoding");
+      expect(plain.headers["content-encoding"]).toBeUndefined();
+      expect(refused.headers["content-encoding"]).toBeUndefined();
+      expect(compressed.headers["content-encoding"]).toBe("gzip");
+      expect((compressed.headers.vary ?? "").toLowerCase()).toContain("accept-encoding");
+      expect(await gunzipAsync(compressed.body)).toEqual(plain.body);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("serves the learner lesson from a saved draft snapshot without waiting for block reconciliation", async () => {
