@@ -1,0 +1,84 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_7555de61b130e4 127-134
+  s_e8850ef125fb32::t_60698b00ded421 135
+  s_e8850ef125fb32::t_c9bd7b13a10c77 7,54,58-72,102-103,105-107,109-114,116-117,122-124,136
+  s_e8850ef125fb32::t_bfa63c1d1b0e40 55-57,92,94-99,115,120,125-126
+  s_e8850ef125fb32::t_8d215a4c4dd7a2 73-91,93,100-101,104,108,118-119,121
+  s_e8850ef125fb32::t_2165c54c49fff1 137
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_55a9f391c1c24f 1095-1096,1112-1113
+  s_e8850ef125fb32::t_e5c32ad7a7a3bb 1073,1091-1092,1097,1099-1100,1108-1109,1111,1114-1115
+  s_e8850ef125fb32::t_1c6cb586891af9 145
+  s_e8850ef125fb32::t_051138cba9547b 2589,2594-2595
+  s_e8850ef125fb32::t_dbbbbed6eeb375 1093-1094,1098,1110
+  s_e8850ef125fb32::t_73aff1a47417de 2590-2593,2596-2609
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_17da6d85a59fc1 28-31,45-47,52-67
+  s_e8850ef125fb32::t_2327674ebce036 68
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_78d580db790476 11-19,21-23,313-323,332
+  s_e8850ef125fb32::t_a13246de93ba8a 20
+  s_e8850ef125fb32::t_c10b874108d806 310-312,324-325,329-331
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_b534f3921e1783 126
+  s_e8850ef125fb32::t_4583e017218b26 134-137,193-200,300-302,342-345
+  s_e8850ef125fb32::t_4f516c8ea2ff0d 226-242
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_11ec0067bbb1ae 1027,1113,1116,1158
+  s_e8850ef125fb32::t_4f516c8ea2ff0d 6,480,524,1130,1163
+  s_e8850ef125fb32::t_6746d2b50f32f0 42-51
+  s_e8850ef125fb32::t_4ed846208294c2 1054
+  s_e8850ef125fb32::t_fc11274545ae29 478
+  s_e8850ef125fb32::t_c59e85fdae76e0 375,379-380
+  s_e8850ef125fb32::t_06d82fdb83a176 1057-1063
+  s_e8850ef125fb32::t_41e538f4590cb7 1050-1053,1055-1056,1064-1072,1128,1133-1138
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_4f516c8ea2ff0d 1,25-30
+  s_e8850ef125fb32::t_f8447265c0e145 24
+  s_36a381ab4bccf9::t_67bb549ec14b67 31
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_bfadaf13a3bd92 1020
+  s_e8850ef125fb32::t_0661423fd1b3da 7,1017-1019,1021-1029,1066-1070,1223-1228
+  s_e8850ef125fb32::t_a3b329f7f9067d 1161-1167
+  s_e8850ef125fb32::t_f3aa8bffb3da66 1652-1653,1658-1734,1774-1779
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_4f516c8ea2ff0d 4,183-202
+  s_e8850ef125fb32::t_a66c68c6408ec4 143-182
+  s_e8850ef125fb32::t_f9dc03b336ab85 278-282
+  s_36a381ab4bccf9::t_c25247a565d923 203
+apps/web/src/types.ts
+  s_e8850ef125fb32::t_f0a922ac82258a 10,12
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_fc996aa011a0e3 834,838,844,846-847,849
+  s_e8850ef125fb32::t_d7033c72551cab 833,837
+  s_e8850ef125fb32::t_63b6b08807ddd7 1266
+  s_e8850ef125fb32::t_6eaf2be11afa25 15-24,1206-1213,1215-1253,1255-1265,1267-1269
+  s_e8850ef125fb32::t_029ee954113859 956,958
+  s_e8850ef125fb32::t_13bb1eb3ae29de 845,848
+  s_e8850ef125fb32::t_d9ee4ad7aa472d 957,1214,1254
+  s_36a381ab4bccf9::t_c5b45e56ae4c9a 1270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0411da945745332a230d2bedbaf60efc3066ea56",
+  "prompts": {},
+  "sessions": {
+    "s_36a381ab4bccf9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a1a6-6503-79c1-8d40-f56fe9691ee6",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
