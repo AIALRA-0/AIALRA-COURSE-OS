@@ -1,0 +1,19 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_9b042a39094c05 1131,1153-1154,1166,1170,1172,1175-1176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8fb5445d8e4c6845e182cabf6581d250051c9fe7",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
