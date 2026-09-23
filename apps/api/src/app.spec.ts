@@ -4,7 +4,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import type { CourseRelease, GenerationJob, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import type { CourseRelease, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -56,7 +56,7 @@ describe("Course OS API", () => {
     release.id = "release-independent-job-index";
     const { app, operations, readweave } = await seededApp(undefined, release);
     const job: GenerationJob = {
-      id: "job-independent-tree-entry",
+      id: "3ad73f91-0000-4000-8000-000000000001",
       workspaceId: "personal",
       materialVersionId: release.id,
       state: "running",
@@ -100,7 +100,7 @@ describe("Course OS API", () => {
     const getRelease = vi.spyOn(readweave, "getRelease");
     const listCourses = vi.spyOn(readweave, "listCourses");
 
-    const taskId = "generation-job:job-independent-tree-entry";
+    const taskId = `generation-job:${job.id}`;
     const first = await request(app).get("/api/v1/imports").set("X-Workspace-Id", "personal").expect(200);
     expect(first.body).toContainEqual(expect.objectContaining({
       id: taskId,
@@ -112,7 +112,7 @@ describe("Course OS API", () => {
       generationCompletedPageIds: ["page-1"],
       state: "ready"
     }));
-    expect(first.body).toContainEqual(expect.objectContaining({ id: "generation-job:job-with-plan-but-no-import" }));
+    expect(first.body.some((task: { id: string }) => task.id === "generation-job:job-with-plan-but-no-import")).toBe(false);
     expect(first.body.some((task: { id: string }) => task.id === "generation-job:job-other-workspace")).toBe(false);
     expect(JSON.stringify(first.body)).not.toContain("casPath");
     expect(getRelease).not.toHaveBeenCalled();
@@ -132,8 +132,106 @@ describe("Course OS API", () => {
     });
     const completedAfterRefresh = await request(app).get(`/api/v1/imports/${encodeURIComponent(taskId)}`).set("X-Workspace-Id", "personal").expect(200);
     expect(completedAfterRefresh.body).toMatchObject({ generationState: "completed", generationCompletedPageIds: job.pageIds, updatedAt: "2026-09-22T10:02:00.000Z" });
-    await request(app).get("/api/v1/imports/generation-job%3Ajob-with-plan-but-no-import").set("X-Workspace-Id", "personal").expect(200);
     await request(app).get(`/api/v1/imports/${encodeURIComponent(taskId)}`).set("X-Workspace-Id", "other").expect(404);
+  });
+  it("does not fan out historical plan pages or source-linked jobs into separate import tasks", async () => {
+    const release = testRelease();
+    release.id = "release-with-many-historical-jobs";
+    const { app, operations } = await seededApp(undefined, release);
+    const importedMaterial: ImportRecord = {
+      id: "import-with-linked-jobs",
+      workspaceId: "personal",
+      courseId: release.courseId,
+      originalName: "Lecture.pptx",
+      mediaType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      kind: "pptx",
+      sizeBytes: 10,
+      sha256: "sha",
+      casPath: "/private/lecture.pptx",
+      source: "user_upload",
+      license: "private_course_material",
+      sensitivity: "private",
+      state: "ready",
+      issues: [],
+      generationPlanId: "historical-plan-1",
+      materialVersionId: release.id,
+      pageIds: release.pageIds,
+      createdAt: "2026-09-22T09:00:00.000Z"
+    };
+    const baseJob: GenerationJob = {
+      id: "historical-job-template",
+      workspaceId: "personal",
+      materialVersionId: release.id,
+      state: "completed",
+      budgetUsd: 1,
+      spentUsd: 0.02,
+      pageIds: ["page-1"],
+      completedPageIds: ["page-1"],
+      failedPageIds: [],
+      attempt: 1,
+      cancelRequested: false,
+      createdAt: "2026-09-22T10:00:00.000Z",
+      updatedAt: "2026-09-22T10:01:00.000Z"
+    };
+    const historicalPlanJobs = Array.from({ length: 611 }, (_, index) => ({
+      ...baseJob,
+      id: `historical-plan-job-${index + 1}`,
+      planId: `historical-plan-${Math.floor(index / 40) + 1}`,
+      pageIds: [`page-${index + 1}`],
+      completedPageIds: [`page-${index + 1}`]
+    }));
+    const linkedJobs = Array.from({ length: 12 }, (_, index) => ({
+      ...baseJob,
+      id: `source-linked-job-${index + 1}`,
+      sourceImportId: importedMaterial.id
+    }));
+    const independentJobs = Array.from({ length: 3 }, (_, index) => ({
+      ...baseJob,
+      id: `standalone-job-${index + 1}`,
+      state: "queued" as const,
+      completedPageIds: []
+    }));
+    const existingPlan: GenerationPlan = {
+      id: "historical-plan-1",
+      workspaceId: "personal",
+      materialVersionId: release.id,
+      sourceImportId: importedMaterial.id,
+      qualityMode: "balanced",
+      language: "zh-CN",
+      writingPolicySnapshotId: "test-writing-policy",
+      pageIds: historicalPlanJobs.slice(0, 40).flatMap((job) => job.pageIds),
+      completedPageIds: ["page-1"],
+      failedPageIds: [],
+      jobIds: historicalPlanJobs.slice(0, 40).map((job) => job.id),
+      budgetUsd: 1,
+      spentUsd: 0.02,
+      holdForReview: false,
+      state: "running",
+      createdAt: "2026-09-22T09:00:00.000Z",
+      updatedAt: "2026-09-22T10:01:00.000Z"
+    };
+    await operations.mutate((state) => {
+      state.imports.push(importedMaterial);
+      state.generationPlans.push(existingPlan);
+      state.jobs.push(...historicalPlanJobs, ...linkedJobs, ...independentJobs, {
+        ...baseJob,
+        id: "standalone-job-other-workspace",
+        workspaceId: "other",
+        state: "queued",
+        completedPageIds: []
+      });
+    });
+
+    const response = await request(app).get("/api/v1/imports").set("X-Workspace-Id", "personal").expect(200);
+    const taskIds = response.body.map((task: { id: string }) => task.id);
+    expect(taskIds).toHaveLength(4);
+    expect(taskIds).toContain(importedMaterial.id);
+    expect(response.body.find((task: { id: string }) => task.id === importedMaterial.id)).toMatchObject({
+      generationState: "running",
+      generationCompletedPageIds: existingPlan.completedPageIds
+    });
+    expect(taskIds).toEqual(expect.arrayContaining(independentJobs.map((job) => `generation-job:${job.id}`)));
+    expect(taskIds.some((id: string) => id.startsWith("generation-job:historical-plan-job-") || id.startsWith("generation-job:source-linked-job-") || id === "generation-job:standalone-job-other-workspace")).toBe(false);
   });
   it("records a safe ReadWeave failure kind without exposing a private response", () => {
     expect(safeReadWeaveFailureKind(new Error("READWEAVE_ETAPI_503:private response"))).toBe("http_503");

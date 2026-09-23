@@ -1090,7 +1090,7 @@ export function createApp(dependencies: AppDependencies): Express {
           };
         });
       const independentJobs = snapshot.jobs
-        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId)
+        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId && !job.planId)
         .map((job) => {
           const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
           return standaloneGenerationTaskRecord(job, relatedImport);
