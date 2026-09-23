@@ -3289,13 +3289,17 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
           language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || "balanced", idempotencyKey: jobId, blueprint }, generation.teachingTrace.plan);
         if (issues.length) throw new ModelRouterGenerationError(`TEACHING_PLAN_CONTENT_INVALID:${issues[0]}`, generation.model, generation.usage, generation.provider);
-        await appendGenerationStageEvent(jobId, page.id, "atomize", "completed", dependencies, {
+      }
+      await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, {
+        provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens,
+        outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0,
+        ...(generation.teachingTrace ? {
           planningMode: "source-plan", plan: generation.teachingTrace.plan, phases: generation.teachingTrace.phases,
           previousPageId: previousPageContext ? release.pages.find(candidate => candidate.pageNumber === page.pageNumber - 1)?.id : undefined,
           coreFingerprint: generation.teachingTrace.coreFingerprint,
-          previousCoreFingerprint: generation.teachingTrace.previousCoreFingerprint });
-      }
-      await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, { provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens, outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0 });
+          previousCoreFingerprint: generation.teachingTrace.previousCoreFingerprint
+        } : {})
+      });
       let rejectedNarrativeIssues: string[] = [];
       if (runtimeModelRouter && !generation.teachingTrace) {
         let coverageIssues = validateTeachingCoverageEvidence(page, generation.content);

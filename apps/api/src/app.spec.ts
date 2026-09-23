@@ -88,6 +88,9 @@ describe("Course OS API", () => {
         apiKey: "private-provider-key",
         plan: { content: "private generation plan that must not appear in the job response" }
       }, "2026-09-22T10:07:00.000Z");
+      append(job.id, "generation.stage.completed", {
+        stage: "teach", pageId: "page-1", planningMode: "source-plan"
+      }, "2026-09-22T10:07:30.000Z");
       append(job.id, "generation.page.completed", { stage: "review", pageId: "page-1" }, "2026-09-22T10:08:00.000Z");
       append(otherWorkspaceJob.id, "generation.stage.started", { stage: "repair", phase: "opening_repair" }, "2026-09-22T10:09:00.000Z");
       append(job.id, "generation.stage.started", { stage: "unknown", phase: "private-secret" }, "2026-09-22T10:10:00.000Z");
@@ -99,7 +102,7 @@ describe("Course OS API", () => {
       status: "completed",
       phase: "explanation",
       phaseStatus: "completed",
-      occurredAt: "2026-09-22T10:07:00.000Z"
+      occurredAt: "2026-09-22T10:07:30.000Z"
     });
     expect(Object.keys(detail.body.latestStageActivity).sort()).toEqual(["occurredAt", "phase", "phaseStatus", "stage", "status"]);
     expect(JSON.stringify(detail.body)).not.toContain("private-stage-payload");
