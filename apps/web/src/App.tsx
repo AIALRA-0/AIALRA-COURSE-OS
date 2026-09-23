@@ -1128,6 +1128,7 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
   const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && (terminalJob || taskFinished));
   const summary = summarizeImportProgress(record, plan, activeJobs, costs);
   const activity = getImportActivity(record, plan, activeJobs, costs);
+  const awaitingPlanDetails = auto && Boolean(record.generationPlanId) && !plan;
   const failed = plan?.failedPageIds.length ?? record.generationFailedPageIds?.length ?? 0;
   const progress = activity.progressPercent;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || taskState === "failed";
@@ -1149,10 +1150,9 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
     : activity.stageStatus === "started" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已开始"
       : activity.stageStatus === "completed" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已完成"
         : "尚未调用模型";
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : `${currentStage}${stageCount}${activeDetail}`;
-  const indeterminate = progress === undefined && activity.busy && !activity.stale;
+  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : awaitingPlanDetails ? "正在读取生成进度" : `${currentStage}${stageCount}${activeDetail}`;
+  const indeterminate = progress === undefined && (activity.busy || awaitingPlanDetails) && (!activity.stale || awaitingPlanDetails);
   const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
-  const awaitingPlanDetails = auto && Boolean(record.generationPlanId) && !plan;
   const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model
     || (awaitingPlanDetails ? "正在读取模型记录" : taskFinished ? "模型记录暂不可用" : recordedModelStage);
   const concurrency = summary.concurrency?.running !== undefined && summary.concurrency.limit !== undefined
@@ -1163,17 +1163,17 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
         ? `—/${summary.concurrency.limit}`
         : "—";
   const cost = summary.costUsd === undefined ? awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用" : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
-  const progressLabel = failedState ? "生成失败" : cancelledState ? "已取消"
+  const progressLabel = failedState ? "生成失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"
       : `${progressScopeLabel(activity.progressScope)}${progress}%`;
   const progressDescription = progress === undefined
-    ? `${activity.stage}，${failedState ? `${failed} 页失败` : activity.stale ? "状态长时间未更新" : "进度百分比暂不可核对"}`
+    ? `${activity.stage}，${failedState ? `${failed} 页失败` : awaitingPlanDetails ? "正在读取任务进度" : activity.stale ? "状态长时间未更新" : "进度百分比暂不可核对"}`
     : `${activity.progressScope || activity.stage} ${progress}%`;
-  return <section className={`import-task-workspace import-state-${record.state} ${activity.stale ? "task-stale" : ""}`} aria-live="polite">
+  return <section className={`import-task-workspace import-state-${record.state} ${activity.stale && !awaitingPlanDetails ? "task-stale" : ""}`} aria-live="polite">
     <header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>{statusTitle}</h2></div><button className="quiet-button" data-action="close-import-task" onClick={onClose}>返回课程</button></header>
     <p className="import-activity-file">{taskTitle || record.originalName}</p>
-    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${activity.progressScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
-    <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{activity.stale ? "状态已超过 2 分钟未更新，请留意任务是否仍在推进" : `最近状态更新：${formatActivityAge(activity.ageSeconds)}`}</small></span></div>
+    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${activity.progressScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
+    <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "状态已超过 2 分钟未更新，请留意任务是否仍在推进" : `最近状态更新：${formatActivityAge(activity.ageSeconds)}`}</small></span></div>
     <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>阶段更新时间</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文核心完成</dt><dd>{auto ? formatProgressCount(summary.core) : "未启用"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "未启用"}</dd></div><div><dt>修复数</dt><dd>{summary.repairCount === undefined ? "—" : summary.repairCount}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>供应商 / 模型</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
     {(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}
     <footer><span>{finished ? failedState ? "任务已结束，可查看失败页面" : cancelledState ? "任务已取消" : taskState === "awaiting_review" ? "任务等待检查" : taskState === "paused" ? "任务已暂停" : !auto || record.generationState === "not_requested" ? "材料导入完成，尚未生成讲解" : "任务已完成" : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
