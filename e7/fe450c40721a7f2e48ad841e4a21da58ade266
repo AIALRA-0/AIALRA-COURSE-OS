@@ -1,0 +1,21 @@
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_83ab8dcffad89e 102-119
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_83ab8dcffad89e 148-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e7fe450c40721a7f2e48ad841e4a21da58ade266",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
