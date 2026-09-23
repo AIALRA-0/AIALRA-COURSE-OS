@@ -1012,6 +1012,49 @@ describe("Course OS API", () => {
       .expect(200);
   }, 60_000);
 
+  it("continues only failed pages under a new Harness while preserving completed import pages", async () => {
+    let calls = 0;
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        if (++calls === 1) throw new Error("PROVIDER_AUTH");
+        return testTeachingResult(0.001);
+      }
+    };
+    const source = { ...testReleaseWithPages(2), writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" };
+    const { app, operations, release } = await seededApp(modelRouter, source);
+    const created = await request(app).post("/api/v1/generation-plans")
+      .set("Idempotency-Key", "partial-snapshot-create")
+      .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 2, qualityMode: "economy" })
+      .expect(202);
+    const oldPlan = await waitForPlan(app, created.body.plan.id);
+    expect(oldPlan).toMatchObject({ state: "failed", completedPageIds: [release.pageIds[1]], failedPageIds: [release.pageIds[0]] });
+    await operations.mutate(state => {
+      const old = state.generationPlans.find(item => item.id === oldPlan.id)!;
+      old.harnessSnapshotId = "obsolete-harness";
+      old.sourceImportId = "import-continuation-test";
+      state.imports.push({ id: old.sourceImportId, workspaceId: "personal", materialVersionId: release.id,
+        pageIds: [...release.pageIds], generationPlanId: old.id, generationState: "failed",
+        generationCompletedPageIds: [...old.completedPageIds], generationFailedPageIds: [...old.failedPageIds],
+        originalName: "sample.pdf", kind: "pdf", state: "ready", autoGenerate: true,
+        createdAt: new Date().toISOString(), sensitivity: "private" } as ImportRecord);
+    });
+    const retried = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
+      .set("Idempotency-Key", "partial-snapshot-retry").expect(202);
+    expect(retried.body.plan).toMatchObject({ retryOfPlanId: oldPlan.id, pageIds: [release.pageIds[0]] });
+    const completed = await waitForPlan(app, retried.body.plan.id);
+    expect(completed).toMatchObject({ state: "completed", completedPageIds: [release.pageIds[0]], failedPageIds: [] });
+    const snapshot = await operations.read();
+    expect(snapshot.generationPlans.find(item => item.id === oldPlan.id)).toMatchObject({ state: "failed", completedPageIds: [release.pageIds[1]] });
+    expect(snapshot.imports.find(item => item.id === "import-continuation-test")).toMatchObject({
+      generationState: "completed", generationPlanId: completed.id,
+      generationCompletedPageIds: release.pageIds, generationFailedPageIds: []
+    });
+    const replay = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
+      .set("Idempotency-Key", "partial-snapshot-retry-again").expect(200);
+    expect(replay.body.plan.id).toBe(completed.id);
+    expect(calls).toBe(3);
+  }, 60_000);
+
   it("deduplicates the same uploaded source even when the idempotency key changes", async () => {
     const app = await testApp();
     const source = Buffer.from("# Same source\nThe source must be stored once");

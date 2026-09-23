@@ -578,6 +578,8 @@ export interface GenerationJob {
 
 export interface GenerationPlan {
   id: Identifier;
+  /** A new snapshot can continue only the failed pages of an older plan. */
+  retryOfPlanId?: Identifier;
   workspaceId: Identifier;
   materialVersionId: Identifier;
   sourceImportId?: Identifier;

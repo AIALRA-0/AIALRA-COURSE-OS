@@ -1341,6 +1341,22 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const idempotencyKey = requireIdempotencyKey(request);
       const harnessSnapshotId = currentGenerationHarness().aggregateSha256;
+      const previous = (await dependencies.operations.read()).generationPlans.find(item => item.id === planId && item.workspaceId === workspaceId);
+      if (previous?.state === "failed" && previous.harnessSnapshotId && previous.harnessSnapshotId !== harnessSnapshotId && previous.completedPageIds.length > 0 && previous.failedPageIds.length > 0) {
+        const currentPolicy = await currentWritingPolicy();
+        if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== previous.writingPolicySnapshotId) {
+          throw new Error("WRITING_POLICY_SNAPSHOT_CHANGED");
+        }
+        const continuation = await createGenerationPlan({
+          idempotencyKey, workspaceId, materialVersionId: previous.materialVersionId,
+          pageIds: [...previous.failedPageIds], budgetUsd: previous.budgetUsd,
+          sourceImportId: previous.sourceImportId, qualityMode: previous.qualityMode,
+          language: previous.language, writingPolicySnapshotId: previous.writingPolicySnapshotId,
+          holdForReview: false, retryOfPlanId: previous.id
+        }, dependencies);
+        startCreatedGenerationPlanJobs(continuation, dependencies);
+        return response.status(continuation.created ? 202 : 200).json({ plan: continuation.plan, jobs: continuation.jobs ?? [], continuationOfPlanId: previous.id });
+      }
       const retried = await dependencies.operations.mutate((state) => {
         const replay = state.idempotency[idempotencyKey];
         if (replay) {
@@ -2860,6 +2876,7 @@ interface CreateGenerationPlanInput {
   pageIds: string[];
   budgetUsd: number;
   sourceImportId?: string;
+  retryOfPlanId?: string;
   qualityMode: "economy" | "balanced" | "quality";
   language: string;
   writingPolicySnapshotId: string;
@@ -2889,10 +2906,18 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
       if (!existing) throw new Error("GENERATION_PLAN_IDEMPOTENCY_CORRUPT");
       return { plan: structuredClone(existing), created: false };
     }
+    const existingContinuation = input.retryOfPlanId
+      ? state.generationPlans.find(item => item.retryOfPlanId === input.retryOfPlanId && item.workspaceId === input.workspaceId)
+      : undefined;
+    if (existingContinuation) {
+      state.idempotency[input.idempotencyKey] = { kind: "generation_plan", objectId: existingContinuation.id };
+      return { plan: structuredClone(existingContinuation), created: false };
+    }
     const now = new Date().toISOString();
     const harnessSnapshotId = currentGenerationHarness().aggregateSha256;
     const plan: GenerationPlan = {
       id: randomUUID(),
+      retryOfPlanId: input.retryOfPlanId,
       workspaceId: input.workspaceId,
       materialVersionId: input.materialVersionId,
       sourceImportId: input.sourceImportId,
@@ -3062,11 +3087,17 @@ function syncImportGenerationPlan(state: OperationalState, plan: GenerationPlan)
   if (!plan.sourceImportId) return;
   const record = state.imports.find((item) => item.id === plan.sourceImportId);
   if (!record) return;
+  const currentPlan = state.generationPlans.find(item => item.id === record.generationPlanId);
+  if (currentPlan && currentPlan.createdAt > plan.createdAt) return;
+  const relatedPlans = state.generationPlans.filter(item => item.sourceImportId === plan.sourceImportId && item.materialVersionId === plan.materialVersionId);
+  const completed = new Set(relatedPlans.flatMap(item => item.completedPageIds));
+  const activePages = new Set(state.jobs.filter(item => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state)).flatMap(item => item.pageIds));
+  const failed = new Set(relatedPlans.flatMap(item => item.failedPageIds).filter(pageId => !completed.has(pageId) && !activePages.has(pageId)));
   record.generationPlanId = plan.id;
-  record.generationJobIds = [...plan.jobIds];
+  record.generationJobIds = relatedPlans.flatMap(item => item.jobIds);
   record.generationJobId = plan.currentJobId || plan.lastJobId;
-  record.generationCompletedPageIds = [...plan.completedPageIds];
-  record.generationFailedPageIds = [...plan.failedPageIds];
+  record.generationCompletedPageIds = (record.pageIds ?? []).filter(pageId => completed.has(pageId));
+  record.generationFailedPageIds = (record.pageIds ?? []).filter(pageId => failed.has(pageId));
   record.generationState = plan.state;
 }
 
