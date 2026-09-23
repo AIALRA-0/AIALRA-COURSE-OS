@@ -1,0 +1,36 @@
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_4b37474a490c81 29-30,67-72,136-142
+  s_e8850ef125fb32::t_bd5f94361dd204 143-144
+apps/api/src/store-checkpoint.spec.ts
+  s_e8850ef125fb32::t_4b37474a490c81 24
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_16954ec64e5b07 438,441-442
+  s_e8850ef125fb32::t_4d43e3d9993b9c 445-471,488-502
+  s_e8850ef125fb32::t_bf82363c065dd7 472-474,476-477,479-482,486-487
+  s_e8850ef125fb32::t_a059ef62fa6c52 475,478,483-485
+  s_e8850ef125fb32::t_837d3ace98d30a 379,382-437,439-440,443
+  s_e8850ef125fb32::t_3788219191c987 444
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_4b37474a490c81 1105,1139
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_a1d523481440cb 1481,1498,1516
+  s_e8850ef125fb32::t_4181a2e2afff5f 2020-2038
+  s_e8850ef125fb32::t_8cd64b7c3dfe4f 650-651,653,655-661
+  s_e8850ef125fb32::t_e2c6ee11238bb7 654,1466,1480,1484-1487,1489,1492,1499-1506,1509-1512,1515
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "31473966fdecbb356c70e017d34cd1da8a54b77f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
