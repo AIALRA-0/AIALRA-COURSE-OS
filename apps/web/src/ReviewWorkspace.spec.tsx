@@ -4,13 +4,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ReviewWorkspace } from "./ReviewWorkspace.js";
 
 describe("ReviewWorkspace without a review map", () => {
-  it("keeps the self-retelling card entry available", () => {
+  it("opens self-retelling cards immediately while the map loads", () => {
     const markup = renderToStaticMarkup(createElement(ReviewWorkspace, {
       releases: [],
       onOpenPage: vi.fn()
     }));
 
-    expect(markup).toContain("掌握地图暂时不可用");
-    expect(markup).toMatch(/<button\b[^>]*data-action="review-open-self-retelling-cards"[^>]*>打开自我重述卡片<\/button>/);
+    expect(markup).toContain("自我重述卡片");
+    expect(markup).toContain("返回复习中心");
+    expect(markup).not.toContain("掌握地图暂时不可用");
   });
 });

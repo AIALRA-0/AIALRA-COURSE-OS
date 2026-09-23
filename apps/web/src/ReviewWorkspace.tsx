@@ -35,7 +35,7 @@ export function ReviewWorkspace({ releases, reviewMap, onOpenPage, onReviewChang
   const [pendingResult, setPendingResult] = useState<PendingReviewResult>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [selfRetellingReviewOpen, setSelfRetellingReviewOpen] = useState(false);
+  const [selfRetellingReviewOpen, setSelfRetellingReviewOpen] = useState(true);
 
   const objectives = reviewMap?.objectives ?? [];
   const items = useMemo(() => objectives.filter((objective) => {
