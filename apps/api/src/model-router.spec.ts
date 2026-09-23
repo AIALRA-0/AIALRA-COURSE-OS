@@ -12,6 +12,16 @@ describe("generation harness", () => {
     expect(parseWrappedProviderJson('{"chapterBridgeMarkdown":"第一行\n第二行\t缩进"}'))
       .toEqual({ chapterBridgeMarkdown: "第一行\n第二行\t缩进" });
   });
+  it("salvages only complete top-level fields from truncated JSON", () => {
+    expect(parseWrappedProviderJson('{"priorKnowledge":["完整字段"],"fullExplanationMarkdown":"截断中'))
+      .toEqual({ priorKnowledge: ["完整字段"] });
+    expect(parseWrappedProviderJson('{"priorKnowledge":["完整字段"],"questions":'))
+      .toEqual({ priorKnowledge: ["完整字段"] });
+  });
+  it("rejects malformed JSON when no complete field can be recovered", () => {
+    expect(() => parseWrappedProviderJson('{"priorKnowledge":['))
+      .toThrow("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
+  });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
     expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.4.67", taskContract: "GENERATE + TEACHING" });
@@ -820,15 +830,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, cachedInputTokens: 20, outputTokens: 400 } });
   });
 
-  it("retries invalid provider JSON once, while preserving both calls' usage", async () => {
+  it("repairs invalid provider JSON from bounded output without resending the source or image", async () => {
+    const requests: Array<{ instructions: string; input: unknown; key: string | null }> = [];
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const attempt = fetchMock.mock.calls.length;
-      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(attempt === 1 ? "json-retry" : "json-retry:schema-retry");
+      const request = JSON.parse(String(init?.body)) as { instructions: string; input: unknown };
+      requests.push({ ...request, key: new Headers(init?.headers).get("Idempotency-Key") });
       return Response.json({ model: "deepseek-flash", output_text: attempt === 1 ? '{"learningObjectives":[' : JSON.stringify(providerTeachingContent()), usage: { input_tokens: 100, output_tokens: 150 } });
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", supportsVision: false, billingMode: "metered" }).generateTeachingPackage(providerInput("json-retry"));
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requests.map(request => request.key)).toEqual(["json-retry", "json-retry:json-repair"]);
+    expect(JSON.stringify(requests[0]!.input)).toContain("输入经过规则处理后得到输出");
+    expect(requests[1]!.instructions).toContain("待修复数据");
+    expect(JSON.stringify(requests[1]!.input)).toContain("invalidOutput");
+    expect(JSON.stringify(requests[1]!.input)).not.toContain("输入经过规则处理后得到输出");
+    expect(JSON.stringify(requests[1]!.input)).not.toContain("input_image");
     expect(result).toMatchObject({ schemaRetries: 1, usage: { inputTokens: 200, outputTokens: 300 } });
   });
 
@@ -935,7 +953,9 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async () => Response.json({ model: "deepseek-flash", output_text: nested, usage: { input_tokens: 100, output_tokens: 150 } }));
     vi.stubGlobal("fetch", fetchMock);
     const failure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test", apiKey: "synthetic-example-deepseek-token", model: "deepseek-flash", protocol: "responses", billingMode: "metered" }).generateTeachingPackage(providerInput("truncated-outer-json")).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "MODEL_PROVIDER_OUTPUT_JSON_INVALID" });
+    expect(failure).toBeInstanceOf(ModelRouterGenerationError);
+    expect(failure).toMatchObject({ code: "MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID" });
+    expect((failure as ModelRouterGenerationError).code).not.toBe("MODEL_PROVIDER_OUTPUT_JSON_INVALID");
   });
 
   it("falls back once and never exposes a provider secret in errors", async () => {
@@ -1181,6 +1201,71 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       .toEqual(["course_os_opening", "course_os_opening_repair", "course_os_opening_repair_json_repair", "course_os_opening_repair"]);
     expect(phases).toEqual(["kuafu:course_os_opening", "kuafu:course_os_opening_repair",
       "kuafu:course_os_opening_repair_json_repair", "kuafu-backup:course_os_opening_repair"]);
+  });
+
+  it("repairs an invalid planned response from bounded output only and accounts for both billed calls", async () => {
+    const malformed = `{"priorKnowledge":"${"x".repeat(20_000)}`;
+    const calls: Array<{ name?: string; body: Record<string, any> }> = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, any>;
+      const name = body.text?.format?.name as string | undefined;
+      calls.push({ name, body });
+      if (name === "course_os_opening") return Response.json({ model: body.model, output_text: JSON.stringify({
+        priorKnowledge: ["输入：处理前已经掌握的信息；规则读取这些信息后，才能决定怎样产生结果"],
+        learningObjectives: ["能够说明页面主题"]
+      }), usage: { input_tokens: 10, output_tokens: 20, total_cost: 0.001 } });
+      if (name === "course_os_opening_repair") return Response.json({ model: body.model, output_text: malformed,
+        usage: { input_tokens: 20, output_tokens: 30, total_cost: 0.002 } });
+      if (name === "course_os_opening_repair_json_repair") return Response.json({ model: body.model,
+        output_text: JSON.stringify({ priorKnowledge: ["输入（Input）：处理前已经掌握的信息；规则读取这些信息后，才能决定怎样产生结果"] }),
+        usage: { input_tokens: 15, output_tokens: 20, total_cost: 0.003 } });
+      throw new Error(`Unexpected phase ${name}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" })
+      .generateTeachingPackage(plannedOpeningRepairInput("planned-focused-json-repair"));
+
+    expect(calls.map(call => call.name)).toEqual([
+      "course_os_opening", "course_os_opening_repair", "course_os_opening_repair_json_repair"
+    ]);
+    const originalRepair = calls[1]!.body;
+    const focusedRepair = calls[2]!.body;
+    expect(focusedRepair.instructions).toContain(originalRepair.instructions);
+    const focusedPrompt = JSON.parse(focusedRepair.input as string) as { invalidOutput: string; schema: unknown };
+    expect(focusedPrompt.invalidOutput).toHaveLength(12_000);
+    expect(focusedPrompt.invalidOutput).toBe(malformed.slice(0, 12_000));
+    expect(focusedPrompt.schema).toEqual(originalRepair.text.format.schema);
+    expect(focusedRepair.input).not.toContain("来源内容");
+    expect(JSON.stringify(focusedRepair.input)).not.toContain("input_image");
+    expect(result.usage.apiEquivalentUsd).toBeCloseTo(0.006);
+    expect(result.teachingTrace?.phases.map(phase => phase.phase)).toContain("opening_repair_invalid_json");
+    expect(result.teachingTrace?.phases.map(phase => phase.phase)).toContain("opening_repair_json_repair");
+  });
+
+  it("keeps malformed repair failures safe and includes their usage without storing response text", async () => {
+    const secretLikeOutput = "provider-output-with-secret-shaped-text-DO_NOT_LOG";
+    let calls = 0;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body)) as Record<string, any>;
+      const name = body.text?.format?.name as string | undefined;
+      if (name === "course_os_opening") return Response.json({ model: body.model, output_text: JSON.stringify({
+        priorKnowledge: ["输入：处理前已经掌握的信息；规则读取这些信息后，才能决定怎样产生结果"],
+        learningObjectives: ["能够说明页面主题"]
+      }), usage: { input_tokens: 10, output_tokens: 20, total_cost: 0.001 } });
+      return Response.json({ model: body.model, output_text: `{"priorKnowledge":"${secretLikeOutput}`,
+        usage: { input_tokens: 10, output_tokens: 15, total_cost: 0.002 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const failure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://api.deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses", supportsVision: true, billingMode: "metered" })
+      .generateTeachingPackage(plannedOpeningRepairInput("planned-invalid-json-repair-failure")).catch((error: unknown) => error);
+
+    expect(calls).toBe(3);
+    expect(failure).toMatchObject({ code: "MODEL_PROVIDER_OUTPUT_JSON_INVALID", usage: { apiEquivalentUsd: 0.005 } });
+    expect(String(failure)).not.toContain(secretLikeOutput);
+    expect(JSON.stringify(failure)).not.toContain(secretLikeOutput);
   });
 
   it("does not send malformed planned content to an OpenCode fallback", async () => {

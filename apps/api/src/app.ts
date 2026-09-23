@@ -142,6 +142,7 @@ async function waitForPreviousCoreContext(input: {
 }
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
+const STANDALONE_GENERATION_TASK_PREFIX = "generation-job:";
 
 /** Reconcile legacy metadata with Course OS's own encrypted vault without
  * reading or exposing the credential value. */
@@ -1069,9 +1070,8 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const snapshot = await dependencies.operations.read();
-      response.json(snapshot.imports
+      const imports = snapshot.imports
         .filter((item) => item.workspaceId === workspaceId)
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
         .map((item) => {
           const plan = snapshot.generationPlans.find((candidate) => candidate.id === item.generationPlanId);
           return {
@@ -1088,7 +1088,16 @@ export function createApp(dependencies: AppDependencies): Express {
             generationFailedPageIds: plan?.failedPageIds ?? item.generationFailedPageIds,
             createdAt: item.createdAt
           };
-        }));
+        });
+      const independentJobs = snapshot.jobs
+        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId)
+        .map((job) => {
+          const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
+          return standaloneGenerationTaskRecord(job, relatedImport);
+        });
+      const tasks = [...imports, ...independentJobs]
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      response.json(tasks);
     } catch (error) { next(error); }
   });
 
@@ -1096,6 +1105,14 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const snapshot = await dependencies.operations.read();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      if (request.params.id.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
+        const jobId = request.params.id.slice(STANDALONE_GENERATION_TASK_PREFIX.length);
+        const job = snapshot.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId && !item.sourceImportId);
+        if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
+        const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
+        response.json(standaloneGenerationTaskRecord(job, relatedImport, true));
+        return;
+      }
       const record = snapshot.imports.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
       const plan = (record.generationPlanId ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId) : undefined)
@@ -2567,6 +2584,27 @@ async function getWorkspaceRelease(readweave: ReadWeaveCourseApi, releaseId: str
   const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
   return courses.some((course) => course.id === release.courseId)
     && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`) ? release : undefined;
+}
+
+function standaloneGenerationTaskRecord(job: GenerationJob, relatedImport?: ImportRecord, detailed = false) {
+  const shortId = job.id.slice(0, 6);
+  return {
+    id: `${STANDALONE_GENERATION_TASK_PREFIX}${job.id}`,
+    workspaceId: job.workspaceId,
+    courseId: relatedImport?.courseId,
+    originalName: relatedImport ? `${relatedImport.originalName} · 生成任务 ${shortId}` : `独立生成任务 ${shortId}`,
+    state: "ready" as const,
+    autoGenerate: true,
+    generationJobId: job.id,
+    materialVersionId: job.materialVersionId,
+    generationState: job.state,
+    pageIds: job.pageIds,
+    generationCompletedPageIds: job.completedPageIds,
+    generationFailedPageIds: job.failedPageIds,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    ...(detailed ? { issues: [] as string[] } : {})
+  };
 }
 
 async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: CourseRelease, pageId: string, workspaceId: string): Promise<CourseRelease["pages"][number] | undefined> {

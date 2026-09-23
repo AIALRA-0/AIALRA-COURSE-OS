@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { CourseRelease } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
 import { normalizeSidebarWidth, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse } from "./App.js";
@@ -19,5 +20,13 @@ describe("workspace tree and incremental import UI inputs", () => {
     ] as CourseRelease[];
     expect(sourceReleasesForCourse(releases, "course-a").map((release) => release.id)).toEqual(["source-a"]);
     expect(sourceReleasesForCourse(releases, "")).toEqual([]);
+  });
+
+  it("navigates to the submitted import from either workspace shell", async () => {
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const handlers = [...source.matchAll(/onSubmitted=\{\(record\) => \{([^}]*)\}\}/g)].map((match) => match[1] ?? "");
+
+    expect(handlers).toHaveLength(2);
+    expect(handlers.every((handler) => handler.includes("rememberImport(record)") && handler.includes("trackImport(record.id)"))).toBe(true);
   });
 });

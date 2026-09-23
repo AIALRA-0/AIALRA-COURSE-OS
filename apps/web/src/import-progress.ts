@@ -123,7 +123,7 @@ export function summarizeImportProgress(
     ["completed", "done", "finished", "converted", "completedPages", "completedPageCount", "convertedPageCount", "conversionCompletedPages", "conversionCompletedPageCount"],
     ["total", "totalPages", "pageCount", "totalPageCount", "conversionTotalPages", "conversionTotalPageCount"]
   ) ?? countFromArrays(sources, ["convertedPageIds", "conversionCompletedPageIds"], ["pageIds"], ["totalPages", "totalPageCount"]);
-  if (!conversion && record.pageIds?.length) conversion = { completed: record.pageIds.length, total: record.pageIds.length };
+  if (!conversion && record.pageIds?.length && !record.generationJobId) conversion = { completed: record.pageIds.length, total: record.pageIds.length };
 
   const core = countFromSources(
     coreSources,
@@ -131,7 +131,10 @@ export function summarizeImportProgress(
     ["completed", "done", "finished", "completedPages", "completedPageCount", "coreCompleted", "coreCompletedPageCount", "bodyCoreCompleted", "bodyCoreCompletedPageCount"],
     ["total", "totalPages", "pageCount", "totalPageCount", "coreTotal", "coreTotalPageCount", "bodyCoreTotal", "bodyCoreTotalPageCount"]
   ) ?? countFromArrays(coreSources, ["coreCompletedPageIds", "bodyCoreCompletedPageIds"], ["pageIds"], ["coreTotal", "coreTotalPageCount"])
-    ?? (plan && plan.pageIds.length > 0 ? { completed: plan.completedPageIds.length, total: plan.pageIds.length } : undefined);
+    ?? (plan && plan.pageIds.length > 0 ? { completed: plan.completedPageIds.length, total: plan.pageIds.length }
+      : record.generationJobId && record.pageIds?.length
+        ? { completed: (record.generationCompletedPageIds?.length ?? 0) + (record.generationFailedPageIds?.length ?? 0), total: record.pageIds.length }
+        : undefined);
 
   const crossPage = countFromSources(
     crossPageSources,
@@ -187,6 +190,14 @@ export function formatProgressCount(value?: ProgressCount): string {
 
 export type ImportTaskState = "queued" | "running" | "completed" | "failed" | "cancelled" | "paused" | "awaiting_review";
 
+export const STANDALONE_GENERATION_TASK_PREFIX = "generation-job:";
+
+export function standaloneGenerationJobId(taskId: string): string | undefined {
+  return taskId.startsWith(STANDALONE_GENERATION_TASK_PREFIX)
+    ? taskId.slice(STANDALONE_GENERATION_TASK_PREFIX.length) || undefined
+    : undefined;
+}
+
 export function getImportTaskState(record: Pick<WebImportRecord, "state" | "generationState" | "autoGenerate">): ImportTaskState {
   const state = record.generationState;
   if (record.state === "failed" || record.state === "rejected" || state === "failed") return "failed";
@@ -210,6 +221,23 @@ export function importTaskStateLabel(state: ImportTaskState): string {
     paused: "已暂停",
     awaiting_review: "待检查"
   } satisfies Record<ImportTaskState, string>)[state];
+}
+
+export function importProgressTitle(record: WebImportRecord, plan: WebGenerationPlan | undefined, retryingFailed: boolean): string {
+  const taskState = getImportTaskState(record);
+  const planState = plan?.state;
+  const failed = taskState === "failed" || planState === "failed";
+  const cancelled = taskState === "cancelled" || planState === "cancelled";
+  if (record.autoGenerate === false || record.generationState === "not_requested") return "材料导入完成，尚未生成讲解";
+  if (retryingFailed) return "正在重试失败页面";
+  if (failed) return "讲解生成失败";
+  if (cancelled) return "生成任务已取消";
+  if (taskState === "paused") return "生成任务已暂停";
+  if (taskState === "awaiting_review") return "等待检查";
+  if (planState === "completed" || taskState === "completed") return "全部讲解已经生成";
+  if (record.generationJobId && taskState === "queued") return "生成任务排队中";
+  if (record.generationJobId && taskState === "running") return "正在生成讲解";
+  return plan ? "正在后台并行生成讲解" : "正在建立生成队列";
 }
 
 export type ImportActivity = {
@@ -269,6 +297,9 @@ export function getImportActivity(
           : record.generationState === "cancelled" ? "生成已取消"
             : record.generationState === "paused" ? "生成已暂停"
               : record.generationState === "completed" ? "全部页面生成完成"
+                : record.generationJobId && record.generationState === "pending_sync" ? "写入课程草稿"
+                  : record.generationJobId && record.generationState === "queued" ? "等待生成任务启动"
+                    : record.generationJobId && record.generationState === "running" ? "生成页面讲解"
                 : record.autoGenerate === false || record.generationState === "not_requested"
             ? "材料导入完成"
             : !plan
@@ -308,6 +339,10 @@ export function getImportActivity(
       progressPercent = Math.round(Math.min(1, plan.bridgeCompletedPageIds.length / plan.pageIds.length) * 100);
       progressScope = "跨页承接";
     }
+  } else if (!plan && record.generationJobId && record.pageIds?.length) {
+    const completed = (record.generationCompletedPageIds?.length ?? 0) + (record.generationFailedPageIds?.length ?? 0);
+    progressPercent = Math.round(Math.min(1, completed / record.pageIds.length) * 100);
+    progressScope = "讲解生成";
   }
   if (planState === "completed") { progressPercent = 100; progressScope = "讲解生成"; }
   if (state === "failed" || state === "cancelled" || state === "paused" || state === "awaiting_review") { progressPercent = undefined; progressScope = undefined; }

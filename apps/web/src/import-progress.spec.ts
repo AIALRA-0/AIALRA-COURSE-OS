@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importTaskStateLabel, summarizeImportProgress } from "./import-progress.js";
+import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
@@ -140,6 +140,67 @@ describe("import progress summary", () => {
     expect(importTaskStateLabel("running")).toBe("正在处理");
   });
 
+  it("restores standalone generation task state, page progress, and stage from the persisted job summary", () => {
+    const task = record({
+      id: "generation-job:job-1",
+      state: "ready",
+      autoGenerate: true,
+      generationJobId: "job-1",
+      generationState: "running",
+      pageIds: ["p1", "p2", "p3", "p4"],
+      generationCompletedPageIds: ["p1", "p2"],
+      generationFailedPageIds: [],
+      updatedAt: "2026-09-22T10:00:00.000Z"
+    });
+    const summary = summarizeImportProgress(task, undefined, [
+      { id: "job-1", state: "running", updatedAt: "2026-09-22T10:00:30.000Z" } as GenerationJob
+    ], []);
+    const activity = getImportActivity(task, undefined, [
+      { id: "job-1", state: "running", updatedAt: "2026-09-22T10:00:30.000Z" } as GenerationJob
+    ], [], Date.parse("2026-09-22T10:01:00.000Z"));
+
+    expect(summary.core).toEqual({ completed: 2, total: 4 });
+    expect(getImportTaskState(task)).toBe("running");
+    expect(activity).toMatchObject({ stage: "生成页面讲解", progressPercent: 50, progressScope: "讲解生成", stale: false });
+    expect(standaloneGenerationJobId("generation-job:job-1")).toBe("job-1");
+    expect(standaloneGenerationJobId("import-1")).toBeUndefined();
+  });
+
+  it("maps all standalone job terminal states to distinct task states and truthful stages", () => {
+    const cases = [
+      ["queued", "queued", "等待生成任务启动"],
+      ["pending_sync", "running", "写入课程草稿"],
+      ["completed", "completed", "全部页面生成完成"],
+      ["failed", "failed", "生成失败"],
+      ["cancelled", "cancelled", "生成已取消"],
+      ["paused", "paused", "生成已暂停"]
+    ] as const;
+    for (const [generationState, expectedState, expectedStage] of cases) {
+      const task = record({ state: "ready", autoGenerate: true, generationJobId: "job-1", generationState, pageIds: ["p1"] });
+      expect(getImportTaskState(task)).toBe(expectedState);
+      expect(getImportActivity(task, undefined, [], [], 0).stage).toBe(expectedStage);
+    }
+  });
+
+  it("shows imported-but-not-generated for a ready material with auto-generation disabled", () => {
+    const task = record({
+      id: "b926c0c9-test",
+      state: "ready",
+      autoGenerate: false,
+      generationState: "not_requested",
+      pageIds: ["p1", "p2", "p3"],
+      issues: []
+    });
+
+    expect(getImportTaskState(task)).toBe("completed");
+    expect(getImportActivity(task, undefined, [], [], 0)).toMatchObject({
+      stage: "材料导入完成",
+      progressPercent: 100,
+      progressScope: "材料导入"
+    });
+    expect(importProgressTitle(task, undefined, false)).toBe("材料导入完成，尚未生成讲解");
+  });
+
   it("does not invent a percentage when active work has no persisted counters", () => {
     const result = getImportActivity(
       record({ state: "ready", autoGenerate: true, generationState: "running", updatedAt: "2026-09-22T10:00:00.000Z" }),
@@ -214,5 +275,10 @@ describe("import progress summary", () => {
     expect(css).toMatch(/\.import-progress i\s*\{[^}]*width:\s*0\s*;/);
     expect(css).toMatch(/\.import-task-workspace dl\s*\{[^}]*display:\s*grid\s*;/);
     expect(css).toContain(".import-task-workspace .import-progress.is-failed");
+    expect(css).toMatch(/\.task-state-queued\s*\{[^}]*background:\s*var\(--blue\)/);
+    expect(css).toMatch(/\.task-state-running\s*\{[^}]*background:\s*var\(--amber\)/);
+    expect(css).toMatch(/\.task-state-completed\s*\{[^}]*background:\s*var\(--green\)/);
+    expect(css).toMatch(/\.task-state-failed\s*\{[^}]*background:\s*var\(--red\)/);
+    expect(css).toMatch(/\.task-state-cancelled,\s*\.task-state-paused\s*\{[^}]*background:\s*var\(--faint\)/);
   });
 });
