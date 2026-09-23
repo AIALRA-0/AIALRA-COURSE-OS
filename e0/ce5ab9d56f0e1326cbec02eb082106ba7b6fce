@@ -1,0 +1,50 @@
+packages/quality/src/index.spec.ts
+  s_e8850ef125fb32::t_654200e0f12731 568
+  s_e8850ef125fb32::t_10064860325938 2,559,569,575,581-582
+  s_e8850ef125fb32::t_ae9d35aa4d548b 560-567,570-574,576-580,583
+  s_7e23799dc317a2::t_a0b9a25b899fec 584
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_8df54b4ae9209a 3
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_b7fb7ab1f1d849 27
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_87b4fa6e93c209 280,282-283
+  s_e8850ef125fb32::t_a96ebf3b118d3c 353-354,356
+  s_e8850ef125fb32::t_9e6b522ed0e7f4 4,279,281,284-286,348,359,362,364,368,372
+  s_e8850ef125fb32::t_1de2bbf4362725 358
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_e6a8066a4bde36 426
+  s_e8850ef125fb32::t_931b10992919d0 308-318,322-333,336-361
+  s_e8850ef125fb32::t_c06f9555fd1d15 307,319-321,334-335
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_27bcd153d9fd18 219,232,234
+  s_e8850ef125fb32::t_1c4507f7017bac 220-231,233,235-238
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_595bfcfc0cbf2c 10
+config/generation-harness/page-plan-prompt.md
+  s_e8850ef125fb32::t_f44ce3cb130bb3 13,16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0ce5ab9d56f0e1326cbec02eb082106ba7b6fce",
+  "prompts": {},
+  "sessions": {
+    "s_7e23799dc317a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ad52-c35f-7882-a496-5c0fabb841af",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
