@@ -1,0 +1,25 @@
+apps/api/src/generation-repair.ts
+  s_e8850ef125fb32::t_fa801b92db797e 84-88
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_fa801b92db797e 463-465
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_5667a26938144b 3246,3827,3830
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_9c1f07dfb5d4e9 478,512,1087-1090
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3525e76f046f1c3d0198bd0ab4f597cbe9c4dfde",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
