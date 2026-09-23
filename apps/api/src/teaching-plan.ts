@@ -440,6 +440,31 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
     }
     return best.trim();
   };
+  // A diagram's labels and values are often explained in adjacent bullets.
+  // Bind their *actual contiguous text* only when every source token appears
+  // in order and the surrounding Chinese explanation shares the source topic.
+  const sourceFactWindow = (observation: string): string | undefined => {
+    const tokens = observation.match(/[A-Za-z]+|\d+(?:\.\d+)?/gu)?.map(value => value.toLocaleLowerCase()) ?? [];
+    if (tokens.length < 4) return undefined;
+    const sourceTrigrams = new Set<string>();
+    for (const run of observation.match(/[\p{Script=Han}]{3,}/gu) ?? []) {
+      for (let index = 0; index <= run.length - 3; index++) sourceTrigrams.add(run.slice(index, index + 3));
+    }
+    const rawLines = explanation.split(/\r?\n/u);
+    for (let start = 0; start < rawLines.length; start++) {
+      for (let end = start + 1; end < Math.min(rawLines.length, start + 6); end++) {
+        const window = rawLines.slice(start, end + 1).join("\n").trim();
+        if (window.length > 450) break;
+        const actual = window.match(/[A-Za-z]+|\d+(?:\.\d+)?/gu)?.map(value => value.toLocaleLowerCase()) ?? [];
+        let next = 0;
+        for (const token of actual) if (token === tokens[next]) next++;
+        if (next !== tokens.length) continue;
+        const commonTrigrams = [...sourceTrigrams].filter(gram => window.includes(gram));
+        if (commonTrigrams.length >= 2 && explanation.includes(window)) return window;
+      }
+    }
+    return undefined;
+  };
   let changed = false;
   const coverageEvidence = content.coverageEvidence.map(evidence => {
     if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return evidence;
@@ -456,7 +481,9 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
       return (bare.length >= Math.max(24, Math.ceil(line.length * 0.4)) && line.includes(bare))
         || (bare.startsWith("$") && bare.length >= 16 && line.startsWith(bare));
     }))[0];
-    const excerpt = matched || contained ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
+    const atomFacts = plan?.facts.filter(fact => fact.atomId === evidence.atomId) ?? [];
+    const tokenRichFact = atomFacts.some(fact => (fact.observation.match(/[A-Za-z]+|\d+(?:\.\d+)?/gu) ?? []).length >= 4);
+    const excerpt = matched || contained || tokenRichFact ? "" : candidateLines.flatMap(line => sourceLines.map(sourceLine => sharedExcerpt(line, sourceLine))
       .filter(span => span.length >= Math.max(24, Math.ceil(line.length * 0.4))))
       .sort((left, right) => right.length - left.length)[0];
     // A title is a navigation cue. Its subject may be taught under a clearer
@@ -470,15 +497,18 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
     // When a provider paraphrases or truncates its coverage quote, an exact
     // span shared by a source-backed plan fact and the teaching text is a
     // safer witness than asking the model to invent another quotation.
-    const factLine = matched || contained || excerpt || titleHeading || evidence.coveredFields.some(field => field !== "observation")
+    const factLine = matched || contained || excerpt || titleHeading || tokenRichFact || evidence.coveredFields.some(field => field !== "observation")
       ? undefined
-      : plan?.facts.filter(fact => fact.atomId === evidence.atomId).flatMap(fact =>
+      : atomFacts.flatMap(fact =>
         sourceLines.map(line => ({ line, overlap: sharedExcerpt(fact.observation.toLocaleLowerCase(), line.toLocaleLowerCase()).length }))
           .filter(candidate => candidate.overlap >= Math.max(12, Math.ceil(fact.observation.length * 0.5))))
         .sort((left, right) => right.overlap - left.overlap)[0]?.line;
-    if (!matched && !contained && !excerpt && !titleHeading && !factLine) return evidence;
+    const factWindow = matched || contained || excerpt || titleHeading || factLine || evidence.coveredFields.some(field => field !== "observation")
+      ? undefined : atomFacts
+        .map(fact => sourceFactWindow(fact.observation)).find(Boolean);
+    if (!matched && !contained && !excerpt && !titleHeading && !factLine && !factWindow) return evidence;
     changed = true;
-    return { ...evidence, explanation: matched || contained || excerpt || titleHeading || factLine! };
+    return { ...evidence, explanation: matched || contained || excerpt || titleHeading || factLine || factWindow! };
   });
   return changed ? { ...content, coverageEvidence } : content;
 }

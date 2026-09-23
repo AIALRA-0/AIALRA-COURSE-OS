@@ -468,6 +468,19 @@ describe("planned teaching", () => {
     const unrelated = bindExactCoverageLines({ ...content, fullExplanationMarkdown: "### 无关内容\n\n该页讨论电压" }, sourcePlan);
     expect(unrelated.coverageEvidence[0]?.explanation).toBe(content.coverageEvidence[0]?.explanation);
   });
+  it("binds a diagram fact taught across adjacent bullets without accepting missing values", () => {
+    const observation = "模块连通性图中可见节点标签 a、b、c、d、e、f 和数字 2、3、1、3、6、5、5、2";
+    const body = "### 连通性图\n\n连通性图里同时出现节点标签和数字\n- 可见的节点标签是 a、b、c、d、e、f\n- 图中还出现数字 2、3、1、3、6、5、5、2";
+    const evidence = { atomId: "diagram", coveredFields: ["observation"], explanation: observation };
+    const sourcePlan = { facts: [{ atomId: "diagram", observation }] } as TeachingPlan;
+    const bound = bindExactCoverageLines({ fullExplanationMarkdown: body, coverageEvidence: [evidence] }, sourcePlan);
+    expect(body).toContain(bound.coverageEvidence[0]!.explanation);
+    expect(bound.coverageEvidence[0]!.explanation).toContain("- 图中还出现数字 2、3、1、3、6、5、5、2");
+    const missingValue = bindExactCoverageLines({ fullExplanationMarkdown: body.replace("6、5、5、2", "6、5、2"), coverageEvidence: [evidence] }, sourcePlan);
+    expect(missingValue.coverageEvidence[0]?.explanation).toBe(observation);
+    const unrelated = bindExactCoverageLines({ fullExplanationMarkdown: "图中还有 a、b、c、d、e、f 和数字 2、3、1、3、6、5、5、2", coverageEvidence: [evidence] }, sourcePlan);
+    expect(unrelated.coverageEvidence[0]?.explanation).toBe(observation);
+  });
   it("rejects stale, unchanged and out-of-scope repair patches", () => {
     const ticket = generationRepairTickets("explanation", explanation, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair({ ...explanation, coverageEvidence: [] }, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_STALE");
