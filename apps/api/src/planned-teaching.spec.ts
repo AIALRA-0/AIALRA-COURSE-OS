@@ -4,7 +4,7 @@ import type { PageLesson } from "@course-os/contracts";
 import { buildTeachingBlueprint } from "./teaching-blueprint.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, completeTeachingPlanTransport, fillMissingPlanObjectiveText, plannedCoverageIssues, previousLessonContext, removeUnknownPlanFactReferences, teachingPlanSchema, validateTeachingPlan, teachingSectionMemory, type TeachingPlan } from "./teaching-plan.js";
 import { planningPrompt, plannedWritingPrompt, writePlannedLesson, plannedFormatIssues, plannedInstructions, normalizePlannedCoverageFields, normalizePlannedOpening, normalizePlannedQuestionPunctuation, normalizePlannedSourceIntroductions, projectPlannedOutputToSchema } from "./planned-teaching.js";
-import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation } from "./generation-harness.js";
+import { policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation, semanticAuditPrompt } from "./generation-harness.js";
 import { applyGenerationRepair, generationRepairTickets } from "./generation-repair.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, type ModelRouterInput, type TeachingPackage } from "./model-router.js";
 import { applyTeachingPackage, stablePreviousPageContext } from "./app.js";
@@ -243,6 +243,15 @@ it("keeps absence inventories and evidence-boundary narration out of the planned
   expect(planningPrompt).toContain("不要把“本页没有定义、没有分类、没有判定标准、后续才讲”等缺失项列成事实");
   expect(plannedWritingPrompt).toContain("不得把来源标签、审计过程或“本页没有定义、分类、判定标准”“后续才讲”等缺失清单写成主体内容");
   expect(plannedWritingPrompt).toContain("只有当明确缺少的前提会使当前推理无法成立或可能被误读时");
+});
+it("keeps qualitative growth claims separate from exact bounds across planning, writing, and audit", () => {
+  for (const prompt of [planningPrompt, plannedWritingPrompt, semanticAuditPrompt]) {
+    expect(prompt).toContain("定性渐进增长");
+    expect(prompt).toContain("最小合法输入");
+    expect(prompt).toContain("边界情形");
+  }
+  expect(semanticAuditPrompt).toContain("只替换该字段中的精确式");
+  expect(semanticAuditPrompt).toContain("不得仅因这项可修复问题判整页失败");
 });
 it("instructs generation to progress between sections without copying definitions", () => {
   expect(plannedWritingPrompt).toContain("各字段承担不同工作");
