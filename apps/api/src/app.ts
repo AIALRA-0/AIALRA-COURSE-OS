@@ -3243,8 +3243,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           });
         },
         onTeachingPhase: async (phase, state, usage) => {
-          await assertGenerationFence(jobId, fenceToken, dependencies);
-          await appendGenerationStageEvent(jobId, page.id, phase === "plan" ? "atomize" : phase.endsWith("_repair") ? "repair" : "teach", state, dependencies, { phase, ...usage });
+          await appendGenerationStageEvent(jobId, page.id, phase === "plan" ? "atomize" : phase.endsWith("_repair") ? "repair" : "teach", state, dependencies, { phase, ...usage }, fenceToken);
         } });
       previousPageContext = generation.teachingTrace?.previousPageContext || previousPageContext;
       if (!generation.teachingTrace) {
@@ -3825,9 +3824,10 @@ async function assertGenerationFence(jobId: string, fenceToken: number, dependen
   if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
 }
 
-async function appendGenerationStageEvent(jobId: string, pageId: string, stage: GenerationCostEntry["stage"], status: "started" | "completed" | "skipped", dependencies: AppDependencies, details: Record<string, unknown> = {}): Promise<void> {
+async function appendGenerationStageEvent(jobId: string, pageId: string, stage: GenerationCostEntry["stage"], status: "started" | "completed" | "skipped", dependencies: AppDependencies, details: Record<string, unknown> = {}, fenceToken?: number): Promise<void> {
   await dependencies.operations.mutate((state) => {
     const job = state.jobs.find((item) => item.id === jobId);
+    if (fenceToken !== undefined && !isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
     if (!job) return;
     dependencies.operations.appendEvent(state, job.id, `generation.stage.${status}`, { pageId, stage, ...details });
   });

@@ -81,7 +81,11 @@ export function generationRepairTickets(phase: string, candidate: Partial<Teachi
 
 export function applyGenerationRepair<T extends Partial<TeachingPackage>>(candidate: T, ticket: GenerationRepairTicket, patch: Partial<TeachingPackage>): T {
   if (repairHash(candidate[ticket.field]) !== ticket.expectedHash) throw new Error("GENERATION_REPAIR_STALE");
-  if (Object.keys(patch).length !== 1 || !Object.prototype.hasOwnProperty.call(patch, ticket.field)) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
+  // Some providers return the requested field together with unrelated fields.
+  // Project onto the ticketed field rather than failing the whole page: the
+  // extra fields are never applied, and the phase validator still checks the
+  // resulting candidate before it can be committed.
+  if (!Object.prototype.hasOwnProperty.call(patch, ticket.field)) throw new Error("GENERATION_REPAIR_SCOPE_INVALID");
   const before = candidate[ticket.field];
   let after = patch[ticket.field];
   if (ticket.field === "coverageEvidence" && Array.isArray(before) && Array.isArray(after) && ticket.atomIds?.length) {

@@ -460,7 +460,9 @@ describe("planned teaching", () => {
     const ticket = generationRepairTickets("explanation", explanation, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair({ ...explanation, coverageEvidence: [] }, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_STALE");
     expect(() => applyGenerationRepair(explanation, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_NO_CHANGE");
-    expect(() => applyGenerationRepair(explanation, ticket, { coverageEvidence: [], fullExplanationMarkdown: "changed" })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
+    const projected = applyGenerationRepair(explanation, ticket, { coverageEvidence: [], fullExplanationMarkdown: "changed" });
+    expect(projected.fullExplanationMarkdown).toBe(explanation.fullExplanationMarkdown);
+    expect(() => applyGenerationRepair(explanation, ticket, { fullExplanationMarkdown: "changed" })).toThrow("GENERATION_REPAIR_SCOPE_INVALID");
     const preserved = { ...explanation, coverageEvidence: [...explanation.coverageEvidence, { atomId: "b", coveredFields: ["observation"], explanation: quote }] };
     const scoped = generationRepairTickets("explanation", preserved, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(applyGenerationRepair(preserved, scoped, { coverageEvidence: [] }).coverageEvidence)
