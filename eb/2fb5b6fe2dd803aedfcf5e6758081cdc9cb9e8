@@ -1,0 +1,24 @@
+packages/converter/src/index.ts
+  s_e8850ef125fb32::t_c36b37874ffb64 167,169-175,201
+packages/converter/src/index.spec.ts
+  s_e8850ef125fb32::t_269df1fa523b10 24,38-40
+scripts/inspect-pptx.py
+  s_e8850ef125fb32::t_ae23b5770eeaab 92,95
+  s_e8850ef125fb32::t_745d6823e4cece 3,7,13-16,24-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb2fb5b6fe2dd803aedfcf5e6758081cdc9cb9e8",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
