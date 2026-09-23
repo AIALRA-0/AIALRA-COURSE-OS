@@ -172,7 +172,7 @@ export function summarizeImportProgress(
   const candidateCost = trustedDirectCost ?? trustedPlanCost
     ?? (knownEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : directCost ?? planCost);
   const unverifiedZero = candidateCost === 0 && knownEntryCosts.length === 0 && Boolean(plan &&
-    plan.completedPageIds.length + plan.failedPageIds.length > 0);
+    (plan.state === "running" || plan.state === "queued" || plan.completedPageIds.length + plan.failedPageIds.length > 0));
   const costUsd = unverifiedZero ? undefined : candidateCost;
   const costBasis = trustedDirectCost !== undefined || trustedPlanCost !== undefined
     ? undefined

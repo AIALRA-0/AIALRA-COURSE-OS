@@ -57,6 +57,15 @@ describe("import progress summary", () => {
     expect(result.conversion).toEqual({ completed: 4, total: 4 });
   });
 
+  it("does not present an unsettled running model bill as zero cost", () => {
+    const result = summarizeImportProgress(
+      record({ id: "import-1", state: "ready", pageIds: ["p1"], issues: [] }),
+      plan({ state: "running", pageIds: ["p1"], completedPageIds: [], failedPageIds: [], spentUsd: 0 }),
+      [], []
+    );
+    expect(result.costUsd).toBeUndefined();
+  });
+
   it("derives legacy fields without inventing unavailable cross-page progress", () => {
     const result = summarizeImportProgress(
       record({ state: "ready", autoGenerate: true, pageIds: ["page-1", "page-2"], issues: [] }),

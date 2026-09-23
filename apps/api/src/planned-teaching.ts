@@ -413,7 +413,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
       if (Array.isArray(partial.misconceptions)) partial.misconceptions = partial.misconceptions
         .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
     }
-    if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
+    if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint), plan);
     let issues = schemaIssues(partial, schema);
     if (index === 1 && !issues.length) issues.push(...plannedCoverageIssues(partial as TeachingPackage, blueprint, plan), ...validateMarkdownMath(partial.fullExplanationMarkdown!));
     if (index === 2 && !issues.length) issues.push(...plannedCoreContentIssues({ ...content, ...partial }, input, plan));
@@ -450,7 +450,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
               .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
           }
           if (index === 0) repaired = normalizePlannedOpening(repaired);
-          if (index === 1) repaired = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(repaired), blueprint));
+          if (index === 1) repaired = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(repaired), blueprint), plan);
           // A field repair must not turn a schema-valid phase into an invalid one.
           if (!candidateWasSchemaValid || schemaIssues(repaired, schema).length === 0) partial = repaired;
         }

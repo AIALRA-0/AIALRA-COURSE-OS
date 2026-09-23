@@ -456,6 +456,18 @@ describe("planned teaching", () => {
     const unrelated = { ...content, fullExplanationMarkdown: "## 无关章节\n\n先解释另一项内容" };
     expect(bindExactCoverageLines(unrelated).coverageEvidence[0]?.explanation).toBe(content.coverageEvidence[0]?.explanation);
   });
+  it("repairs a paraphrased observation claim from a source-backed fact already taught in the body", () => {
+    const content = {
+      fullExplanationMarkdown: "### 商业芯片的规模\n\n- 数百个块（Hundreds of Blocks）：需要同时确定位置，连接关系也必须保留",
+      coverageEvidence: [{ atomId: "region-3", coveredFields: ["observation"], explanation: "本页场景涉及的块数量是数百个（Hundreds of" }]
+    };
+    const sourcePlan = { facts: [{ atomId: "region-3", observation: "该场景涉及数百个块（Hundreds of blocks）" }] } as TeachingPlan;
+    const repaired = bindExactCoverageLines(content, sourcePlan);
+    expect(repaired.coverageEvidence[0]?.explanation).toBe("- 数百个块（Hundreds of Blocks）：需要同时确定位置，连接关系也必须保留");
+    expect(content.fullExplanationMarkdown).toContain(repaired.coverageEvidence[0]!.explanation);
+    const unrelated = bindExactCoverageLines({ ...content, fullExplanationMarkdown: "### 无关内容\n\n该页讨论电压" }, sourcePlan);
+    expect(unrelated.coverageEvidence[0]?.explanation).toBe(content.coverageEvidence[0]?.explanation);
+  });
   it("rejects stale, unchanged and out-of-scope repair patches", () => {
     const ticket = generationRepairTickets("explanation", explanation, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair({ ...explanation, coverageEvidence: [] }, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_STALE");

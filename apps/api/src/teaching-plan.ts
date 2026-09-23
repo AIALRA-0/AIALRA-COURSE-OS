@@ -420,7 +420,7 @@ export function plannedCoverageIssues(content: TeachingPackage, blueprint: Teach
 }
 
 /** Rebind a model's multi-paragraph claim only to its own exact line in the explanation. */
-export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(content: T): T {
+export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(content: T, plan?: TeachingPlan): T {
   if (!content.fullExplanationMarkdown || !content.coverageEvidence) return content;
   const explanation = content.fullExplanationMarkdown;
   const sourceLines = explanation.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
@@ -467,9 +467,18 @@ export function bindExactCoverageLines<T extends Partial<TeachingPackage>>(conte
     const titleHeading = matched || contained || excerpt || !titleTerms.length ? undefined
       : sourceLines.find(line => /^#{1,6}\s/u.test(line)
         && titleTerms.some(term => line.toLocaleLowerCase().includes(term)));
-    if (!matched && !contained && !excerpt && !titleHeading) return evidence;
+    // When a provider paraphrases or truncates its coverage quote, an exact
+    // span shared by a source-backed plan fact and the teaching text is a
+    // safer witness than asking the model to invent another quotation.
+    const factLine = matched || contained || excerpt || titleHeading || evidence.coveredFields.some(field => field !== "observation")
+      ? undefined
+      : plan?.facts.filter(fact => fact.atomId === evidence.atomId).flatMap(fact =>
+        sourceLines.map(line => ({ line, overlap: sharedExcerpt(fact.observation.toLocaleLowerCase(), line.toLocaleLowerCase()).length }))
+          .filter(candidate => candidate.overlap >= Math.max(12, Math.ceil(fact.observation.length * 0.5))))
+        .sort((left, right) => right.overlap - left.overlap)[0]?.line;
+    if (!matched && !contained && !excerpt && !titleHeading && !factLine) return evidence;
     changed = true;
-    return { ...evidence, explanation: matched || contained || excerpt || titleHeading! };
+    return { ...evidence, explanation: matched || contained || excerpt || titleHeading || factLine! };
   });
   return changed ? { ...content, coverageEvidence } : content;
 }
