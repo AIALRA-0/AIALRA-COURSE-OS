@@ -1049,6 +1049,11 @@ describe("Course OS API", () => {
       generationState: "completed", generationPlanId: completed.id,
       generationCompletedPageIds: release.pageIds, generationFailedPageIds: []
     });
+    const detail = await request(app).get("/api/v1/imports/import-continuation-test").expect(200);
+    expect(detail.body).toMatchObject({ generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
+    const listing = await request(app).get("/api/v1/imports").expect(200);
+    expect(listing.body.find((item: ImportRecord) => item.id === "import-continuation-test"))
+      .toMatchObject({ generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
     const replay = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
       .set("Idempotency-Key", "partial-snapshot-retry-again").expect(200);
     expect(replay.body.plan.id).toBe(completed.id);

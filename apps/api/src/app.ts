@@ -1115,10 +1115,10 @@ export function createApp(dependencies: AppDependencies): Express {
             originalName: item.originalName,
             state: item.state,
             autoGenerate: item.autoGenerate,
-            generationState: plan?.state ?? item.generationState,
+            generationState: plan?.retryOfPlanId ? item.generationState : plan?.state ?? item.generationState,
             pageIds: item.pageIds,
-            generationCompletedPageIds: plan?.completedPageIds ?? item.generationCompletedPageIds,
-            generationFailedPageIds: plan?.failedPageIds ?? item.generationFailedPageIds,
+            generationCompletedPageIds: plan?.retryOfPlanId ? item.generationCompletedPageIds : plan?.completedPageIds ?? item.generationCompletedPageIds,
+            generationFailedPageIds: plan?.retryOfPlanId ? item.generationFailedPageIds : plan?.failedPageIds ?? item.generationFailedPageIds,
             createdAt: item.createdAt
           };
         });
@@ -1153,7 +1153,11 @@ export function createApp(dependencies: AppDependencies): Express {
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
       if (plan) {
         const jobId = plan.currentJobId || plan.lastJobId;
-        response.json({ ...record, generationPlanId: plan.id, generationJobId: jobId, generationJobIds: plan.jobIds, generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, generationState: plan.state });
+        response.json({ ...record, generationPlanId: plan.id, generationJobId: jobId,
+          generationJobIds: plan.retryOfPlanId ? record.generationJobIds : plan.jobIds,
+          generationCompletedPageIds: plan.retryOfPlanId ? record.generationCompletedPageIds : plan.completedPageIds,
+          generationFailedPageIds: plan.retryOfPlanId ? record.generationFailedPageIds : plan.failedPageIds,
+          generationState: plan.retryOfPlanId ? record.generationState : plan.state });
         return;
       }
       const job = snapshot.jobs.find((item) => item.id === record.generationJobId || item.sourceImportId === record.id);

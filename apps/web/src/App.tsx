@@ -1133,7 +1133,10 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || taskState === "failed";
   const cancelledState = planState === "cancelled" || taskState === "cancelled";
   const statusTitle = record.state !== "ready" ? importInfo.title : importProgressTitle(record, plan, retryingFailed);
-  const currentPages = activeJobs.map((job) => (job.batchIndex ?? 0) + 1).sort((a, b) => a - b);
+  const currentPages = activeJobs.map((job) => {
+    const sourceIndex = record.pageIds?.indexOf(job.pageIds[0] ?? "") ?? -1;
+    return sourceIndex >= 0 ? sourceIndex + 1 : (job.batchIndex ?? 0) + 1;
+  }).sort((a, b) => a - b);
   const stageCount = activity.stage === "页面转换" ? ` · 页面 ${formatProgressCount(summary.conversion)}`
     : plan ? ` · 正文 ${formatProgressCount(summary.core)} · 跨页承接 ${formatProgressCount(summary.crossPage)}`
       : record.generationJobId ? ` · 页面 ${formatProgressCount(summary.core)}` : "";

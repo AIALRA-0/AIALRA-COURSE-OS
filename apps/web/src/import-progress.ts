@@ -127,7 +127,7 @@ export function summarizeImportProgress(
     conversion = { completed: record.pageIds.length, total: record.pageIds.length };
   }
 
-  const core = countFromSources(
+  let core = countFromSources(
     coreSources,
     ["core", "bodyCore", "bodyCoreProgress", "coreProgress", "teachingProgress"],
     ["completed", "done", "finished", "completedPages", "completedPageCount", "coreCompleted", "coreCompletedPageCount", "bodyCoreCompleted", "bodyCoreCompletedPageCount"],
@@ -138,12 +138,16 @@ export function summarizeImportProgress(
         ? { completed: (record.generationCompletedPageIds?.length ?? 0) + (record.generationFailedPageIds?.length ?? 0), total: record.pageIds.length }
         : undefined);
 
-  const crossPage = countFromSources(
+  let crossPage = countFromSources(
     crossPageSources,
     ["crossPage", "crossPageCarryover", "carryover", "handoff", "bridge", "crossPageProgress", "carryoverProgress"],
     ["completed", "done", "finished", "completedPages", "completedPageCount", "crossPageCompleted", "crossPageCompletedPages", "carryoverCompleted", "carryoverCompletedPages"],
     ["total", "totalPages", "pageCount", "totalPageCount", "crossPageTotal", "crossPageTotalPages", "carryoverTotal", "carryoverTotalPages"]
   ) ?? countFromArrays(crossPageSources, ["crossPageCompletedPageIds", "carryoverCompletedPageIds", "bridgeCompletedPageIds"], ["pageIds"], ["crossPageTotal", "carryoverTotal"]);
+  if (plan?.retryOfPlanId && record.pageIds?.length && record.generationCompletedPageIds) {
+    core = { completed: record.generationCompletedPageIds.length, total: record.pageIds.length };
+    crossPage = undefined;
+  }
 
   const explicitRepairCount = firstNumber(sources, ["repairCount", "repairs", "repairAttempts", "completedRepairCount"])
     ?? firstNumber(progressSources(sources, ["repair", "repairProgress"]), ["count", "completed", "done", "attempts"]);
@@ -380,6 +384,10 @@ export function getImportActivity(
     }
   }
   if (planState === "completed") { progressPercent = 100; progressScope = "讲解生成"; }
+  if (plan?.retryOfPlanId && record.pageIds?.length && record.generationCompletedPageIds) {
+    progressPercent = Math.round(record.generationCompletedPageIds.length / record.pageIds.length * 100);
+    progressScope = "讲解生成";
+  }
   if (state === "failed" || state === "cancelled" || state === "paused" || state === "awaiting_review") { progressPercent = undefined; progressScope = undefined; }
 
   const activitySources = nestedSources(record, plan);

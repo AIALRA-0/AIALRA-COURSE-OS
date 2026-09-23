@@ -66,6 +66,18 @@ describe("import progress summary", () => {
     expect(result.costUsd).toBeUndefined();
   });
 
+  it("shows whole-material completion while a one-page continuation runs", () => {
+    const source = record({ id: "import-1", state: "ready", autoGenerate: true,
+      generationState: "running", pageIds: ["p1", "p2", "p3", "p4"],
+      generationCompletedPageIds: ["p1", "p2", "p4"], issues: [] });
+    const continuation = plan({ retryOfPlanId: "old-plan", state: "running", pageIds: ["p3"],
+      completedPageIds: [], failedPageIds: [], coreCompletedPageIds: [], bridgeCompletedPageIds: [] });
+    const summary = summarizeImportProgress(source, continuation, [], []);
+    expect(summary.core).toEqual({ completed: 3, total: 4 });
+    expect(summary.crossPage).toBeUndefined();
+    expect(getImportActivity(source, continuation, [], []).progressPercent).toBe(75);
+  });
+
   it("derives legacy fields without inventing unavailable cross-page progress", () => {
     const result = summarizeImportProgress(
       record({ state: "ready", autoGenerate: true, pageIds: ["page-1", "page-2"], issues: [] }),
