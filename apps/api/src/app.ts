@@ -4811,7 +4811,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.generationFailedPageIds = generationPlan?.plan.failedPageIds;
       item.generationState = generationPlan?.plan.state || "not_requested";
       dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds,
-        insertedPageIds: prepared?.insertedPageIds, regeneratedPageIds: generationPageIds, preservedPageIds: prepared?.preservedPageIds,
+        insertedPageIds: prepared?.insertedPageIds, affectedPageIds: generationPageIds,
+        regeneratedPageIds: generationPlan ? generationPageIds : [], preservedPageIds: prepared?.preservedPageIds,
         generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
     if (generationPlan) startCreatedGenerationPlanJobs(generationPlan, dependencies);

@@ -821,7 +821,7 @@ describe("Course OS API", () => {
     expect(newGamma?.page.blocks[0]?.markdown).toBe(savedGamma.page.blocks[0]?.markdown);
     expect(newGamma?.status).toBe(savedGamma.status);
     const event = (await dependencies.operations.read()).events.find(item => item.streamId === updated.id && item.type === "import.ready");
-    expect(event?.payload).toMatchObject({ insertedPageIds: [updated.pageIds[1]], regeneratedPageIds: updated.pageIds.slice(0, 3),
+    expect(event?.payload).toMatchObject({ insertedPageIds: [updated.pageIds[1]], affectedPageIds: updated.pageIds.slice(0, 3), regeneratedPageIds: [],
       preservedPageIds: expect.arrayContaining([{ previousPageId: original.pageIds[2], pageId: updated.pageIds[3] }]) });
     const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-second")
       .field("autoGenerate", "false").field("courseId", original.courseId)

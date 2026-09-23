@@ -1152,7 +1152,9 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
   const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : `${currentStage}${stageCount}${activeDetail}`;
   const indeterminate = progress === undefined && activity.busy && !activity.stale;
   const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
-  const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model || recordedModelStage;
+  const awaitingPlanDetails = auto && Boolean(record.generationPlanId) && !plan;
+  const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model
+    || (awaitingPlanDetails ? "正在读取模型记录" : taskFinished ? "模型记录暂不可用" : recordedModelStage);
   const concurrency = summary.concurrency?.running !== undefined && summary.concurrency.limit !== undefined
     ? `${summary.concurrency.running}/${summary.concurrency.limit}`
     : summary.concurrency?.running !== undefined
@@ -1160,7 +1162,7 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
       : summary.concurrency?.limit !== undefined
         ? `—/${summary.concurrency.limit}`
         : "—";
-  const cost = summary.costUsd === undefined ? activity.busy ? "生成中，完成页面后结算" : "未知" : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
+  const cost = summary.costUsd === undefined ? awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用" : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
   const progressLabel = failedState ? "生成失败" : cancelledState ? "已取消"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"
       : `${progressScopeLabel(activity.progressScope)}${progress}%`;
