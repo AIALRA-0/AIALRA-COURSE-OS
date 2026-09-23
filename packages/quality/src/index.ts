@@ -216,6 +216,26 @@ export function maximumTeachingExplanationCharacters(input: Pick<TeachingNarrati
           : 3_500;
 }
 
+/** Identify page-navigation metadata for field-local correction. */
+export function validateTeachingSourceFocus(input: TeachingNarrativeInput): string[] {
+  const sections: Array<[string, string]> = [
+    ["chapterBridgeMarkdown", input.chapterBridgeMarkdown || ""],
+    ["learningObjectives", input.learningObjectives.join("\n")],
+    ["mainContentMarkdown", input.mainContentMarkdown],
+    ["priorKnowledge", input.priorKnowledge.join("\n")],
+    ["fullExplanationMarkdown", input.fullExplanationMarkdown],
+    ["misconceptions", input.misconceptions.join("\n")],
+    ["questions", input.questions.map(question => [question.prompt, question.expectedAnswer || "", ...(question.options || []), question.explanation].join("\n")).join("\n")]
+  ];
+  const visibleSections = sections.map(([field, markdown]) => [field, stripProtectedMarkdown(markdown)] as const);
+  const issues: string[] = [];
+  const locator = /(?:页码|页脚|页眉|页面编号|分页信息|第\s*\d+\s*页)/u;
+  for (const [field, text] of visibleSections) {
+    if (locator.test(text)) issues.push(`TEACHING_PRESENTATION:${field}:LAYOUT_COMMENTARY`);
+  }
+  return [...new Set(issues)];
+}
+
 /**
  * Checks the learner-facing narrative, not the provenance metadata.  A page
  * can have perfect atom bookkeeping and still read like an internal audit

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, formatMisconception, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTex } from "./index.js";
+import { calculateCoverage, formatMisconception, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTeachingSourceFocus, validateTex } from "./index.js";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -554,6 +554,32 @@ describe("learner-facing teaching narrative", () => {
       .toContain("TEACHING_LAYOUT_COMMENTARY");
     expect(validateTeachingNarrative({ ...valid, strictWritingStyle: true, pageKind: "agenda" }))
       .not.toContain("TEACHING_LAYOUT_COMMENTARY");
+  });
+
+  it("keeps a title page on topic and routes explicit page metadata to local correction", () => {
+    const cover = { ...valid, pageKind: "cover" as const, sourceDensity: "sparse" as const,
+      sourceTitle: "EE 680: Reinforcement Learning Floorplanning",
+      fullExplanationMarkdown: "标题说明课程主题，副标题进一步限定本课程讨论的范围" };
+    expect(validateTeachingNarrative(cover)).not.toContain("TEACHING_LAYOUT_COMMENTARY");
+
+    const noisy = { ...cover,
+      mainContentMarkdown: "- 页面没有提供方法或收益，所以无法判断课程效果",
+      fullExplanationMarkdown: "标题说明课程主题，副标题进一步限定本课程讨论的范围\n\n材料没有给出方法或收益，因此无法判断课程效果\n\n本页页码为 1" };
+    expect(validateTeachingSourceFocus(noisy)).toContain("TEACHING_PRESENTATION:fullExplanationMarkdown:LAYOUT_COMMENTARY");
+    expect(validateTeachingNarrative(noisy)).not.toContain("TEACHING_LAYOUT_COMMENTARY");
+  });
+
+  it("preserves meaningful numbers in body content and accepts one omission tied to its impact", () => {
+    const numericBody = { ...valid, pageKind: "formula" as const,
+      fullExplanationMarkdown: "每轮处理 $32$ 个样本，分成 $4$ 组后每组有 $8$ 个；运行 $4$ 轮共处理 $128$ 个样本" };
+    expect(validateTeachingSourceFocus(numericBody)).toEqual([]);
+    expect(numericBody.fullExplanationMarkdown).toContain("$32$");
+    expect(numericBody.fullExplanationMarkdown).toContain("$128$");
+
+    const qualifiedGap = { ...numericBody,
+      fullExplanationMarkdown: "来源没有说明权重单位，因此不能比较不同项的绝对大小" };
+    expect(validateTeachingSourceFocus(qualifiedGap)).toEqual([]);
+    expect(validateTeachingNarrative(qualifiedGap)).not.toContain("TEACHING_LAYOUT_COMMENTARY");
   });
 
   it("rejects irrelevant absence checklists while preserving a meaningful chart limitation", () => {

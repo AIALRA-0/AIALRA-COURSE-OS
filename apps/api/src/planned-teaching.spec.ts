@@ -304,6 +304,61 @@ describe("planned teaching", () => {
         : request.phase === "explanation" ? explanation : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
     });
   });
+  it("keeps a title-page plan focused on its stated topic without passing the page number", async () => {
+    const { page, input, plan } = fixture("EE 680: Reinforcement Learning Floorplanning");
+    page.pageNumber = 1;
+    page.atoms = [{ id: "a", kind: "image_region", label: "整页来源画面", observation: "EE 680: Reinforcement Learning Floorplanning\nCourse overview" } as PageLesson["atoms"][number]];
+    page.anchors = [{ id: "title", pageId: page.id, kind: "text", label: "标题与副标题", text: "EE 680: Reinforcement Learning Floorplanning\nCourse overview" }];
+    page.coverageRequirements = [];
+    input.pageTitle = page.title;
+    input.pageNumber = 1;
+    input.sourceText = "EE 680: Reinforcement Learning Floorplanning\nCourse overview";
+    input.blueprint = buildTeachingBlueprint(page, input.sourceText, "zh-CN", "quality", "writing-policy:test", true);
+    expect(input.blueprint.resourcePackage.pageKind).toBe("cover");
+
+    plan.problem = "说明课程主题与课程范围";
+    plan.facts[0]!.observation = "标题标出课程名称，副标题概括课程范围";
+    plan.steps[0]!.explanation = "结合标题与副标题说明课程主题和讨论范围";
+    const phases: string[] = [];
+    const result = await writePlannedLesson(input, async request => {
+      phases.push(request.phase);
+      if (request.phase === "plan") {
+        const planInput = JSON.parse(request.prompt) as Record<string, unknown>;
+        expect(planInput).not.toHaveProperty("pageNumber");
+        expect(request.instructions).toContain("定位元数据");
+        return { content: plan, provider: "deepseek", model: "flash", usage };
+      }
+      return { content: request.phase === "opening" ? opening : request.phase === "explanation" ? explanation
+        : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
+    });
+    expect(phases).not.toContain("plan_repair");
+    expect(result.trace.plan.facts[0]?.observation).toBe("标题标出课程名称，副标题概括课程范围");
+  });
+
+  it("keeps numerical body facts intact while omitting page-number metadata from the plan request", async () => {
+    const { page, input, plan } = fixture("Batch processing");
+    const source = "Each round processes 32 samples in 4 groups; four rounds process 128 samples";
+    page.anchors = [{ id: "body", pageId: page.id, kind: "text", label: "正文", text: source }];
+    page.atoms[0] = { id: "a", kind: "text_region", label: "正文", observation: source } as PageLesson["atoms"][number];
+    input.sourceText = source;
+    input.blueprint = buildTeachingBlueprint(page, source, "zh-CN", "quality", "writing-policy:test", false);
+    plan.facts[0]!.observation = "每轮处理 32 个样本并分为 4 组，4 轮共处理 128 个样本";
+    plan.steps[0]!.explanation = "按每轮 32 个样本和 4 组核对每组数量，再累计 4 轮的 128 个样本";
+    let plannedInput: Record<string, unknown> | undefined;
+    const result = await writePlannedLesson(input, async request => {
+      if (request.phase === "plan") {
+        plannedInput = JSON.parse(request.prompt) as Record<string, unknown>;
+        return { content: plan, provider: "deepseek", model: "flash", usage };
+      }
+      return { content: request.phase === "opening" ? opening : request.phase === "explanation" ? explanation
+        : request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
+    });
+    expect(plannedInput?.source).toContain("32");
+    expect(plannedInput).not.toHaveProperty("pageNumber");
+    expect(result.trace.plan.facts[0]?.observation).toContain("32");
+    expect(result.trace.plan.facts[0]?.observation).toContain("128");
+    expect(result.trace.phases.map(phase => phase.phase)).not.toContain("plan_repair");
+  });
   it("searches only declared evidence gaps and carries normalized evidence into writing", async () => {
     const { input, plan } = fixture("外部方法");
     plan.researchQueries = [{ id: "rq1", atomId: "a", query: "official method terminology", reason: "课件使用方法名但没有给出正式名称来源" }];
@@ -368,7 +423,7 @@ describe("planned teaching", () => {
       provider: "deepseek", model: "flash", usage
     }));
     expect(result.trace.phases.map(phase => phase.phase)).not.toContain("plan_repair");
-    expect(result.trace.plan.problem).toBe(input.blueprint!.requirementPackage.objective);
+    expect(result.trace.plan.problem).toBe(`让零基础读者能够理解并使用《${input.pageTitle}》中的有效内容`);
     expect(result.trace.plan.facts).toEqual(plan.facts);
   });
   it("routes the four failed sample signatures to exact fields without a page rewrite", () => {

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { TeachingBlueprint } from "@course-os/contracts";
-import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateMarkdownMath, validateTeachingPresentation, validateTeachingSourceFocus } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import { alignPlanQuestionObjectives, assignUnplacedPlanFacts, bindExactCoverageLines, bindMissingPlanFactAtoms, completeTeachingPlanTransport, fillMissingPlanObjectiveText, plannedCoverageIssues, removeUnknownPlanFactReferences, schemaIssues, teachingPlanSchema, teachingSectionMemory, validateTeachingPlan, type TeachingPlan, type TeachingResearchEvidence } from "./teaching-plan.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
@@ -276,6 +276,14 @@ function plannedCoreContentIssues(content: Partial<TeachingPackage>, input: Mode
     complete.mainContentMarkdown, ...complete.misconceptions,
     ...complete.questions.flatMap(question => [question.prompt, ...question.options || [], question.expectedAnswer, question.explanation])];
   for (const text of values) issues.push(...validateMarkdownMath(text));
+  issues.push(...validateTeachingSourceFocus({
+    learningObjectives: [],
+    mainContentMarkdown: complete.mainContentMarkdown,
+    priorKnowledge: [],
+    fullExplanationMarkdown: "",
+    misconceptions: complete.misconceptions,
+    questions: complete.questions,
+  }));
   if (complete.questions.filter(question => question.kind === "comprehension").length !== 2) issues.push("PLAN_QUESTION_MIX");
   for (const question of complete.questions) {
     const options = question.options || [];
@@ -337,28 +345,31 @@ export async function writePlannedLesson(input: ModelRouterInput,
     return projectPlannedOutputToSchema(result.content, request.schema, request.phase);
   };
   const planRequest: PlannedCall = { phase: "plan", instructions: `${planningPrompt}\n\n${writingPolicyInstructions(input.language)}\n\n外部检索不是固定步骤。只有课件来源不足以核实正式术语、外部方法或时效性事实，且 externalSearchAvailable 为 true 时，才填写最多两项 researchQueries，并为每项选择 web、academic、terminology 或 temporal 类型；课件已经给出的事实、公式推导和页面之间的承接不得检索。没有真实缺口时省略 researchQueries 或返回空数组`,
-    prompt: JSON.stringify({ title: input.pageTitle, pageNumber: input.pageNumber,
+    prompt: JSON.stringify({ title: input.pageTitle,
       source: input.sourceText, previousTeaching: "正文核心独立生成，不读取前页；只根据本页来源建立教学结构",
       atomIds: blueprint.resourcePackage.atomIds, requirements: blueprint.requirementPackage.requirements,
       externalSearchAvailable: Boolean(input.searchEvidence) }),
     schema: teachingPlanSchema, image: input.sourceImageDataUrl, maxOutputTokens: 6500 };
+  const planBlueprint: TeachingBlueprint = { ...blueprint, requirementPackage: { ...blueprint.requirementPackage,
+    objective: `让零基础读者能够理解并使用《${input.pageTitle}》中的有效内容` } };
   const normalizePlan = (value: unknown) => alignPlanQuestionObjectives(fillMissingPlanObjectiveText(assignUnplacedPlanFacts(
-    removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(completeTeachingPlanTransport(value, blueprint), blueprint)))));
+    removeUnknownPlanFactReferences(bindMissingPlanFactAtoms(completeTeachingPlanTransport(value, planBlueprint), planBlueprint)))));
   let plan = resume?.plan ?? normalizePlan(await run(planRequest));
-  let planIssues = validateTeachingPlan(plan, blueprint);
+  const validatePlan = (candidate: TeachingPlan) => validateTeachingPlan(candidate, blueprint);
+  let planIssues = validatePlan(plan);
   for (let round = 0; round < 2 && planIssues.length; round++) {
     const repairedPlan = await run({ ...planRequest, phase: "plan_repair", prompt: JSON.stringify({ originalInput: JSON.parse(planRequest.prompt), currentPlan: plan, issues: planIssues,
-      instruction: "只修正列出的问题，保留已正确的事实和步骤；可以只返回需要替换的顶层字段；每个来源要求都需对应事实，每个事实都需有讲解位置；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as Partial<TeachingPlan>;
+      instruction: "只修正列出的问题，保留已正确的事实和步骤；可以只返回需要替换的顶层字段；有效来源要求都需对应事实，每个事实都需有讲解位置；页码、页眉页脚和纯版面位置不能成为问题、事实或步骤；正文数字及其单位、条件、范围必须保留；同一缺失提醒最多一次并说明它对哪项判断或计算的具体影响；每个学习目标至少对应一道题，四道题仍须恰好两道理解题和两道选择题" }) }) as Partial<TeachingPlan>;
     plan = normalizePlan({ ...plan, ...repairedPlan });
-    planIssues = validateTeachingPlan(plan, blueprint);
+    planIssues = validatePlan(plan);
   }
   if (planIssues.some(issue => issue.startsWith("PLAN_FACT_UNASSIGNED:"))) {
     plan = assignUnplacedPlanFacts(plan);
-    planIssues = validateTeachingPlan(plan, blueprint);
+    planIssues = validatePlan(plan);
   }
   if (planIssues.some(issue => issue.startsWith("PLAN_OBJECTIVE_UNTESTED:"))) {
     plan = alignPlanQuestionObjectives(plan);
-    planIssues = validateTeachingPlan(plan, blueprint);
+    planIssues = validatePlan(plan);
   }
   if (planIssues.length) {
     trace.plan = plan;
