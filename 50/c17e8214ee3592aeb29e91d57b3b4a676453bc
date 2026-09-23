@@ -1,0 +1,65 @@
+apps/api/src/etapi-settings-routes.spec.ts
+  s_e8850ef125fb32::t_85e39deb0fc24a 114-136
+apps/api/src/self-retelling-routes.spec.ts
+  s_e8850ef125fb32::t_85e39deb0fc24a 10-14,54-85
+  s_e8850ef125fb32::t_222389c8e2680e 86-87
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_b1f17322f7c392 2652-2654
+  s_e8850ef125fb32::t_79f11f1dde68f8 585
+  s_e8850ef125fb32::t_5c8297bccd16ef 58,2649-2651,2655-2656
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_5c8297bccd16ef 10,1679,1688
+  s_e8850ef125fb32::t_76216826104da0 11,1674,1676,1678,1680-1687,1689-1697
+  s_e8850ef125fb32::t_839d1f18a9981d 1667-1673,1675,1677
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_79f11f1dde68f8 889
+  s_e8850ef125fb32::t_68a4583976aee0 715-719
+apps/api/src/provider-settings.ts
+  s_e8850ef125fb32::t_5c8297bccd16ef 63-69
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_dd6bcc066ea4a9 1405-1407
+  s_e8850ef125fb32::t_18a5a07fcae44c 1396-1397,1399-1400,1402
+apps/api/src/etapi-settings-routes.ts
+  s_e8850ef125fb32::t_85e39deb0fc24a 122-123,146
+apps/api/src/provider-settings.spec.ts
+  s_e8850ef125fb32::t_839d1f18a9981d 62,68,70-71
+  s_e8850ef125fb32::t_5c8297bccd16ef 2,72
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_8f1c3fd12095e3 1165
+  s_e8850ef125fb32::t_86c4ef00648d67 1200-1213
+  s_e8850ef125fb32::t_00f9dafe789907 1150,1152-1154,1156,1162-1164,1166,1171-1172,1177,1184-1195,1197-1199,1398-1435,1438,1442-1445
+  s_e8850ef125fb32::t_84e7c9b3ac9f23 1167-1169,1196
+  s_e8850ef125fb32::t_fbc06d50e01c4d 1176,1182-1183,1439-1440
+  s_e8850ef125fb32::t_bd07b364bd944f 1178-1179,1181,1437
+  s_e8850ef125fb32::t_0229cdb60075af 1157-1161,1170,1173-1175,1180,1436,1441
+  s_e8850ef125fb32::t_df6be828a83b10 1151,1155
+apps/api/src/self-retelling-routes.ts
+  s_e8850ef125fb32::t_85e39deb0fc24a 61
+apps/web/src/settings-routes.spec.ts
+  s_e8850ef125fb32::t_839d1f18a9981d 35-43
+  s_f0dc1701fc0031::t_9208ca1c9a49d6 44-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "50c17e8214ee3592aeb29e91d57b3b4a676453bc",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f0dc1701fc0031": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc521-e36b-7fd3-8f60-ebd14a6657c9",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
