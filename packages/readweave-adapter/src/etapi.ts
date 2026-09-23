@@ -28,8 +28,8 @@ import type {
   CourseTreeNode,
   TreeNodeProperties
 } from "@course-os/contracts";
-import type { MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
-import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings } from "./index.js";
+import type { CourseReleaseIndex, MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
+import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings, toCourseReleaseIndex } from "./index.js";
 import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
 
 const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
@@ -260,6 +260,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   async listReleases(courseId?: string): Promise<CourseRelease[]> {
     const releases = (await this.readStateReference()).releases;
     return structuredClone(courseId ? releases.filter((release) => release.courseId === courseId) : releases);
+  }
+
+  async listReleaseIndexes(courseId?: string): Promise<CourseReleaseIndex[]> {
+    const releases = (await this.readStateReference()).releases;
+    return (courseId ? releases.filter((release) => release.courseId === courseId) : releases).map(toCourseReleaseIndex);
   }
 
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {

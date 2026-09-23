@@ -37,12 +37,50 @@ export interface QuestionAttemptTransactionResult {
 
 export type MasteryReducer = (previous: MasteryRecord | undefined) => MasteryRecord;
 
+export type CourseReleaseIndexPage = Pick<CourseRelease["pages"][number], "id" | "pageNumber" | "title" | "imageUrl" | "quality"> & {
+  anchors: [];
+  atoms: [];
+  blocks: [];
+  lessonSections: [];
+  questionBank: [];
+  coverageRequirements: [];
+  coverageClaims: [];
+};
+
+export type CourseReleaseIndex = Omit<CourseRelease, "pages" | "assessments"> & {
+  pages: CourseReleaseIndexPage[];
+  assessments: [];
+};
+
+export function toCourseReleaseIndex(release: CourseRelease): CourseReleaseIndex {
+  return {
+    ...release,
+    pageIds: [...release.pageIds],
+    assessments: [],
+    pages: release.pages.map((page) => ({
+      id: page.id,
+      pageNumber: page.pageNumber,
+      title: page.title,
+      imageUrl: page.imageUrl,
+      anchors: [],
+      atoms: [],
+      blocks: [],
+      lessonSections: [],
+      questionBank: [],
+      coverageRequirements: [],
+      coverageClaims: [],
+      quality: page.quality
+    }))
+  };
+}
+
 export interface ReadWeaveCourseApi {
   listCourses(): Promise<CourseProject[]>;
   createCourse(course: CourseProject, context: IdempotentWriteContext): Promise<CourseProject>;
   registerDraftSource(release: CourseRelease, context: IdempotentWriteContext): Promise<CourseRelease>;
   removeDraftSource(releaseId: string, context: IdempotentWriteContext): Promise<void>;
   listReleases(courseId?: string): Promise<CourseRelease[]>;
+  listReleaseIndexes(courseId?: string): Promise<CourseReleaseIndex[]>;
   getRelease(releaseId: string): Promise<CourseRelease | undefined>;
   publishRelease(release: CourseRelease, manifest: ReleaseManifest, context: IdempotentWriteContext): Promise<CourseRelease>;
   saveQuestion(question: PageQuestion, context: IdempotentWriteContext): Promise<PageQuestion>;
@@ -519,6 +557,11 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return courseId ? state.releases.filter((release) => release.courseId === courseId) : state.releases;
   }
 
+  async listReleaseIndexes(courseId?: string): Promise<CourseReleaseIndex[]> {
+    const state = await this.read();
+    return (courseId ? state.releases.filter((release) => release.courseId === courseId) : state.releases).map(toCourseReleaseIndex);
+  }
+
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {
     return (await this.read()).releases.find((release) => release.id === releaseId);
   }
@@ -965,6 +1008,10 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
   async listReleases(courseId?: string): Promise<CourseRelease[]> {
     const query = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
     return this.request<CourseRelease[]>(`/releases${query}`);
+  }
+
+  async listReleaseIndexes(courseId?: string): Promise<CourseReleaseIndex[]> {
+    return (await this.listReleases(courseId)).map(toCourseReleaseIndex);
   }
 
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {

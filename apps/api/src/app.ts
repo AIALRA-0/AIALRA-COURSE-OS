@@ -53,7 +53,7 @@ import { convertMaterial, FileConversionQueueClient, removeConversionOutput } fr
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, unpairedEnglishPhrases, unpairedEnglishTeachingFields, validatePageForPublication, validateTeachingNarrative, validateTex, type TeachingNarrativeField } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
-import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
+import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
@@ -838,29 +838,11 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/releases", async (request, response, next) => {
     try {
-      const releases = await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id));
       if (request.query.view === "index") {
-        response.json(releases.map((release) => ({
-          ...release,
-          assessments: [],
-          pages: release.pages.map((page) => ({
-            id: page.id,
-            pageNumber: page.pageNumber,
-            title: page.title,
-            imageUrl: page.imageUrl,
-            anchors: [],
-            atoms: [],
-            blocks: [],
-            lessonSections: [],
-            questionBank: [],
-            coverageRequirements: [],
-            coverageClaims: [],
-            quality: page.quality
-          }))
-        })));
+        response.json(await listWorkspaceReleaseIndexes(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));
         return;
       }
-      response.json(releases);
+      response.json(await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));
     } catch (error) { next(error); }
   });
 
@@ -2580,6 +2562,13 @@ async function listWorkspaceReleases(readweave: ReadWeaveCourseApi, workspaceId:
   const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
   const releases = await readweave.listReleases(courseId);
+  return releases.filter((release) => courseIds.has(release.courseId) && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
+}
+
+async function listWorkspaceReleaseIndexes(readweave: ReadWeaveCourseApi, workspaceId: string, courseId?: string): Promise<CourseReleaseIndex[]> {
+  const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
+  const courseIds = new Set(courses.map((course) => course.id));
+  const releases = await readweave.listReleaseIndexes(courseId);
   return releases.filter((release) => courseIds.has(release.courseId) && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
 }
 

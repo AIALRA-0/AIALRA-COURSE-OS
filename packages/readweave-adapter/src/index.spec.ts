@@ -179,6 +179,59 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("returns a minimal release index without cloning away the full release path", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const fullRelease = releaseWithPage();
+    const fullPage = fullRelease.pages[0]!;
+    fullRelease.assessments = [{ id: "assessment-index", objectiveId: "objective-1", pageId: "page-1", prompt: "assessment body", expectedAnswer: "answer body", transfer: false }];
+    fullPage.atoms = [{ kind: "text_region", id: "atom-index", label: "index atom", observation: "atom body" }];
+    fullPage.blocks[0]!.markdown = "large teaching body ".repeat(20_000);
+    fullPage.lessonSections = [{ id: "section-index", kind: "main_content", title: "section body", markdown: "section body", sourceAnchorIds: [], atomIds: [] }];
+    fullPage.questionBank = [{ id: "question-index", pageId: "page-1", objectiveId: "objective-1", kind: "comprehension", prompt: "question body", expectedAnswer: "answer body", explanation: "explanation body", sourceAnchorIds: [], status: "approved", version: 1, generatedBy: "test" }];
+    await api.publishRelease(fullRelease, { ...manifest, courseReleaseId: fullRelease.id }, { ...context, idempotencyKey: "release-index-publish" });
+
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    let index;
+    try {
+      index = await api.listReleaseIndexes();
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+
+    expect(index).toHaveLength(1);
+    expect(index[0]).toMatchObject({
+      id: fullRelease.id,
+      pageIds: fullRelease.pageIds,
+      assessments: [],
+      pages: [{
+        id: "page-1",
+        pageNumber: 1,
+        title: "测试页面",
+        imageUrl: "/page.png",
+        anchors: [],
+        atoms: [],
+        blocks: [],
+        lessonSections: [],
+        questionBank: [],
+        coverageRequirements: [],
+        coverageClaims: [],
+        quality: fullPage.quality
+      }]
+    });
+    expect(JSON.stringify(index)).not.toContain("large teaching body");
+    expect(JSON.stringify(index)).not.toContain("question body");
+
+    const full = await api.listReleases();
+    expect(full).toHaveLength(1);
+    expect(full[0]!.assessments).toEqual(fullRelease.assessments);
+    expect(full[0]!.pages[0]!.atoms).toEqual(fullPage.atoms);
+    expect(full[0]!.pages[0]!.blocks[0]!.markdown).toBe(fullPage.blocks[0]!.markdown);
+    expect(full[0]!.pages[0]!.lessonSections).toEqual(fullPage.lessonSections);
+    expect(full[0]!.pages[0]!.questionBank).toEqual(fullPage.questionBank);
+  });
+
   it("partitions high-frequency learning activity and preserves it across restart", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });

@@ -390,13 +390,45 @@ describe("Course OS API", () => {
   });
 
   it("returns a lightweight release index without sending lesson bodies", async () => {
-    const { app, release } = await seededApp();
+    const release = testRelease();
+    release.assessments = [{ id: "assessment-index", objectiveId: "objective-1", pageId: "page-1", prompt: "assessment body", expectedAnswer: "answer body", transfer: false }];
+    release.pages[0]!.atoms = [{ kind: "text_region", id: "atom-index", label: "index atom", observation: "atom body" }];
+    const { app, readweave } = await seededApp(undefined, release);
+    const fullRead = vi.spyOn(readweave, "listReleases");
+    const indexRead = vi.spyOn(readweave, "listReleaseIndexes");
     const full = await request(app).get("/api/v1/releases").expect(200);
     const index = await request(app).get("/api/v1/releases?view=index").expect(200);
+    const fullRelease = full.body.find((item: CourseRelease) => item.id === release.id) as CourseRelease;
     const indexed = index.body.find((item: CourseRelease) => item.id === release.id) as CourseRelease;
+    expect(fullRead).toHaveBeenCalledTimes(1);
+    expect(indexRead).toHaveBeenCalledTimes(1);
+    expect(fullRelease.assessments).toEqual(release.assessments);
+    expect(fullRelease.pages[0]!.atoms).toEqual(release.pages[0]!.atoms);
+    expect(fullRelease.pages[0]!.blocks).toEqual(release.pages[0]!.blocks);
+    expect(fullRelease.pages[0]!.questionBank).toEqual(release.pages[0]!.questionBank);
     expect(indexed.pages).toHaveLength(release.pages.length);
-    expect(indexed.pages[0]).toMatchObject({ id: release.pages[0]!.id, title: release.pages[0]!.title, blocks: [], atoms: [], anchors: [], questionBank: [] });
+    expect(indexed).toEqual({
+      ...fullRelease,
+      assessments: [],
+      pages: fullRelease.pages.map((page) => ({
+        id: page.id,
+        pageNumber: page.pageNumber,
+        title: page.title,
+        imageUrl: page.imageUrl,
+        anchors: [],
+        atoms: [],
+        blocks: [],
+        lessonSections: [],
+        questionBank: [],
+        coverageRequirements: [],
+        coverageClaims: [],
+        quality: page.quality
+      }))
+    });
     expect(indexed.pages[0]!.quality).toEqual(release.pages[0]!.quality);
+    expect(JSON.stringify(index.body)).not.toContain("assessment body");
+    expect(JSON.stringify(index.body)).not.toContain("atom body");
+    expect(JSON.stringify(index.body)).not.toContain("原始讲解");
     expect(JSON.stringify(index.body).length).toBeLessThan(JSON.stringify(full.body).length);
   });
 
