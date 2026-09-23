@@ -119,8 +119,8 @@ export class EtapiSettingsRuntime {
     const token = suppliedToken?.trim() || this.currentToken;
     if (!token) throw new Error("READWEAVE_TOKEN_REQUIRED");
     const config = { ...input, token, workspaceId: this.options.workspaceId };
-    const candidate = this.createAdapter(config);
-    await candidate.verifyConnection();
+    const candidate = enabled ? this.createAdapter(config) : undefined;
+    if (candidate) await candidate.verifyConnection();
 
     const nextSecretRef = `${secretNamePrefix}${randomUUID()}`;
     await this.options.vault.set(nextSecretRef, token);
@@ -143,7 +143,7 @@ export class EtapiSettingsRuntime {
     this.currentToken = token;
     this.current = input;
     this.enabled = enabled;
-    this.adapter = enabled ? candidate : this.options.fallbackAdapter();
+    this.adapter = candidate ?? this.options.fallbackAdapter();
     this.applyAdapter?.(this.adapter);
     if (oldSecretRef && oldSecretRef !== nextSecretRef) await this.options.vault.delete(oldSecretRef).catch(() => undefined);
     return this.snapshot();

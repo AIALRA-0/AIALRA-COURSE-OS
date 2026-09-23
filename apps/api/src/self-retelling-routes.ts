@@ -58,7 +58,7 @@ export function registerSelfRetellingRoutes(app: Express, dependencies: AppDepen
         const record: SelfRetelling = {
           workspaceId: context.workspaceId, releaseId, pageId, answer,
           answeredAt: previous?.answeredAt ?? now, updatedAt: now,
-          reviewedAt: previous?.reviewedAt, nextReviewAt: previous?.nextReviewAt ?? now
+          reviewedAt: previous?.reviewedAt, nextReviewAt: now
         };
         state.selfRetellings[key] = record;
         state.idempotency[replayKey] = { kind: "self_retelling", objectId: key };

@@ -55,6 +55,7 @@ import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type OperationalState } from "./store.js";
+import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConnection, professorInstructions, providerRouterFromSettings, teachingBlueprint, teachingPackageSchema, teachingUserPromptTemplate, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult, type SemanticAuditResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor, searchPriceSnapshotFor } from "./pricing.js";
@@ -581,7 +582,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.put("/api/v1/model-route-policy", async (request, response, next) => {
     try {
       const policy = request.body as ModelRoutePolicy;
-      const routesValid = policy?.routes === undefined || (Array.isArray(policy.routes) && policy.routes.length > 0
+      const routesValid = policy?.routes === undefined || (Array.isArray(policy.routes)
         && policy.routes.length <= 12
         && new Set(policy.routes.map(route => route.providerId)).size === policy.routes.length
         && policy.routes.every(route => typeof route.providerId === "string" && route.providerId.length > 0
@@ -2645,11 +2646,14 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
     // is intentionally absent from the production server.
     if (!configuredProviderIds.size) return environmentFallback;
     return providerRouterFromSettings({
-      load: async () => ({
-        providers: (await dependencies.operations.read()).modelProviders,
-        policy: (await dependencies.operations.read()).modelRoutePolicy,
-        credential: async (providerId) => configuredProviderIds.has(providerId) ? vault.get(`model-provider:${providerId}`) : undefined
-      })
+      load: async () => {
+        const settings = await dependencies.operations.read();
+        return {
+          providers: settings.modelProviders,
+          policy: modelRoutePolicyForRuntime(settings.modelRoutePolicy),
+          credential: async (providerId) => configuredProviderIds.has(providerId) ? vault.get(`model-provider:${providerId}`) : undefined
+        };
+      }
     });
   } catch {
     return environmentFallback;

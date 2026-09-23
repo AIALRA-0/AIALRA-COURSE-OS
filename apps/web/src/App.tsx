@@ -712,7 +712,11 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
 
   const savePolicy = async () => {
     setBusy(true); setError("");
-    try { setPolicy(await api.saveModelRoutePolicy(policy)); setNotice("模型路由规则已保存"); }
+    try {
+      // Empty routes is the API signal for an intentional switch to per-stage rules.
+      const policyToSave = policy.routes === undefined ? { ...policy, routes: [] } : policy;
+      setPolicy(await api.saveModelRoutePolicy(policyToSave)); setNotice("模型路由规则已保存");
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "路由规则保存失败"); }
     finally { setBusy(false); }
   };
@@ -882,7 +886,7 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
               <div className="model-priority-actions">
                 <button className="icon-button" disabled={busy || index === 0} onClick={() => moveModelRoute(index, -1)} aria-label={`上移 ${provider?.displayName || route.providerId}`}>↑</button>
                 <button className="icon-button" disabled={busy || index === (policy.routes?.length || 0) - 1} onClick={() => moveModelRoute(index, 1)} aria-label={`下移 ${provider?.displayName || route.providerId}`}>↓</button>
-                <button className="quiet-button danger-button" disabled={busy || (policy.routes?.length || 0) <= 1} onClick={() => setPolicy((current) => removeModelRoute(current, index))} aria-label={`删除 ${provider?.displayName || route.providerId} 线路`}>删除</button>
+                <button className="quiet-button danger-button" disabled={busy} onClick={() => setPolicy((current) => removeModelRoute(current, index))} aria-label={`删除 ${provider?.displayName || route.providerId} 线路`}>删除</button>
               </div>
             </div>;
           })}</div>

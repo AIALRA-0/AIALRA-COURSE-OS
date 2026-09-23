@@ -7,7 +7,8 @@ import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/read
 import type { CourseRelease, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
-import { ModelRouterGenerationError, currentGenerationHarness, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
+import { modelRoutePolicyForRuntime } from "./provider-settings.js";
+import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -1663,6 +1664,37 @@ describe("Course OS API", () => {
       .send({ ...modelPolicy.body, routes: [modelPolicy.body.routes[0], modelPolicy.body.routes[0]] }).expect(422);
     await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "valid-kuafu-backup-route")
       .send({ ...modelPolicy.body, routes: modelPolicy.body.routes.slice(0, 2) }).expect(200);
+    const kuafuRoute = modelPolicy.body.routes.find((route: { providerId: string }) => route.providerId === "kuafu");
+    const singleKuafuPolicy = await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "delete-kuafu-backup-route")
+      .send({ ...modelPolicy.body, routes: [kuafuRoute] }).expect(200);
+    expect(singleKuafuPolicy.body.routes.map((route: { providerId: string }) => route.providerId)).toEqual(["kuafu"]);
+    expect((await request(app).get("/api/v1/model-route-policy").expect(200)).body.routes).toEqual(singleKuafuPolicy.body.routes);
+    const noOrderedRoutes = await request(app).put("/api/v1/model-route-policy").set("Idempotency-Key", "delete-last-model-route")
+      .send({ ...singleKuafuPolicy.body, routes: [] }).expect(200);
+    expect(noOrderedRoutes.body.routes).toEqual([]);
+    expect((await request(app).get("/api/v1/model-route-policy").expect(200)).body).toMatchObject({
+      routes: [], rules: modelPolicy.body.rules
+    });
+    const resolvedPolicy = await dependencies.operations.read();
+    expect(resolvedPolicy.modelRoutePolicy.routes).toEqual([]);
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.deepseek.com/responses");
+      expect(JSON.parse(String(init?.body))).toMatchObject({ model: "deepseek-flash" });
+      return Response.json({ model: "deepseek-flash", output_text: JSON.stringify(testTeachingResult(0).content),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    const routeResolver = providerRouterFromSettings({ load: async () => ({
+      providers: resolvedPolicy.modelProviders,
+      policy: modelRoutePolicyForRuntime(resolvedPolicy.modelRoutePolicy),
+      credential: async () => "synthetic-route-resolver-token"
+    }) });
+    const routeResult = await routeResolver.generateTeachingPackage({
+      pageTitle: "per-stage route fallback", pageNumber: 1, sourceText: "已知输入与处理规则",
+      writingPolicySnapshotId: "route-fallback-test", language: "zh-CN", qualityMode: "balanced",
+      idempotencyKey: "route-fallback-test"
+    });
+    expect(routeResult.provider).toBe("deepseek");
+    expect(providerFetch).toHaveBeenCalledTimes(1);
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
     expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"]);

@@ -1393,12 +1393,18 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         const kuafuPeer = nextCandidate && ["kuafu", "kuafu-backup"].includes(candidate.providerId)
           && ["kuafu", "kuafu-backup"].includes(nextCandidate.providerId) && nextCandidate.providerId !== candidate.providerId;
         const peerAuthFailure = kuafuPeer && /^MODEL_PROVIDER_FAILED:(?:401|403|invalid_api_key|insufficient_quota)$/u.test(error.code);
+        const peerPlannedJsonFailure = kuafuPeer && input.blueprint !== undefined && !input.repair
+          && error.code === "MODEL_PROVIDER_OUTPUT_JSON_INVALID";
         // Provider-local capacity and upstream failures may use the explicit
-        // ordered route list. Content and configuration failures must retain
+        // ordered route list. Planned JSON transport failures may use the
+        // other Kuafu line; other content and configuration failures retain
         // their original provider and error.
-        if (!peerAuthFailure && error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
+        if (!peerAuthFailure && !peerPlannedJsonFailure && error.code !== "MODEL_PROVIDER_INSUFFICIENT_BALANCE"
           && !/^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|quota_exhausted|rate_limit_exceeded|upstream_error|response_failed)$/.test(error.code)
           && error.code !== "MODEL_PROVIDER_NETWORK_FAILURE") throw error;
+        if (kuafuPeer && input.blueprint !== undefined && !input.repair && routedInput.resumeTeaching) {
+          input.resumeTeaching = routedInput.resumeTeaching;
+        }
         lastError = error;
       }
     }

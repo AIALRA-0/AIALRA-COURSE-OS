@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultCourseModelProviders, defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults, mergeCourseModelRoutePolicyDefaults } from "./provider-settings.js";
+import { defaultCourseModelProviders, defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults, mergeCourseModelRoutePolicyDefaults, modelRoutePolicyForRuntime } from "./provider-settings.js";
 
 describe("Course OS native model provider defaults", () => {
   it("registers Kimi Coding as a disabled vault-managed Chat Completions provider", () => {
@@ -59,19 +59,17 @@ describe("Course OS native model provider defaults", () => {
     expect(mergeCourseModelRoutePolicyDefaults(saved).routes?.find((route) => route.providerId === "deepseek")?.modelId).toBe("deepseek-flash");
   });
 
-  it("adds the backup provider beside either saved primary without changing the existing credential", () => {
-    const saved = defaultCourseModelProviders().filter(provider => provider.id !== "kuafu-backup").map(provider => provider.id === "kuafu"
-      ? { ...provider, credential: { configured: true, maskedValue: "••••1234" } } : provider);
-    const merged = mergeCourseModelProviderDefaults(saved);
-    expect(merged.find(provider => provider.id === "kuafu-backup")?.models.map(model => model.id)).toEqual(["deepseek-v4.1-flash-expires-on-0910"]);
-    expect(merged.find(provider => provider.id === "kuafu")?.credential.maskedValue).toBe("••••1234");
+  it("preserves an explicitly deleted Kuafu peer and an intentionally empty route chain", () => {
     for (const primaryProvider of ["kuafu", "kuafu-backup"]) {
       const policy = defaultCourseModelRoutePolicy();
       policy.routes = [{ providerId: primaryProvider, modelId: primaryProvider === "kuafu"
         ? "deepseek-v4.1-flash" : "deepseek-v4.1-flash-expires-on-0910", enabled: true }];
       const routes = mergeCourseModelRoutePolicyDefaults(policy).routes!;
-      expect(routes.map(route => route.providerId)).toEqual([primaryProvider, primaryProvider === "kuafu" ? "kuafu-backup" : "kuafu"]);
+      expect(routes.map(route => route.providerId)).toEqual([primaryProvider]);
     }
+    const cleared = { ...defaultCourseModelRoutePolicy(), routes: [] };
+    expect(mergeCourseModelRoutePolicyDefaults(cleared).routes).toEqual([]);
+    expect(modelRoutePolicyForRuntime(mergeCourseModelRoutePolicyDefaults(cleared)).routes).toBeUndefined();
   });
 
   it("removes the retired ambiguous emergency provider from persisted settings", () => {

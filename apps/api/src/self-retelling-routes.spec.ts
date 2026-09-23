@@ -7,7 +7,11 @@ import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
 
 function harness() {
   const release = { id: "release-1", courseId: "course-1", pageIds: ["page-1"], pages: [] } as unknown as CourseRelease;
-  const state = { selfRetellings: {} as Record<string, any>, idempotency: {} as Record<string, { kind: string; objectId: string }> };
+  const state = {
+    selfRetellings: {} as Record<string, any>,
+    idempotency: {} as Record<string, { kind: string; objectId: string }>,
+    unrelatedStorage: { courseCatalog: [{ id: "course-elsewhere" }], activityLog: [{ id: "activity-1" }] }
+  };
   const dependencies = {
     readweave: {
       getRelease: async (id: string) => id === release.id ? release : undefined,
@@ -45,6 +49,40 @@ describe("self retelling routes", () => {
     const replay = await request(app).put(path).set(headers).send({ answer: "重放请求" }).expect(200);
     expect(replay.body.answer).toBe("第一次提交");
     expect(Object.keys(state.selfRetellings)).toHaveLength(1);
+  });
+
+  it("makes an edited answer due immediately without changing unrelated records or storage", async () => {
+    const { app, state } = harness();
+    const path = "/api/v1/self-retellings/release-1/page-1";
+    const siblingKey = JSON.stringify(["personal", "release-1", "page-2"]);
+    state.selfRetellings[siblingKey] = {
+      workspaceId: "personal", releaseId: "release-1", pageId: "page-2", answer: "另一个页面的回答",
+      answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+      nextReviewAt: "2026-01-02T00:00:00.000Z"
+    };
+    const siblingBefore = structuredClone(state.selfRetellings[siblingKey]);
+    const unrelatedStorageBefore = structuredClone(state.unrelatedStorage);
+
+    const original = await request(app).put(path).set(writeHeaders("answer-before-edit"))
+      .send({ answer: "原始回答" }).expect(200);
+    const reviewed = await request(app).post(`${path}/review`).set(writeHeaders("review-before-edit"))
+      .send({ result: "remembered" }).expect(200);
+    const previousDueAt = Date.parse(reviewed.body.nextReviewAt);
+    expect(previousDueAt).toBeGreaterThan(Date.now());
+
+    const beforeEdit = Date.now();
+    const edited = await request(app).put(path).set(writeHeaders("edit-answer"))
+      .send({ answer: "修订后的回答" }).expect(200);
+    const afterEdit = Date.now();
+
+    expect(edited.body.answer).toBe("修订后的回答");
+    expect(edited.body.answeredAt).toBe(original.body.answeredAt);
+    expect(edited.body.nextReviewAt).toBe(edited.body.updatedAt);
+    expect(Date.parse(edited.body.nextReviewAt)).toBeGreaterThanOrEqual(beforeEdit);
+    expect(Date.parse(edited.body.nextReviewAt)).toBeLessThanOrEqual(afterEdit);
+    expect(Date.parse(edited.body.nextReviewAt)).toBeLessThan(previousDueAt);
+    expect(state.selfRetellings[siblingKey]).toEqual(siblingBefore);
+    expect(state.unrelatedStorage).toEqual(unrelatedStorageBefore);
   });
 
   it("rejects invalid, unowned, and unverified writes", async () => {

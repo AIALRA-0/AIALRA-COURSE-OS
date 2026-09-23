@@ -32,6 +32,17 @@ describe("settings route editor", () => {
     expect(removeModelRoute(added, -1)).toBe(added);
   });
 
+  it("keeps the remaining Kuafu route when its peer is deleted", () => {
+    const kuafuPolicy: ModelRoutePolicy = {
+      ...policy,
+      routes: [
+        { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+        { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: true }
+      ]
+    };
+    expect(removeModelRoute(kuafuPolicy, 1).routes).toEqual([kuafuPolicy.routes![0]]);
+  });
+
   it("edits a valid route, rejects unavailable models and duplicate providers", () => {
     const withSecond = addModelRoute(policy, providers);
     expect(updateModelRoute(withSecond, 1, { modelId: "second-model", enabled: true }, providers).routes?.[1]).toEqual({

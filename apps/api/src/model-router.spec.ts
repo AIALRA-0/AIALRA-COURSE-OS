@@ -1147,6 +1147,70 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it("retries malformed planned output through the other Kuafu line", async () => {
+    const phases: string[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const providerId = new URL(url).hostname.split(".")[0];
+      const request = JSON.parse(String(init?.body)) as { model: string; text?: { format?: { name?: string } } };
+      phases.push(`${providerId}:${request.text?.format?.name}`);
+      if (providerId === "kuafu") {
+        if (request.text?.format?.name === "course_os_opening") {
+          return Response.json({ model: request.model, output_text: JSON.stringify({
+            priorKnowledge: ["标题：供应商协议测试页"], learningObjectives: ["能够说明页面主题"]
+          }), usage: { input_tokens: 10, output_tokens: 20, total_cost: 0.001 } });
+        }
+        return Response.json({ model: request.model, output_text: `{"priorKnowledge":[`, usage: { input_tokens: 10, output_tokens: 10, total_cost: 0.001 } });
+      }
+      if (request.text?.format?.name === "course_os_opening_repair") {
+        return Response.json({ model: request.model, output_text: JSON.stringify({ priorKnowledge: ["标题（title）：供应商协议测试页"] }), usage: { input_tokens: 10, output_tokens: 20, total_cost: 0.001 } });
+      }
+      if (request.text?.format?.name === "course_os_bridge") {
+        return Response.json({ model: request.model, output_text: JSON.stringify({ chapterBridgeMarkdown: "前面已经认识输入，本页接着看规则如何把输入转成输出" }), usage: { input_tokens: 10, output_tokens: 20, total_cost: 0.001 } });
+      }
+      throw new Error(`Unexpected planned phase: ${request.text?.format?.name}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const input = plannedOpeningRepairInput("planned-kuafu-json-fallback");
+    expect(input.sourceImageDataUrl).toBeDefined();
+    expect(input.sourceText.trim()).not.toBe("");
+    const result = await plannedJsonFallbackClient(["kuafu", "kuafu-backup"]).generateTeachingPackage(input);
+    expect(result).toMatchObject({ provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910" });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).hostname.split(".")[0])).toEqual(["kuafu", "kuafu", "kuafu", "kuafu-backup"]);
+    expect(fetchMock.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as { text: { format: { name: string } } }).text.format.name))
+      .toEqual(["course_os_opening", "course_os_opening_repair", "course_os_opening_repair_json_repair", "course_os_opening_repair"]);
+    expect(phases).toEqual(["kuafu:course_os_opening", "kuafu:course_os_opening_repair",
+      "kuafu:course_os_opening_repair_json_repair", "kuafu-backup:course_os_opening_repair"]);
+  });
+
+  it("does not send malformed planned content to an OpenCode fallback", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { model: string };
+      return Response.json({ model: request.model, output_text: `{"priorKnowledge":[`, usage: { input_tokens: 10, output_tokens: 10, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const failure = await plannedJsonFallbackClient(["kuafu", "opencode-go"])
+      .generateTeachingPackage(plannedOpeningRepairInput("planned-kuafu-no-paid-content-fallback"))
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_OUTPUT_JSON_INVALID" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([url]) => new URL(String(url)).hostname === "kuafu.test")).toBe(true);
+  });
+
+  it("keeps ordinary teaching content failures on the primary Kuafu line", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { model: string };
+      return Response.json({ model: request.model, output_text: "{}", usage: { input_tokens: 10, output_tokens: 10, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const failure = await plannedJsonFallbackClient(["kuafu", "kuafu-backup"])
+      .generateTeachingPackage(providerInput("ordinary-kuafu-content-failure"))
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ provider: "kuafu", code: "MODEL_ROUTER_LEARNING_OBJECTIVES_INVALID" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([url]) => new URL(String(url)).hostname === "kuafu.test")).toBe(true);
+  });
+
   it("falls back during semantic audit when the primary quota route fails", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({ error: { code: "quota_exhausted", message: "quota exhausted" } }, { status: 429 }))
@@ -1329,5 +1393,53 @@ function providerTeachingContent() {
       { kind: "multiple_choice", prompt: "第一步是什么", options: ["识别输入", "忽略条件", "直接结论", "删除规则"], expectedAnswer: "识别输入", explanation: "输入决定后续处理对象" },
       { kind: "multiple_choice", prompt: "最后一步是什么", options: ["核对输出", "删除结果", "忽略目标", "改变题意"], expectedAnswer: "核对输出", explanation: "输出需要对照目标检查" }
     ]
+  };
+}
+
+function plannedJsonFallbackClient(providerIds: string[]) {
+  const modelIds: Record<string, string> = {
+    kuafu: "deepseek-v4.1-flash",
+    "kuafu-backup": "deepseek-v4.1-flash-expires-on-0910",
+    "opencode-go": "paid-fallback-test"
+  };
+  return new SettingsProviderTeachingClient({ load: async () => ({
+    providers: providerIds.map(id => ({ id, displayName: id, baseUrl: `https://${id}.test`, enabled: true,
+      credential: { configured: true }, models: [{ id: modelIds[id]!, displayName: id, protocol: "responses" as const,
+        supportsVision: false, supportsJsonSchema: true, supportsReasoning: true,
+        billingMode: (id === "opencode-go" ? "subscription_quota" : "metered") as "subscription_quota" | "metered" }] })),
+    policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false,
+      updatedAt: new Date(0).toISOString(), rules: [{ stage: "teach", providerId: "kuafu", modelId: modelIds.kuafu!, enabled: true }],
+      routes: providerIds.map(providerId => ({ providerId, modelId: modelIds[providerId]!, enabled: true })) },
+    credential: async () => "synthetic-secret"
+  }) });
+}
+
+function plannedOpeningRepairInput(idempotencyKey: string): ModelRouterInput {
+  const page = {
+    id: "planned-json-fallback-page", pageNumber: 1, title: "供应商协议测试页", imageUrl: "",
+    anchors: [], atoms: [{ id: "a1", kind: "text_region", label: "页面标题", observation: "供应商协议测试页" }],
+    blocks: [], coverageRequirements: [], coverageClaims: [],
+    quality: { highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false, issues: [] }
+  } as Parameters<typeof buildTeachingBlueprint>[0];
+  const blueprint = buildTeachingBlueprint(page, "来源内容", "zh-CN", "balanced", "writing-policy:test", false);
+  const plan: import("./teaching-plan.js").TeachingPlan = {
+    problem: "解释页面标题", knownStartingPoint: "已经知道标题用于标记主题", scopeBoundary: "只解释当前页面",
+    facts: [{ id: "f1", atomId: "a1", observation: "本页标题为供应商协议测试页", qualification: "表示当前主题" }],
+    prerequisites: [{ name: "标题", explanation: "用于标记页面主题" }],
+    steps: [{ id: "s1", factIds: ["f1"], dependsOn: [], explanation: "读取标题", example: "", boundary: "不推断标题外的信息" }],
+    objectives: [{ id: "o1", startingPoint: "已经知道标题用途", outcome: "能够说明页面主题", stepIds: ["s1"] }],
+    questions: ["comprehension", "comprehension", "multiple_choice", "multiple_choice"].map((kind, index) => ({
+      objectiveId: "o1", stepId: "s1", kind: kind as "comprehension" | "multiple_choice", focus: `核对点${index + 1}`
+    }))
+  };
+  return {
+    ...providerInput(idempotencyKey, true), blueprint, teachingFingerprint: "planned-json-fallback-fingerprint",
+    onTeachingCheckpoint: async () => undefined,
+    resumeTeaching: {
+      fingerprint: "planned-json-fallback-fingerprint", plan,
+      content: { ...providerTeachingContent(), chapterBridgeMarkdown: "前页已认识标题，本页说明页面主题" } as TeachingPackage,
+      completedPhases: ["explanation", "consolidation", "bridge"],
+      trace: { version: 1, plan, phases: [] }
+    }
   };
 }

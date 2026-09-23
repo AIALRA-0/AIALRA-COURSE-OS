@@ -111,6 +111,29 @@ describe("ReadWeave ETAPI settings routes", () => {
     expect(replay.body.replayed).toBe(true);
     expect(Object.keys(state.idempotency)).toHaveLength(1);
   });
+
+  it("disables ETAPI without checking the connection when ReadWeave is unavailable", async () => {
+    let unavailable = false;
+    let fetchCount = 0;
+    const { app, activeAdapter } = await harness(async () => {
+      fetchCount += 1;
+      return unavailable ? new Response("unavailable", { status: 503 }) : new Response("{}", { status: 200 });
+    });
+    const path = "/api/v1/readweave/etapi-settings";
+    const config = { baseUrl: "https://readweave.example", parentNoteId: "root-note", token: "private-token" };
+
+    await request(app).put(path).set(headers("enable-before-outage")).send(config).expect(200);
+    const connectedAdapter = activeAdapter();
+    const fetchCountBeforeDisable = fetchCount;
+    unavailable = true;
+
+    const disabled = await request(app).put(path).set(headers("disable-during-outage"))
+      .send({ ...config, enabled: false }).expect(200);
+
+    expect(disabled.body).toMatchObject({ enabled: false });
+    expect(fetchCount).toBe(fetchCountBeforeDisable);
+    expect(activeAdapter()).not.toBe(connectedAdapter);
+  });
 });
 
 async function readStoredSecretReference(dataDir: string): Promise<string> {

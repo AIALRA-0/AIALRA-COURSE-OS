@@ -49,16 +49,6 @@ export function mergeCourseModelRoutePolicyDefaults(saved?: ModelRoutePolicy): M
   const routes = Array.isArray(saved.routes)
     ? structuredClone(saved.routes)
     : structuredClone(defaults.routes ?? []);
-  const selected = routes.findIndex(route => route.providerId === "kuafu" || route.providerId === "kuafu-backup");
-  if (selected >= 0) {
-    const primary = routes[selected]!;
-    const backup = primary.providerId === "kuafu"
-      ? { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: primary.enabled }
-      : { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: primary.enabled };
-    if (!routes.some(route => route.providerId === backup.providerId)) {
-      routes.splice(selected + 1, 0, backup);
-    }
-  }
   return {
     ...structuredClone(saved),
     routes: routes?.map(route => route.providerId === "deepseek" && route.modelId === "deepseek-v4-flash-vision-exp"
@@ -68,6 +58,13 @@ export function mergeCourseModelRoutePolicyDefaults(saved?: ModelRoutePolicy): M
       ? saved.allowProviderFallback ?? defaults.allowProviderFallback
       : defaults.allowProviderFallback
   };
+}
+
+/** Empty is persisted as an explicit user choice; the runtime uses omitted routes for per-stage fallback. */
+export function modelRoutePolicyForRuntime(policy: ModelRoutePolicy): ModelRoutePolicy {
+  if (policy.routes?.length !== 0) return policy;
+  const { routes: _empty, ...perStagePolicy } = policy;
+  return perStagePolicy;
 }
 
 export function defaultCourseModelRoutePolicy(workspaceId = "personal"): ModelRoutePolicy {
