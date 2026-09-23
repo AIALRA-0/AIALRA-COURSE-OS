@@ -14,6 +14,7 @@ const usage = { inputTokens: 100, cachedInputTokens: 0, outputTokens: 200, apiEq
 const opening = { chapterBridgeMarkdown: "前页已经说明输入是开始处理时掌握的信息\n\n本页继续说明怎样从输入得到可以核对的结果", priorKnowledge: ["输入（Input）：它是处理开始前已经具备的信息；它为当前操作提供具体对象；规则读取这些信息后才决定结果；开始计算前需要先确认输入；输入与处理结束后的输出不同"], learningObjectives: ["给定输入以后，能够按顺序说明它怎样变成结果"] };
 const bridge = { chapterBridgeMarkdown: opening.chapterBridgeMarkdown };
 const explanation = { fullExplanationMarkdown: `### 从具体对象开始\n\n${quote}\n\n处理之前先保留输入的数值和条件，随后只执行材料允许的操作，再把得到的结果与目标比较\n\n### 核对结果\n\n如果输入条件发生变化，应当重新计算对应结果，而不能把之前得到的结论直接用在新的对象上，比较时也要保持其他条件相同`, coverageEvidence: [{ atomId: "a", coveredFields: ["observation"], explanation: quote }] };
+const formatOnlyExplanation = { ...explanation, fullExplanationMarkdown: `### 从具体对象开始\n\n${quote}${"仍需核对输入条件并按规则检查输出结果".repeat(12)}\n\n### 核对结果\n\n如果输入条件发生变化，应当重新计算对应结果，而不能把之前得到的结论直接用在新的对象上` };
 const closing = { mainContentMarkdown: "- 输入提供具体对象，规则决定允许的变化\n- 结果需要在相同条件下与原目标进行比较", misconceptions: ["错误理解：输入变化后可以保留原结果\n\n错因：忽略了结果依赖输入\n\n正确判断：应当重新计算\n\n核对方法：逐项检查输入条件"], questions: [0, 1, 2, 3].map(index => ({ kind: index < 2 ? "comprehension" : "multiple_choice", prompt: `第 ${index + 1} 个练习应当怎样核对输入条件`, options: index < 2 ? [] : ["核对输入", "只看输出", "改变规则", "删除条件"], expectedAnswer: "核对输入", explanation: "因为结果依赖输入，必须先确认输入条件相同，再按照规则计算和比较结果" })) };
 
 it("supplies every byte of the approved writing skill to each Chinese generation phase", () => {
@@ -645,6 +646,66 @@ describe("planned teaching", () => {
       return { content: outputs[phases.length - 1], provider: "deepseek", model: "model", usage };
     });
     expect(phases).toEqual(["plan", "opening", "explanation", "explanation_repair", "consolidation", "bridge"]);
+  });
+  it("keeps a schema-valid explanation when two format repairs return a too-short replacement", async () => {
+    const { input, plan } = fixture();
+    input.teachingFingerprint = "format-repair-schema-guard";
+    const calls: string[] = [];
+    const checkpoints: NonNullable<ModelRouterInput["resumeTeaching"]>[] = [];
+    input.onTeachingCheckpoint = async value => { checkpoints.push(structuredClone(value)); };
+    const result = await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? formatOnlyExplanation
+          : request.phase === "explanation_repair" ? { fullExplanationMarkdown: "仅返回一条过短的修复" }
+            : request.phase === "bridge" ? bridge : closing,
+      provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["plan", "opening", "explanation", "explanation_repair", "explanation_repair", "consolidation", "bridge"]);
+    expect(result.content.fullExplanationMarkdown).toBe(formatOnlyExplanation.fullExplanationMarkdown);
+    expect(result.trace.formatWarnings).toEqual([{ phase: "explanation", issues: ["TEACHING_PRESENTATION:fullExplanationMarkdown:PROSE_PACKED"] }]);
+    expect(checkpoints.at(-1)?.trace.formatWarnings).toEqual(result.trace.formatWarnings);
+    const pendingExplanation = checkpoints.filter(checkpoint => checkpoint.pending?.phase === "explanation");
+    expect(pendingExplanation.length).toBeGreaterThan(0);
+    expect(pendingExplanation.every(checkpoint => (checkpoint.pending?.content.fullExplanationMarkdown?.length ?? 0) >= 120)).toBe(true);
+    expect(pendingExplanation.every(checkpoint => !checkpoint.pending?.issues.includes("result.fullExplanationMarkdown:length"))).toBe(true);
+  });
+  it("does not repeat format repairs already recorded in a resumed checkpoint", async () => {
+    const { input, plan } = fixture();
+    input.teachingFingerprint = "resume-after-two-format-repairs";
+    input.resumeTeaching = {
+      fingerprint: input.teachingFingerprint,
+      plan,
+      content: { priorKnowledge: opening.priorKnowledge, learningObjectives: opening.learningObjectives },
+      completedPhases: ["opening"],
+      pending: { phase: "explanation", content: formatOnlyExplanation, issues: [
+        "TEACHING_FORMAT:fullExplanationMarkdown:WRITING_COLON_PSEUDO_HEADING",
+        "TEACHING_PRESENTATION:fullExplanationMarkdown:PROSE_PACKED"
+      ] },
+      trace: { version: 1, plan, phases: [0, 1].map(() => ({ phase: "explanation_repair", provider: "deepseek", model: "flash", usage })) }
+    };
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: request.phase === "bridge" ? bridge : closing, provider: "deepseek", model: "flash", usage };
+    });
+    expect(calls).toEqual(["consolidation", "bridge"]);
+    expect(result.content.fullExplanationMarkdown).toBe(formatOnlyExplanation.fullExplanationMarkdown);
+    expect(result.trace.formatWarnings?.[0]).toMatchObject({ phase: "explanation", issues: ["TEACHING_PRESENTATION:fullExplanationMarkdown:PROSE_PACKED"] });
+  });
+  it("still fails after two repairs when a structural explanation issue remains", async () => {
+    const { input, plan } = fixture();
+    const invalidExplanation = { ...explanation, coverageEvidence: [{ atomId: "a", coveredFields: ["observation"] }] };
+    const calls: string[] = [];
+    await expect(writePlannedLesson(input, async request => {
+      calls.push(request.phase);
+      return { content: request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? invalidExplanation
+          : request.phase === "explanation_repair" ? { coverageEvidence: invalidExplanation.coverageEvidence }
+            : request.phase === "bridge" ? bridge : closing,
+      provider: "deepseek", model: "flash", usage };
+    })).rejects.toThrow("TEACHING_EXPLANATION_INVALID:result.coverageEvidence.0.explanation:required");
+    expect(calls).toEqual(["plan", "opening", "explanation", "explanation_repair", "explanation_repair"]);
   });
   it("assigns an unplaced plan fact locally without a provider repair", async () => {
     const { input, plan } = fixture();

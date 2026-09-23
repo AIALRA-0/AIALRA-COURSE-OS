@@ -34,6 +34,7 @@ export interface PlannedTrace {
   coreFingerprint?: string;
   previousCoreFingerprint?: string;
   phases: Array<{ phase: string; provider: string; model: string; usage: ModelRouterUsage; attempt?: number }>;
+  formatWarnings?: Array<{ phase: string; issues: string[] }>;
   researchEvidence?: TeachingResearchEvidence[];
 }
 export interface PlannedCheckpoint {
@@ -52,6 +53,17 @@ const fieldsByPhase = [
 ] as const;
 const phases = ["opening", "explanation", "consolidation"];
 const partialSchema = (fields: readonly string[]) => ({ type: "object", properties: Object.fromEntries(fields.map(field => [field, (teachingPackageSchema.properties as Record<string, unknown>)[field]])), required: fields, additionalProperties: false });
+const isFormattingIssue = (issue: string) => issue.startsWith("TEACHING_FORMAT:") || issue.startsWith("TEACHING_PRESENTATION:");
+const countPhaseRepairCalls = (trace: PlannedTrace, phase: string) => trace.phases.filter(entry =>
+  entry.phase === `${phase}_repair` || entry.phase === `${phase}_repair_invalid_json`).length;
+
+function recordFormatWarnings(trace: PlannedTrace, phase: string, issues: string[]) {
+  const formatIssues = issues.filter(isFormattingIssue);
+  if (!formatIssues.length) return;
+  const existing = trace.formatWarnings?.find(warning => warning.phase === phase);
+  if (existing) existing.issues = [...new Set([...existing.issues, ...formatIssues])];
+  else (trace.formatWarnings ??= []).push({ phase, issues: [...new Set(formatIssues)] });
+}
 
 function normalizeQuestionKind(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -371,10 +383,12 @@ export async function writePlannedLesson(input: ModelRouterInput,
     if (index === 2 && !issues.length) issues.push(...plannedCoreContentIssues({ ...content, ...partial }, input, plan));
     if (!issues.length) issues.push(...plannedFormatIssues(partial));
     if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
-    for (let round = 0; round < 2 && issues.length; round++) {
+    let repairCalls = countPhaseRepairCalls(trace, phases[index]!);
+    for (let round = 0; round < 2 && issues.length && repairCalls < 2; round++) {
       const tickets = generationRepairTickets(phases[index]!, partial, issues, blueprint.resourcePackage.atomIds);
       if (tickets.length === 0) break;
       for (const ticket of tickets) {
+        if (repairCalls >= 2) break;
         const patch = await run({ phase: `${request.phase}_repair`,
           instructions: `${plannedInstructions([ticket.field], input.language)}\n${ticket.instruction}`,
           prompt: JSON.stringify({ pageTitle: input.pageTitle, issue: ticket.issues, field: ticket.field,
@@ -383,20 +397,27 @@ export async function writePlannedLesson(input: ModelRouterInput,
             facts: ticket.field === "coverageEvidence" ? plan.facts : undefined,
             precedingSections: ticket.field === "coverageEvidence" ? undefined : teachingSectionMemory(content) }),
           schema: partialSchema([ticket.field]), maxOutputTokens: ticket.field === "fullExplanationMarkdown" ? 9000 : 3500 }) as Partial<TeachingPackage>;
+        repairCalls++;
+        const candidateWasSchemaValid = schemaIssues(partial, schema).length === 0;
+        let repaired: Partial<TeachingPackage> | undefined;
         try {
-          partial = applyGenerationRepair(partial, ticket, patch);
+          repaired = applyGenerationRepair(partial, ticket, patch);
         } catch (error) {
           // A model can return the unchanged field. Keep the last valid checkpoint
           // and let the next bounded round diagnose the real remaining issue.
           if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
         }
-        if (index === 2) {
-          partial = normalizePlannedQuestionPunctuation(partial);
-          if (Array.isArray(partial.misconceptions)) partial.misconceptions = partial.misconceptions
-            .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
+        if (repaired) {
+          if (index === 2) {
+            repaired = normalizePlannedQuestionPunctuation(repaired);
+            if (Array.isArray(repaired.misconceptions)) repaired.misconceptions = repaired.misconceptions
+              .map(value => typeof value === "string" ? formatMisconception(value) : value) as string[];
+          }
+          if (index === 0) repaired = normalizePlannedOpening(repaired);
+          if (index === 1) repaired = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(repaired), blueprint));
+          // A field repair must not turn a schema-valid phase into an invalid one.
+          if (!candidateWasSchemaValid || schemaIssues(repaired, schema).length === 0) partial = repaired;
         }
-        if (index === 0) partial = normalizePlannedOpening(partial);
-        if (index === 1) partial = bindExactCoverageLines(normalizePlannedCoverageFields(normalizePlannedSourceIntroductions(partial), blueprint));
         await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
       }
       issues = schemaIssues(partial, schema);
@@ -405,7 +426,8 @@ export async function writePlannedLesson(input: ModelRouterInput,
       if (!issues.length) issues.push(...plannedFormatIssues(partial));
       if (issues.length) await save({ plan, content, completedPhases, pending: { phase: phases[index]!, content: partial, issues } });
     }
-    if (issues.length) throw new Error(`TEACHING_${request.phase.toUpperCase()}_INVALID:${issues.join(",")}`);
+    if (issues.length && !issues.every(isFormattingIssue)) throw new Error(`TEACHING_${request.phase.toUpperCase()}_INVALID:${issues.join(",")}`);
+    recordFormatWarnings(trace, phases[index]!, issues);
     content = { ...content, ...partial };
     completedPhases.push(phases[index]!);
     await save({ plan, content, completedPhases });
@@ -452,10 +474,12 @@ export async function writePlannedLesson(input: ModelRouterInput,
     };
     let partial = normalizePlannedOpening(await run(request) as Partial<TeachingPackage>);
     let issues = [...schemaIssues(partial, schema), ...plannedFormatIssues(partial)];
-    for (let round = 0; round < 2 && issues.length; round++) {
+    let repairCalls = countPhaseRepairCalls(trace, "bridge");
+    for (let round = 0; round < 2 && issues.length && repairCalls < 2; round++) {
       const tickets = generationRepairTickets("bridge", partial, issues, blueprint.resourcePackage.atomIds);
       if (tickets.length === 0) break;
       for (const ticket of tickets) {
+        if (repairCalls >= 2) break;
         const patch = await run({
           phase: "bridge_repair",
           instructions: `${plannedInstructions([ticket.field], input.language)}\n${ticket.instruction}`,
@@ -465,14 +489,20 @@ export async function writePlannedLesson(input: ModelRouterInput,
           schema: partialSchema([ticket.field]),
           maxOutputTokens: 2600
         }) as Partial<TeachingPackage>;
-        try { partial = normalizePlannedOpening(applyGenerationRepair(partial, ticket, patch)); }
-        catch (error) {
+        repairCalls++;
+        const candidateWasSchemaValid = schemaIssues(partial, schema).length === 0;
+        try {
+          const repaired = normalizePlannedOpening(applyGenerationRepair(partial, ticket, patch));
+          // Keep the last valid candidate if a formatting patch damages its schema.
+          if (!candidateWasSchemaValid || schemaIssues(repaired, schema).length === 0) partial = repaired;
+        } catch (error) {
           if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
         }
       }
       issues = [...schemaIssues(partial, schema), ...plannedFormatIssues(partial)];
     }
-    if (issues.length) throw new Error(`TEACHING_BRIDGE_INVALID:${issues.join(",")}`);
+    if (issues.length && !issues.every(isFormattingIssue)) throw new Error(`TEACHING_BRIDGE_INVALID:${issues.join(",")}`);
+    recordFormatWarnings(trace, "bridge", issues);
     content = { ...content, ...partial };
     completedPhases.push("bridge");
     await save({ plan, content, completedPhases });

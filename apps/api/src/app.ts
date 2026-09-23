@@ -1445,13 +1445,23 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const jobId = request.path.slice("/api/v1/generation-jobs/".length, -":retry".length);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const idempotencyKey = asOptionalString(request.header("Idempotency-Key"));
       const retried = await dependencies.operations.mutate((state) => {
+        const replay = idempotencyKey ? state.idempotency[idempotencyKey] : undefined;
+        if (replay) {
+          if (replay.kind !== "generation_job_retry" || replay.objectId !== jobId) throw new Error("GENERATION_RETRY_IDEMPOTENCY_CONFLICT");
+          const replayJob = state.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId);
+          return replayJob ? { job: structuredClone(replayJob), replayed: true } : undefined;
+        }
         const job = state.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId);
         if (!job) return undefined;
-        if (!["failed", "completed"].includes(job.state)) throw new Error("GENERATION_RETRY_STATE_INVALID");
-        if (job.failedPageIds.length === 0) throw new Error("GENERATION_RETRY_HAS_NO_FAILED_PAGES");
+        if (!["failed", "completed", "cancelled"].includes(job.state)) throw new Error("GENERATION_RETRY_STATE_INVALID");
         if (job.planId && state.jobs.some((item) => item.planId === job.planId && item.id !== job.id && ["queued", "running", "pending_sync"].includes(item.state))) throw new Error("GENERATION_PLAN_BUSY");
-        const retryPageIds = [...job.failedPageIds];
+        const completedPageIds = new Set(job.completedPageIds);
+        const retryPageIds = job.state === "cancelled"
+          ? job.pageIds.filter((pageId) => !completedPageIds.has(pageId))
+          : [...job.failedPageIds];
+        if (retryPageIds.length === 0) throw new Error("GENERATION_RETRY_HAS_NO_FAILED_PAGES");
         Object.assign(job, transitionJob(job, "queued"), { pageIds: retryPageIds, completedPageIds: [], failedPageIds: [], cancelRequested: false });
         if (job.planId) {
           const plan = state.generationPlans.find((item) => item.id === job.planId);
@@ -1465,11 +1475,12 @@ export function createApp(dependencies: AppDependencies): Express {
           }
         }
         dependencies.operations.appendEvent(state, job.id, "job.retry.queued", { pageIds: retryPageIds, nextAttempt: job.attempt + 1 });
-        return structuredClone(job);
+        if (idempotencyKey) state.idempotency[idempotencyKey] = { kind: "generation_job_retry", objectId: job.id };
+        return { job: structuredClone(job), replayed: false };
       });
       if (!retried) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      startGenerationJob(retried.id, dependencies);
-      response.status(202).json(retried);
+      if (!retried.replayed) startGenerationJob(retried.job.id, dependencies);
+      response.status(retried.replayed ? 200 : 202).json(retried.job);
     } catch (error) { next(error); }
   });
 
@@ -2137,6 +2148,7 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("TREE_PARENT_CYCLE")) return { status: 422, code: "TREE_PARENT_CYCLE", message: "不能把项目移动到自己或自己的下级项目中", retryable: false };
   if (raw.includes("CANDIDATE_RELEASE_EXISTS") || raw.includes("CANDIDATE_ID_COLLISION") || raw.includes("CANDIDATE_PAGE_ID_COLLISION") || raw.includes("CANDIDATE_POLICY_CHANGED") || raw.includes("CANDIDATE_GENERATION_SELECTION_CONFLICT")) return { status: 409, code: "CANDIDATE_CONFLICT", message: "候选版本已经存在冲突，请换用新的候选版本编号", retryable: false };
   if (raw.includes("GENERATION_PLAN_IDEMPOTENCY_CONFLICT")) return { status: 409, code: "GENERATION_PLAN_IDEMPOTENCY_CONFLICT", message: "这个唯一请求编号已经用于另一种生成操作，请换一个编号", retryable: false };
+  if (raw.includes("GENERATION_RETRY_IDEMPOTENCY_CONFLICT")) return { status: 409, code: "GENERATION_RETRY_IDEMPOTENCY_CONFLICT", message: "这个唯一请求编号已经用于另一项操作，请换一个编号", retryable: false };
   if (raw.includes("GENERATION_RETRY_STATE_INVALID") || raw.includes("GENERATION_RETRY_HAS_NO_FAILED_PAGES")) return { status: 409, code: "GENERATION_RETRY_NOT_ALLOWED", message: "当前生成任务没有可重试的失败页面", retryable: false };
   if (raw.includes("GENERATION_PLAN_BUSY")) return { status: 409, code: "GENERATION_PLAN_BUSY", message: "这个生成计划还有其他任务运行，请等待当前批次结束后再重试", retryable: true };
   if (raw.includes("WRITING_POLICY_SNAPSHOT_CHANGED") || raw.includes("WRITING_POLICY_VALIDATION_FAILED")) return { status: 409, code: "WRITING_POLICY_SNAPSHOT_CHANGED", message: "当前写作策略已经变化或未通过验证，请重新建立生成计划", retryable: false };

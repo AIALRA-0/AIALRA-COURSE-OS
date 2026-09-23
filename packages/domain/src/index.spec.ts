@@ -23,6 +23,11 @@ describe("generation job", () => {
     expect(() => transitionJob(job, "completed")).toThrow("JOB_TRANSITION_INVALID");
   });
 
+  it("allows cancelled jobs to resume in the queue", () => {
+    const cancelled = transitionJob(transitionJob(job, "running"), "cancelled");
+    expect(transitionJob(cancelled, "queued").state).toBe("queued");
+  });
+
   it("warns at 80 percent and blocks cost above the hard budget", () => {
     const running = transitionJob(job, "running");
     const warning = registerCost(running, 6.4);

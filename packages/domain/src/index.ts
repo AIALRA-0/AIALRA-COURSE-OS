@@ -7,7 +7,7 @@ const JOB_TRANSITIONS: Record<JobState, JobState[]> = {
   pending_sync: ["completed", "paused", "cancelled", "failed"],
   completed: ["queued"],
   paused: ["queued", "cancelled"],
-  cancelled: [],
+  cancelled: ["queued"],
   failed: ["queued", "cancelled"]
 };
 

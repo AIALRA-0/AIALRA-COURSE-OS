@@ -1453,6 +1453,68 @@ describe("Course OS API", () => {
     expect(costs.body.entries.map((item: { status: string; actualMicrousd: number }) => ({ status: item.status, actualMicrousd: item.actualMicrousd }))).toEqual([{ status: "failed", actualMicrousd: 0 }, { status: "succeeded", actualMicrousd: 15_000 }]);
   }, 60_000);
 
+  it("resumes cancelled jobs from unfinished pages and replays a keyed retry", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const { app, operations, release } = await seededApp(undefined, testReleaseWithPages(3));
+      const created = await request(app).post("/api/v1/generation-jobs")
+        .set("Idempotency-Key", "cancelled-resume-job")
+        .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 4 })
+        .expect(202);
+      const checkpoint = {
+        fingerprint: "resume-checkpoint",
+        content: { opening: "已完成" },
+        completedPhases: ["opening"],
+        trace: { version: 1, plan: undefined, phases: [] }
+      } as never;
+      await operations.mutate((state) => {
+        const job = state.jobs.find((item) => item.id === created.body.id)!;
+        Object.assign(job, {
+          state: "cancelled",
+          cancelRequested: true,
+          completedPageIds: [release.pageIds[0]!],
+          planId: "resume-plan"
+        });
+        state.generationCheckpoints[job.id + ":" + release.pageIds[1]!] = checkpoint;
+        state.jobs.push({
+          ...structuredClone(job),
+          id: "resume-plan-sibling",
+          state: "queued",
+          pageIds: [release.pageIds[2]!],
+          completedPageIds: [],
+          failedPageIds: [],
+          cancelRequested: false
+        });
+      });
+
+      const retryUrl = "/api/v1/generation-jobs/" + created.body.id + ":retry";
+      await request(app).post(retryUrl).set("Idempotency-Key", "cancelled-resume-retry")
+        .expect(409).expect(({ body }) => expect(body.error.code).toBe("GENERATION_PLAN_BUSY"));
+      await operations.mutate((state) => {
+        state.jobs.find((item) => item.id === "resume-plan-sibling")!.state = "completed";
+      });
+
+      const resumed = await request(app).post(retryUrl).set("Idempotency-Key", "cancelled-resume-retry").expect(202);
+      expect(resumed.body).toMatchObject({
+        state: "queued",
+        pageIds: release.pageIds.slice(1),
+        completedPageIds: [],
+        failedPageIds: [],
+        cancelRequested: false
+      });
+      const replay = await request(app).post(retryUrl).set("Idempotency-Key", "cancelled-resume-retry").expect(200);
+      expect(replay.body.id).toBe(created.body.id);
+
+      const state = await operations.read();
+      expect(state.generationCheckpoints[created.body.id + ":" + release.pageIds[1]!]).toEqual(checkpoint);
+      expect(state.events.filter((event) => event.streamId === created.body.id && event.type === "job.retry.queued")).toHaveLength(1);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
+  });
+
   it("creates an empty general-purpose course before any material is imported", async () => {
     const app = await testApp();
     const created = await request(app).post("/api/v1/courses").set("Idempotency-Key", "course-create-1").send({ title: "线性代数", description: "公式、推导和应用" }).expect(201);
