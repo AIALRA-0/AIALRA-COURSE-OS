@@ -1073,7 +1073,9 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
         } else if (updated.generationPlanId) {
           const [planResult, costResult] = await Promise.all([
             api.generationPlan(updated.generationPlanId),
-            api.costs(updated.materialVersionId ? { materialVersionId: updated.materialVersionId } : {})
+            updated.materialVersionId
+              ? api.costs({ materialVersionId: updated.materialVersionId })
+              : Promise.resolve({ entries: [] as GenerationCostEntry[], rollups: [] })
           ]);
           if (cancelled) return;
           setPlan(planResult.plan);
