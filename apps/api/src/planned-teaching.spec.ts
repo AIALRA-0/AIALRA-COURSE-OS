@@ -481,6 +481,30 @@ describe("planned teaching", () => {
     const unrelated = bindExactCoverageLines({ fullExplanationMarkdown: "图中还有 a、b、c、d、e、f 和数字 2、3、1、3、6、5、5、2", coverageEvidence: [evidence] }, sourcePlan);
     expect(unrelated.coverageEvidence[0]?.explanation).toBe(observation);
   });
+  it("accepts a single-array field repair without skipping question validation", () => {
+    const schema = { type: "object", properties: { questions: { type: "array", items: { type: "string" } } }, required: ["questions"], additionalProperties: false };
+    expect(projectPlannedOutputToSchema(["第一题", "第二题"], schema, "consolidation_repair"))
+      .toEqual({ questions: ["第一题", "第二题"] });
+    expect(projectPlannedOutputToSchema({ result: ["第一题", "第二题"] }, schema, "consolidation_repair"))
+      .toEqual({ questions: ["第一题", "第二题"] });
+    expect(projectPlannedOutputToSchema({ result: [7] }, schema, "consolidation_repair"))
+      .toEqual({ questions: [7] });
+  });
+  it("uses the remaining bounded repair attempt after an out-of-scope provider response", async () => {
+    const { input, plan } = fixture();
+    let attempts = 0;
+    const invalid = { ...closing, mainContentMarkdown: "总结公式 \\(x" };
+    const result = await writePlannedLesson(input, async request => {
+      const content = request.phase === "plan" ? plan : request.phase === "opening" ? opening
+        : request.phase === "explanation" ? explanation : request.phase === "consolidation" ? invalid
+          : request.phase === "consolidation_repair" ? ++attempts === 1 ? { wrongField: "ignored" }
+            : { mainContentMarkdown: closing.mainContentMarkdown }
+            : bridge;
+      return { content, provider: "deepseek", model: "flash", usage };
+    });
+    expect(attempts).toBe(2);
+    expect(result.content.mainContentMarkdown).toBe(closing.mainContentMarkdown);
+  });
   it("rejects stale, unchanged and out-of-scope repair patches", () => {
     const ticket = generationRepairTickets("explanation", explanation, ["PLAN_EVIDENCE_QUOTE_MISSING:a"])[0]!;
     expect(() => applyGenerationRepair({ ...explanation, coverageEvidence: [] }, ticket, { coverageEvidence: explanation.coverageEvidence })).toThrow("GENERATION_REPAIR_STALE");

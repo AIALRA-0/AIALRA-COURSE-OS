@@ -94,6 +94,20 @@ function normalizeQuestionKind(value: unknown): unknown {
  */
 export function projectPlannedOutputToSchema(value: unknown, schema: any, phase = ""): unknown {
   let candidate = value;
+  const onlyField = schema?.type === "object" && Object.keys(schema.properties ?? {}).length === 1
+    ? Object.keys(schema.properties)[0] : undefined;
+  if (onlyField && schema.properties[onlyField]?.type === "array") {
+    // A single-field repair may be returned as the array itself or under a
+    // generic response wrapper. Preserve the array; downstream schema and
+    // semantic validators still decide whether its contents are acceptable.
+    if (Array.isArray(candidate)) candidate = { [onlyField]: candidate };
+    else if (candidate && typeof candidate === "object") {
+      const entries = Object.entries(candidate as Record<string, unknown>);
+      if (entries.length === 1 && entries[0]![0] !== onlyField && Array.isArray(entries[0]![1])) {
+        candidate = { [onlyField]: entries[0]![1] };
+      }
+    }
+  }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const entries = Object.entries(candidate as Record<string, unknown>);
     const knownKeys = new Set(Object.keys(schema.properties ?? {}));
@@ -441,7 +455,7 @@ export async function writePlannedLesson(input: ModelRouterInput,
         } catch (error) {
           // A model can return the unchanged field. Keep the last valid checkpoint
           // and let the next bounded round diagnose the real remaining issue.
-          if (!(error instanceof Error) || error.message !== "GENERATION_REPAIR_NO_CHANGE") throw error;
+          if (!(error instanceof Error) || !["GENERATION_REPAIR_NO_CHANGE", "GENERATION_REPAIR_SCOPE_INVALID"].includes(error.message)) throw error;
         }
         if (repaired) {
           if (index === 2) {
