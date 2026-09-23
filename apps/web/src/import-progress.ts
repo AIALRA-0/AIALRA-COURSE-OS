@@ -123,7 +123,9 @@ export function summarizeImportProgress(
     ["completed", "done", "finished", "converted", "completedPages", "completedPageCount", "convertedPageCount", "conversionCompletedPages", "conversionCompletedPageCount"],
     ["total", "totalPages", "pageCount", "totalPageCount", "conversionTotalPages", "conversionTotalPageCount"]
   ) ?? countFromArrays(sources, ["convertedPageIds", "conversionCompletedPageIds"], ["pageIds"], ["totalPages", "totalPageCount"]);
-  if (!conversion && record.pageIds?.length && !record.generationJobId) conversion = { completed: record.pageIds.length, total: record.pageIds.length };
+  if (!conversion && record.state === "ready" && record.pageIds?.length && !record.id?.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
+    conversion = { completed: record.pageIds.length, total: record.pageIds.length };
+  }
 
   const core = countFromSources(
     coreSources,

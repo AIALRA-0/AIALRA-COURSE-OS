@@ -48,6 +48,15 @@ function cost(stage: GenerationCostEntry["stage"], createdAt: string, values: Pa
 }
 
 describe("import progress summary", () => {
+  it("keeps the completed conversion count visible after automatic generation starts", () => {
+    const result = summarizeImportProgress(
+      record({ id: "import-1", state: "ready", generationJobId: "job-1", pageIds: ["p1", "p2", "p3", "p4"], issues: [] }),
+      plan({ pageIds: ["p1", "p2", "p3", "p4"], completedPageIds: [], failedPageIds: [] }),
+      [], []
+    );
+    expect(result.conversion).toEqual({ completed: 4, total: 4 });
+  });
+
   it("derives legacy fields without inventing unavailable cross-page progress", () => {
     const result = summarizeImportProgress(
       record({ state: "ready", autoGenerate: true, pageIds: ["page-1", "page-2"], issues: [] }),
