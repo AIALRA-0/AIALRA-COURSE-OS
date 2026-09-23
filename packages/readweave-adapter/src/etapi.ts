@@ -1464,7 +1464,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset, maxConcurrency = 1): Promise<void> {
-    if (projection.pageOverviewHash && sha256(await this.getContent(projection.pageNoteId)) !== projection.pageOverviewHash) throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+    if (projection.pageOverviewHash) {
+      const actualHash = sha256(await this.getContent(projection.pageNoteId));
+      if (actualHash !== projection.pageOverviewHash) {
+        const pendingHash = sha256(this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName));
+        if (actualHash !== pendingHash) throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+        // A previous attempt updated the note before its state transaction failed.
+        projection.pageOverviewHash = actualHash;
+      }
+    }
     if (sourceAsset) {
       projection.sourceImageFileName = sourceAsset.fileName;
       if (!projection.sourceImageNoteId) {

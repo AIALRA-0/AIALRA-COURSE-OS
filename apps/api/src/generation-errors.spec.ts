@@ -34,6 +34,15 @@ describe("generation error classification", () => {
       .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error"), 1, 0, 4)).toBe(true);
   });
+  it("retries an unreadable successful provider response within the existing attempt limit", () => {
+    expect(describeGenerationError(new Error("MODEL_PROVIDER_INVALID_RESPONSE"))).toMatchObject({ code: "MODEL_INVALID_OUTPUT", retryable: true });
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 1, 0, 4)).toBe(true);
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 3, 0, 4)).toBe(false);
+  });
+  it("classifies a ReadWeave network failure as storage rather than model transport", () => {
+    expect(classifyGenerationFailure(new Error("READWEAVE_ETAPI_NETWORK:fetch failed")))
+      .toMatchObject({ category: "storage", action: "retry_readback", code: "READWEAVE_UNAVAILABLE" });
+  });
   it("keeps a rejected provider request distinct from an internal failure", () => {
     expect(describeGenerationError(new Error("MODEL_PROVIDER_FAILED:invalid_request_error"))).toEqual({
       code: "PROVIDER_INVALID_REQUEST",

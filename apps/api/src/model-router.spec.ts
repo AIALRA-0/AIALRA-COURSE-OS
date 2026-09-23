@@ -315,6 +315,18 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       usage: { inputTokens: 220, cachedInputTokens: 20, outputTokens: 330, apiEquivalentUsd: 0.004 } });
   });
 
+  it("preserves the HTTP status when a relay returns plain text instead of JSON or events", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream unavailable", {
+      status: 502, headers: { "Content-Type": "text/plain" }
+    })));
+    const client = new HttpProviderTeachingClient({
+      providerId: "kuafu", baseUrl: "https://relay.test", apiKey: "synthetic-example-token",
+      model: "deepseek-v4.1-flash", protocol: "responses", supportsVision: true, billingMode: "metered"
+    });
+    await expect(client.generateTeachingPackage(providerInput("relay-plain-text-502", true)))
+      .rejects.toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_FAILED:502" });
+  });
+
   it("requests a small source-backed semantic findings report instead of a rewritten lesson", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } }; max_output_tokens: number; metadata: { stage: string } };

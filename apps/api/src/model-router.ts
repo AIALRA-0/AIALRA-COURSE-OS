@@ -666,6 +666,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         if (error instanceof Error && error.name === "AbortError") {
           throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
         }
+        if (!response.ok) {
+          throw new ModelRouterGenerationError(`MODEL_PROVIDER_FAILED:${response.status}`, this.connection.model, emptyUsage(started), this.connection.providerId);
+        }
         throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId);
       }
       return { response, body };

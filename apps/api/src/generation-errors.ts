@@ -44,7 +44,7 @@ export function shouldAutoRecoverGenerationFailure(
   return route.action === "retry_stage" || route.action === "repair_field" || route.action === "retry_readback";
 }
 
-const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE"]);
+const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE", "MODEL_INVALID_OUTPUT"]);
 
 export function describeGenerationError(error: unknown): GenerationErrorDescriptor {
   const raw = error instanceof Error ? error.message : String(error || "INTERNAL_FAILURE");
@@ -55,16 +55,16 @@ export function describeGenerationError(error: unknown): GenerationErrorDescript
 function normalizeCode(raw: string): string {
   const teachingPhase = /^(TEACHING_(?:PLAN|OPENING|EXPLANATION|CONSOLIDATION)_INVALID)(?::|$)/u.exec(raw)?.[1];
   if (teachingPhase) return teachingPhase;
+  if (raw.includes("READWEAVE") && raw.includes("MISMATCH")) return "READWEAVE_HASH_MISMATCH";
+  if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
   if (raw.includes("INSUFFICIENT_BALANCE") || raw.includes("QUOTA_EXHAUSTED") || raw.includes("402")) return "PROVIDER_QUOTA_EXHAUSTED";
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
   if (raw.includes("429") || raw.includes("RATE_LIMIT")) return "PROVIDER_RATE_LIMIT";
   if (raw.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
-  if (raw.includes("READWEAVE") && raw.includes("MISMATCH")) return "READWEAVE_HASH_MISMATCH";
-  if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
   if (raw.includes("MODEL_PROVIDER_OUTPUT_LIMIT")) return "MODEL_OUTPUT_LIMIT";
-  if (raw.includes("JSON") || raw.includes("OUTPUT")) return "MODEL_INVALID_OUTPUT";
+  if (raw.includes("JSON") || raw.includes("OUTPUT") || raw.includes("MODEL_PROVIDER_INVALID_RESPONSE")) return "MODEL_INVALID_OUTPUT";
   if (raw.includes("MATH")) return "FORMULA_INVALID";
   if (raw.includes("COVERAGE")) return "COVERAGE_GAP";
   if (/^[A-Z0-9_:-]+$/.test(raw)) return raw.slice(0, 120);

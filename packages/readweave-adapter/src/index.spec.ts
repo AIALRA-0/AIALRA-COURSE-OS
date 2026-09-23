@@ -382,6 +382,23 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(projectionWritesBeforeConflict);
   });
 
+  it("resumes a draft after its overview write committed but the state transaction did not", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const saved = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "overview-before-failure" });
+    const next = structuredClone(saved);
+    next.page.lessonFlowVersion = 2;
+    next.page.lessonSections = [{ id: "lesson-full", kind: "full_explanation", title: "完整讲解", markdown: "恢复后的新讲解", sourceAnchorIds: [], atomIds: [] }];
+    const renderOverview = (api as unknown as { renderPageOverview(draft: typeof next): string }).renderPageOverview.bind(api);
+    const overview = renderOverview(next);
+    remote.editByTitle("第 001 页 · 测试页面", overview);
+    const recovered = await api.saveDraft(next, 1, { ...context, idempotencyKey: "overview-after-failure" });
+    expect(recovered.revision).toBe(2);
+    expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(overview);
+  });
+
   it("updates independent draft notes with a limit of four while keeping each revision before its content", async () => {
     const remote = new FakeEtapi();
     let trackWrites = false;
