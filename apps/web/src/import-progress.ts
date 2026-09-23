@@ -145,7 +145,8 @@ export function summarizeImportProgress(
 
   const explicitRepairCount = firstNumber(sources, ["repairCount", "repairs", "repairAttempts", "completedRepairCount"])
     ?? firstNumber(progressSources(sources, ["repair", "repairProgress"]), ["count", "completed", "done", "attempts"]);
-  const repairCount = explicitRepairCount ?? (costs.length > 0 ? costs.filter((entry) => entry.stage === "repair").length : undefined);
+  const observedRepairCount = costs.filter((entry) => entry.stage === "repair").length;
+  const repairCount = explicitRepairCount ?? (observedRepairCount > 0 ? observedRepairCount : undefined);
 
   const concurrencySource = [...progressSources(sources, ["concurrency", "runningConcurrency"]), ...sources];
   const running = firstNumber(concurrencySource, ["running", "active", "current", "runningConcurrency", "activeConcurrency"])

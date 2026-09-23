@@ -99,6 +99,24 @@ describe("import progress summary", () => {
     expect(result.costUsd).toBe(0.0421);
   });
 
+  it("keeps repair count unknown without repair cost entries and honors an explicit count", () => {
+    const costs = [
+      cost("teach", "2026-09-21T10:00:00.000Z"),
+      cost("teach", "2026-09-21T10:01:00.000Z"),
+      cost("review", "2026-09-21T10:02:00.000Z")
+    ];
+    const withoutCount = summarizeImportProgress(record({ state: "ready", autoGenerate: true }), undefined, undefined, costs);
+    const withCount = summarizeImportProgress(
+      record({ state: "ready", autoGenerate: true, progress: { repairCount: 3 } }),
+      undefined,
+      undefined,
+      costs
+    );
+
+    expect(withoutCount.repairCount).toBeUndefined();
+    expect(withCount.repairCount).toBe(3);
+  });
+
   it("leaves metrics unknown when neither the new nor legacy data proves them", () => {
     const result = summarizeImportProgress(record({ state: "processing" }), undefined, undefined, []);
 
