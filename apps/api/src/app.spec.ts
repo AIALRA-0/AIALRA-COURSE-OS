@@ -51,6 +51,58 @@ describe("Course OS API", () => {
     await request(app).get("/api/v1/imports/import-other").set("X-Workspace-Id", "personal").expect(404);
     expect((await request(app).get("/api/v1/imports").set("X-Workspace-Id", "other").expect(200)).body).toHaveLength(1);
   });
+  it("returns a workspace-scoped, sanitized latest generation stage and phase summary", async () => {
+    const { app, operations } = await seededApp();
+    const job: GenerationJob = {
+      id: "generation-stage-summary",
+      workspaceId: "personal",
+      materialVersionId: "release-1",
+      state: "running",
+      budgetUsd: 1,
+      spentUsd: 0,
+      pageIds: ["page-1"],
+      completedPageIds: [],
+      failedPageIds: [],
+      attempt: 1,
+      cancelRequested: false,
+      createdAt: "2026-09-22T10:00:00.000Z",
+      updatedAt: "2026-09-22T10:00:00.000Z"
+    };
+    const otherWorkspaceJob = { ...job, id: "generation-stage-summary-other", workspaceId: "other" };
+    await operations.mutate((state) => {
+      state.jobs.push(job, otherWorkspaceJob);
+      const append = (streamId: string, type: string, payload: Record<string, unknown>, occurredAt: string) => {
+        const event = operations.appendEvent(state, streamId, type, payload);
+        event.occurredAt = occurredAt;
+      };
+      append(job.id, "generation.stage.started", { stage: "teach", pageId: "page-1", secret: "private-stage-payload" }, "2026-09-22T10:05:00.000Z");
+      append(job.id, "generation.stage.started", { stage: "teach", phase: "explanation", pageId: "page-1", prompt: "private prompt" }, "2026-09-22T10:06:00.000Z");
+      append(job.id, "generation.stage.completed", {
+        stage: "teach",
+        phase: "explanation",
+        apiKey: "private-provider-key",
+        plan: { content: "private generation plan that must not appear in the job response" }
+      }, "2026-09-22T10:07:00.000Z");
+      append(job.id, "generation.page.completed", { stage: "review", pageId: "page-1" }, "2026-09-22T10:08:00.000Z");
+      append(otherWorkspaceJob.id, "generation.stage.started", { stage: "repair", phase: "opening_repair" }, "2026-09-22T10:09:00.000Z");
+      append(job.id, "generation.stage.started", { stage: "unknown", phase: "private-secret" }, "2026-09-22T10:10:00.000Z");
+    });
+
+    const detail = await request(app).get(`/api/v1/generation-jobs/${job.id}`).set("X-Workspace-Id", "personal").expect(200);
+    expect(detail.body.latestStageActivity).toEqual({
+      stage: "teach",
+      status: "completed",
+      phase: "explanation",
+      phaseStatus: "completed",
+      occurredAt: "2026-09-22T10:07:00.000Z"
+    });
+    expect(Object.keys(detail.body.latestStageActivity).sort()).toEqual(["occurredAt", "phase", "phaseStatus", "stage", "status"]);
+    expect(JSON.stringify(detail.body)).not.toContain("private-stage-payload");
+    expect(JSON.stringify(detail.body)).not.toContain("private prompt");
+    expect(JSON.stringify(detail.body)).not.toContain("private-provider-key");
+    expect(JSON.stringify(detail.body)).not.toContain("private generation plan");
+    await request(app).get(`/api/v1/generation-jobs/${otherWorkspaceJob.id}`).set("X-Workspace-Id", "personal").expect(404);
+  });
   it("indexes independent generation jobs under their course and restores their task page after refresh", async () => {
     const release = testRelease();
     release.id = "release-independent-job-index";

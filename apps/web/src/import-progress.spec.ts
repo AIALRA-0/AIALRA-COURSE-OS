@@ -140,7 +140,7 @@ describe("import progress summary", () => {
     expect(importTaskStateLabel("running")).toBe("正在处理");
   });
 
-  it("restores standalone generation task state, page progress, and stage from the persisted job summary", () => {
+  it("restores standalone generation state and uses the persisted stage activity without inventing a percentage", () => {
     const task = record({
       id: "generation-job:job-1",
       state: "ready",
@@ -153,17 +153,121 @@ describe("import progress summary", () => {
       updatedAt: "2026-09-22T10:00:00.000Z"
     });
     const summary = summarizeImportProgress(task, undefined, [
-      { id: "job-1", state: "running", updatedAt: "2026-09-22T10:00:30.000Z" } as GenerationJob
+      {
+        id: "job-1",
+        state: "running",
+        updatedAt: "2026-09-22T10:00:30.000Z",
+        latestStageActivity: {
+          stage: "teach",
+          status: "started",
+          phase: "explanation",
+          phaseStatus: "started",
+          occurredAt: "2026-09-22T10:00:45.000Z"
+        }
+      } as GenerationJob
     ], []);
     const activity = getImportActivity(task, undefined, [
-      { id: "job-1", state: "running", updatedAt: "2026-09-22T10:00:30.000Z" } as GenerationJob
+      {
+        id: "job-1",
+        state: "running",
+        updatedAt: "2026-09-22T10:00:30.000Z",
+        latestStageActivity: {
+          stage: "teach",
+          status: "started",
+          phase: "explanation",
+          phaseStatus: "started",
+          occurredAt: "2026-09-22T10:00:45.000Z"
+        }
+      } as GenerationJob
     ], [], Date.parse("2026-09-22T10:01:00.000Z"));
 
     expect(summary.core).toEqual({ completed: 2, total: 4 });
     expect(getImportTaskState(task)).toBe("running");
-    expect(activity).toMatchObject({ stage: "生成页面讲解", progressPercent: 50, progressScope: "讲解生成", stale: false });
+    expect(activity).toMatchObject({
+      stage: "正文讲解",
+      stageCode: "teach",
+      stageStatus: "started",
+      phase: "explanation",
+      phaseStatus: "started",
+      progressPercent: undefined,
+      lastActivityAt: "2026-09-22T10:00:45.000Z",
+      ageSeconds: 15,
+      stale: false
+    });
     expect(standaloneGenerationJobId("generation-job:job-1")).toBe("job-1");
     expect(standaloneGenerationJobId("import-1")).toBeUndefined();
+  });
+
+  it("does not show a fabricated 0 percent while a standalone job has no completed pages", () => {
+    const activity = getImportActivity(record({
+      id: "generation-job:job-1",
+      state: "ready",
+      autoGenerate: true,
+      generationJobId: "job-1",
+      generationState: "running",
+      pageIds: ["p1", "p2"],
+      generationCompletedPageIds: [],
+      generationFailedPageIds: [],
+      updatedAt: "2026-09-22T10:00:00.000Z"
+    }), undefined, [], [], Date.parse("2026-09-22T10:00:30.000Z"));
+
+    expect(activity.progressPercent).toBeUndefined();
+    expect(activity.stage).toBe("生成页面讲解");
+  });
+
+  it("ignores the last stage activity after a standalone job finishes", () => {
+    const activity = getImportActivity(record({
+      id: "generation-job:job-1",
+      state: "ready",
+      autoGenerate: true,
+      generationJobId: "job-1",
+      generationState: "completed",
+      pageIds: ["p1"],
+      generationCompletedPageIds: ["p1"],
+      generationActivity: {
+        stage: "review",
+        status: "completed",
+        occurredAt: "2026-09-22T10:00:30.000Z"
+      },
+      updatedAt: "2026-09-22T10:01:00.000Z"
+    }), undefined, [], [], Date.parse("2026-09-22T10:02:00.000Z"));
+
+    expect(activity).toMatchObject({
+      stage: "全部页面生成完成",
+      stageCode: undefined,
+      phase: undefined,
+      progressPercent: 100,
+      lastActivityAt: "2026-09-22T10:01:00.000Z"
+    });
+  });
+
+  it("uses stage activity while a job is syncing and keeps queued jobs at the queue stage", () => {
+    const activity = {
+      stage: "teach" as const,
+      status: "started" as const,
+      phase: "opening",
+      phaseStatus: "started" as const,
+      occurredAt: "2026-09-22T10:00:30.000Z"
+    };
+    const pendingSync = getImportActivity(record({
+      state: "ready",
+      autoGenerate: true,
+      generationJobId: "job-1",
+      generationState: "pending_sync",
+      generationActivity: activity,
+      updatedAt: "2026-09-22T10:00:00.000Z"
+    }), undefined, [], [], Date.parse("2026-09-22T10:01:00.000Z"));
+    const queued = getImportActivity(record({
+      state: "ready",
+      autoGenerate: true,
+      generationJobId: "job-1",
+      generationState: "queued",
+      generationActivity: activity,
+      updatedAt: "2026-09-22T10:00:00.000Z"
+    }), undefined, [], [], Date.parse("2026-09-22T10:01:00.000Z"));
+
+    expect(pendingSync).toMatchObject({ stage: "正文讲解", phase: "opening", lastActivityAt: activity.occurredAt });
+    expect(queued).toMatchObject({ stage: "等待生成任务启动", phase: undefined, lastActivityAt: "2026-09-22T10:00:00.000Z" });
   });
 
   it("maps all standalone job terminal states to distinct task states and truthful stages", () => {

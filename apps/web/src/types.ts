@@ -1,7 +1,7 @@
-import type { GenerationPlan, ImportRecord } from "@course-os/contracts";
+import type { GenerationPlan, GenerationStageActivitySummary, ImportRecord } from "@course-os/contracts";
 
 /** API 可能先返回尚未进入共享契约的渐进发布字段。 */
-export type WebImportRecord = ImportRecord & Record<string, unknown>;
+export type WebImportRecord = ImportRecord & { generationActivity?: GenerationStageActivitySummary } & Record<string, unknown>;
 
 /** The task index deliberately excludes source files and private server paths. */
 export type ImportTaskSummary = Pick<ImportRecord,

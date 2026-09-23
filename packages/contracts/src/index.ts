@@ -14,6 +14,13 @@ export type WorkspaceMode = "studio" | "learn" | "review";
 export type LessonSectionKind = "chapter_bridge" | "learning_objectives" | "main_content" | "prior_knowledge" | "full_explanation" | "misconceptions";
 export type QuestionKind = "comprehension" | "multiple_choice";
 export type GenerationStage = "extract" | "atomize" | "teach" | "review" | "repair" | "semantic_audit" | "question_refill" | "search";
+export interface GenerationStageActivitySummary {
+  stage: GenerationStage;
+  status: "started" | "completed" | "skipped";
+  phase?: string;
+  phaseStatus?: "started" | "completed";
+  occurredAt: ISODateTime;
+}
 export type CourseTreeNodeKind = "workspace" | "course" | "module" | "material" | "section" | "release" | "page" | "trash";
 export type TreeNodeCapability =
   | "create"
@@ -565,6 +572,8 @@ export interface GenerationJob {
   cancelRequested: boolean;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
+  /** Read-only summary attached by the generation-job detail endpoint. */
+  latestStageActivity?: GenerationStageActivitySummary;
 }
 
 export interface GenerationPlan {

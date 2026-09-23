@@ -1,4 +1,4 @@
-import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
+import type { GenerationCostEntry, GenerationJob, GenerationStage, GenerationStageActivitySummary } from "@course-os/contracts";
 import type { ImportProgressSummary, ProgressCount, WebGenerationPlan, WebImportRecord } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -242,6 +242,10 @@ export function importProgressTitle(record: WebImportRecord, plan: WebGeneration
 
 export type ImportActivity = {
   stage: string;
+  stageCode?: GenerationStage;
+  stageStatus?: GenerationStageActivitySummary["status"];
+  phase?: string;
+  phaseStatus?: GenerationStageActivitySummary["phaseStatus"];
   busy: boolean;
   progressPercent?: number;
   progressScope?: string;
@@ -284,8 +288,24 @@ export function getImportActivity(
 ): ImportActivity {
   const state = getImportTaskState(record);
   const planState = plan?.state;
+  const generationIsActive = record.generationState === "running" || record.generationState === "pending_sync";
+  const generationActivity = generationIsActive
+    ? record.generationActivity ?? activeJobs.find((job) => job.id === record.generationJobId)?.latestStageActivity
+    : undefined;
   const busy = state === "running" || planState === "running";
-  const stage = record.state === "quarantined" || record.state === "accepted"
+  const stageLabels: Record<GenerationStage, string> = {
+    extract: "页面解析",
+    atomize: "页面结构化",
+    teach: "正文讲解",
+    review: "质量检查",
+    repair: "内容修复",
+    semantic_audit: "语义审校",
+    question_refill: "题目补充",
+    search: "外部检索"
+  };
+  const stage = record.state === "ready" && record.generationJobId && generationActivity
+    ? stageLabels[generationActivity.stage]
+    : record.state === "quarantined" || record.state === "accepted"
     ? "安全检查与排队"
     : record.state === "processing"
       ? "页面转换"
@@ -339,19 +359,39 @@ export function getImportActivity(
       progressPercent = Math.round(Math.min(1, plan.bridgeCompletedPageIds.length / plan.pageIds.length) * 100);
       progressScope = "跨页承接";
     }
-  } else if (!plan && record.generationJobId && record.pageIds?.length) {
-    const completed = (record.generationCompletedPageIds?.length ?? 0) + (record.generationFailedPageIds?.length ?? 0);
-    progressPercent = Math.round(Math.min(1, completed / record.pageIds.length) * 100);
-    progressScope = "讲解生成";
+  }
+  if (!plan && record.generationJobId) {
+    if (record.state === "ready" && record.generationState === "completed") {
+      progressPercent = 100;
+      progressScope = "讲解生成";
+    } else {
+      progressPercent = undefined;
+      progressScope = undefined;
+    }
   }
   if (planState === "completed") { progressPercent = 100; progressScope = "讲解生成"; }
   if (state === "failed" || state === "cancelled" || state === "paused" || state === "awaiting_review") { progressPercent = undefined; progressScope = undefined; }
 
   const activitySources = nestedSources(record, plan);
-  const lastActivityAt = timestamp([...activitySources, ...activeJobs], ["lastProgressAt", "lastEventAt", "updatedAt", "convertedAt", "createdAt"])
+  const lastActivityAt = !plan && record.generationJobId ? generationActivity?.occurredAt
+    : undefined;
+  const resolvedLastActivityAt = lastActivityAt
+    ?? timestamp([...activitySources, ...activeJobs], ["lastProgressAt", "lastEventAt", "updatedAt", "convertedAt", "createdAt"])
     ?? timestamp(costs, ["createdAt"]);
-  const ageSeconds = lastActivityAt ? Math.max(0, Math.floor((now - Date.parse(lastActivityAt)) / 1000)) : undefined;
-  return { stage, busy, progressPercent, progressScope, lastActivityAt, ageSeconds, stale: busy && ageSeconds !== undefined && ageSeconds >= 120 };
+  const ageSeconds = resolvedLastActivityAt ? Math.max(0, Math.floor((now - Date.parse(resolvedLastActivityAt)) / 1000)) : undefined;
+  return {
+    stage,
+    stageCode: generationActivity?.stage,
+    stageStatus: generationActivity?.status,
+    phase: generationActivity?.phase,
+    phaseStatus: generationActivity?.phaseStatus,
+    busy,
+    progressPercent,
+    progressScope,
+    lastActivityAt: resolvedLastActivityAt,
+    ageSeconds,
+    stale: busy && ageSeconds !== undefined && ageSeconds >= 120
+  };
 }
 
 export function formatActivityAge(ageSeconds?: number): string {

@@ -20,6 +20,8 @@ import type {
   GenerationCostEntry,
   GenerationJob,
   GenerationPlan,
+  GenerationStage,
+  GenerationStageActivitySummary,
   IdempotentWriteContext,
   ImportRecord,
   LessonSection,
@@ -1409,9 +1411,10 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-jobs/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const job = (await dependencies.operations.read()).jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
+      const snapshot = await dependencies.operations.read();
+      const job = snapshot.jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      response.json(job);
+      response.json({ ...job, latestStageActivity: latestGenerationStageActivity(snapshot.events, job.id) });
     } catch (error) { next(error); }
   });
 
@@ -3788,6 +3791,64 @@ async function appendGenerationStageEvent(jobId: string, pageId: string, stage: 
     if (!job) return;
     dependencies.operations.appendEvent(state, job.id, `generation.stage.${status}`, { pageId, stage, ...details });
   });
+}
+
+const generationStages = new Set<GenerationStage>(["extract", "atomize", "teach", "review", "repair", "semantic_audit", "question_refill", "search"]);
+const generationPhases = new Set(["plan", "opening", "explanation", "consolidation", "bridge"].flatMap((phase) => [
+  phase,
+  `${phase}_json_repair`,
+  `${phase}_repair`,
+  `${phase}_repair_json_repair`
+]));
+const generationStageEventStatuses = new Map<string, GenerationStageActivitySummary["status"]>([
+  ["generation.stage.started", "started"],
+  ["generation.stage.completed", "completed"],
+  ["generation.stage.skipped", "skipped"]
+]);
+
+function generationStageForPhase(phase: string): GenerationStage {
+  if (phase === "plan") return "atomize";
+  return phase.endsWith("_repair") ? "repair" : "teach";
+}
+
+function latestGenerationStageActivity(events: OperationalState["events"], jobId: string): GenerationStageActivitySummary | undefined {
+  let latest: { stage: GenerationStage; status: GenerationStageActivitySummary["status"]; occurredAt: string } | undefined;
+  let phaseActivity: { phase: string; status: string } | undefined;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.streamId !== jobId) continue;
+    const status = generationStageEventStatuses.get(event.type);
+    if (!status || !Number.isFinite(Date.parse(event.occurredAt))) continue;
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown>
+      : undefined;
+    const stage = payload?.stage;
+    if (!payload || typeof stage !== "string" || !generationStages.has(stage as GenerationStage)) continue;
+
+    if (!latest) {
+      latest = { stage: stage as GenerationStage, status, occurredAt: event.occurredAt };
+    } else if (stage !== latest.stage) {
+      break;
+    }
+
+    if (!phaseActivity) {
+      const phase = payload.phase;
+      if (typeof phase === "string" && generationPhases.has(phase) && generationStageForPhase(phase) === latest.stage) {
+        phaseActivity = { phase, status };
+      }
+    }
+  }
+  if (!latest) return undefined;
+
+  return {
+    stage: latest.stage,
+    status: latest.status,
+    ...(phaseActivity ? {
+      phase: phaseActivity.phase,
+      ...(phaseActivity.status === "started" || phaseActivity.status === "completed" ? { phaseStatus: phaseActivity.status } : {})
+    } : {}),
+    occurredAt: latest.occurredAt
+  };
 }
 
 async function failGenerationJob(jobId: string, issue: string, dependencies: AppDependencies, fenceToken?: number): Promise<void> {
