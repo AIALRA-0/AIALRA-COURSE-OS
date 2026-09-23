@@ -26,6 +26,8 @@ export interface OperationalState {
   idempotency: Record<string, { kind: string; objectId: string }>;
 }
 
+export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans">;
+
 export const EMPTY: OperationalState = {
   schemaVersion: "1.0.0",
   imports: [],
@@ -60,6 +62,12 @@ export class OperationalStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(EMPTY);
       throw error;
     }
+  }
+
+  /** Read only the fields needed by the task tree and import detail screens. */
+  async readTaskIndex(): Promise<TaskIndex> {
+    const state = await this.read();
+    return { imports: state.imports, jobs: state.jobs, generationPlans: state.generationPlans };
   }
 
   async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
@@ -123,6 +131,15 @@ export class PostgresOperationalStore extends OperationalStore {
     await this.ready;
     const result = await this.pool.query<{ state: Partial<OperationalState> }>("SELECT state FROM operational_state WHERE id = 1");
     return normalizeOperationalState(result.rows[0]?.state);
+  }
+
+  override async readTaskIndex(): Promise<TaskIndex> {
+    await this.ready;
+    const result = await this.pool.query<TaskIndex>(
+      `SELECT state->'imports' AS imports, state->'jobs' AS jobs,
+        state->'generationPlans' AS "generationPlans" FROM operational_state WHERE id = 1`
+    );
+    return result.rows[0] ?? { imports: [], jobs: [], generationPlans: [] };
   }
 
   override async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {

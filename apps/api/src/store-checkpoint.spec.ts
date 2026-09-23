@@ -21,5 +21,6 @@ describe("private generation checkpoint", () => {
     const reopened = await new OperationalStore(path).read();
     expect(reopened.generationCheckpoints["job:page"]).toEqual(checkpoint);
     expect(JSON.stringify(reopened.jobs)).not.toContain("已验证的前情");
+    expect(await new OperationalStore(path).readTaskIndex()).toEqual({ imports: [], jobs: [], generationPlans: [] });
   });
 });

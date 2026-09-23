@@ -647,8 +647,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         state.conflicts.push(conflict);
         return { conflict };
       }
+      const projectionCreated = !state.projections.drafts[draft.id];
+      const ensureStartedAt = performance.now();
       const projection = await this.ensureDraftProjection(state, draft, sourceAsset);
-      await this.refreshDraftProjection(draft, projection, sourceAsset);
+      const ensuredAt = performance.now();
+      await this.refreshDraftProjection(draft, projection, sourceAsset, 4);
+      if (process.env.COURSE_OS_READWEAVE_TIMING === "1") {
+        console.info("course_os.readweave_draft_projection_timing", JSON.stringify({
+          projectionCreated,
+          ensureDraftProjectionMs: Math.round(ensuredAt - ensureStartedAt),
+          refreshDraftProjectionMs: Math.round(performance.now() - ensuredAt)
+        }));
+      }
       const saved: LessonDraft = structuredClone({
         ...draft,
         readweaveNoteId: projection.pageNoteId,
@@ -1453,7 +1463,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return projection;
   }
 
-  private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset): Promise<void> {
+  private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset, maxConcurrency = 1): Promise<void> {
     if (projection.pageOverviewHash && sha256(await this.getContent(projection.pageNoteId)) !== projection.pageOverviewHash) throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
     if (sourceAsset) {
       projection.sourceImageFileName = sourceAsset.fileName;
@@ -1467,33 +1477,43 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       }
       await this.putBinaryContent(projection.sourceImageNoteId, sourceAsset.bytes, sourceAsset.mediaType);
     }
+    const updates: Array<() => Promise<void>> = [];
+    const blockCreations: Array<() => Promise<void>> = [];
     if (projection.pageOverviewHash) {
       const overview = this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName);
-      await this.putContent(projection.pageNoteId, overview);
-      projection.pageOverviewHash = sha256(await this.getContent(projection.pageNoteId));
+      updates.push(async () => {
+        await this.putContent(projection.pageNoteId, overview);
+        projection.pageOverviewHash = sha256(await this.getContent(projection.pageNoteId));
+      });
     }
-    await this.putContent(projection.sectionNoteIds.source, this.renderSource(draft, projection.sourceImageNoteId, projection.sourceImageFileName));
+    updates.push(() => this.putContent(projection.sectionNoteIds.source, this.renderSource(draft, projection.sourceImageNoteId, projection.sourceImageFileName)));
     for (const [key] of SECTION_DEFINITIONS) {
       if (key === "source") continue;
-      await this.putContent(projection.sectionNoteIds[key], this.renderSectionOverview(draft, key));
+      updates.push(() => this.putContent(projection.sectionNoteIds[key], this.renderSectionOverview(draft, key)));
     }
     for (const block of draft.page.blocks) {
       const nextHash = sha256(block.markdown);
       let noteId = projection.blockNoteIds[block.id];
       if (!noteId) {
-        const section = this.sectionForBlock(block);
-        const note = await this.createNote(projection.sectionNoteIds[section], block.title, block.markdown, "code", "text/markdown", {
-          courseOsType: "explanation_block",
-          courseOsObjectId: block.id,
-          courseOsPageId: draft.pageId
+        blockCreations.push(async () => {
+          const section = this.sectionForBlock(block);
+          const note = await this.createNote(projection.sectionNoteIds[section], block.title, block.markdown, "code", "text/markdown", {
+            courseOsType: "explanation_block",
+            courseOsObjectId: block.id,
+            courseOsPageId: draft.pageId
+          });
+          projection.blockNoteIds[block.id] = note.noteId;
+          projection.blockHashes[block.id] = nextHash;
         });
-        noteId = note.noteId;
-        projection.blockNoteIds[block.id] = noteId;
       } else if (projection.blockHashes[block.id] !== nextHash) {
-        await this.putContent(noteId, block.markdown);
+        updates.push(async () => {
+          await this.putContent(noteId!, block.markdown);
+          projection.blockHashes[block.id] = nextHash;
+        });
       }
-      projection.blockHashes[block.id] = nextHash;
     }
+    await forEachWithConcurrency(updates, maxConcurrency, (update) => update());
+    for (const createBlock of blockCreations) await createBlock();
   }
 
   private async ensureCourseProjection(state: EtapiState, release: CourseRelease): Promise<CourseProjection> {
@@ -1995,6 +2015,25 @@ function treePath(state: EtapiState, nodeId: string): string[] {
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+async function forEachWithConcurrency<T>(items: T[], maxConcurrency: number, action: (item: T) => Promise<void>): Promise<void> {
+  let nextIndex = 0;
+  let failed = false;
+  let failure: unknown;
+  const worker = async () => {
+    while (!failed && nextIndex < items.length) {
+      const item = items[nextIndex++]!;
+      try {
+        await action(item);
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(items.length, Math.max(1, maxConcurrency)) }, worker));
+  if (failed) throw failure;
 }
 
 function renderReadableLessonText(markdown: string): string {

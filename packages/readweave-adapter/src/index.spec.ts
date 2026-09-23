@@ -376,8 +376,130 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.contentByTitle(title)).toContain("<h3>完整讲解</h3>");
     expect(remote.contentByTitle(title)).not.toContain("<pre>");
     remote.editByTitle(title, "<p>ReadWeave 中直接修改的页面</p>");
+    const projectionWritesBeforeConflict = remote.requests.filter((item) => item.method !== "GET").length;
     await expect(api.saveDraft({ ...saved, revision: 1 }, 1, { ...context, idempotencyKey: "native-image-conflict" })).rejects.toThrow("READWEAVE_PAGE_OVERVIEW_CONFLICT");
     expect(remote.contentByTitle(title)).toBe("<p>ReadWeave 中直接修改的页面</p>");
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(projectionWritesBeforeConflict);
+  });
+
+  it("updates independent draft notes with a limit of four while keeping each revision before its content", async () => {
+    const remote = new FakeEtapi();
+    let trackWrites = false;
+    let activeWrites = 0;
+    let maxActiveWrites = 0;
+    const writeEvents: Array<{ noteId: string; method: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/^\/etapi/, "");
+      const method = init?.method ?? "GET";
+      const isProjectionWrite = trackWrites && ((method === "POST" && path.endsWith("/revision")) || (method === "PUT" && path.endsWith("/content")));
+      const noteId = path.split("/")[2]!;
+      if (isProjectionWrite) {
+        writeEvents.push({ noteId, method });
+        activeWrites += 1;
+        maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      try {
+        return await remote.fetch(input, init);
+      } finally {
+        if (isProjectionWrite) activeWrites -= 1;
+      }
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    const firstBlock = pageRelease.pages[0]!.blocks[0]!;
+    pageRelease.pages[0]!.blocks = Array.from({ length: 9 }, (_, index) => ({
+      ...firstBlock,
+      id: `block-${index + 1}`,
+      title: `讲解块 ${index + 1}`,
+      markdown: `初始内容 ${index + 1}`
+    }));
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const initialDraft = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "bounded-draft-initial" });
+    const changedDraft = structuredClone(initialDraft);
+    changedDraft.page.blocks.forEach((block, index) => { block.markdown = `并发保存后的内容 ${index + 1}`; });
+
+    trackWrites = true;
+    const saved = await api.saveDraft(changedDraft, 1, { ...context, idempotencyKey: "bounded-draft-update" });
+    trackWrites = false;
+
+    expect(saved.revision).toBe(2);
+    expect(maxActiveWrites).toBeGreaterThan(1);
+    expect(maxActiveWrites).toBeLessThanOrEqual(4);
+    const eventsByNote = new Map<string, string[]>();
+    for (const event of writeEvents) eventsByNote.set(event.noteId, [...(eventsByNote.get(event.noteId) ?? []), event.method]);
+    expect(eventsByNote.size).toBeGreaterThanOrEqual(9);
+    for (const methods of eventsByNote.values()) expect(methods).toEqual(["POST", "PUT"]);
+
+    const writesAfterSave = remote.requests.filter((item) => item.method !== "GET").length;
+    await expect(api.saveDraft(changedDraft, 1, { ...context, idempotencyKey: "bounded-draft-update" })).resolves.toMatchObject({ revision: 2 });
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesAfterSave);
+    await expect(api.getDraftByPage("page-1")).resolves.toMatchObject({ revision: 2 });
+
+    remote.editByTitle("讲解块 1", "ReadWeave 的新内容");
+    const reopenedApi = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await expect(reopenedApi.getDraftByPage("page-1")).resolves.toMatchObject({ revision: 3, page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "ReadWeave 的新内容" })]) } });
+  });
+
+  it("creates newly added block notes in order and stops creating after a partial failure", async () => {
+    const remote = new FakeEtapi();
+    let trackBlockCreates = false;
+    let activeBlockCreates = 0;
+    let maxActiveBlockCreates = 0;
+    const attemptedBlockTitles: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (trackBlockCreates && url.pathname.endsWith("/create-note") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { title: string };
+        if (body.title.startsWith("new block ")) {
+          attemptedBlockTitles.push(body.title);
+          activeBlockCreates += 1;
+          maxActiveBlockCreates = Math.max(maxActiveBlockCreates, activeBlockCreates);
+          try {
+            if (body.title === "new block 2") return new Response("injected failure", { status: 400 });
+            return await remote.fetch(input, init);
+          } finally {
+            activeBlockCreates -= 1;
+          }
+        }
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const source = { ...releaseWithPage(), id: "partial-block-source", lifecycle: "draft_source" as const };
+    await api.registerDraftSource(source, { ...context, idempotencyKey: "partial-block-source" });
+    const timingLog = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.stubEnv("COURSE_OS_READWEAVE_TIMING", "1");
+    let saved: LessonDraft;
+    let timingCalls: unknown[][] = [];
+    try {
+      saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "partial-block-initial" });
+      timingCalls = timingLog.mock.calls.map(([event, payload]) => [event, payload]);
+    } finally {
+      vi.unstubAllEnvs();
+      timingLog.mockRestore();
+    }
+    expect(timingCalls).toHaveLength(1);
+    expect(timingCalls[0]?.[0]).toBe("course_os.readweave_draft_projection_timing");
+    const timing = JSON.parse(String(timingCalls[0]?.[1])) as Record<string, unknown>;
+    expect(timing).toEqual({ projectionCreated: true, ensureDraftProjectionMs: expect.any(Number), refreshDraftProjectionMs: expect.any(Number) });
+    expect(Object.keys(timing).sort()).toEqual(["ensureDraftProjectionMs", "projectionCreated", "refreshDraftProjectionMs"]);
+    const changed = structuredClone(saved);
+    changed.page.blocks.push(
+      { ...changed.page.blocks[0]!, id: "new-block-1", title: "new block 1", markdown: "first" },
+      { ...changed.page.blocks[0]!, id: "new-block-2", title: "new block 2", markdown: "second" },
+      { ...changed.page.blocks[0]!, id: "new-block-3", title: "new block 3", markdown: "third" }
+    );
+
+    trackBlockCreates = true;
+    await expect(api.saveDraft(changed, 1, { ...context, idempotencyKey: "partial-block-update" })).rejects.toThrow("READWEAVE_ETAPI_400");
+    trackBlockCreates = false;
+
+    expect(attemptedBlockTitles).toEqual(["new block 1", "new block 2"]);
+    expect(maxActiveBlockCreates).toBe(1);
+    expect(remote.titles()).toContain("new block 1");
+    expect(remote.titles()).not.toContain("new block 3");
   });
 
   it("projects tree changes to ReadWeave branches and validates exact links", async () => {

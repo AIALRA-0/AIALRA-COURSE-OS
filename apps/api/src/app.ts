@@ -1102,7 +1102,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/imports", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const snapshot = await dependencies.operations.read();
+      const snapshot = await dependencies.operations.readTaskIndex();
       const imports = snapshot.imports
         .filter((item) => item.workspaceId === workspaceId)
         .map((item) => {
@@ -1136,7 +1136,7 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/imports/:id", async (request, response, next) => {
     try {
-      const snapshot = await dependencies.operations.read();
+      const snapshot = await dependencies.operations.readTaskIndex();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       if (request.params.id.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
         const jobId = request.params.id.slice(STANDALONE_GENERATION_TASK_PREFIX.length);
