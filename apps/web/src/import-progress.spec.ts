@@ -360,6 +360,67 @@ describe("import progress summary", () => {
     expect(formatActivityAge(result.ageSeconds)).toBe("4 分钟前");
   });
 
+  it("shows the newest active plan job stage and phase while preserving counter progress", () => {
+    const activeJobs = [
+      {
+        id: "older-job",
+        state: "running",
+        latestStageActivity: {
+          stage: "repair",
+          status: "started",
+          phase: "opening_repair",
+          phaseStatus: "started",
+          occurredAt: "2026-09-22T10:59:30.000Z"
+        }
+      },
+      {
+        id: "newer-job",
+        state: "running",
+        latestStageActivity: {
+          stage: "teach",
+          status: "started",
+          phase: "explanation",
+          phaseStatus: "started",
+          occurredAt: "2026-09-22T10:59:50.000Z"
+        }
+      },
+      {
+        id: "queued-retry-with-old-history",
+        state: "queued",
+        latestStageActivity: {
+          stage: "review",
+          status: "completed",
+          occurredAt: "2026-09-22T10:59:55.000Z"
+        }
+      }
+    ] as unknown as GenerationJob[];
+    const result = getImportActivity(
+      record({ state: "ready", autoGenerate: true }),
+      plan({
+        id: "plan-1",
+        state: "running",
+        pageIds: Array.from({ length: 10 }, (_, index) => `p${index + 1}`),
+        coreCompletedPageIds: Array.from({ length: 10 }, (_, index) => `p${index + 1}`),
+        bridgeCompletedPageIds: Array.from({ length: 7 }, (_, index) => `p${index + 1}`)
+      }),
+      activeJobs,
+      [],
+      Date.parse("2026-09-22T11:00:00.000Z")
+    );
+
+    expect(result).toMatchObject({
+      stage: "正文讲解",
+      stageCode: "teach",
+      stageStatus: "started",
+      phase: "explanation",
+      phaseStatus: "started",
+      progressPercent: 85,
+      progressScope: "讲解生成",
+      lastActivityAt: "2026-09-22T10:59:50.000Z",
+      ageSeconds: 10
+    });
+  });
+
   it("marks a completed plan complete and keeps failed progress from implying success", () => {
     const completed = getImportActivity(
       record({ state: "ready", autoGenerate: true }),

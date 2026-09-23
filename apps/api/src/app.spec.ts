@@ -103,6 +103,92 @@ describe("Course OS API", () => {
     expect(JSON.stringify(detail.body)).not.toContain("private generation plan");
     await request(app).get(`/api/v1/generation-jobs/${otherWorkspaceJob.id}`).set("X-Workspace-Id", "personal").expect(404);
   });
+  it("attaches sanitized latest stage summaries to active jobs in a generation plan", async () => {
+    const { app, operations, release } = await seededApp();
+    const planId = "plan-stage-summary";
+    const timestamp = "2026-09-22T10:00:00.000Z";
+    const plan: GenerationPlan = {
+      id: planId,
+      workspaceId: "personal",
+      materialVersionId: release.id,
+      qualityMode: "balanced",
+      language: "en",
+      writingPolicySnapshotId: "writing-policy:test",
+      pageIds: ["page-1", "page-2", "page-3"],
+      completedPageIds: [],
+      failedPageIds: [],
+      coreCompletedPageIds: [],
+      bridgeCompletedPageIds: [],
+      jobIds: ["plan-stage-job-1", "plan-stage-job-2", "plan-stage-job-completed"],
+      activeJobIds: ["plan-stage-job-1", "plan-stage-job-2"],
+      currentJobId: "plan-stage-job-1",
+      maxConcurrency: 2,
+      budgetUsd: 2,
+      spentUsd: 0,
+      holdForReview: false,
+      state: "running",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    const makeJob = (id: string, state: GenerationJob["state"]): GenerationJob => ({
+      id,
+      workspaceId: "personal",
+      materialVersionId: release.id,
+      planId,
+      state,
+      budgetUsd: 1,
+      spentUsd: 0,
+      pageIds: ["page-1"],
+      completedPageIds: [],
+      failedPageIds: [],
+      attempt: 1,
+      cancelRequested: false,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    const [firstJob, secondJob, completedJob] = [
+      makeJob("plan-stage-job-1", "running"),
+      makeJob("plan-stage-job-2", "running"),
+      makeJob("plan-stage-job-completed", "completed")
+    ];
+    await operations.mutate((state) => {
+      state.generationPlans.push(plan);
+      state.jobs.push(firstJob!, secondJob!, completedJob!);
+      const append = (streamId: string, type: string, payload: Record<string, unknown>, occurredAt: string) => {
+        const event = operations.appendEvent(state, streamId, type, payload);
+        event.occurredAt = occurredAt;
+      };
+      append(firstJob!.id, "generation.stage.started", { stage: "teach", phase: "opening", prompt: "private stage prompt" }, "2026-09-22T10:01:00.000Z");
+      append(secondJob!.id, "generation.stage.started", { stage: "teach", phase: "opening" }, "2026-09-22T10:02:00.000Z");
+      append(secondJob!.id, "generation.stage.completed", {
+        stage: "teach",
+        phase: "explanation",
+        plan: { content: "private generation plan payload" }
+      }, "2026-09-22T10:03:00.000Z");
+      append(completedJob!.id, "generation.stage.started", { stage: "repair", phase: "opening_repair", secret: "inactive job event" }, "2026-09-22T10:04:00.000Z");
+    });
+
+    const response = await request(app).get(`/api/v1/generation-plans/${planId}`).expect(200);
+    expect(response.body.activeJobs).toHaveLength(2);
+    expect(response.body.activeJobs[0].latestStageActivity).toEqual({
+      stage: "teach",
+      status: "started",
+      phase: "opening",
+      phaseStatus: "started",
+      occurredAt: "2026-09-22T10:01:00.000Z"
+    });
+    expect(response.body.activeJobs[1].latestStageActivity).toEqual({
+      stage: "teach",
+      status: "completed",
+      phase: "explanation",
+      phaseStatus: "completed",
+      occurredAt: "2026-09-22T10:03:00.000Z"
+    });
+    expect(response.body.currentJob.latestStageActivity).toEqual(response.body.activeJobs[0].latestStageActivity);
+    expect(JSON.stringify(response.body)).not.toContain("private stage prompt");
+    expect(JSON.stringify(response.body)).not.toContain("private generation plan payload");
+    expect(JSON.stringify(response.body)).not.toContain("inactive job event");
+  });
   it("indexes independent generation jobs under their course and restores their task page after refresh", async () => {
     const release = testRelease();
     release.id = "release-independent-job-index";

@@ -1280,7 +1280,9 @@ export function createApp(dependencies: AppDependencies): Express {
       const snapshot = await dependencies.operations.read();
       const plan = snapshot.generationPlans.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
-      const activeJobs = snapshot.jobs.filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state));
+      const activeJobs = snapshot.jobs
+        .filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state))
+        .map((job) => ({ ...job, latestStageActivity: latestGenerationStageActivity(snapshot.events, job.id) }));
       const currentJob = activeJobs[0] ?? snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
       const planJobs = snapshot.jobs.filter(item => item.planId === plan.id);
       const jobIds = new Set(planJobs.map(item => item.id));

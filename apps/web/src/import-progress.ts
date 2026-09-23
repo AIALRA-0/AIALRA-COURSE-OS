@@ -289,9 +289,16 @@ export function getImportActivity(
   const state = getImportTaskState(record);
   const planState = plan?.state;
   const generationIsActive = record.generationState === "running" || record.generationState === "pending_sync";
-  const generationActivity = generationIsActive
-    ? record.generationActivity ?? activeJobs.find((job) => job.id === record.generationJobId)?.latestStageActivity
-    : undefined;
+  const generationActivity = planState === "running"
+    ? activeJobs.reduce<GenerationStageActivitySummary | undefined>((latest, job) => {
+      if (job.state !== "running" && job.state !== "pending_sync") return latest;
+      const candidate = job.latestStageActivity;
+      if (!candidate || !Number.isFinite(Date.parse(candidate.occurredAt))) return latest;
+      return !latest || Date.parse(candidate.occurredAt) > Date.parse(latest.occurredAt) ? candidate : latest;
+    }, undefined)
+    : !plan && generationIsActive
+      ? record.generationActivity ?? activeJobs.find((job) => job.id === record.generationJobId)?.latestStageActivity
+      : undefined;
   const busy = state === "running" || planState === "running";
   const stageLabels: Record<GenerationStage, string> = {
     extract: "页面解析",
@@ -303,7 +310,7 @@ export function getImportActivity(
     question_refill: "题目补充",
     search: "外部检索"
   };
-  const stage = record.state === "ready" && record.generationJobId && generationActivity
+  const stage = record.state === "ready" && generationActivity
     ? stageLabels[generationActivity.stage]
     : record.state === "quarantined" || record.state === "accepted"
     ? "安全检查与排队"
@@ -373,8 +380,7 @@ export function getImportActivity(
   if (state === "failed" || state === "cancelled" || state === "paused" || state === "awaiting_review") { progressPercent = undefined; progressScope = undefined; }
 
   const activitySources = nestedSources(record, plan);
-  const lastActivityAt = !plan && record.generationJobId ? generationActivity?.occurredAt
-    : undefined;
+  const lastActivityAt = generationActivity?.occurredAt;
   const resolvedLastActivityAt = lastActivityAt
     ?? timestamp([...activitySources, ...activeJobs], ["lastProgressAt", "lastEventAt", "updatedAt", "convertedAt", "createdAt"])
     ?? timestamp(costs, ["createdAt"]);
