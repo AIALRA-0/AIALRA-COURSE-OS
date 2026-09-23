@@ -979,7 +979,7 @@ describe("Course OS API", () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         calls += 1;
-        if (calls === 1) throw new Error("PROVIDER_AUTH");
+        if (calls === 1) throw new ModelRouterGenerationError("PROVIDER_AUTH", "synthetic-vision", testTeachingResult(0.002).usage, "deepseek");
         return testTeachingResult(0.001);
       }
     };
@@ -1009,7 +1009,10 @@ describe("Course OS API", () => {
     expect(retried.body.jobs[0].lastErrorCode).toBeUndefined();
     expect(Object.keys((await operations.read()).generationCheckpoints)).toHaveLength(0);
     const completed = await waitForPlan(app, failed.id);
-    expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.003 });
+    const costs = await request(app).get(`/api/v1/costs?jobId=${retried.body.jobs[0].id}`).expect(200);
+    expect(costs.body.entries).toHaveLength(2);
+    expect(new Set(costs.body.entries.map((entry: { id: string }) => entry.id)).size).toBe(2);
     await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
       .set("Idempotency-Key", "failed-plan-retry-run")
       .expect(200);

@@ -4437,7 +4437,7 @@ function makeSearchCostEntry(jobId: string, job: GenerationJob, release: CourseR
   const billingMode = actualMicrousd === 0 ? "free" as const : "metered" as const;
   const billing = billingBreakdown(receipt.provider, billingMode, actualMicrousd);
   return {
-    id: `cost:${jobId}:attempt:${job.attempt}:${pageId}:search:${receipt.queryId}:${receipt.provider}:${index}`,
+    id: `cost:${jobId}:fence:${job.lease?.fenceToken ?? 0}:attempt:${job.attempt}:${pageId}:search:${receipt.queryId}:${receipt.provider}:${index}`,
     workspaceId: job.workspaceId, courseId: release.courseId, materialVersionId: release.id, pageId,
     objectId: `draft:${pageId}`, jobId, stage: "search", provider: receipt.provider, model: "native-search",
     inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
@@ -4465,7 +4465,7 @@ function makeGenerationCostEntry(jobId: string, job: GenerationJob, release: Cou
   const actualBilling = billingBreakdown(provider, billingMode, actualMicrousd);
   const estimatedBilling = billingBreakdown(provider, billingMode, estimatedMicrousd);
   return {
-    id: `cost:${jobId}:attempt:${job.attempt}:${pageId}:teach`,
+    id: `cost:${jobId}:fence:${job.lease?.fenceToken ?? 0}:attempt:${job.attempt}:${pageId}:teach`,
     workspaceId: job.workspaceId,
     courseId: release.courseId,
     materialVersionId: release.id,
