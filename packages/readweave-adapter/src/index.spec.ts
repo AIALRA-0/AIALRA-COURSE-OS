@@ -399,6 +399,43 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(overview);
   });
 
+  it("reconciles an interrupted generated overview from matching section notes, but rejects an edited section", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const saved = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "section-interruption-base" });
+    const kinds = [
+      ["chapter_bridge", "承上启下"], ["prior_knowledge", "先验知识"], ["learning_objectives", "学习目标"],
+      ["full_explanation", "完整讲解"], ["main_content", "主要内容"], ["misconceptions", "易错点"]
+    ] as const;
+    const interrupted = structuredClone(saved);
+    interrupted.page.lessonFlowVersion = 2;
+    interrupted.page.lessonSections = kinds.map(([kind, title], index) => ({
+      id: `section-${index}`, kind, title, markdown: `系统上次写入的${title}`, sourceAnchorIds: [], atomIds: []
+    }));
+    const render = api as unknown as {
+      renderPageOverview(draft: typeof interrupted): string;
+      renderSectionOverview(draft: typeof interrupted, key: "prerequisites" | "objectives" | "explanation" | "main" | "misconceptions"): string;
+    };
+    const overview = render.renderPageOverview(interrupted);
+    remote.editByTitle("第 001 页 · 测试页面", overview);
+    const sections = [
+      ["01 先验知识", "prerequisites"], ["02 学习目标", "objectives"], ["03 完整讲解", "explanation"],
+      ["04 主要内容", "main"], ["05 易错点", "misconceptions"]
+    ] as const;
+    for (const [title, key] of sections) remote.editByTitle(title, render.renderSectionOverview(interrupted, key));
+    const retry = structuredClone(interrupted);
+    retry.page.lessonSections = retry.page.lessonSections!.map((section) => ({ ...section, markdown: `本次重新生成的${section.title}` }));
+    remote.editByTitle("03 完整讲解", "<p>人工修改的子笔记</p>");
+    await expect(api.saveDraft(retry, 1, { ...context, idempotencyKey: "section-interruption-conflict" })).rejects.toThrow("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+    expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(overview);
+    remote.editByTitle("03 完整讲解", render.renderSectionOverview(interrupted, "explanation"));
+    const recovered = await api.saveDraft(retry, 1, { ...context, idempotencyKey: "section-interruption-retry" });
+    expect(recovered.revision).toBe(2);
+    expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(render.renderPageOverview(retry));
+  });
+
   it("updates independent draft notes with a limit of four while keeping each revision before its content", async () => {
     const remote = new FakeEtapi();
     let trackWrites = false;

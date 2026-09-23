@@ -1465,10 +1465,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset, maxConcurrency = 1): Promise<void> {
     if (projection.pageOverviewHash) {
-      const actualHash = sha256(await this.getContent(projection.pageNoteId));
+      const actualOverview = await this.getContent(projection.pageNoteId);
+      const actualHash = sha256(actualOverview);
       if (actualHash !== projection.pageOverviewHash) {
         const pendingHash = sha256(this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName));
-        if (actualHash !== pendingHash) throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+        if (actualHash !== pendingHash && !(await this.isInterruptedOverviewWrite(actualOverview, draft, projection))) {
+          throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+        }
         // A previous attempt updated the note before its state transaction failed.
         projection.pageOverviewHash = actualHash;
       }
@@ -1522,6 +1525,28 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     await forEachWithConcurrency(updates, maxConcurrency, (update) => update());
     for (const createBlock of blockCreations) await createBlock();
+  }
+
+  private async isInterruptedOverviewWrite(actual: string, draft: LessonDraft, projection: DraftProjection): Promise<boolean> {
+    const emptyPage = { ...draft.page, lessonSections: [] };
+    const prefix = this.renderPageOverview({ ...draft, page: emptyPage }, projection.sourceImageNoteId, projection.sourceImageFileName);
+    if (!actual.startsWith(prefix)) return false;
+    const sections = [
+      ["prerequisites", "先验知识"],
+      ["objectives", "学习目标"],
+      ["explanation", "完整讲解"],
+      ["main", "主要内容"],
+      ["misconceptions", "易错点"]
+    ] as const;
+    const headings = [...actual.matchAll(/<h3>([^<]+)<\/h3>/gu)];
+    if (headings.map((match) => match[1]).join("|") !== "承上启下|先验知识|学习目标|完整讲解|主要内容|易错点") return false;
+    const contents = await Promise.all(sections.map(async ([key]) => this.getContent(projection.sectionNoteIds[key])));
+    return sections.every(([, title], index) => {
+      const heading = `<h3>${title}</h3>`;
+      const start = actual.indexOf(heading);
+      const next = actual.indexOf("<h3>", start + heading.length);
+      return start >= 0 && actual.slice(start + heading.length, next < 0 ? undefined : next) === contents[index];
+    });
   }
 
   private async ensureCourseProjection(state: EtapiState, release: CourseRelease): Promise<CourseProjection> {
