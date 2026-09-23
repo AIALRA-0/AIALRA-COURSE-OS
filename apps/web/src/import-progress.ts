@@ -173,12 +173,13 @@ export function summarizeImportProgress(
   const entryCostMicrousd = knownEntryCosts.reduce((sum, entry) => sum + (entry.costBasis === "provider_reported" ? entry.actualMicrousd : entry.estimatedMicrousd), 0);
   const trustedDirectCost = directCost && directCost > 0 ? directCost : undefined;
   const trustedPlanCost = planCost && planCost > 0 ? planCost : undefined;
-  const candidateCost = trustedDirectCost ?? trustedPlanCost
+  const cumulativeEntryCost = plan?.retryOfPlanId && knownEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : undefined;
+  const candidateCost = cumulativeEntryCost ?? trustedDirectCost ?? trustedPlanCost
     ?? (knownEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : directCost ?? planCost);
   const unverifiedZero = candidateCost === 0 && knownEntryCosts.length === 0 && Boolean(plan &&
     (plan.state === "running" || plan.state === "queued" || plan.completedPageIds.length + plan.failedPageIds.length > 0));
   const costUsd = unverifiedZero ? undefined : candidateCost;
-  const costBasis = trustedDirectCost !== undefined || trustedPlanCost !== undefined
+  const costBasis = cumulativeEntryCost === undefined && (trustedDirectCost !== undefined || trustedPlanCost !== undefined)
     ? undefined
     : knownEntryCosts.length === 0
       ? undefined

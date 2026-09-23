@@ -78,6 +78,19 @@ describe("import progress summary", () => {
     expect(getImportActivity(source, continuation, [], []).progressPercent).toBe(75);
   });
 
+  it("adds earlier page costs to a continuation instead of showing only the retry", () => {
+    const source = record({ id: "import-1", state: "ready", pageIds: ["p1", "p2"], issues: [] });
+    const continuation = plan({ retryOfPlanId: "old-plan", state: "completed", pageIds: ["p2"],
+      completedPageIds: ["p2"], failedPageIds: [], spentUsd: 0.08 });
+    const entries = [
+      cost("teach", "2026-09-23T00:00:00Z", { id: "first", estimatedMicrousd: 100_000, costBasis: "price_snapshot" }),
+      cost("teach", "2026-09-23T00:01:00Z", { id: "retry", estimatedMicrousd: 80_000, costBasis: "price_snapshot" })
+    ];
+    const summary = summarizeImportProgress(source, continuation, [], entries);
+    expect(summary.costUsd).toBe(0.18);
+    expect(summary.costBasis).toBe("estimated");
+  });
+
   it("derives legacy fields without inventing unavailable cross-page progress", () => {
     const result = summarizeImportProgress(
       record({ state: "ready", autoGenerate: true, pageIds: ["page-1", "page-2"], issues: [] }),
