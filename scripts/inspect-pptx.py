@@ -1,9 +1,9 @@
 import json
 import pathlib
 import posixpath
-import re
 import sys
 import zipfile
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 MAX_ENTRIES = 10000
@@ -86,9 +86,17 @@ def main() -> None:
                 if item.compress_size > 0 and item.file_size / item.compress_size > MAX_RATIO:
                     fail("PPTX_COMPRESSION_RATIO_TOO_HIGH")
                 if item.filename.endswith(".rels") and item.file_size:
-                    body = archive.read(item).decode("utf-8", errors="ignore")
-                    if re.search(r'TargetMode\s*=\s*["\']External["\']', body, re.I):
-                        fail("PPTX_EXTERNAL_RELATIONSHIP")
+                    try:
+                        relationships = ElementTree.fromstring(archive.read(item))
+                    except ElementTree.ParseError:
+                        fail("PPTX_RELATIONSHIP_XML_INVALID")
+                    for relationship in relationships.findall(f"{{{PACKAGE_RELATIONSHIP_NS}}}Relationship"):
+                        if relationship.get("TargetMode", "").lower() != "external":
+                            continue
+                        target = urlsplit(relationship.get("Target", ""))
+                        is_web_link = relationship.get("Type", "") == f"{RELATIONSHIP_NS}/hyperlink" and target.scheme.lower() in ("http", "https") and bool(target.hostname)
+                        if not is_web_link:
+                            fail("PPTX_EXTERNAL_RELATIONSHIP")
             titles = slide_titles(archive, names)
     except zipfile.BadZipFile:
         fail("PPTX_ZIP_INVALID")
