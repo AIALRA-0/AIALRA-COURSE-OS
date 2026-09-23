@@ -1342,6 +1342,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .review-unavailable > span { width: 58px; height: 58px; display: grid; place-items: center; border-radius: 50%; background: color-mix(in srgb, var(--amber) 14%, var(--panel)); color: var(--amber); }
 .review-unavailable h1 { margin: 0; font-size: 25px; }
 .review-unavailable p { max-width: 520px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.75; }
+.review-unavailable-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
 
 .slide-shell:fullscreen,
 .slide-shell.is-fullscreen {
