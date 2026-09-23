@@ -1,0 +1,40 @@
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_3595c7fc3d3ef4 3796-3802,3808-3814,3822-3825,3827,3831-3832,3839-3840,3842-3844,3846,3849,3851-3853
+  s_e8850ef125fb32::t_7a5dec520172de 3803-3807,3815-3821,3828-3830,3833-3838,3841,3845,3847-3848,3850
+  s_e8850ef125fb32::t_eae1ba101c7d1c 3826
+  s_e8850ef125fb32::t_e8ce39a2f831aa 23-24,1414-1415,1417
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_e8ce39a2f831aa 17-23,575-576
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_96dfeea1d93c36 291-294
+  s_e8850ef125fb32::t_466c68d7cc35f2 1,245-248,296-308,362-370,376-379,381-394
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_e93370ebc08556 1018
+  s_e8850ef125fb32::t_466c68d7cc35f2 1062,1139-1145,1148,1168
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_96dfeea1d93c36 218-243
+  s_e8850ef125fb32::t_dbebf11a818271 143,156-167,170-181,186-196,201-215
+  s_e8850ef125fb32::t_024570fd0411fb 216,244-272
+  s_e8850ef125fb32::t_56fed34b4b584d 217
+apps/web/src/types.ts
+  s_e8850ef125fb32::t_466c68d7cc35f2 1,4
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_7ed9ec40503ad9 54-79,86-98,100-102,104-105
+  s_e8850ef125fb32::t_96dfeea1d93c36 80-85,99,103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13c9c361a4aec1b2fb70646aef4d54ca751499c7",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
