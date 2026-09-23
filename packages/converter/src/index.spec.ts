@@ -21,6 +21,7 @@ describe("offline material converter", () => {
     const sourcePath = join(root, `lecture.${kind}`);
     await writeFile(sourcePath, kind === "pdf" ? "%PDF-1.7" : "PK synthetic pptx", "utf8");
     const runProcess: ProcessRunner = async (command, args, options) => {
+      if (command === "python" && kind === "pptx") return { stdout: JSON.stringify({ slideTitles: ["A complete title that wraps", "Second title"] }), stderr: "" };
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7", "utf8");
       if (command === "pdfinfo") return { stdout: "Pages:          2\n", stderr: "" };
       if (command === "pdftoppm") {
@@ -34,7 +35,9 @@ describe("offline material converter", () => {
       { id: `${kind}-1`, sourcePath, originalName: `lecture.${kind}`, kind, outputDir: join(root, "out"), createdAt: new Date().toISOString() },
       { runProcess, binaries: { pdfinfo: "pdfinfo", pdftoppm: "pdftoppm", pdftotext: "pdftotext", soffice: "soffice", python: "python", pptxInspector: "inspect.py" } }
     );
-    expect(result.pages.map((page) => [page.pageNumber, page.title])).toEqual([[1, "First page"], [2, "Second page"]]);
+    expect(result.pages.map((page) => [page.pageNumber, page.title])).toEqual(kind === "pptx"
+      ? [[1, "A complete title that wraps"], [2, "Second title"]]
+      : [[1, "First page"], [2, "Second page"]]);
   });
 
   it("requeues a conversion left in processing after a worker crash", async () => {

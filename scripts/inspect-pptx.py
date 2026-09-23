@@ -1,18 +1,64 @@
 import json
 import pathlib
+import posixpath
 import re
 import sys
 import zipfile
+from xml.etree import ElementTree
 
 MAX_ENTRIES = 10000
 MAX_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_RATIO = 120
+PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+RELATIONSHIP_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PACKAGE_RELATIONSHIP_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
 def fail(code: str) -> None:
     print(json.dumps({"accepted": False, "issue": code}))
     raise SystemExit(2)
+
+
+def slide_titles(archive: zipfile.ZipFile, names: set[str]) -> list[str]:
+    relationship_path = "ppt/_rels/presentation.xml.rels"
+    if relationship_path not in names:
+        return []
+    try:
+        presentation = ElementTree.fromstring(archive.read("ppt/presentation.xml"))
+        relationships = ElementTree.fromstring(archive.read(relationship_path))
+        targets = {
+            item.get("Id"): item.get("Target")
+            for item in relationships.findall(f"{{{PACKAGE_RELATIONSHIP_NS}}}Relationship")
+        }
+        titles = []
+        for item in presentation.findall(f".//{{{PRESENTATION_NS}}}sldId"):
+            target = targets.get(item.get(f"{{{RELATIONSHIP_NS}}}id"))
+            if not target:
+                titles.append("")
+                continue
+            path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else f"ppt/{target}")
+            if path not in names:
+                titles.append("")
+                continue
+            slide = ElementTree.fromstring(archive.read(path))
+            title = ""
+            for shape in slide.findall(f".//{{{PRESENTATION_NS}}}sp"):
+                placeholder = shape.find(f"{{{PRESENTATION_NS}}}nvSpPr/{{{PRESENTATION_NS}}}nvPr/{{{PRESENTATION_NS}}}ph")
+                if placeholder is None or placeholder.get("type") not in ("title", "ctrTitle"):
+                    continue
+                paragraphs = shape.findall(f"{{{PRESENTATION_NS}}}txBody/{{{DRAWING_NS}}}p")
+                title = " ".join(
+                    "".join(node.text or "" for node in paragraph.findall(f".//{{{DRAWING_NS}}}t")).strip()
+                    for paragraph in paragraphs
+                ).strip()
+                if title:
+                    break
+            titles.append(title)
+        return titles
+    except ElementTree.ParseError:
+        return []
 
 
 def main() -> None:
@@ -43,9 +89,10 @@ def main() -> None:
                     body = archive.read(item).decode("utf-8", errors="ignore")
                     if re.search(r'TargetMode\s*=\s*["\']External["\']', body, re.I):
                         fail("PPTX_EXTERNAL_RELATIONSHIP")
+            titles = slide_titles(archive, names)
     except zipfile.BadZipFile:
         fail("PPTX_ZIP_INVALID")
-    print(json.dumps({"accepted": True, "entries": len(infos), "expandedBytes": total}))
+    print(json.dumps({"accepted": True, "entries": len(infos), "expandedBytes": total, "slideTitles": titles}))
 
 
 if __name__ == "__main__":

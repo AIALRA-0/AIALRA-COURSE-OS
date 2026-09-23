@@ -164,8 +164,15 @@ export async function convertMaterial(request: ConversionRequest, options: Conve
 
 async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, outputDir: string, binaries: ConverterBinaries, runProcess: ProcessRunner): Promise<ConvertedPage[]> {
   let pdfPath = sourcePath;
+  let pptxTitles: string[] = [];
   if (kind === "pptx") {
-    await runProcess(binaries.python, [binaries.pptxInspector, sourcePath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+    const inspection = await runProcess(binaries.python, [binaries.pptxInspector, sourcePath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+    try {
+      const parsed: unknown = JSON.parse(inspection.stdout);
+      if (parsed && typeof parsed === "object" && "slideTitles" in parsed && Array.isArray(parsed.slideTitles)) {
+        pptxTitles = parsed.slideTitles.map((title: unknown) => typeof title === "string" ? title.trim().slice(0, 90) : "");
+      }
+    } catch { /* Older inspectors did not return slide titles; retain PDF text inference. */ }
     const localPptx = join(outputDir, "source.pptx");
     await writeFile(localPptx, await readFile(sourcePath), { flag: "wx" });
     const userInstallation = pathToFileURL(join(outputDir, "libreoffice-profile")).href;
@@ -191,7 +198,7 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
     const text = normalizeExtractedText(pageTexts[index] ?? "");
     return {
       pageNumber: index + 1,
-      title: inferTitle(text, index + 1),
+      title: pptxTitles[index] || inferTitle(text, index + 1),
       text,
       imagePath: join(outputDir, name),
       imageMediaType: "image/png"
