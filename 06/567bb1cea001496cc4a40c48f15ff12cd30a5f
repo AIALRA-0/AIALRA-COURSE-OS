@@ -1,0 +1,35 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_af8b610bf61076 1456-1475,1477-1478,1480-1483,1485-1490,1492-1509,1511-1517
+  s_e8850ef125fb32::t_b6eccac617e3a1 1476,1479,1484,1510
+  s_e8850ef125fb32::t_74d659758c1a72 1491
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_64a74f879b2051 2151
+  s_e8850ef125fb32::t_7d6bbe31000a15 1448,1450-1455,1458,1460-1464,1478-1479,1482-1483
+packages/domain/src/index.ts
+  s_e8850ef125fb32::t_3d0a77f708566a 10
+packages/domain/src/index.spec.ts
+  s_e8850ef125fb32::t_ee8193c7477af4 26-30
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_3804119e43de8f 37,56-66,386-387,391,400,429-430,477-478,482,492,504-505
+  s_e8850ef125fb32::t_b435107d54298b 401-402,404,410-419,493-498
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_bb05dbeb85dbf2 17,650-666,668-678,680-709
+  s_e8850ef125fb32::t_6e89a746b0eab0 667
+  s_e8850ef125fb32::t_1f380ff353fbd5 679
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06567bb1cea001496cc4a40c48f15ff12cd30a5f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
