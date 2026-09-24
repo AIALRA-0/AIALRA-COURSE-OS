@@ -1173,7 +1173,7 @@ describe("Course OS API", () => {
     await readweave.saveDraft({
       id: "draft:candidate-page-1", workspaceId: "personal", courseId: candidate.courseId, moduleId: candidate.moduleId,
       sourceReleaseId: candidate.id, pageId: "candidate-page-1", revision: 0, status: "ready",
-      page: { ...candidate.pages[0]!, questionBank: draftQuestions }, changedBlockIds: [], contentHash: "candidate-ready-hash",
+      page: { ...candidate.pages[0]!, quality: { ...candidate.pages[0]!.quality, publishable: false, issues: ["非阻断质量提示"] }, questionBank: draftQuestions }, changedBlockIds: [], contentHash: "candidate-ready-hash",
       updatedAt: new Date().toISOString()
     }, 0, { idempotencyKey: "candidate-questions-ready", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-ready" });
 

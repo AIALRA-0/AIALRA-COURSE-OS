@@ -2677,7 +2677,7 @@ async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: 
   if (!sourcePage || release.lifecycle !== "draft_source") return sourcePage;
   const draft = await readweave.getDraftByPage(pageId);
   return draft?.sourceReleaseId === release.id && draft.workspaceId === workspaceId && draft.courseId === release.courseId
-    && draft.status === "ready" && draft.page.quality.publishable ? draft.page : undefined;
+    && draft.status === "ready" ? draft.page : undefined;
 }
 
 async function resolveWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string): Promise<CourseTreeNode | undefined> {
