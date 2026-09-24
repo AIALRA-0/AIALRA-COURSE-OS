@@ -185,7 +185,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(typeof instructions).toBe("string");
       expect(instructions).toContain("密集矩阵不要逐格转写");
       expect(instructions).toContain("按行、列位置核实");
-      expect(instructions).toContain("不推断或编造数值冲突");
+      expect(instructions).toContain("两处可见数值确有差异时逐处保留");
+      expect(instructions).toContain("没有单位或所计对象的数字标签保留原文");
       const imagePart = (body.messages[1]?.content as Array<{ type: string; image_url?: { detail?: string } }>).find(part => part.type === "image_url");
       expect(imagePart?.image_url?.detail).toBe("high");
       return Response.json({ choices: [{ message: { content: "页面内容：矩阵中已核实的代表值见相应行列。\n教学顺序：先说明矩阵含义。" } }], usage: { prompt_tokens: 100, completion_tokens: 50 } });
