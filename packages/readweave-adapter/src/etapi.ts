@@ -165,6 +165,11 @@ interface LocatedDraftPageRecord {
   record: EtapiDraftPageRecord;
 }
 
+// The API process is single-writer in production. Adapter instances can still
+// overlap briefly when ETAPI settings are replaced, so their page locks share
+// this process-wide map.
+const draftPageWriteChains = new Map<string, Promise<void>>();
+
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
 
 const SECTION_DEFINITIONS = [
@@ -192,7 +197,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private bootstrapPromise?: Promise<ProjectionIndex>;
   private bootstrapStateContent?: string;
   private writeChain: Promise<void> = Promise.resolve();
-  private readonly draftWriteChains = new Map<string, Promise<void>>();
   private readonly draftPageRecordCache = new Map<string, LocatedDraftPageRecord>();
   private readonly draftPageRecordVersions = new Map<string, number>();
   private draftPageRecordVersion = 0;
@@ -604,7 +608,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const state = structuredClone(await this.readStateReference(true));
       const located = await this.findDraftPageRecord(entry.pageId!);
       if (located) this.mergeDraftPageRecord(state, located.record);
-      const release = state.releases.find((item) => item.id === entry.materialVersionId || item.courseId === entry.courseId);
+      const release = state.releases.find((item) => item.id === entry.materialVersionId)
+        ?? state.releases.find((item) => item.courseId === entry.courseId
+          && item.pages.some((page) => page.id === entry.pageId));
       let draft = located?.record.draft ?? state.drafts.find((item) => item.pageId === entry.pageId);
       if (!draft && release) {
         const page = release.pages.find((item) => item.id === entry.pageId);
@@ -2005,19 +2011,24 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async readDraftPageRecords(pageId?: string): Promise<LocatedDraftPageRecord[]> {
     const observedVersions = new Map(this.draftPageRecordVersions);
-    const labels = pageId
-      ? `#courseOsDraftRecordPageId="${pageId}"`
-      : '#courseOsType="draft_record"';
-    const query = new URLSearchParams({
-      search: labels,
-      ancestorNoteId: this.config.parentNoteId,
-      ancestorDepth: "lt5",
-      fastSearch: "true"
-    });
-    const search = await this.request<SearchResponse>(`/notes?${query.toString()}`);
+    const searches = pageId
+      ? [`#courseOsDraftRecordPageId="${pageId}"`]
+      : ['#courseOsType="draft_record"', '"Course OS draft record"'];
+    const responses = await Promise.all(searches.map(async (search) => {
+      const query = new URLSearchParams({
+        search,
+        ancestorNoteId: this.config.parentNoteId,
+        ancestorDepth: "lt5",
+        fastSearch: "true"
+      });
+      return this.request<SearchResponse>(`/notes?${query.toString()}`);
+    }));
+    const notes = [...new Map(responses.flatMap((response) => response.results)
+      .filter((note) => note.title.startsWith("Course OS draft record · "))
+      .map((note) => [note.noteId, note])).values()];
     const located: LocatedDraftPageRecord[] = [];
-    for (let index = 0; index < search.results.length; index += 8) {
-      const batch = await Promise.all(search.results.slice(index, index + 8).map(async (note) => {
+    for (let index = 0; index < notes.length; index += 8) {
+      const batch = await Promise.all(notes.slice(index, index + 8).map(async (note) => {
         const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
         if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return undefined;
         if (pageId && parsed.pageId !== pageId) return undefined;
@@ -2033,20 +2044,34 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
             conflicts: parsed.conflicts ?? []
           }
         };
-        if ((this.draftPageRecordVersions.get(parsed.pageId) ?? 0) <= (observedVersions.get(parsed.pageId) ?? 0)) {
-          this.cacheDraftPageRecord(located);
-        }
         return located;
       }));
       located.push(...batch.filter((item): item is LocatedDraftPageRecord => item !== undefined));
     }
-    return located;
+    const newest = new Map<string, LocatedDraftPageRecord>();
+    for (const candidate of located) {
+      const previous = newest.get(candidate.record.pageId);
+      if (!previous
+        || candidate.record.draft.revision > previous.record.draft.revision
+        || (candidate.record.draft.revision === previous.record.draft.revision
+          && candidate.noteId.localeCompare(previous.noteId) < 0)) {
+        newest.set(candidate.record.pageId, candidate);
+      }
+    }
+    for (const candidate of newest.values()) {
+      if ((this.draftPageRecordVersions.get(candidate.record.pageId) ?? 0)
+        <= (observedVersions.get(candidate.record.pageId) ?? 0)) this.cacheDraftPageRecord(candidate);
+    }
+    return [...newest.values()];
   }
 
   private async findDraftPageRecord(pageId: string): Promise<LocatedDraftPageRecord | undefined> {
     const located = (await this.readDraftPageRecords(pageId))[0];
     const cached = this.draftPageRecordCache.get(pageId);
-    if (cached || located) return cached ?? located;
+    if (cached || located) {
+      return cached && (!located || cached.record.draft.revision > located.record.draft.revision)
+        ? cached : located;
+    }
     return this.recoverUnlabelledDraftPageRecord(pageId);
   }
 
@@ -2177,16 +2202,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async withDraftPageLock<T>(pageId: string, context: IdempotentWriteContext | undefined, work: () => Promise<T>): Promise<T> {
-    const predecessor = this.draftWriteChains.get(pageId) ?? Promise.resolve();
+    const lockKey = [this.config.baseUrl, this.config.parentNoteId, this.workspaceId, pageId].join("\u0000");
+    const predecessor = draftPageWriteChains.get(lockKey) ?? Promise.resolve();
     let release: () => void = () => {};
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.draftWriteChains.set(pageId, current);
+    draftPageWriteChains.set(lockKey, current);
     await predecessor.catch(() => undefined);
     try {
       return context ? await this.writeContext.run(context, work) : await work();
     } finally {
       release();
-      if (this.draftWriteChains.get(pageId) === current) this.draftWriteChains.delete(pageId);
+      if (draftPageWriteChains.get(lockKey) === current) draftPageWriteChains.delete(lockKey);
     }
   }
 
