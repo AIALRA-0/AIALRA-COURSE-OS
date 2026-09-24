@@ -219,14 +219,12 @@ export class PostgresOperationalStore extends OperationalStore {
       }
       const job = locked.rows[0].job_data;
       if (!job) throw new Error(`GENERATION_JOB_PROJECTION_MISSING:${jobId}`);
-      const [eventRows, checkpointRows] = await Promise.all([
-        client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
-          "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
-        ),
-        client.query<{ page_id: string; checkpoint: PlannedCheckpoint }>(
-          "SELECT page_id, checkpoint FROM generation_job_checkpoints WHERE job_id = $1 ORDER BY page_id", [jobId]
-        )
-      ]);
+      const eventRows = await client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+        "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
+      );
+      const checkpointRows = await client.query<{ page_id: string; checkpoint: PlannedCheckpoint }>(
+        "SELECT page_id, checkpoint FROM generation_job_checkpoints WHERE job_id = $1 ORDER BY page_id", [jobId]
+      );
       const context = postgresGenerationJobMutationContext(job, eventRows.rows, checkpointRows.rows);
       const result = await change(job, context);
       if (job.id !== jobId) throw new Error("GENERATION_JOB_ID_IMMUTABLE");
@@ -273,15 +271,15 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   private async projectPostgresState(client: pg.PoolClient, state: OperationalState): Promise<void> {
-    const [jobRows, eventRows, checkpointRows] = await Promise.all([
-      client.query<{ job_data: GenerationJob }>("SELECT job_data FROM generation_jobs WHERE job_data IS NOT NULL ORDER BY created_at, id"),
-      client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
-        "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events ORDER BY id"
-      ),
-      client.query<{ job_id: string; page_id: string; checkpoint: PlannedCheckpoint }>(
-        "SELECT job_id, page_id, checkpoint FROM generation_job_checkpoints ORDER BY job_id, page_id"
-      )
-    ]);
+    const jobRows = await client.query<{ job_data: GenerationJob }>(
+      "SELECT job_data FROM generation_jobs WHERE job_data IS NOT NULL ORDER BY created_at, id"
+    );
+    const eventRows = await client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+      "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events ORDER BY id"
+    );
+    const checkpointRows = await client.query<{ job_id: string; page_id: string; checkpoint: PlannedCheckpoint }>(
+      "SELECT job_id, page_id, checkpoint FROM generation_job_checkpoints ORDER BY job_id, page_id"
+    );
     state.jobs = mergeGenerationJobs(state.jobs, jobRows.rows.map(row => row.job_data));
     state.events = mergeOrderedEvents(state.events, eventRows.rows);
     for (const row of checkpointRows.rows) state.generationCheckpoints[`${row.job_id}:${row.page_id}`] = row.checkpoint;
