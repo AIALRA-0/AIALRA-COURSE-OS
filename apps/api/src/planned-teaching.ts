@@ -50,6 +50,16 @@ export interface PlannedPhaseReceipt {
   model: string;
   usage: ModelRouterUsage;
   attempt?: number;
+  providerDiagnostic?: ProviderOutputDiagnostic;
+}
+
+interface ProviderOutputDiagnostic {
+  responseId?: string;
+  finishReason?: string;
+  status?: string;
+  rawOutputType: string;
+  rawOutputChars?: number;
+  rawFields?: Record<string, { type: string; length?: number }>;
 }
 
 export interface PlannedTrace {
@@ -60,6 +70,13 @@ export interface PlannedTrace {
   formatCheckMs?: number;
   formatWarnings?: Array<{ phase: string; issues: string[] }>;
   qualityWarnings?: Array<{ phase: string; issues: string[] }>;
+  /** Metadata only; the private model response text is never stored here. */
+  initialOutputDiagnostic?: {
+    provider?: ProviderOutputDiagnostic;
+    parsedFields?: Record<string, { type: string; length?: number }>;
+    normalizedFields?: Record<string, { type: string; length?: number }>;
+    parseIssue?: string;
+  };
   repairDiagnostic?: {
     initialShapeIssues: string[];
     initialQuestionCount: number;
@@ -330,6 +347,15 @@ interface CallResult {
   provider?: string;
   model?: string;
   usage?: ModelRouterUsage;
+  providerDiagnostic?: ProviderOutputDiagnostic;
+}
+
+function outputFieldSummary(value: unknown): Record<string, { type: string; length?: number }> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, {
+    type: Array.isArray(field) ? "array" : field === null ? "null" : typeof field,
+    ...(Array.isArray(field) || typeof field === "string" ? { length: field.length } : {})
+  }]));
 }
 
 function unpackCallResult(value: unknown): CallResult {
@@ -341,7 +367,9 @@ function unpackCallResult(value: unknown): CallResult {
         content: record.content,
         ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
         ...(typeof record.model === "string" ? { model: record.model } : {}),
-        ...(record.usage && typeof record.usage === "object" ? { usage: record.usage as ModelRouterUsage } : {})
+        ...(record.usage && typeof record.usage === "object" ? { usage: record.usage as ModelRouterUsage } : {}),
+        ...(record.providerDiagnostic && typeof record.providerDiagnostic === "object"
+          ? { providerDiagnostic: record.providerDiagnostic as ProviderOutputDiagnostic } : {})
       };
     }
   }
@@ -476,6 +504,7 @@ export async function writePlannedLesson(
       provider: result.provider ?? "unknown",
       model: result.model ?? "unknown",
       usage: result.usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: null, durationMs: 0 },
+      ...(result.providerDiagnostic ? { providerDiagnostic: result.providerDiagnostic } : {}),
       ...(input.generationAttempt !== undefined ? { attempt: input.generationAttempt } : {})
     });
     await input.onTeachingPhase?.(request.phase, "completed", result.usage);
@@ -517,8 +546,11 @@ export async function writePlannedLesson(
   };
 
   let initialRaw: unknown;
+  let initialProviderDiagnostic: ProviderOutputDiagnostic | undefined;
   try {
-    initialRaw = (await run(teachingRequest)).content;
+    const initialResult = await run(teachingRequest);
+    initialRaw = initialResult.content;
+    initialProviderDiagnostic = initialResult.providerDiagnostic;
   } catch (error) {
     const recoverable = error instanceof Error ? transientInvalidProviderOutput(error) : undefined;
     if (recoverable === undefined) throw error;
@@ -528,6 +560,12 @@ export async function writePlannedLesson(
   const initialParsed = parseTeachingOutput(initialRaw);
   const initialCheckStarted = performance.now();
   const initialCandidate = initialParsed.issue ? undefined : normalizeTeachingOutput(initialParsed.content);
+  trace.initialOutputDiagnostic = {
+    ...(initialProviderDiagnostic ? { provider: initialProviderDiagnostic } : {}),
+    ...(initialParsed.issue ? { parseIssue: initialParsed.issue } : {}),
+    ...(outputFieldSummary(initialParsed.content) ? { parsedFields: outputFieldSummary(initialParsed.content) } : {}),
+    ...(outputFieldSummary(initialCandidate) ? { normalizedFields: outputFieldSummary(initialCandidate) } : {})
+  };
   const initialShapeIssues = initialParsed.issue
     ? [initialParsed.issue]
     : plannedContentIssues(initialCandidate as TeachingPackage);

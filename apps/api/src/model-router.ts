@@ -37,6 +37,15 @@ export interface ModelRouterUsage {
   durationMs: number;
 }
 
+interface ProviderDiagnostic {
+  responseId?: string;
+  finishReason?: string;
+  status?: string;
+  rawOutputType: string;
+  rawOutputChars?: number;
+  rawFields?: Record<string, { type: string; length?: number }>;
+}
+
 export interface TeachingGenerationResult {
   teachingTrace?: PlannedTrace;
   content: TeachingPackage;
@@ -113,6 +122,17 @@ export class ModelRouterGenerationError extends Error {
 
 function emptyUsage(started: number): ModelRouterUsage {
   return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: null, durationMs: Date.now() - started };
+}
+
+let providerRequestsInFlight = 0;
+let peakProviderRequestsInFlight = 0;
+
+function providerRequestDiagnosticsEnabled(): boolean {
+  return process.env.COURSE_OS_PROVIDER_REQUEST_DIAGNOSTICS === "true";
+}
+
+function logProviderRequest(event: Record<string, unknown>): void {
+  if (providerRequestDiagnosticsEnabled()) console.info(JSON.stringify(event));
 }
 
 function sumProviderUsage(first: ModelRouterUsage, second: ModelRouterUsage): ModelRouterUsage {
@@ -281,7 +301,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     return { markdown: markdown.trim(), provider: response.provider, model: response.model, usage: response.usage };
   }
 
-  private async requestJson(url: string, init: RequestInit, started: number): Promise<{ response: Response; body: ProviderResponseBody }> {
+  private async requestJson(url: string, init: RequestInit, started: number, phase: string): Promise<{ response: Response; body: ProviderResponseBody }> {
     const controller = new AbortController();
     let idleTimeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     const absoluteTimeout = setTimeout(() => controller.abort(), Math.max(this.requestTimeoutMs, this.requestAbsoluteTimeoutMs));
@@ -289,6 +309,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       clearTimeout(idleTimeout);
       idleTimeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     };
+    let trackedRequest = false;
+    let httpStatus: number | undefined;
+    let requestError: string | undefined;
+    let requestStartedAt = 0;
     try {
       const rawBody = this.connection.providerId === "opencode-go" && /^deepseek-/.test(this.connection.model)
         && this.connection.protocol === "chat_completions" && typeof init.body === "string"
@@ -299,12 +323,30 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       const requestBody = useResponsesStream
         ? JSON.stringify({ ...(JSON.parse(rawBody as string) as Record<string, unknown>), stream: true })
         : rawBody;
+      requestStartedAt = Date.now();
+      providerRequestsInFlight += 1;
+      peakProviderRequestsInFlight = Math.max(peakProviderRequestsInFlight, providerRequestsInFlight);
+      trackedRequest = true;
+      logProviderRequest({
+        event: "provider_request",
+        state: "start",
+        provider: this.connection.providerId,
+        model: this.connection.model,
+        phase,
+        start: new Date(requestStartedAt).toISOString(),
+        currentInFlight: providerRequestsInFlight,
+        peakInFlight: peakProviderRequestsInFlight,
+        httpStatus: null,
+        error: null
+      });
       const response = await fetch(url, {
         ...init,
         body: requestBody,
         headers: useResponsesStream ? { ...Object.fromEntries(new Headers(init.headers).entries()), Accept: "text/event-stream" } : init.headers,
         signal: controller.signal
       });
+      httpStatus = response.status;
+      if (!response.ok) requestError = `HTTP_${response.status}`;
       refreshIdleTimeout();
       let body: ProviderResponseBody;
       try {
@@ -321,13 +363,33 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         }
         throw new ModelRouterGenerationError("MODEL_PROVIDER_INVALID_RESPONSE", this.connection.model, emptyUsage(started), this.connection.providerId);
       }
+      if (body.status === "failed" || body.status === "incomplete") requestError = `PROVIDER_${body.status.toUpperCase()}`;
       return { response, body };
     } catch (error) {
+      requestError = error instanceof ModelRouterGenerationError ? error.code
+        : error instanceof Error ? error.name : "unknown";
       if (error instanceof ModelRouterGenerationError) throw error;
       throw new ModelRouterGenerationError(error instanceof Error && error.name === "AbortError"
         ? "MODEL_PROVIDER_TIMEOUT" : "MODEL_PROVIDER_NETWORK_FAILURE",
       this.connection.model, emptyUsage(started), this.connection.providerId);
     } finally {
+      if (trackedRequest) {
+        providerRequestsInFlight = Math.max(0, providerRequestsInFlight - 1);
+        logProviderRequest({
+          event: "provider_request",
+          state: "end",
+          provider: this.connection.providerId,
+          model: this.connection.model,
+          phase,
+          start: new Date(requestStartedAt).toISOString(),
+          end: new Date().toISOString(),
+          durationMs: Date.now() - requestStartedAt,
+          currentInFlight: providerRequestsInFlight,
+          peakInFlight: peakProviderRequestsInFlight,
+          httpStatus: httpStatus ?? null,
+          error: requestError ?? null
+        });
+      }
       clearTimeout(idleTimeout);
       clearTimeout(absoluteTimeout);
     }
@@ -444,7 +506,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       let response: Response;
       let received: ProviderResponseBody;
       try {
-        ({ response, body: received } = await this.requestJson(url, init, attemptStarted));
+        ({ response, body: received } = await this.requestJson(url, init, attemptStarted, request.phase));
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
         addAttemptUsage(error.usage);
@@ -495,6 +557,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       budgetSpent += attemptCost;
       let content: unknown;
       const output = extractProviderOutput(received);
+      const providerDiagnostic = providerOutputDiagnostic(received, output);
       try { content = request.schema && typeof output === "string" ? parseWrappedProviderJson(output) : output; }
       catch {
         // Malformed content is an output-format issue, not a provider outage.
@@ -502,7 +565,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         // repair can act on this stage without restarting the page or route.
         content = output;
       }
-      return { content, usage: includeUnreportedReserve()!, model, provider: this.connection.providerId };
+      return { content, usage: includeUnreportedReserve()!, model, provider: this.connection.providerId, providerDiagnostic };
     }
     throw new ModelRouterGenerationError("MODEL_PROVIDER_RETRY_EXHAUSTED", this.connection.model,
       accumulatedUsage ?? emptyUsage(stageStarted), this.connection.providerId, request.phase);
@@ -778,6 +841,7 @@ interface ProviderResponseBody {
   };
   cost?: number;
   status?: string;
+  stop_reason?: string;
   incomplete_details?: { reason?: string } | null;
   error?: { code?: string; message?: string };
 }
@@ -854,6 +918,34 @@ function extractProviderOutput(body: ProviderResponseBody): unknown {
   if (typeof choice?.text === "string") return choice.text;
   if (body.content?.length) return body.content.map((part) => part.text || "").join("");
   return body.output;
+}
+
+function providerOutputDiagnostic(body: ProviderResponseBody, output: unknown): ProviderDiagnostic {
+  const rawOutputType = output === null ? "null" : Array.isArray(output) ? "array" : typeof output;
+  let rawObject: Record<string, unknown> | undefined;
+  if (typeof output === "string") {
+    try {
+      const parsed: unknown = JSON.parse(output);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) rawObject = parsed as Record<string, unknown>;
+    } catch {
+      // Keep malformed provider text out of diagnostics.
+    }
+  } else if (output !== null && typeof output === "object" && !Array.isArray(output)) {
+    rawObject = output as Record<string, unknown>;
+  }
+  const rawFields = rawObject && Object.fromEntries(Object.entries(rawObject).map(([key, value]) => [key, {
+    type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+    ...(typeof value === "string" || Array.isArray(value) ? { length: value.length } : {})
+  }]));
+  const finishReason = body.choices?.[0]?.finish_reason || body.stop_reason || body.incomplete_details?.reason;
+  return {
+    ...(typeof body.id === "string" ? { responseId: body.id } : {}),
+    ...(typeof finishReason === "string" ? { finishReason } : {}),
+    ...(typeof body.status === "string" ? { status: body.status } : {}),
+    rawOutputType,
+    ...(typeof output === "string" ? { rawOutputChars: output.length } : {}),
+    ...(rawFields ? { rawFields } : {})
+  };
 }
 
 function normalizeProviderUsage(usage: ProviderResponseBody["usage"], cost: number | undefined, started: number): ModelRouterUsage {

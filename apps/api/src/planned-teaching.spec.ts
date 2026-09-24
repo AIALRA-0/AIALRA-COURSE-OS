@@ -94,6 +94,31 @@ describe("planned teaching core writer", () => {
     expect(result.content.chapterBridgeMarkdown).toBe("");
   });
 
+  it("keeps provider and field diagnostics without saving the private response", async () => {
+    const raw = JSON.stringify(teachingPackage());
+    const result = await writePlannedLesson(input(), async request => request.phase === "plan"
+      ? "先讲输入，再讲输出"
+      : {
+        content: raw,
+        provider: "test-provider",
+        model: "test-model",
+        providerDiagnostic: {
+          responseId: "resp-test",
+          finishReason: "stop",
+          status: "completed",
+          rawOutputType: "string",
+          rawOutputChars: raw.length,
+          rawFields: { questions: { type: "array", length: 4 } }
+        }
+      });
+    expect(result.trace.initialOutputDiagnostic?.provider).toMatchObject({
+      responseId: "resp-test", finishReason: "stop", rawFields: { questions: { length: 4 } }
+    });
+    expect(result.trace.initialOutputDiagnostic?.parsedFields?.questions).toEqual({ type: "array", length: 4 });
+    expect(result.trace.initialOutputDiagnostic?.normalizedFields?.questions).toEqual({ type: "array", length: 4 });
+    expect(JSON.stringify(result.trace)).not.toContain("输入确定处理对象");
+  });
+
   it("formats a summary returned as a list without another model call", async () => {
     const calls: string[] = [];
     const result = await writePlannedLesson(input(), async request => {

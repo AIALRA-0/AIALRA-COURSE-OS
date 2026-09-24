@@ -44,7 +44,68 @@ describe("generation harness", () => {
 });
 
 describe("OpenCode Go and DeepSeek provider clients", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("returns metadata from raw provider output without retaining its values", async () => {
+    const rawText = JSON.stringify({ answer: "private provider text", items: ["one", "two"], count: 4, empty: null });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      id: "response-test-id", status: "completed", stop_reason: "stop", output_text: rawText,
+      usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.001 }
+    })));
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
+    const result = await runPlannedStageForTest(client);
+    expect(result.providerDiagnostic).toEqual({
+      responseId: "response-test-id",
+      finishReason: "stop",
+      status: "completed",
+      rawOutputType: "string",
+      rawOutputChars: rawText.length,
+      rawFields: {
+        answer: { type: "string", length: "private provider text".length },
+        items: { type: "array", length: 2 },
+        count: { type: "number" },
+        empty: { type: "null" }
+      }
+    });
+    expect(JSON.stringify(result.providerDiagnostic)).not.toContain("private provider text");
+  });
+
+  it("tracks concurrent provider requests and emits gated structured lifecycle logs", async () => {
+    vi.stubEnv("COURSE_OS_PROVIDER_REQUEST_DIAGNOSTICS", "true");
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    let releaseRequests!: () => void;
+    const requestsReleased = new Promise<void>((resolve) => { releaseRequests = resolve; });
+    const fetchMock = vi.fn(async () => {
+      await requestsReleased;
+      return Response.json({ output_text: "ok", usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
+    const first = runPlannedStageForTest(client, "counter_a");
+    const second = runPlannedStageForTest(client, "counter_b");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const startEvents = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .filter((event) => event.state === "start");
+    expect(startEvents.map((event) => event.currentInFlight)).toEqual([1, 2]);
+    expect(startEvents.map((event) => event.peakInFlight)).toEqual([1, 2]);
+    releaseRequests();
+    await Promise.all([first, second]);
+    const events = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    const endEvents = events.filter((event) => event.state === "end");
+    expect(endEvents).toHaveLength(2);
+    expect(endEvents.map((event) => event.currentInFlight).sort()).toEqual([0, 1]);
+    expect(endEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: "deepseek", model: "deepseek-flash", phase: "counter_a", httpStatus: 200, error: null }),
+      expect.objectContaining({ provider: "deepseek", model: "deepseek-flash", phase: "counter_b", httpStatus: 200, error: null })
+    ]));
+    expect(JSON.stringify(events)).not.toContain("synthetic-example-token");
+    expect(JSON.stringify(events)).not.toContain("https://deepseek.test");
+  });
 
   it("uses the Anthropic messages protocol for OpenCode Go Qwen", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -673,6 +734,19 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+function runPlannedStageForTest(client: HttpProviderTeachingClient, phase = "teaching") {
+  const internalClient = client as unknown as {
+    requestPlannedStage(
+      input: ReturnType<typeof providerInput>,
+      request: { phase: string; instructions: string; prompt: string; maxOutputTokens: number },
+      budget: number
+    ): Promise<{ providerDiagnostic?: Record<string, unknown> }>;
+  };
+  return internalClient.requestPlannedStage(providerInput(`diagnostic-${phase}`), {
+    phase, instructions: "test", prompt: "test", maxOutputTokens: 1_000
+  }, 0.06);
+}
 
 function providerInput(idempotencyKey: string, withImage = false) {
   return {
