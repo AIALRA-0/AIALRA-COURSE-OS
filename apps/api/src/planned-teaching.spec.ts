@@ -513,6 +513,90 @@ describe("planned teaching core writer", () => {
     expect(practice.questions).toHaveLength(4);
   });
 
+  it.each([
+    {
+      page: "chapter2:27",
+      body: (source: TeachingPackage) => {
+        const { questions, ...rest } = source;
+        return {
+          ...rest,
+          fullExplanationMarkdown: "e".repeat(1_922),
+          mainSummaryMarkdown: "m".repeat(181),
+          practiceQuestions: questions
+        };
+      },
+      aliases: { practiceQuestions: { type: "array", length: 4 }, mainSummaryMarkdown: { type: "string", length: 181 } },
+      expectedExplanationIncludes: "eeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      page: "intro:4",
+      body: (source: TeachingPackage) => {
+        const { questions, ...rest } = source;
+        return { ...rest, assessmentQuestions: questions };
+      },
+      aliases: { assessmentQuestions: { type: "array", length: 4 } },
+      expectedExplanationIncludes: "## 从输入开始"
+    },
+    {
+      page: "intro:20",
+      body: (source: TeachingPackage) => {
+        const { questions, fullExplanationMarkdown: _explanation, ...rest } = source;
+        return {
+          ...rest,
+          fullExplanation: "e".repeat(2_047),
+          keyPoints: ["a", "b", "c", "d", "e"],
+          understandingQuestions: questions.slice(0, 2),
+          choiceQuestions: questions.slice(2)
+        };
+      },
+      aliases: {
+        fullExplanation: { type: "string", length: 2_047 },
+        understandingQuestions: { type: "array", length: 2 },
+        choiceQuestions: { type: "array", length: 2 }
+      },
+      expectedExplanationIncludes: "eeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      page: "intro:3",
+      body: (source: TeachingPackage) => {
+        const { fullExplanationMarkdown: _explanation, ...rest } = source;
+        return { ...rest, completeExplanationMarkdown: "e".repeat(2_949) };
+      },
+      aliases: { completeExplanationMarkdown: { type: "string", length: 2_949 } },
+      expectedExplanationIncludes: "eeeeeeeeeeeeeeeeeeee"
+    }
+  ])("normalizes the observed fixed20 aliases for $page before repair", async fixture => {
+    const source = teachingPackage();
+    const content = fixture.body(source);
+    const summarize = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).map(([key, field]) => [key, {
+      type: Array.isArray(field) ? "array" : field === null ? "null" : typeof field,
+      ...(Array.isArray(field) || typeof field === "string" ? { length: field.length } : {})
+    }]));
+    const rawFields = summarize(content);
+    expect(rawFields).toMatchObject(fixture.aliases);
+
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      if (request.phase === "plan") return "先说明输入，再核对输出";
+      return {
+        content: JSON.stringify(content),
+        provider: "fixture-provider",
+        model: "fixture-model",
+        providerDiagnostic: { rawFields }
+      };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.trace.initialOutputDiagnostic?.provider?.rawFields).toMatchObject(fixture.aliases);
+    expect(result.trace.initialOutputDiagnostic?.parsedFields).toEqual(rawFields);
+    expect(result.trace.initialOutputDiagnostic?.normalizedFields?.questions).toEqual({ type: "array", length: 4 });
+    expect(result.trace.initialOutputDiagnostic?.normalizedFields?.fullExplanationMarkdown?.type).toBe("string");
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.content.fullExplanationMarkdown).toContain(fixture.expectedExplanationIncludes);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
   it("projects mainContentSummary to the final main content field", () => {
     const source = teachingPackage();
     const { mainContentMarkdown: _main, ...body } = source;
