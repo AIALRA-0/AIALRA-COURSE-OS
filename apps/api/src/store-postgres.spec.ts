@@ -49,6 +49,18 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("creates a new generation job through the production mutation path", async () => {
+    const fixture = await startFixture([]);
+    const job = makeJob(randomUUID());
+    fixture.jobs.push(job);
+    try {
+      await fixture.store.mutate(state => { state.jobs.push(job); });
+      expect((await fixture.store.readTaskIndex()).jobs.find(item => item.id === job.id)).toMatchObject({ state: "queued" });
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("backfills legacy job state, events, and checkpoints into the read projection", async () => {
     const job = makeJob(randomUUID());
     const fixture = await startFixture([job], true);

@@ -465,7 +465,7 @@ async function persistChangedGenerationJobs(
          page_ids, completed_page_ids, failed_page_ids, attempt, cancel_requested,
          lease_owner, lease_expires_at, created_at, updated_at, job_data
        ) VALUES (
-         $1, $2, 'generation-job:' || $1::text, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
+         $1::uuid, $2, 'generation-job:' || $1::uuid::text, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
          $10, $11, $12, $13::timestamptz, $14::timestamptz, $15::timestamptz, $16::jsonb
        )
        ON CONFLICT (id) DO UPDATE SET
