@@ -123,6 +123,27 @@ describe("planned teaching core writer", () => {
     expect(result.content.questions[0]?.explanation).toContain("\n\n因此需要核对本页的条件");
   });
 
+  it("keeps four model questions when explanations are structured or absent", async () => {
+    const calls: string[] = [];
+    const content = teachingPackage();
+    const questions = content.questions.map((question, index) => ({
+      ...question,
+      explanation: index === 0 ? { reason: question.explanation, steps: ["核对输入", "重新计算"] }
+        : index === 1 ? null : question.explanation
+    }));
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      if (request.phase === "plan") return "先解释条件再出题";
+      return { ...content, questions };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.content.questions[0]?.explanation).toContain("核对输入");
+    expect(result.content.questions[1]?.explanation).toBe(content.questions[1]?.expectedAnswer);
+    expect(result.trace.qualityWarnings?.[0]?.issues).toContain("TEACHING_QUALITY:QUESTION_EXPLANATION_EQUALS_ANSWER");
+  });
+
   it("uses one focused repair for a machine-shape error", async () => {
     const calls: string[] = [];
     const incomplete: Record<string, unknown> = { ...teachingPackage() };

@@ -97,6 +97,20 @@ function normalizeQuestionKind(value: unknown): unknown {
   return value;
 }
 
+/** Preserve the model's explanation when a compatible provider returns it as structured text. */
+function explanationText(value: unknown, depth = 0): string {
+  if (depth > 4) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return value.map(item => explanationText(item, depth + 1)).filter(Boolean).join("\n\n");
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const preferred = ["text", "content", "explanation", "reason", "rationale", "analysis", "steps", "why"]
+    .filter(key => key in record);
+  return (preferred.length ? preferred.map(key => record[key]) : Object.values(record))
+    .map(item => explanationText(item, depth + 1)).filter(Boolean).join("\n\n");
+}
+
 /** Project harmless provider wrappers and aliases into a requested JSON shape. */
 export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase = ""): unknown {
   let candidate = value;
@@ -136,13 +150,14 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
     const expectedAnswer = typeof rawAnswer === "string" && /^[A-D]$/iu.test(rawAnswer.trim())
       && rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
       ? (rawOptions as Record<string, unknown>)[rawAnswer.trim().toUpperCase()] ?? rawAnswer : rawAnswer;
+    const rawExplanation = record.explanation ?? record.rationale ?? record.reason;
     const normalized = schema.properties?.kind ? {
       ...record,
       kind: questionKind,
       prompt: record.prompt ?? record.question ?? record.stem,
       options: options ?? (questionKind === "comprehension" ? [] : undefined),
       expectedAnswer,
-      explanation: record.explanation ?? record.rationale ?? record.reason
+      explanation: explanationText(rawExplanation) || (typeof expectedAnswer === "string" ? expectedAnswer : undefined)
     } : schema.properties?.fullExplanationMarkdown ? {
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
@@ -408,6 +423,9 @@ function recordQualityWarnings(trace: PlannedTrace, content: TeachingPackage): v
   const issues: string[] = [];
   if (content.fullExplanationMarkdown.length < 120) issues.push("TEACHING_QUALITY:EXPLANATION_SHORT");
   if (content.questions.length !== 4) issues.push("TEACHING_QUALITY:QUESTION_COUNT:" + content.questions.length);
+  if (content.questions.some(question => question.explanation.trim() === question.expectedAnswer.trim())) {
+    issues.push("TEACHING_QUALITY:QUESTION_EXPLANATION_EQUALS_ANSWER");
+  }
   if (issues.length) trace.qualityWarnings = [{ phase: "teaching", issues }];
 }
 
