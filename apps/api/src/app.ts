@@ -3292,8 +3292,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       };
       persistenceStage = "save_draft";
       const saveDraftStartedAt = Date.now();
-      let saved = await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId));
+      const draftWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId);
+      const bundledCost = Boolean(dependencies.readweave.saveDraftWithCost);
+      let saved = bundledCost
+        ? await dependencies.readweave.saveDraftWithCost!(draft, existing?.revision ?? 0, draftWriteContext, cost)
+        : await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, draftWriteContext);
       timings.draftWriteMs = Date.now() - saveDraftStartedAt;
+      if (bundledCost) finalizedCostPersisted = true;
       persistenceStage = "read_back";
       const readBackStartedAt = Date.now();
       const readBack = await dependencies.readweave.getDraftByPage(page.id);
@@ -3302,15 +3307,18 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const readableAt = new Date().toISOString();
       const readableMs = Date.now() - Date.parse(currentJob.createdAt);
       persistenceStage = "append_cost";
-      const appendCostStartedAt = Date.now();
-      await dependencies.readweave.appendCostEntry(cost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
-      timings.costWriteMs = Date.now() - appendCostStartedAt;
+      if (!bundledCost) {
+        const appendCostStartedAt = Date.now();
+        await dependencies.readweave.appendCostEntry(cost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
+        timings.costWriteMs = Date.now() - appendCostStartedAt;
+      }
       finalizedCostPersisted = true;
       meter.markSettled();
       await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
         context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
           contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
-          readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt, timings: { ...timings } });
+          readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
+          costBundledIntoDraft: bundledCost, timings: { ...timings } });
       });
       persistenceStage = undefined;
       let bridgeCompleted = false;

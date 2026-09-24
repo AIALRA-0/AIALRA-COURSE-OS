@@ -631,6 +631,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
+    return this.saveDraftInternal(draft, expectedRevision, context, sourceAsset);
+  }
+
+  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft> {
+    return this.saveDraftInternal(draft, expectedRevision, context, undefined, cost);
+  }
+
+  private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {
     const result = await this.mutate(async (state): Promise<{ saved?: LessonDraft; conflict?: CourseConflict }> => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
@@ -668,6 +676,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       });
       if (index >= 0) state.drafts[index] = saved;
       else state.drafts.push(saved);
+      if (cost && !state.costEntries.some((item) => item.id === cost.id)) {
+        await this.createNote(projection.sectionNoteIds.quality,
+          `成本 · ${cost.stage} · ${cost.model}`,
+          `<pre>${escapeHtml(JSON.stringify(cost, null, 2))}</pre>`, "text", undefined,
+          { courseOsType: "generation_cost", courseOsObjectId: cost.id, courseOsPageId: cost.pageId ?? "" });
+        state.costEntries.push(structuredClone(cost));
+        state.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
+      }
       state.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
       return { saved };
     }, context);

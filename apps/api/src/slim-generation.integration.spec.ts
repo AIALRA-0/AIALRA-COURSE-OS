@@ -158,6 +158,8 @@ describe("slim page generation integration", () => {
     for (const page of release.pages) {
       const draft = await readweave.getDraftByPage(page.id);
       expect(draft?.status, page.id).toBe("ready");
+      const costs = await readweave.listCostEntries({ pageId: page.id });
+      expect(costs.filter((entry) => entry.stage === "teach"), page.id).toHaveLength(1);
       expect(draft?.page.lessonSections?.find((section) => section.kind === "main_content")?.markdown).toContain("先识别输入");
       expect(draft?.page.blocks.find((block) => block.kind === "core")?.markdown).toContain("先识别输入");
       expect(modelCallsByPage.get(page.pageNumber)).toBe(1);

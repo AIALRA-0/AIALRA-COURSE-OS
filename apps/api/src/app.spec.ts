@@ -1117,6 +1117,9 @@ describe("Course OS API", () => {
     const originalSave = readweave.saveDraft.bind(readweave);
     vi.spyOn(readweave, "saveDraft").mockImplementation((draft, revision, context, asset) =>
       originalSave({ ...draft, contentHash: `remote:${draft.contentHash}` }, revision, context, asset));
+    const originalSaveWithCost = readweave.saveDraftWithCost.bind(readweave);
+    vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost) =>
+      originalSaveWithCost({ ...draft, contentHash: `remote:${draft.contentHash}` }, revision, context, cost));
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "persisted-hash-job").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed" });
     const saved = await readweave.getDraftByPage("page-1");

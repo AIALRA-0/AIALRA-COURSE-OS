@@ -106,6 +106,8 @@ export interface ReadWeaveCourseApi {
   getDraftByPage(pageId: string): Promise<LessonDraft | undefined>;
   getDraftSnapshotByPage?(pageId: string): Promise<LessonDraft | undefined>;
   saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft>;
+  /** Store a generated draft and its teaching cost in one authority mutation. */
+  saveDraftWithCost?(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft>;
   listConflicts(): Promise<CourseConflict[]>;
   resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict>;
   getSyncStatus(): Promise<ReadWeaveSyncStatus>;
@@ -754,6 +756,14 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, _sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
+    return this.saveDraftInternal(draft, expectedRevision, context);
+  }
+
+  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft> {
+    return this.saveDraftInternal(draft, expectedRevision, context, cost);
+  }
+
+  private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost?: GenerationCostEntry): Promise<LessonDraft> {
     const result = await this.mutate(async (state): Promise<{ saved?: LessonDraft; conflict?: CourseConflict }> => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
@@ -785,6 +795,10 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
       const saved = structuredClone({ ...draft, revision: currentRevision + 1 });
       if (index >= 0) state.drafts[index] = saved;
       else state.drafts.push(saved);
+      if (cost && !state.costEntries.some((item) => item.id === cost.id)) {
+        state.costEntries.push(structuredClone(cost));
+        state.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
+      }
       state.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
       return { saved };
     });

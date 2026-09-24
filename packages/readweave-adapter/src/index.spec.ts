@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CourseProject, CourseRelease, CourseTreeNode, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
+import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
 
@@ -359,6 +359,34 @@ describe("ReadWeave ETAPI adapter", () => {
     expect((await api.getDraftByPage("page-1"))?.revision).toBe(2);
     expect(remote.requests).toHaveLength(readsAfterFirstOpen);
     expect((await api.getSyncStatus()).mode).toBe("etapi");
+  });
+
+  it("stores a generated draft and its cost in one idempotent ReadWeave mutation", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const release = releaseWithPage();
+    await api.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const cost: GenerationCostEntry = {
+      id: "cost-page-1", workspaceId: "personal", courseId: release.courseId,
+      materialVersionId: release.id, pageId: "page-1", jobId: "job-1", stage: "teach",
+      provider: "test", model: "test-model", inputTokens: 10, outputTokens: 20,
+      cachedInputTokens: 0, unitPriceSnapshot: {
+        id: "price-1", provider: "test", model: "test-model", currency: "USD",
+        capturedAt: new Date().toISOString(), source: "test",
+        inputMicrousdPerMillion: 1, outputMicrousdPerMillion: 1,
+        cachedInputMicrousdPerMillion: 0
+      }, estimatedMicrousd: 1, actualMicrousd: 1, durationMs: 25,
+      retries: 0, status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
+    };
+    const writeContext = { ...context, idempotencyKey: "draft-with-cost-1" };
+    const first = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
+    const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
+    const replay = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
+    expect(replay.revision).toBe(first.revision);
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
+    expect(await api.listCostEntries({ pageId: "page-1" })).toEqual([cost]);
+    expect(remote.titles()).toEqual(expect.arrayContaining(["成本 · teach · test-model"]));
+    expect((await api.getDraftByPage("page-1"))?.contentHash).toBe(first.contentHash);
   });
 
   it("shows the original image and teaching on the ReadWeave page while preserving remote overview edits", async () => {
