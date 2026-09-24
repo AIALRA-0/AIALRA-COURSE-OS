@@ -1,14 +1,19 @@
 import sharp from "sharp";
 
-const MAX_MODEL_IMAGE_BYTES = 48 * 1024;
+const MAX_MODEL_IMAGE_BYTES = 160 * 1024;
 
 export async function buildModelImageDataUrl(source: Buffer): Promise<string> {
   if (source.length > 32 * 1024 * 1024) throw new Error("SOURCE_PAGE_IMAGE_TOO_LARGE");
   const attempts = [
-    { width: 720, quality: 72 },
-    { width: 640, quality: 64 },
-    { width: 560, quality: 58 },
-    { width: 480, quality: 52 }
+    { width: 1200, quality: 84 },
+    { width: 1080, quality: 78 },
+    { width: 960, quality: 72 },
+    { width: 840, quality: 66 },
+    { width: 720, quality: 60 },
+    { width: 640, quality: 52 },
+    { width: 512, quality: 44 },
+    { width: 384, quality: 36 },
+    { width: 320, quality: 28 }
   ];
   let smallest: Buffer | undefined;
   for (const attempt of attempts) {
