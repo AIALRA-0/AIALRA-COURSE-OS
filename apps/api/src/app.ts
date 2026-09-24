@@ -1239,7 +1239,7 @@ export function createApp(dependencies: AppDependencies): Express {
         if (existingJob && generationPlan) existingJob = snapshot.jobs.find((job) => job.id === (generationPlan?.currentJobId || generationPlan?.lastJobId)) || existingJob;
         await rememberCandidateIdempotency(dependencies, idempotencyKey, existing.id);
         if (existingJob && (planCreated || jobCreated)) startGenerationJob(existingJob.id, dependencies);
-        return response.status(planCreated || jobCreated ? 202 : 200).json({ candidate: existing, generationPlan, generationJob: existingJob, draftIds: savedDrafts.map((draft) => draft.id) });
+        return response.status(planCreated || jobCreated ? 202 : 200).json({ candidate: existing, generationPlan, generationJob: existingJob, draftIds: savedDrafts });
       }
       const policy = await currentWritingPolicy();
       if (policy.validator.status !== "passed") return sendError(request, response, 503, "WRITING_POLICY_UNAVAILABLE", "当前写作策略未通过验证，暂时不能建立候选版本", true, { issues: policy.validator.issues });
@@ -1265,7 +1265,7 @@ export function createApp(dependencies: AppDependencies): Express {
       }, dependencies);
       await rememberCandidateIdempotency(dependencies, idempotencyKey, candidate.id);
       startCreatedGenerationPlanJobs(generation, dependencies);
-      response.status(202).json({ candidate, generationPlan: generation.plan, generationJob: generation.job, draftIds: savedDrafts.map((draft) => draft.id) });
+      response.status(202).json({ candidate, generationPlan: generation.plan, generationJob: generation.job, draftIds: savedDrafts });
     } catch (error) { next(error); }
   });
 
@@ -4365,16 +4365,17 @@ function createReleaseCandidate(base: CourseRelease, candidateId: string, policy
   };
 }
 
-async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: string, idempotencyKey: string, updatedAt: string, dependencies: AppDependencies, request: Request, pageNumbers?: number[]): Promise<LessonDraft[]> {
-  const savedDrafts: LessonDraft[] = [];
+async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: string, idempotencyKey: string, updatedAt: string, dependencies: AppDependencies, request: Request, pageNumbers?: number[]): Promise<string[]> {
+  // Keep only IDs while preparing a large deck to bound this request's heap use.
+  const savedDraftIds: string[] = [];
   for (const page of candidate.pages.filter((item) => !pageNumbers || pageNumbers.includes(item.pageNumber))) {
     const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
     if (existingDraft) {
       if (existingDraft.sourceReleaseId !== candidate.id || existingDraft.courseId !== candidate.courseId) throw new Error("CANDIDATE_PAGE_ID_COLLISION");
-      savedDrafts.push(existingDraft);
+      savedDraftIds.push(existingDraft.id);
       continue;
     }
-    savedDrafts.push(await dependencies.readweave.saveDraft({
+    const saved = await dependencies.readweave.saveDraft({
       id: `draft:${page.id}`,
       workspaceId,
       courseId: candidate.courseId,
@@ -4387,9 +4388,10 @@ async function ensureCandidateDrafts(candidate: CourseRelease, workspaceId: stri
       changedBlockIds: page.blocks.map((block) => block.id),
       contentHash: sha256Text(stableStringify(page)),
       updatedAt
-    }, 0, writeContext(request, `${idempotencyKey}:draft:${page.pageNumber}`), await candidateSourceAsset(page, dependencies)));
+    }, 0, writeContext(request, `${idempotencyKey}:draft:${page.pageNumber}`), await candidateSourceAsset(page, dependencies));
+    savedDraftIds.push(saved.id);
   }
-  return savedDrafts;
+  return savedDraftIds;
 }
 
 async function candidateSourceAsset(page: CourseRelease["pages"][number], dependencies: AppDependencies): Promise<DraftSourceAsset | undefined> {

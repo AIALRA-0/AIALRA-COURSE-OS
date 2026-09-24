@@ -33,6 +33,7 @@ services:
     <<: *course-os-runtime
     environment:
       NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=6144
       COURSE_OS_APP: api
       COURSE_OS_HOST: 0.0.0.0
       COURSE_OS_PORT: 4100

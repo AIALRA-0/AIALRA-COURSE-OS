@@ -732,8 +732,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const cached = this.draftReadCache.get(pageId);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
     return this.withDraftPageLock(pageId, undefined, async () => {
-      const state = structuredClone(await this.readStateReference(true));
+      const stateReference = await this.readStateReference(true);
       const located = await this.findDraftPageRecord(pageId);
+      if (!located && !stateReference.drafts.some((item) => item.pageId === pageId)) return undefined;
+      const state = structuredClone(stateReference);
       if (located) this.mergeDraftPageRecord(state, located.record);
       const draft = state.drafts.find((item) => item.pageId === pageId);
       if (!draft) return undefined;

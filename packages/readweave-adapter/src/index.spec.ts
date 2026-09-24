@@ -191,6 +191,36 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("returns an unrecorded page miss without cloning the global state", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    try {
+      await expect(api.getDraftByPage("missing-page")).resolves.toBeUndefined();
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  it("still reconciles a stored page draft when opening it through a fresh adapter", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "fast-miss-existing-draft" });
+    remote.editByTitle("核心解释", "从权威页面记录重建并协调后的内容");
+
+    const reopenedApi = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(reopenedApi.getDraftByPage("page-1")).resolves.toMatchObject({
+      revision: 2,
+      page: { blocks: [expect.objectContaining({ id: "block-1", markdown: "从权威页面记录重建并协调后的内容" })] }
+    });
+  });
+
   it("retries workspace bootstrap after a transient ETAPI failure", async () => {
     const remote = new FakeEtapi();
     let failuresRemaining = 3;
