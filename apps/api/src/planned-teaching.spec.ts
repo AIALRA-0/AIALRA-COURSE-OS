@@ -94,6 +94,35 @@ describe("planned teaching core writer", () => {
     expect(result.content.chapterBridgeMarkdown).toBe("");
   });
 
+  it("formats a summary returned as a list without another model call", async () => {
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      if (request.phase === "plan") return "先说明输入和输出";
+      return { ...teachingPackage(), mainContentMarkdown: ["输入确定处理对象", "输出记录处理结果"] };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toBe("- 输入确定处理对象\n- 输出记录处理结果");
+  });
+
+  it("keeps model questions when an explanation is returned as paragraphs", async () => {
+    const calls: string[] = [];
+    const content = teachingPackage();
+    const questions = content.questions.map((question, index) => index < 2
+      ? { ...question, explanation: [question.explanation, "因此需要核对本页的条件"] }
+      : question);
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      if (request.phase === "plan") return "先解释条件再出题";
+      return { ...content, questions };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.content.questions[0]?.explanation).toContain("\n\n因此需要核对本页的条件");
+  });
+
   it("uses one focused repair for a machine-shape error", async () => {
     const calls: string[] = [];
     const incomplete: Record<string, unknown> = { ...teachingPackage() };

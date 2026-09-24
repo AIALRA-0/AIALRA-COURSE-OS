@@ -100,6 +100,10 @@ function normalizeQuestionKind(value: unknown): unknown {
 /** Project harmless provider wrappers and aliases into a requested JSON shape. */
 export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase = ""): unknown {
   let candidate = value;
+  if (schema?.type === "string" && Array.isArray(candidate) && candidate.length > 0
+    && candidate.every(item => typeof item === "string" && item.trim())) {
+    return candidate.map(item => item.trim()).join("\n\n");
+  }
   const keys = Object.keys(schema?.properties ?? {});
   const onlyField = schema?.type === "object" && keys.length === 1 ? keys[0] : undefined;
   if (onlyField && schema.properties[onlyField]?.type === "array") {
@@ -339,7 +343,19 @@ function parseTeachingOutput(value: unknown): { content?: unknown; raw?: string;
 }
 
 function normalizeTeachingOutput(value: unknown): TeachingPackage {
-  const projected = projectPlannedOutputToSchema(value, teachingPackageSchema, "teaching");
+  // Some compatible relays return the summary as a JSON list even when the
+  // requested field is Markdown. This is a lossless formatting conversion,
+  // so it should not spend the page's only model repair call.
+  let source = value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const main = record.mainContentMarkdown ?? record.mainContent ?? record.summary;
+    if (Array.isArray(main) && main.length > 0 && main.every(item => typeof item === "string" && item.trim())) {
+      source = { ...record, mainContentMarkdown: main.map(item => /^\s*[-*+]\s/u.test(item)
+        ? item.trim() : `- ${item.trim()}`).join("\n") };
+    }
+  }
+  const projected = projectPlannedOutputToSchema(source, teachingPackageSchema, "teaching");
   if (!projected || typeof projected !== "object" || Array.isArray(projected)) return projected as TeachingPackage;
   let normalized = normalizePlannedOpening(normalizePlannedQuestionPunctuation(
     normalizePlannedSourceIntroductions(projected as Partial<TeachingPackage>)));
