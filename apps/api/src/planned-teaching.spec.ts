@@ -144,12 +144,16 @@ describe("planned teaching core writer", () => {
     expect(result.trace.repairDiagnostic).toBeUndefined();
   });
 
-  it.each(["quiz", "split"]) ("preserves provider %s questions without a repair", async variant => {
+  it.each(["quiz", "quizObject", "split", "comprehensionSplit"]) ("preserves provider %s questions without a repair", async variant => {
     const calls: string[] = [];
     const { questions, ...body } = teachingPackage();
-    const providerContent = variant === "quiz" ? { ...body, quiz: questions } : {
+    const providerContent = variant === "quiz" ? { ...body, quiz: questions }
+      : variant === "quizObject" ? { ...body, quiz: {
+        comprehensionQuestions: questions.slice(0, 2), multipleChoiceQuestions: questions.slice(2)
+      } } : {
       ...body,
-      understandingQuestions: questions.slice(0, 2).map(({ kind: _kind, ...question }) => question),
+      [variant === "comprehensionSplit" ? "comprehensionQuestions" : "understandingQuestions"]:
+        questions.slice(0, 2).map(({ kind: _kind, ...question }) => question),
       multipleChoiceQuestions: questions.slice(2).map(({ kind: _kind, ...question }) => question)
     };
     const result = await writePlannedLesson(input(), async request => {
@@ -162,7 +166,20 @@ describe("planned teaching core writer", () => {
     ]);
   });
 
-  it.each(["lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown"]) (
+  it("infers an unknown short-answer kind from the absence of options", async () => {
+    const calls: string[] = [];
+    const content = teachingPackage();
+    const questions = content.questions.map((question, index) => index < 2
+      ? { ...question, kind: "text_response", options: undefined } : question);
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出" : { ...content, questions };
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions.filter(question => question.kind === "comprehension")).toHaveLength(2);
+  });
+
+  it.each(["lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown", "teachingContentMarkdown"]) (
     "uses %s as the provider's existing complete explanation", async field => {
     const calls: string[] = [];
     const { fullExplanationMarkdown, ...body } = teachingPackage();
@@ -183,6 +200,19 @@ describe("planned teaching core writer", () => {
       calls.push(request.phase);
       return request.phase === "plan" ? "先讲输入，再讲输出"
         : { ...body, keyPoints: ["输入确定处理对象", "输出记录处理结果"] };
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toContain("- 输入确定处理对象");
+  });
+
+  it.each(["keyContent", "keyTakeawaysMarkdown"]) ("uses provider %s as existing main content", async field => {
+    const calls: string[] = [];
+    const { mainContentMarkdown: _mainContentMarkdown, ...body } = teachingPackage();
+    const value = field === "keyContent" ? ["输入确定处理对象", "输出记录处理结果"]
+      : "- 输入确定处理对象\n- 输出记录处理结果";
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出" : { ...body, [field]: value };
     });
     expect(calls).toEqual(["plan", "teaching"]);
     expect(result.content.mainContentMarkdown).toContain("- 输入确定处理对象");

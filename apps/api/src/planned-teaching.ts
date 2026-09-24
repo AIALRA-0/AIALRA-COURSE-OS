@@ -112,8 +112,19 @@ function normalizeQuestionKind(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const key = value.trim().toLocaleLowerCase().replace(/[\s-]+/gu, "_");
   if (/选择|choice|multiple/u.test(key)) return "multiple_choice";
-  if (/理解|comprehension|understanding|short_answer|open_ended/u.test(key)) return "comprehension";
+  if (/理解|简答|问答|comprehension|understanding|short_?answer|open_?ended|free_?text|essay/u.test(key)) return "comprehension";
   return value;
+}
+
+function providerQuizQuestions(value: unknown): unknown {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return undefined;
+  const quiz = value as Record<string, unknown>;
+  for (const key of ["questions", "quizQuestions", "items"]) {
+    if (Array.isArray(quiz[key]) && quiz[key].length) return quiz[key];
+  }
+  const groups = Object.values(quiz).filter(Array.isArray);
+  return groups.length ? groups.flat() : undefined;
 }
 
 /** Preserve the model's explanation when a compatible provider returns it as structured text. */
@@ -170,17 +181,20 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
         return { ...question, kind: question.kind ?? kind };
       }) : [];
     const splitQuestions = [
-      ...taggedQuestions(record.understandingQuestions, "comprehension"),
+      ...taggedQuestions(Array.isArray(record.understandingQuestions) && record.understandingQuestions.length
+        ? record.understandingQuestions : record.comprehensionQuestions, "comprehension"),
       ...taggedQuestions(record.multipleChoiceQuestions, "multiple_choice")
     ];
-    const questionChoices = [record.questions, record.quizQuestions, record.quiz, splitQuestions];
+    const questionChoices = [record.questions, record.quizQuestions, providerQuizQuestions(record.quiz), splitQuestions];
     const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length === 4)
       ?? questionChoices.find(item => Array.isArray(item) && item.length > 0)
       ?? record.questions ?? [];
-    const questionKind = normalizeQuestionKind(record.kind ?? record.type);
     const rawOptions = record.options ?? record.choices;
     const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
       ? Object.values(rawOptions as Record<string, unknown>) : rawOptions;
+    const recognizedKind = normalizeQuestionKind(record.kind ?? record.type);
+    const questionKind = recognizedKind === "comprehension" || recognizedKind === "multiple_choice"
+      ? recognizedKind : Array.isArray(options) && options.length >= 2 ? "multiple_choice" : "comprehension";
     const rawAnswer = record.expectedAnswer ?? record.answer ?? record.correctAnswer;
     const expectedAnswer = typeof rawAnswer === "string" && /^[A-D]$/iu.test(rawAnswer.trim())
       && rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
@@ -197,11 +211,11 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
       learningObjectives: record.learningObjectives ?? record.objectives ?? [],
-      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary) !== undefined
-        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary } : {}),
+      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary) !== undefined
+        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary } : {}),
       priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
-      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.explanation) !== undefined
-        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.explanation } : {}),
+      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation) !== undefined
+        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation } : {}),
       misconceptions: record.misconceptions ?? record.commonMistakes ?? [],
       coverageEvidence: record.coverageEvidence ?? [],
       questions: sourceQuestions
@@ -410,7 +424,8 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   let source = value;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
-    const main = record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary;
+    const main = record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints
+      ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary;
     if (Array.isArray(main) && main.length > 0 && main.every(item => typeof item === "string" && item.trim())) {
       source = { ...record, mainContentMarkdown: main.map(item => /^\s*[-*+]\s/u.test(item)
         ? item.trim() : `- ${item.trim()}`).join("\n") };
