@@ -1,0 +1,35 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_333f71d8c988f9 237-247,256-257,260,268,291,339,625-634,840
+  s_e8850ef125fb32::t_de3c1e1efa5393 653-673,681-762,764-783
+  s_e8850ef125fb32::t_52329d5f40cceb 2,173-174
+  s_e8850ef125fb32::t_4269104f369ab5 1933,1939,1944,1949,1953,1966,1977,1984-1993,1998-2023,2150
+  s_e8850ef125fb32::t_1ef473945b9876 675-676
+  s_e8850ef125fb32::t_9102681a546a56 2188-2194
+  s_e8850ef125fb32::t_fbd5d146a2c168 841,863-866
+  s_e8850ef125fb32::t_2ea7f9455d0502 550,763,822,1638-1656,1697,2139-2149
+  s_e8850ef125fb32::t_c9081f37d5327a 674,677-680
+  s_e8850ef125fb32::t_5eff171f6cacf2 2151
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_8522b11b0cf1ff 628-633,636-649,652-671,673-676,679-695,700-706,711-732
+  s_e8850ef125fb32::t_4ae1932b6b241b 992-994,996,1001,1004
+  s_e8850ef125fb32::t_b575d24548ab20 707-710
+  s_e8850ef125fb32::t_2d1ea56e7de2d4 634-635,650-651,672,677-678,696-699
+  s_e8850ef125fb32::t_8e4c278598ee7d 486-567,1162-1163
+  s_e8850ef125fb32::t_2213d5eb5e92ff 1164-1165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bd1095e185f07a720320f6aa04f7fbbaaca41e01",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
