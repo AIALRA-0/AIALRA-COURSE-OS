@@ -190,51 +190,149 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
-  it("commits cost entries before projecting their notes and coalesces same-entry retries", async () => {
+  it("stores standalone costs in the compact index and replays without rewriting the main index", async () => {
     const remote = new FakeEtapi();
-    let releaseFirstSearch!: () => void;
-    let markFirstSearchStarted!: () => void;
-    const firstSearchStarted = new Promise<void>((resolve) => { markFirstSearchStarted = resolve; });
-    const firstSearchGate = new Promise<void>((resolve) => { releaseFirstSearch = resolve; });
-    let holdFirstSearch = true;
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBefore = remote.contentWriteCount(stateNoteId);
+    const first = costEntryFor(pageRelease, "cost-standalone-1");
+    const writeContext = { ...context, idempotencyKey: "append-cost-standalone-1" };
+    await api.appendCostEntry(first, writeContext);
+
+    const costIndexId = remote.noteIdByTitle("02 Course OS 成本索引");
+    const costIndex = decodeReadWeaveStateContent(remote.contentByTitle("02 Course OS 成本索引")) as { costEntries: GenerationCostEntry[] };
+    const mainIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[]; projections: { costIndexNoteId?: string } };
+    expect(costIndex.costEntries).toEqual([first]);
+    expect(mainIndex.projections.costIndexNoteId).toBe(costIndexId);
+    expect(mainIndex.costEntries).not.toContainEqual(first);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBefore + 1);
+
+    const stateWritesAfterInitialization = remote.contentWriteCount(stateNoteId);
+    const costWritesBeforeReplay = remote.contentWriteCount(costIndexId);
+    await expect(api.appendCostEntry(first, writeContext)).resolves.toEqual(first);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
+    expect(remote.contentWriteCount(costIndexId)).toBe(costWritesBeforeReplay);
+
+    const second = costEntryFor(pageRelease, "cost-standalone-2");
+    await api.appendCostEntry(second, { ...context, idempotencyKey: "append-cost-standalone-2" });
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
+    expect(await api.listCostEntries({ pageId: "page-1" })).toHaveLength(2);
+  });
+
+  it("commits a second standalone cost while the first quality-note projection is pending", async () => {
+    const remote = new FakeEtapi();
+    let releaseProjection!: () => void;
+    let markProjectionStarted!: () => void;
+    let holdSlowProjection = true;
+    const projectionStarted = new Promise<void>((resolve) => { markProjectionStarted = resolve; });
+    const projectionGate = new Promise<void>((resolve) => { releaseProjection = resolve; });
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-      if (holdFirstSearch && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/notes")
-        && url.searchParams.get("search") === '#courseOsObjectId="cost-slow"') {
-        holdFirstSearch = false;
-        markFirstSearchStarted();
-        await firstSearchGate;
+      if (holdSlowProjection && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/notes")
+        && url.searchParams.get("search") === '#courseOsObjectId="cost-projection-slow"') {
+        holdSlowProjection = false;
+        markProjectionStarted();
+        await projectionGate;
       }
       return remote.fetch(input, init);
     };
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
-    const makeCost = (id: string): GenerationCostEntry => ({
-      id, workspaceId: "personal", courseId: pageRelease.courseId, materialVersionId: pageRelease.id,
-      pageId: "page-1", jobId: `job-${id}`, stage: "teach", provider: "test", model: "test-model",
-      inputTokens: 10, outputTokens: 20, cachedInputTokens: 0,
-      unitPriceSnapshot: { id: "price-1", provider: "test", model: "test-model", currency: "USD", capturedAt: new Date().toISOString(), source: "test", inputMicrousdPerMillion: 1, outputMicrousdPerMillion: 1, cachedInputMicrousdPerMillion: 0 },
-      estimatedMicrousd: 1, actualMicrousd: 1, durationMs: 25, retries: 0,
-      status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
-    });
-    const slow = makeCost("cost-slow");
-    const slowContext = { ...context, idempotencyKey: "append-cost-slow" };
-    const slowWrite = api.appendCostEntry(slow, slowContext);
+    const slowCost = costEntryFor(pageRelease, "cost-projection-slow");
+    const fastCost = costEntryFor(pageRelease, "cost-projection-fast");
+    const slowAppend = api.appendCostEntry(slowCost, { ...context, idempotencyKey: "append-cost-projection-slow" });
+    let fastAppend: Promise<GenerationCostEntry> | undefined;
+    let fastCompleted = false;
     try {
-      await firstSearchStarted;
-      expect(await api.listCostEntries({ pageId: "page-1" })).toContainEqual(slow);
-      await expect(api.appendCostEntry(makeCost("cost-fast"), { ...context, idempotencyKey: "append-cost-fast" })).resolves.toMatchObject({ id: "cost-fast" });
-
-      const retry = api.appendCostEntry(slow, slowContext);
-      releaseFirstSearch();
-      await expect(Promise.all([slowWrite, retry])).resolves.toHaveLength(2);
-      expect(remote.countNotesByLabel("courseOsObjectId", "cost-slow")).toBe(1);
-      expect(remote.countNotesByLabel("courseOsObjectId", "cost-fast")).toBe(1);
-      expect(await api.listCostEntries({ pageId: "page-1" })).toHaveLength(2);
+      await projectionStarted;
+      fastAppend = api.appendCostEntry(fastCost, { ...context, idempotencyKey: "append-cost-projection-fast" });
+      fastCompleted = await Promise.race([
+        fastAppend.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000))
+      ]);
     } finally {
-      releaseFirstSearch();
+      releaseProjection();
+      await slowAppend;
+      if (fastAppend) await fastAppend;
     }
+
+    expect(fastCompleted).toBe(true);
+    expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id).sort())
+      .toEqual([slowCost.id, fastCost.id].sort());
+  });
+
+  it("merges compact costs after a cold restart and replays the same idempotency key", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const cost = costEntryFor(pageRelease, "cost-cold-restart");
+    const writeContext = { ...context, idempotencyKey: "append-cost-cold-restart" };
+    await api.appendCostEntry(cost, writeContext);
+
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const costIndexId = remote.noteIdByTitle("02 Course OS 成本索引");
+    const writesBeforeReplay = remote.contentWriteCount(costIndexId);
+    await expect(reopened.listCostEntries({ pageId: "page-1" })).resolves.toEqual([cost]);
+    await expect(reopened.appendCostEntry(cost, writeContext)).resolves.toEqual(cost);
+    expect(remote.contentWriteCount(costIndexId)).toBe(writesBeforeReplay);
+    expect(await reopened.listCostEntries({ pageId: "page-1" })).toEqual([cost]);
+    expect(remote.countNotesByLabel("courseOsCostIndex", "personal")).toBe(1);
+  });
+
+  it("repairs a failed quality projection on replay without duplicating the cost", async () => {
+    const remote = new FakeEtapi();
+    let failProjectionLookup = true;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (failProjectionLookup && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/notes")
+        && url.searchParams.get("search") === '#courseOsObjectId="cost-projection-retry"') {
+        failProjectionLookup = false;
+        return new Response("injected quality projection failure", { status: 400 });
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const cost = costEntryFor(pageRelease, "cost-projection-retry");
+    const writeContext = { ...context, idempotencyKey: "append-cost-projection-retry" };
+
+    await expect(api.appendCostEntry(cost, writeContext)).rejects.toThrow("READWEAVE_ETAPI_400");
+    await expect(api.listCostEntries({ pageId: "page-1" })).resolves.toEqual([cost]);
+    await expect(api.appendCostEntry(cost, writeContext)).resolves.toEqual(cost);
+    await expect(api.listCostEntries({ pageId: "page-1" })).resolves.toEqual([cost]);
+    expect(remote.countNotesByLabel("courseOsObjectId", cost.id)).toBe(1);
+  });
+
+  it("reuses the cost index when its first main-index pointer write fails ambiguously", async () => {
+    const remote = new FakeEtapi();
+    let stateNoteId = "";
+    let pointerFailuresRemaining = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      if (pointerFailuresRemaining > 0 && init?.method === "PUT" && path === `/notes/${stateNoteId}/content`) {
+        pointerFailuresRemaining -= 1;
+        return new Response("injected ambiguous pointer failure", { status: 500 });
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const cost = costEntryFor(pageRelease, "cost-pointer-retry");
+    const writeContext = { ...context, idempotencyKey: "append-cost-pointer-retry" };
+    pointerFailuresRemaining = 3;
+
+    await expect(api.appendCostEntry(cost, writeContext)).rejects.toThrow("READWEAVE_ETAPI_500");
+    await expect(api.appendCostEntry(cost, writeContext)).resolves.toEqual(cost);
+    await expect(api.listCostEntries({ pageId: "page-1" })).resolves.toEqual([cost]);
+    expect(remote.countNotesByLabel("courseOsCostIndex", "personal")).toBe(1);
   });
 
   it("returns a minimal release index without cloning away the full release path", async () => {
@@ -442,6 +540,8 @@ describe("ReadWeave ETAPI adapter", () => {
       pageId: "page-1", seed: "seed-before-draft", questionIds: ["question-1"],
       createdAt: "2026-09-15T00:00:00.000Z"
     }, { ...context, idempotencyKey: "selection-before-draft" });
+    const standaloneCost = costEntryFor(release, "cost-standalone-before-draft");
+    await api.appendCostEntry(standaloneCost, { ...context, idempotencyKey: "append-standalone-before-draft" });
     const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
     const activityWritesBeforeDraft = remote.contentWriteCount(activityNoteId);
     const first = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
@@ -450,7 +550,11 @@ describe("ReadWeave ETAPI adapter", () => {
     const replay = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
     expect(replay.revision).toBe(first.revision);
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
-    expect(await api.listCostEntries({ pageId: "page-1" })).toEqual([cost]);
+    expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id).sort()).toEqual([standaloneCost.id, cost.id].sort());
+    const mainIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[] };
+    const compactIndex = decodeReadWeaveStateContent(remote.contentByTitle("02 Course OS 成本索引")) as { costEntries: GenerationCostEntry[] };
+    expect(mainIndex.costEntries).toEqual([cost]);
+    expect(compactIndex.costEntries).toEqual([standaloneCost]);
     expect(remote.titles()).toEqual(expect.arrayContaining(["成本 · teach · test-model"]));
     expect((await api.getDraftByPage("page-1"))?.contentHash).toBe(first.contentHash);
   });
@@ -932,6 +1036,21 @@ function releaseWithPage(): CourseRelease {
       coverageClaims: [],
       quality: { highRiskCoverage: 1, generalCoverage: 1, mathValid: true, publishable: true, issues: [] }
     }]
+  };
+}
+
+function costEntryFor(pageRelease: CourseRelease, id: string): GenerationCostEntry {
+  return {
+    id, workspaceId: "personal", courseId: pageRelease.courseId, materialVersionId: pageRelease.id,
+    pageId: "page-1", jobId: `job-${id}`, stage: "teach", provider: "test", model: "test-model",
+    inputTokens: 10, outputTokens: 20, cachedInputTokens: 0,
+    unitPriceSnapshot: {
+      id: "price-1", provider: "test", model: "test-model", currency: "USD",
+      capturedAt: new Date().toISOString(), source: "test",
+      inputMicrousdPerMillion: 1, outputMicrousdPerMillion: 1, cachedInputMicrousdPerMillion: 0
+    },
+    estimatedMicrousd: 1, actualMicrousd: 1, durationMs: 25, retries: 0,
+    status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
   };
 }
 
