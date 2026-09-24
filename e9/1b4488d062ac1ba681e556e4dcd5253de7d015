@@ -1,0 +1,39 @@
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_2057d6ef1fea64 167-171
+  s_e8850ef125fb32::t_5f02094d1407e9 164-166,172-179,207
+  s_e8850ef125fb32::t_a563ef29bceccd 200-201,413
+  s_e8850ef125fb32::t_12dccaae308122 203-204
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_6eb3df4bb5d05c 8
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_1cc32df762dd13 166,172,176-188
+  s_e8850ef125fb32::t_9354f7a2331795 134-146
+  s_e8850ef125fb32::t_e97160d53e3f5d 165
+  s_e8850ef125fb32::t_5e6f2711026d42 147-164,167-171,173-175,189-190
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_8d786b27b237b9 361
+  s_e8850ef125fb32::t_b37bb96921ae19 362-364
+  s_e8850ef125fb32::t_960e0f8225d357 365-368,613
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_66ca776505b5a8 273-290
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_1b7a5951024a71 51-56
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_587633a3db15cd 59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e91b4488d062ac1ba681e556e4dcd5253de7d015",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
