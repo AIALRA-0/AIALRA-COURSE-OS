@@ -379,7 +379,15 @@ describe("ReadWeave ETAPI adapter", () => {
       retries: 0, status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
     };
     const writeContext = { ...context, idempotencyKey: "draft-with-cost-1" };
+    await api.saveQuestionSelection({
+      id: "selection-before-draft", sessionId: "session-before-draft", courseReleaseId: release.id,
+      pageId: "page-1", seed: "seed-before-draft", questionIds: ["question-1"],
+      createdAt: "2026-09-15T00:00:00.000Z"
+    }, { ...context, idempotencyKey: "selection-before-draft" });
+    const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const activityWritesBeforeDraft = remote.contentWriteCount(activityNoteId);
     const first = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
+    expect(remote.contentWriteCount(activityNoteId)).toBe(activityWritesBeforeDraft);
     const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
     const replay = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
     expect(replay.revision).toBe(first.revision);

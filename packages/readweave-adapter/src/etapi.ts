@@ -1804,9 +1804,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         // still fetched from ReadWeave before the mutation.
         const state = await this.readStateReference(true);
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
+        const activityBefore = state.projections.activityStateNoteId
+          ? JSON.stringify(this.activityState(state)) : undefined;
         result = structuredClone(await change(state));
         if (!replay) {
-          if (state.projections.activityStateNoteId) await this.writeActivityState(state);
+          // Drafts, release metadata, and generation costs do not change the
+          // learning activity index. Avoid rewriting that separate note for
+          // every generated page while retaining the write for actual changes.
+          if (state.projections.activityStateNoteId
+            && JSON.stringify(this.activityState(state)) !== activityBefore) {
+            await this.writeActivityState(state);
+          }
           await this.writeState(state);
         }
       } catch (error) {
