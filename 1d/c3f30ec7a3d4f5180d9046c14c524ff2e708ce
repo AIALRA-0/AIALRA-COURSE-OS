@@ -1,0 +1,23 @@
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_fa52a7deb2eaa9 15
+apps/api/src/server.spec.ts
+  s_e8850ef125fb32::t_eb0e162f773086 1-110
+apps/api/src/server.ts
+  s_e8850ef125fb32::t_28db23aa225b00 1,5,12-150,152-167,169-229,232-245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1dc3f30ec7a3d4f5180d9046c14c524ff2e708ce",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
