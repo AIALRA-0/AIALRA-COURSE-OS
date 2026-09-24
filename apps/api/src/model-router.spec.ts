@@ -119,13 +119,13 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
   it("generates a bridge from the previous explanation and current summary", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { input: string; text: { format: { name: string } } };
+      const body = JSON.parse(String(init?.body)) as { input: string; text?: { format?: { name?: string } } };
       expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("bridge-page:bridge");
       expect(body.input).toContain("前页解释了输入");
       expect(body.input).toContain("本页讨论处理规则");
-      expect(body.text.format.name).toBe("course_os_bridge");
+      expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",
-        output_text: JSON.stringify({ chapterBridgeMarkdown: "前页认识了输入，本页接着看处理规则。" }),
+        output_text: "前页认识了输入，本页接着看处理规则。",
         usage: { input_tokens: 100, output_tokens: 50, total_cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -219,6 +219,55 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
     await expect(client.generateTeachingPackage(providerInput("relay-plain-text-502", true)))
       .rejects.toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_FAILED:502" });
+  });
+
+  it("uses the configured backup when a relay rejects concurrent requests", async () => {
+    const fetchMock = vi.fn(async (url: string) => url.includes("primary.test")
+      ? Response.json({ error: { code: "gateway_concurrency_limit", message: "busy" } }, { status: 400 })
+      : Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: ["kuafu", "kuafu-backup"].map((id, index) => ({ id, displayName: id, baseUrl: `https://${index === 0 ? "primary" : "backup"}.test`, enabled: true,
+        credential: { configured: true }, models: [{ id: index === 0 ? "deepseek-v4.1-flash" : "deepseek-v4.1-flash-expires-on-0910", displayName: "Flash", protocol: "responses" as const,
+          supportsVision: false, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] })),
+      policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), routes: [
+          { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+          { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: true }
+        ], rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const result = await client.generateTeachingPackage(providerInput("concurrency-fallback"));
+    expect(result.provider).toBe("kuafu-backup");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("backup.test"))).toBe(true);
+  });
+
+  it("bounds simultaneous Kuafu teaching calls while all page jobs can keep running", async () => {
+    let active = 0;
+    let peak = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      active -= 1;
+      return Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    }));
+    const client = new SettingsProviderTeachingClient({ load: async () => ({
+      providers: [{ id: "kuafu", displayName: "Kuafu", baseUrl: "https://primary.test", enabled: true,
+        credential: { configured: true }, models: [{ id: "deepseek-v4.1-flash", displayName: "Flash", protocol: "responses" as const,
+          supportsVision: false, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] }],
+      policy: { workspaceId: "personal", allowProviderFallback: false, allowAialraEmergencyFallback: false,
+        updatedAt: new Date(0).toISOString(), routes: [{ providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }],
+        rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }] },
+      credential: async () => "synthetic-secret"
+    }) });
+    const results = await Promise.all(Array.from({ length: 15 }, (_, index) =>
+      client.generateTeachingPackage(providerInput(`parallel-page-${index}`))));
+    expect(results).toHaveLength(15);
+    expect(peak).toBeLessThanOrEqual(12);
+    expect(peak).toBeGreaterThan(1);
   });
 
   it("uses the planned writer without a blueprint and only adds a plan call when none was supplied", async () => {

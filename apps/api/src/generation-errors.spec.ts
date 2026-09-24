@@ -34,6 +34,11 @@ describe("generation error classification", () => {
       .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error"), 1, 0, 4)).toBe(true);
   });
+  it("treats a relay concurrency rejection as provider backpressure", () => {
+    const error = new Error("MODEL_PROVIDER_FAILED:gateway_concurrency_limit");
+    expect(classifyGenerationFailure(error)).toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_RATE_LIMIT" });
+    expect(shouldAutoRecoverGenerationFailure(error, 1, 0, 4)).toBe(true);
+  });
   it("does not restart page perception after an unreadable final response", () => {
     expect(describeGenerationError(new Error("MODEL_PROVIDER_INVALID_RESPONSE"))).toMatchObject({ code: "MODEL_INVALID_OUTPUT", retryable: false });
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 1, 0, 4)).toBe(false);

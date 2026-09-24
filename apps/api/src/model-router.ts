@@ -272,11 +272,10 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       instructions: `为当前课件页写一个简短的承上启下段。只回收前页讲解中理解当前页确实需要的一点，再自然指出本页接着解决什么。不重复本页完整讲解，不虚构前页事实。遵守下面完整的写作策略。\n\n${writingPolicyInstructions(input.language)}`,
       prompt: JSON.stringify({ pageTitle: input.pageTitle, previousTeaching: input.previousPageContext,
         currentSummary: input.currentSummary }),
-      schema: { type: "object", properties: { chapterBridgeMarkdown: { type: "string", minLength: 1 } },
-        required: ["chapterBridgeMarkdown"], additionalProperties: false },
       maxOutputTokens: 700
     }, input.maxCostUsd ?? 0.06);
-    const markdown = (response.content as { chapterBridgeMarkdown?: unknown })?.chapterBridgeMarkdown;
+    const markdown = typeof response.content === "string" ? response.content.trim()
+      : (response.content as { chapterBridgeMarkdown?: unknown })?.chapterBridgeMarkdown;
     if (typeof markdown !== "string" || !markdown.trim()) throw new ModelRouterGenerationError("MODEL_PROVIDER_BRIDGE_INVALID",
       response.model, response.usage, response.provider);
     return { markdown: markdown.trim(), provider: response.provider, model: response.model, usage: response.usage };
@@ -530,6 +529,7 @@ function providerFailureCode(status: number, error: ProviderResponseBody["error"
 function retryableProviderResponse(status: number, error: ProviderResponseBody["error"]): boolean {
   const providerError = `${error?.code || ""} ${error?.message || ""}`;
   if (/insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+exhausted|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) return false;
+  if (/gateway_concurrency_limit/i.test(providerError)) return true;
   if (status === 401 || status === 403 || (status >= 400 && status < 500 && status !== 429)) return false;
   return status === 429 || (status >= 500 && status <= 599)
     || /\b(?:rate_limited|rate_limit_exceeded|upstream_error)\b/i.test(providerError);
@@ -538,7 +538,26 @@ function retryableProviderResponse(status: number, error: ProviderResponseBody["
 function retryableProviderError(code: string): boolean {
   if (code === "MODEL_PROVIDER_INSUFFICIENT_BALANCE") return false;
   return code === "MODEL_PROVIDER_NETWORK_FAILURE" || code === "MODEL_PROVIDER_TIMEOUT"
-    || /^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|rate_limit_exceeded|upstream_error)$/u.test(code);
+    || /^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|rate_limit_exceeded|upstream_error|gateway_concurrency_limit)$/u.test(code);
+}
+
+// The relay rejected five of twenty simultaneous page requests with
+// gateway_concurrency_limit. Keep page jobs parallel while bounding requests
+// to that relay below its observed capacity; no page needs to fail or restart.
+let kuafuInFlight = 0;
+const kuafuWaiters: Array<() => void> = [];
+async function withKuafuCapacity<T>(providerId: string, work: () => Promise<T>): Promise<T> {
+  if (providerId !== "kuafu" && providerId !== "kuafu-backup") return work();
+  const configured = Number(process.env.COURSE_OS_KUAFU_MAX_IN_FLIGHT || 12);
+  const limit = Number.isFinite(configured) ? Math.max(1, Math.min(20, Math.trunc(configured))) : 12;
+  if (kuafuInFlight >= limit) await new Promise<void>(resolve => kuafuWaiters.push(resolve));
+  else kuafuInFlight += 1;
+  try { return await work(); }
+  finally {
+    const next = kuafuWaiters.shift();
+    if (next) next();
+    else kuafuInFlight -= 1;
+  }
 }
 
 function waitForProviderRetry(response?: Response): Promise<void> {
@@ -694,7 +713,7 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         billingMode: model.billingMode
       };
       try {
-        return await execute(new HttpProviderTeachingClient(connection), routedInput);
+        return await withKuafuCapacity(provider.id, () => execute(new HttpProviderTeachingClient(connection), routedInput));
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
         // Explicit routes are used only for transient provider failures. Auth,

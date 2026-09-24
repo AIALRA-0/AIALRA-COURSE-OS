@@ -54,7 +54,7 @@ function normalizeCode(raw: string): string {
   if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
   if (raw.includes("INSUFFICIENT_BALANCE") || raw.includes("QUOTA_EXHAUSTED") || raw.includes("402")) return "PROVIDER_QUOTA_EXHAUSTED";
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
-  if (raw.includes("429") || raw.includes("RATE_LIMIT")) return "PROVIDER_RATE_LIMIT";
+  if (raw.includes("429") || raw.includes("RATE_LIMIT") || raw.includes("gateway_concurrency_limit")) return "PROVIDER_RATE_LIMIT";
   if (raw.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
