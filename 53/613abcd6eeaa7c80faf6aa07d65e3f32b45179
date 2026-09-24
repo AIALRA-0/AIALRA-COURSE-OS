@@ -1,0 +1,30 @@
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_4ad2abed9d5996 3194,3210,3245
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_1e22c008c9cc97 275,279
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_ad40d7e7de5439 208,211,361-381
+  s_e8850ef125fb32::t_6a6db43fcbef92 382-383
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_4ad2abed9d5996 68-69
+  s_e8850ef125fb32::t_932bd74b0f2acb 188-189,191-192,218-219,221-222
+  s_e8850ef125fb32::t_ed2adb2085f1a5 432-433
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_1e22c008c9cc97 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "53613abcd6eeaa7c80faf6aa07d65e3f32b45179",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
