@@ -221,6 +221,20 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       .rejects.toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_FAILED:502" });
   });
 
+  it("retries a relay reasoning-only failure once within the same teaching stage", async () => {
+    const fetchMock = vi.fn(async () => fetchMock.mock.calls.length === 1
+      ? Response.json({ error: { code: "upstream_reasoning_only", message: "no final content" } }, { status: 400 })
+      : Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses",
+      supportsVision: false, billingMode: "metered" });
+    const result = await client.generateTeachingPackage({ ...providerInput("reasoning-only-retry"), maxCostUsd: 8 });
+    expect(result.content.fullExplanationMarkdown).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("uses the configured backup when a relay rejects concurrent requests", async () => {
     const fetchMock = vi.fn(async (url: string) => url.includes("primary.test")
       ? Response.json({ error: { code: "gateway_concurrency_limit", message: "busy" } }, { status: 400 })

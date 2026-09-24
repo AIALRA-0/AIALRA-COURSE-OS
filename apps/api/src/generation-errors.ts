@@ -56,10 +56,10 @@ function normalizeCode(raw: string): string {
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
   if (raw.includes("429") || raw.includes("RATE_LIMIT") || raw.includes("gateway_concurrency_limit")) return "PROVIDER_RATE_LIMIT";
   if (raw.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
-  if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
+  if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|upstream_reasoning_only|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
   if (raw.includes("MODEL_PROVIDER_OUTPUT_LIMIT")) return "MODEL_OUTPUT_LIMIT";
-  if (raw.includes("JSON") || raw.includes("OUTPUT") || raw.includes("MODEL_PROVIDER_INVALID_RESPONSE")) return "MODEL_INVALID_OUTPUT";
+  if (raw.includes("JSON") || raw.includes("OUTPUT") || raw.includes("TEACHING_PACKAGE_INVALID") || raw.includes("MODEL_PROVIDER_INVALID_RESPONSE")) return "MODEL_INVALID_OUTPUT";
   if (raw.includes("MATH")) return "FORMULA_INVALID";
   if (raw.includes("COVERAGE")) return "COVERAGE_GAP";
   if (/^[A-Z0-9_:-]+$/.test(raw)) return raw.slice(0, 120);

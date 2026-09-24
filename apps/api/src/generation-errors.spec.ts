@@ -33,6 +33,10 @@ describe("generation error classification", () => {
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error")))
       .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error"), 1, 0, 4)).toBe(true);
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_reasoning_only")))
+      .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
+    expect(describeGenerationError(new Error("TEACHING_PACKAGE_INVALID:result:json")))
+      .toMatchObject({ code: "MODEL_INVALID_OUTPUT", retryable: false });
   });
   it("treats a relay concurrency rejection as provider backpressure", () => {
     const error = new Error("MODEL_PROVIDER_FAILED:gateway_concurrency_limit");

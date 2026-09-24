@@ -530,6 +530,7 @@ function retryableProviderResponse(status: number, error: ProviderResponseBody["
   const providerError = `${error?.code || ""} ${error?.message || ""}`;
   if (/insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+exhausted|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) return false;
   if (/gateway_concurrency_limit/i.test(providerError)) return true;
+  if (/\bupstream_reasoning_only\b/i.test(providerError)) return true;
   if (status === 401 || status === 403 || (status >= 400 && status < 500 && status !== 429)) return false;
   return status === 429 || (status >= 500 && status <= 599)
     || /\b(?:rate_limited|rate_limit_exceeded|upstream_error)\b/i.test(providerError);
@@ -538,7 +539,7 @@ function retryableProviderResponse(status: number, error: ProviderResponseBody["
 function retryableProviderError(code: string): boolean {
   if (code === "MODEL_PROVIDER_INSUFFICIENT_BALANCE") return false;
   return code === "MODEL_PROVIDER_NETWORK_FAILURE" || code === "MODEL_PROVIDER_TIMEOUT"
-    || /^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|rate_limit_exceeded|upstream_error|gateway_concurrency_limit)$/u.test(code);
+    || /^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|rate_limit_exceeded|upstream_error|upstream_reasoning_only|gateway_concurrency_limit)$/u.test(code);
 }
 
 // The relay rejected five of twenty simultaneous page requests with
