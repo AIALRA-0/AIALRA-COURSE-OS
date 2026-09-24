@@ -3,12 +3,12 @@ import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGe
 
 describe("generation error classification", () => {
   it("routes content, transport, quota and storage failures to distinct recovery actions", () => {
-    expect(classifyGenerationFailure(new Error("TEACHING_EXPLANATION_INVALID:PLAN_EVIDENCE_QUOTE_MISSING:a"))).toMatchObject({ category: "content", phase: "explanation", action: "repair_field" });
+    expect(classifyGenerationFailure(new Error("TEACHING_EXPLANATION_INVALID:PLAN_EVIDENCE_QUOTE_MISSING:a"))).toMatchObject({ action: "pause" });
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:429"))).toMatchObject({ category: "provider", action: "retry_stage" });
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_INSUFFICIENT_BALANCE"))).toMatchObject({ category: "provider", action: "switch_provider" });
     expect(classifyGenerationFailure(new Error("READWEAVE_DRAFT_READBACK_MISMATCH"))).toMatchObject({ category: "storage", action: "retry_readback" });
     expect(classifyGenerationFailure(new Error("LEASE_LOST"))).toMatchObject({ category: "internal", action: "retry_stage" });
-    expect(classifyGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"))).toMatchObject({ category: "content", action: "retry_stage" });
+    expect(classifyGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"))).toMatchObject({ category: "content", action: "pause" });
   });
   it("preserves the failing teaching phase without exposing details or misreading source IDs as HTTP codes", () => {
     expect(describeGenerationError(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:source-401,source-402"))).toMatchObject({ code: "TEACHING_PLAN_INVALID", retryable: false });
@@ -21,12 +21,12 @@ describe("generation error classification", () => {
     });
   });
 
-  it("keeps output and teaching-plan repair inside a bounded runtime retry", () => {
-    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID"), 1, 0.02, 4)).toBe(true);
-    expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 2, 0.04, 4)).toBe(true);
+  it("does not replay the page after final-format repair or a legacy teaching-plan error", () => {
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_OUTPUT_JSON_INVALID"), 1, 0.02, 4)).toBe(false);
+    expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 2, 0.04, 4)).toBe(false);
     expect(shouldAutoRecoverGenerationFailure(new Error("TEACHING_PLAN_INVALID:PLAN_SOURCE_UNASSIGNED:atom-1"), 3, 0.04, 4)).toBe(false);
-    expect(shouldAutoRecoverGenerationFailure(new Error("LEASE_LOST"), 1, 0.04, 4)).toBe(true);
-    expect(shouldAutoRecoverGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"), 1, 0.04, 4)).toBe(true);
+    expect(shouldAutoRecoverGenerationFailure(new Error("LEASE_LOST"), 1, 0.04, 4)).toBe(false);
+    expect(shouldAutoRecoverGenerationFailure(new Error("GENERATION_REPAIR_SCOPE_INVALID"), 1, 0.04, 4)).toBe(false);
     expect(shouldAutoRecoverGenerationFailure(new Error("PROVIDER_AUTH"), 1, 0, 4)).toBe(false);
   });
   it("retries relay upstream failures instead of pausing the page", () => {
@@ -34,9 +34,9 @@ describe("generation error classification", () => {
       .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:upstream_error"), 1, 0, 4)).toBe(true);
   });
-  it("retries an unreadable successful provider response within the existing attempt limit", () => {
-    expect(describeGenerationError(new Error("MODEL_PROVIDER_INVALID_RESPONSE"))).toMatchObject({ code: "MODEL_INVALID_OUTPUT", retryable: true });
-    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 1, 0, 4)).toBe(true);
+  it("does not restart page perception after an unreadable final response", () => {
+    expect(describeGenerationError(new Error("MODEL_PROVIDER_INVALID_RESPONSE"))).toMatchObject({ code: "MODEL_INVALID_OUTPUT", retryable: false });
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 1, 0, 4)).toBe(false);
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 3, 0, 4)).toBe(false);
   });
   it("classifies a ReadWeave network failure as storage rather than model transport", () => {

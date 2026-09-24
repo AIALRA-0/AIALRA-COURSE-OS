@@ -40,7 +40,7 @@ services:
       COURSE_OS_WORKSPACE_ID: ${COURSE_OS_WORKSPACE_ID:-personal}
       COURSE_OS_CONVERSION_QUEUE_MODE: file
       COURSE_OS_EXTERNAL_WORKER: "true"
-      COURSE_OS_GENERATION_CONCURRENCY: ${COURSE_OS_GENERATION_CONCURRENCY:-16}
+      COURSE_OS_GENERATION_CONCURRENCY: ${COURSE_OS_GENERATION_CONCURRENCY:-20}
       COURSE_OS_API_URL: http://api:4100
       COURSE_OS_WORKER_TOKEN_FILE: /run/secrets/course_os_worker_token
       COURSE_OS_SETTINGS_KEY_FILE: /run/secrets/course_os_settings_key
@@ -49,16 +49,13 @@ services:
       READWEAVE_ROOT_NOTE_ID: ${READWEAVE_ROOT_NOTE_ID:-root}
       READWEAVE_PUBLIC_URL: ${READWEAVE_PUBLIC_URL:-https://readweave.example.com}
       READWEAVE_API_TOKEN_FILE: /run/secrets/readweave_api_token
-      MODEL_ROUTER_URL: ${MODEL_ROUTER_URL:-}
-      MODEL_ROUTER_API_KEY_FILE: /run/secrets/model_router_api_key
-      COURSE_OS_ALLOW_AIALRA_EMERGENCY: ${COURSE_OS_ALLOW_AIALRA_EMERGENCY:-false}
     command:
       - sh
       - -c
       - >-
         export DATABASE_URL="postgresql://course_os:$$(cat /run/secrets/postgres_password)@postgres:5432/course_os";
         pnpm --filter @course-os/api start
-    secrets: [postgres_password, readweave_api_token, course_os_worker_token, course_os_settings_key, model_router_api_key]
+    secrets: [postgres_password, readweave_api_token, course_os_worker_token, course_os_settings_key]
     volumes:
       - ./data:/data
     ports:
@@ -95,7 +92,7 @@ services:
       NODE_ENV: production
       COURSE_OS_APP: worker
       COURSE_OS_EXTERNAL_WORKER: "true"
-      COURSE_OS_GENERATION_CONCURRENCY: ${COURSE_OS_GENERATION_CONCURRENCY:-16}
+      COURSE_OS_GENERATION_CONCURRENCY: ${COURSE_OS_GENERATION_CONCURRENCY:-20}
       COURSE_OS_API_URL: http://api:4100
       COURSE_OS_WORKER_TOKEN_FILE: /run/secrets/course_os_worker_token
     command:
@@ -131,8 +128,6 @@ secrets:
     file: ${COURSE_OS_SECRET_DIR:-./secrets}/course_os_worker_token
   course_os_settings_key:
     file: ${COURSE_OS_SECRET_DIR:-./secrets}/course_os_settings_key
-  model_router_api_key:
-    file: ${COURSE_OS_SECRET_DIR:-./secrets}/model_router_api_key
 
 volumes:
   postgres-data:

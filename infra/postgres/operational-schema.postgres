@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS operational_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+INSERT INTO operational_state (id, state) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS imports (
     id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
@@ -40,23 +42,147 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     cancel_requested BOOLEAN NOT NULL DEFAULT false,
     lease_owner TEXT,
     lease_expires_at TIMESTAMPTZ,
+    job_data JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (spent_usd <= budget_usd)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS job_data JSONB;
+ALTER TABLE generation_jobs DROP CONSTRAINT IF EXISTS generation_jobs_check;
 
 CREATE INDEX IF NOT EXISTS generation_jobs_claim_idx ON generation_jobs (state, lease_expires_at, created_at);
 
+CREATE TABLE IF NOT EXISTS generation_job_checkpoints (
+    job_id UUID NOT NULL REFERENCES generation_jobs (id) ON DELETE CASCADE,
+    page_id TEXT NOT NULL,
+    checkpoint JSONB NOT NULL,
+    PRIMARY KEY (job_id, page_id)
+);
+
 CREATE TABLE IF NOT EXISTS ordered_events (
     id BIGSERIAL PRIMARY KEY,
-    stream_id UUID NOT NULL,
+    stream_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (stream_id, id)
 );
 
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'ordered_events'
+          AND column_name = 'stream_id'
+          AND data_type <> 'text'
+    ) THEN
+        ALTER TABLE ordered_events ALTER COLUMN stream_id TYPE TEXT USING stream_id::text;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS ordered_events_stream_idx ON ordered_events (stream_id, id);
+
+INSERT INTO generation_jobs (
+    id, workspace_id, idempotency_key, material_version_id, state, budget_usd, spent_usd,
+    page_ids, completed_page_ids, failed_page_ids, attempt, cancel_requested,
+    lease_owner, lease_expires_at, created_at, updated_at, job_data
+)
+SELECT
+    CASE WHEN job->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         THEN (job->>'id')::uuid END,
+    job->>'workspaceId',
+    'generation-job:' || (job->>'id'),
+    job->>'materialVersionId',
+    job->>'state',
+    (job->>'budgetUsd')::numeric,
+    COALESCE((job->>'spentUsd')::numeric, 0),
+    COALESCE(job->'pageIds', '[]'::jsonb),
+    COALESCE(job->'completedPageIds', '[]'::jsonb),
+    COALESCE(job->'failedPageIds', '[]'::jsonb),
+    COALESCE((job->>'attempt')::integer, 0),
+    COALESCE((job->>'cancelRequested')::boolean, false),
+    job->'lease'->>'owner',
+    NULLIF(job->'lease'->>'expiresAt', '')::timestamptz,
+    COALESCE(NULLIF(job->>'createdAt', '')::timestamptz, now()),
+    COALESCE(NULLIF(job->>'updatedAt', '')::timestamptz, now()),
+    job
+FROM operational_state AS source
+CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(source.state->'jobs') = 'array' THEN source.state->'jobs' ELSE '[]'::jsonb END
+) AS legacy(job)
+WHERE job->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  AND job->>'workspaceId' IS NOT NULL
+  AND job->>'materialVersionId' IS NOT NULL
+  AND job->>'state' IN ('queued', 'running', 'pending_sync', 'completed', 'paused', 'cancelled', 'failed')
+ON CONFLICT (id) DO UPDATE SET
+    workspace_id = EXCLUDED.workspace_id,
+    material_version_id = EXCLUDED.material_version_id,
+    state = EXCLUDED.state,
+    budget_usd = EXCLUDED.budget_usd,
+    spent_usd = EXCLUDED.spent_usd,
+    page_ids = EXCLUDED.page_ids,
+    completed_page_ids = EXCLUDED.completed_page_ids,
+    failed_page_ids = EXCLUDED.failed_page_ids,
+    attempt = EXCLUDED.attempt,
+    cancel_requested = EXCLUDED.cancel_requested,
+    lease_owner = EXCLUDED.lease_owner,
+    lease_expires_at = EXCLUDED.lease_expires_at,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at,
+    job_data = EXCLUDED.job_data
+WHERE generation_jobs.job_data IS NULL;
+
+INSERT INTO generation_job_checkpoints (job_id, page_id, checkpoint)
+SELECT job.id, substr(checkpoint.key, length(job.id::text) + 2), checkpoint.value
+FROM operational_state AS source
+CROSS JOIN LATERAL jsonb_each(
+    CASE WHEN jsonb_typeof(source.state->'generationCheckpoints') = 'object'
+         THEN source.state->'generationCheckpoints' ELSE '{}'::jsonb END
+) AS checkpoint(key, value)
+JOIN generation_jobs AS job ON checkpoint.key LIKE job.id::text || ':%'
+WHERE length(checkpoint.key) > length(job.id::text) + 1
+ON CONFLICT (job_id, page_id) DO NOTHING;
+
+INSERT INTO ordered_events (id, stream_id, event_type, payload, occurred_at)
+SELECT
+    (event->>'id')::bigint,
+    CASE WHEN event->>'streamId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         THEN (event->>'streamId')::uuid END,
+    event->>'type',
+    COALESCE(event->'payload', 'null'::jsonb),
+    COALESCE(NULLIF(event->>'occurredAt', '')::timestamptz, now())
+FROM operational_state AS source
+CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(source.state->'events') = 'array' THEN source.state->'events' ELSE '[]'::jsonb END
+) AS legacy(event)
+WHERE event->>'id' ~ '^[0-9]+$'
+  AND event->>'streamId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  AND EXISTS (
+      SELECT 1 FROM generation_jobs AS job
+      WHERE job.id = CASE WHEN event->>'streamId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                          THEN (event->>'streamId')::uuid END
+  )
+ON CONFLICT (id) DO NOTHING;
+
+DO $$
+DECLARE
+    sequence_name TEXT;
+    greatest_event_id BIGINT;
+BEGIN
+    sequence_name := pg_get_serial_sequence('ordered_events', 'id');
+    SELECT GREATEST(
+        COALESCE((SELECT MAX(id) FROM ordered_events), 0),
+        COALESCE((
+            SELECT MAX(CASE WHEN event->>'id' ~ '^[0-9]+$' THEN (event->>'id')::bigint END)
+            FROM operational_state AS source
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(source.state->'events') = 'array' THEN source.state->'events' ELSE '[]'::jsonb END
+            ) AS legacy(event)
+        ), 0)
+    ) INTO greatest_event_id;
+    PERFORM setval(sequence_name, GREATEST(greatest_event_id, 1), greatest_event_id > 0);
+END $$;
 
 CREATE TABLE IF NOT EXISTS outbox (
     id UUID PRIMARY KEY,

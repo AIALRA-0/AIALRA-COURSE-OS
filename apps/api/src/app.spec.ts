@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
-import { applyTeachingPackage, applySemanticAuditFindings, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, mergeFocusedTeachingRepair, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind, validateTeachingCoverageEvidence } from "./app.js";
+import { applyTeachingPackage, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
@@ -56,7 +56,7 @@ describe("Course OS API", () => {
     await request(app).get("/api/v1/imports/import-other").set("X-Workspace-Id", "personal").expect(404);
     expect((await request(app).get("/api/v1/imports").set("X-Workspace-Id", "other").expect(200)).body).toHaveLength(1);
   });
-  it("returns a workspace-scoped, sanitized latest generation stage and phase summary", async () => {
+  it("returns a workspace-scoped latest stage and ignores historical phase fields", async () => {
     const { app, operations } = await seededApp();
     const job: GenerationJob = {
       id: "generation-stage-summary",
@@ -100,18 +100,16 @@ describe("Course OS API", () => {
     expect(detail.body.latestStageActivity).toEqual({
       stage: "teach",
       status: "completed",
-      phase: "explanation",
-      phaseStatus: "completed",
       occurredAt: "2026-09-22T10:07:30.000Z"
     });
-    expect(Object.keys(detail.body.latestStageActivity).sort()).toEqual(["occurredAt", "phase", "phaseStatus", "stage", "status"]);
+    expect(Object.keys(detail.body.latestStageActivity).sort()).toEqual(["occurredAt", "stage", "status"]);
     expect(JSON.stringify(detail.body)).not.toContain("private-stage-payload");
     expect(JSON.stringify(detail.body)).not.toContain("private prompt");
     expect(JSON.stringify(detail.body)).not.toContain("private-provider-key");
     expect(JSON.stringify(detail.body)).not.toContain("private generation plan");
     await request(app).get(`/api/v1/generation-jobs/${otherWorkspaceJob.id}`).set("X-Workspace-Id", "personal").expect(404);
   });
-  it("attaches sanitized latest stage summaries to active jobs in a generation plan", async () => {
+  it("attaches sanitized latest stage summaries and ignores historical phases in a plan", async () => {
     const { app, operations, release } = await seededApp();
     const planId = "plan-stage-summary";
     const timestamp = "2026-09-22T10:00:00.000Z";
@@ -181,15 +179,11 @@ describe("Course OS API", () => {
     expect(response.body.activeJobs[0].latestStageActivity).toEqual({
       stage: "teach",
       status: "started",
-      phase: "opening",
-      phaseStatus: "started",
       occurredAt: "2026-09-22T10:01:00.000Z"
     });
     expect(response.body.activeJobs[1].latestStageActivity).toEqual({
       stage: "teach",
       status: "completed",
-      phase: "explanation",
-      phaseStatus: "completed",
       occurredAt: "2026-09-22T10:03:00.000Z"
     });
     expect(response.body.currentJob.latestStageActivity).toEqual(response.body.activeJobs[0].latestStageActivity);
@@ -489,59 +483,6 @@ describe("Course OS API", () => {
     expect(reconciledRead).not.toHaveBeenCalled();
   });
 
-  it("applies only exact, unambiguous semantic corrections and preserves unrelated fields", () => {
-    const before = testTeachingResult(0).content;
-    before.misconceptions[0] = "原始比值是 1.2，但裁剪后仍是 1.2";
-    const applied = applySemanticAuditFindings(before, [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "来源页：0.30 / 0.20 = 1.5" }]);
-    expect(applied.content.misconceptions[0]).toContain("原始比值是 1.5，但裁剪后仍是 1.2");
-    expect(applied.content.fullExplanationMarkdown).toBe(before.fullExplanationMarkdown);
-    expect(before.misconceptions[0]).toContain("原始比值是 1.2");
-    const replayed = applySemanticAuditFindings(applied.content, [{ field: "misconceptions:0", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "来源页：0.30 / 0.20 = 1.5" }]);
-    expect(replayed.content).toEqual(applied.content);
-    expect(replayed.fields).toEqual([]);
-    expect(() => applySemanticAuditFindings(before, [{ field: "fullExplanationMarkdown", original: "不存在的句子", replacement: "改写", evidence: "来源" }])).toThrow();
-    expect(() => applySemanticAuditFindings(before, [{ field: "questions:0:expectedAnswer", original: "答案", replacement: "改写", evidence: "来源" }])).toThrow();
-  });
-
-  it("updates only evidence excerpts containing an exact corrected fact", () => {
-    const before = testTeachingResult(0).content;
-    before.fullExplanationMarkdown = "这里的原始比值是 1.2，用于比较这两个输入\n另外一个对象的解释保持原样且不参与本次修正";
-    before.coverageEvidence = [
-      { atomId: "ratio", coveredFields: ["observation"], explanation: "这里的原始比值是 1.2，用于比较这两个输入" },
-      { atomId: "other", coveredFields: ["observation"], explanation: "另外一个对象的解释保持原样且不参与本次修正" }
-    ];
-    const applied = applySemanticAuditFindings(before, [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "0.30 除以 0.20 得到 1.5" }]);
-    expect(applied.content.coverageEvidence[0]!.explanation).toContain("原始比值是 1.5");
-    expect(applied.content.fullExplanationMarkdown).toContain(applied.content.coverageEvidence[0]!.explanation);
-    expect(applied.content.coverageEvidence[1]).toEqual(before.coverageEvidence[1]);
-    expect(before.coverageEvidence[0]!.explanation).toContain("1.2");
-    expect(applied.content.questions).toEqual(before.questions);
-  });
-
-  it("keeps verified teaching fields when repairing only coverage or a prior definition", () => {
-    const previous: TeachingPackage = { chapterBridgeMarkdown: "", learningObjectives: ["解释作用"], mainContentMarkdown: "- 已知关系", priorKnowledge: ["原定义"], fullExplanationMarkdown: "这里已经解释了原图中两个对象的关系，以及它们怎样共同产生结果".repeat(3), misconceptions: ["原易错点"], coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "旧引用" }], questions: [] };
-    const repaired: TeachingPackage = { ...previous, priorKnowledge: ["新定义"], fullExplanationMarkdown: "模型意外重写了讲解".repeat(6), coverageEvidence: [{ atomId: "a1", coveredFields: ["observation"], explanation: "新的真实引用" }] };
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_COVERAGE_QUOTE_NOT_FOUND:a1"])).toEqual({ ...previous, coverageEvidence: repaired.coverageEvidence });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_PRIOR_KNOWLEDGE_TOO_SHALLOW"])).toEqual({ ...previous, priorKnowledge: repaired.priorKnowledge });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH", "TEACHING_PRIOR_UNPAIRED_ENGLISH"])).toBeUndefined();
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_MISCONCEPTIONS_PACKED", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:a1"])).toEqual({ ...previous, misconceptions: repaired.misconceptions, coverageEvidence: repaired.coverageEvidence });
-    expect(mergeFocusedTeachingRepair(previous, { ...repaired, learningObjectives: ["修好的公式"] }, ["TEACHING_MATH_INVALID:learningObjectives"]))
-      .toEqual({ ...previous, learningObjectives: ["修好的公式"] });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNPAIRED_ENGLISH"], ["fullExplanationMarkdown"])).toEqual({ ...previous, fullExplanationMarkdown: repaired.fullExplanationMarkdown, coverageEvidence: repaired.coverageEvidence });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_WEIGHTED_TREND_CONDITION_MISSING:mainContentMarkdown"]))
-      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_SOFTMAX_NORMALIZATION_CONTRADICTION:misconceptions"]))
-      .toEqual({ ...previous, misconceptions: repaired.misconceptions });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_ABBREVIATION_PLACEMENT:chapterBridgeMarkdown"]))
-      .toEqual({ ...previous, chapterBridgeMarkdown: repaired.chapterBridgeMarkdown });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_UNTRANSLATED_SOURCE_LABEL:chapterBridgeMarkdown"]))
-      .toEqual({ ...previous, chapterBridgeMarkdown: repaired.chapterBridgeMarkdown });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_FACTORIAL_MAGNITUDE_MISMATCH:mainContentMarkdown:1000:2567"]))
-      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
-    expect(mergeFocusedTeachingRepair(previous, repaired, ["TEACHING_CONCAT_DIMENSION_CONTRADICTION:mainContentMarkdown"]))
-      .toEqual({ ...previous, mainContentMarkdown: repaired.mainContentMarkdown });
-  });
-
   it("quotes exact source headings and translates a formula-heading reference without changing its symbol", () => {
     const content = testTeachingResult(0).content;
     content.chapterBridgeMarkdown = "上一页把 EDGE-GNN 接入了网络";
@@ -657,46 +598,6 @@ describe("Course OS API", () => {
     for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) expect(misconception).toContain(`**${role}：** `);
   });
 
-  it("requires the actual coverage excerpt rather than an overlapping phrase", () => {
-    const page = {
-      ...testRelease().pages[0]!,
-      atoms: [{ kind: "text_region" as const, id: "source-1", label: "原文片段", observation: "每条边先拼接两个端点再投影" }],
-      coverageRequirements: [{ id: "requirement-1", atomId: "source-1", requiredFields: ["observation"], risk: "high" as const }]
-    };
-    const fullExplanationMarkdown = "先把两个端点和边本身的信息放在一起。接着用同一组权重计算边表示，维度必须与输入长度相容。";
-    const content = {
-      fullExplanationMarkdown,
-      coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "接着用同一组权重计算边表示，维度必须与输入长度相容。" }]
-    } as TeachingPackage;
-    expect(validateTeachingCoverageEvidence(page, content)).toEqual([]);
-    const paraphrasedPage = { ...page, atoms: [{ ...page.atoms[0]!, observation: "Remove the value prediction layer" }] };
-    expect(validateTeachingCoverageEvidence(paraphrasedPage, { ...content, fullExplanationMarkdown: "先去掉价值预测层，再把编码器接入策略网络", coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "先移除价值预测层，然后连接策略网络" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
-    expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [{ atomId: "source-1", coveredFields: ["observation"], explanation: "只声称已经覆盖这个片段，但正文没有对应的连续讲解。" }] })).toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:source-1");
-    expect(validateTeachingCoverageEvidence(page, { ...content, coverageEvidence: [content.coverageEvidence[0]!, content.coverageEvidence[0]!] }))
-      .toContain("TEACHING_COVERAGE_DUPLICATE_ATOM");
-  });
-  it("rebinds a coverage quote after a small semantic patch but rejects unrelated text", () => {
-    const content = testTeachingResult(0).content;
-    content.fullExplanationMarkdown = "先去掉价值预测层，再把编码器接入策略网络，并继续训练策略。";
-    content.coverageEvidence = [
-      { atomId: "source-1", coveredFields: ["observation"], explanation: "先去掉价值预测层，再将编码器接入策略网络，并继续训练策略。" },
-      { atomId: "source-2", coveredFields: ["observation"], explanation: "这段无关说明不能被自动伪装成正文证据。" }
-    ];
-    const normalized = normalizeTeachingPackageMath(content);
-    expect(normalized.coverageEvidence[0]!.explanation).toBe("先去掉价值预测层，再把编码器接入策略网络，并继续训练策略");
-    expect(normalized.coverageEvidence[1]!.explanation).toBe("这段无关说明不能被自动伪装成正文证据");
-  });
-  it("matches a duplicated OCR math signature to one exact KaTeX line", () => {
-    const mathPage = { ...testRelease().pages[0]!,
-      atoms: [{ kind: "text_region" as const, id: "math-1", label: "公式", observation: "𝜋𝜋 𝑎𝑎1 = 𝜋𝜋 𝑎𝑎2 = 0.5" }],
-      coverageRequirements: [{ id: "math-r1", atomId: "math-1", requiredFields: ["observation"], risk: "high" as const }] };
-    const content = { ...testTeachingResult(0).content,
-      fullExplanationMarkdown: "初始概率满足 $\\pi(a_1)=\\pi(a_2)=\\frac{1}{2}=0.5$",
-      coverageEvidence: [{ atomId: "math-1", coveredFields: ["observation"], explanation: "两个动作的初始概率相等" }] };
-    expect(validateTeachingCoverageEvidence(mathPage, content)).toEqual([]);
-    expect(validateTeachingCoverageEvidence(mathPage, { ...content, fullExplanationMarkdown: "初始概率只有 $\\pi(a_1)=0.5$" }))
-      .toContain("TEACHING_COVERAGE_QUOTE_NOT_FOUND:math-1");
-  });
   it("splits a long generated paragraph without touching Markdown objects", async () => {
     const { normalizePackedTeachingProse } = await import("./app.js");
     const long = `第一句${"用于解释关系".repeat(22)}。第二句${"用于解释条件".repeat(22)}。`;
@@ -893,13 +794,13 @@ describe("Course OS API", () => {
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
     const running = await request(app).get(`/api/v1/generation-plans/${created.body.generationPlan.id}`).expect(200);
-    expect(running.body.plan).toMatchObject({ maxConcurrency: 16 });
+    expect(running.body.plan).toMatchObject({ maxConcurrency: 20 });
     expect(running.body.plan.jobIds).toHaveLength(3);
     expect(running.body.activeJobs).toHaveLength(3);
     expect(running.body.progress).toMatchObject({
       core: { completed: 0, total: 3 },
       crossPage: { completed: 0, total: 2 },
-      concurrency: { running: 0, limit: 16 },
+      concurrency: { running: 0, limit: 20 },
       costUsd: 0
     });
     releaseGeneration();
@@ -974,7 +875,7 @@ describe("Course OS API", () => {
     expect(keys[2]).toContain("test-release-v2-retry-candidate:page:1");
   }, 60_000);
 
-  it("retries every failed page in one plan and safely adopts the current Harness before any page completed", async () => {
+  it("retries a failed plan page under the active Harness and records each billed attempt once", async () => {
     let calls = 0;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
@@ -996,7 +897,6 @@ describe("Course OS API", () => {
       plan.harnessSnapshotId = "obsolete-harness";
       for (const job of state.jobs.filter((item) => item.planId === failed.id)) {
         job.harnessSnapshotId = "obsolete-harness";
-        state.generationCheckpoints[`${job.id}:page-1`] = { fingerprint: "obsolete-fingerprint", content: {}, completedPhases: [], trace: { version: 1, plan: undefined, phases: [] } } as never;
       }
     });
     const retried = await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
@@ -1007,7 +907,6 @@ describe("Course OS API", () => {
     expect(retried.body.jobs[0].harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
     expect(retried.body.jobs[0].attempt).toBe(0);
     expect(retried.body.jobs[0].lastErrorCode).toBeUndefined();
-    expect(Object.keys((await operations.read()).generationCheckpoints)).toHaveLength(0);
     const completed = await waitForPlan(app, failed.id);
     expect(completed).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.003 });
     const costs = await request(app).get(`/api/v1/costs?jobId=${retried.body.jobs[0].id}`).expect(200);
@@ -1161,7 +1060,7 @@ describe("Course OS API", () => {
     expect(evaluateQuestionAnswer(choice, "忽略条件")).toBe(false);
   });
 
-  it("stores QA changes, reproducible mixed questions, attempts and generation costs in ReadWeave", async () => {
+  it("stores QA changes and generation costs with the simplified teaching stage", async () => {
     const { app, operations, readweave, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0) });
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
     const asked = await request(app).post(`/api/v1/sessions/${session.body.id}/questions`).set("Idempotency-Key", "qa-create").send({ pageId: "page-1", learnerAttempt: "先比较输入", question: "为什么要检查前提", hintLevel: 1, anchorIds: [] }).expect(201);
@@ -1196,7 +1095,8 @@ describe("Course OS API", () => {
       "generation.page.completed",
       "job.completed"
     ]));
-    expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string }).stage === "atomize")).toBe(true);
+    expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string }).stage === "teach")).toBe(true);
+    expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string }).stage === "atomize")).toBe(false);
   }, 15_000);
 
   it("records the persisted ReadWeave draft hash in the completed-page event", async () => {
@@ -1324,44 +1224,26 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
-  it("automatically resumes a recoverable model-output failure and completes the page", async () => {
+  it("does not restart a page after invalid final model output", async () => {
     let calls = 0;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         calls += 1;
-        if (calls === 1) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", "deepseek-v4.1-flash", {
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_JSON_INVALID", "deepseek-v4.1-flash", {
           inputTokens: 80, cachedInputTokens: 0, outputTokens: 20, apiEquivalentUsd: 0.002, durationMs: 50
         }, "kuafu");
-        return testTeachingResult(0.004);
       }
     };
     const { app, operations, release } = await seededApp(modelRouter);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "agent-output-recovery")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     const job = await waitForJob(app, created.body.id);
-    expect(job).toMatchObject({ state: "completed", attempt: 2, completedPageIds: ["page-1"], failedPageIds: [] });
-    expect(job.lastErrorCode).toBeUndefined();
-    expect(calls).toBe(2);
-    expect((await operations.read()).events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ streamId: created.body.id, type: "generation.page.agent_repair_queued" })
-    ]));
-  }, 60_000);
-
-  it("keeps a failed field repair inside bounded Agent retries and records every billed call", async () => {
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => {
-        const result = testTeachingResult(0.005);
-        result.content.chapterBridgeMarkdown = "上一页使用 PDA 这个未解释的缩写讨论输入，本页继续沿用它来解释过程";
-        return result;
-      },
-      repairTeachingFields: async () => { throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:429", "gpt-5.6-sol", {inputTokens:50,cachedInputTokens:0,outputTokens:20,apiEquivalentUsd:0.003,durationMs:100}); }
-    };
-    const {app,release} = await seededApp(modelRouter);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key","paid-then-failed").send({materialVersionId:release.id,pageIds:["page-1"],budgetUsd:1}).expect(202);
-    const job = await waitForJob(app,created.body.id);
-    expect(job).toMatchObject({state:"failed",attempt:3,spentUsd:0.024});
-    const costs = await request(app).get(`/api/v1/costs?jobId=${job.id}`).expect(200);
-    expect(costs.body.entries.reduce((sum:number,item:{actualMicrousd:number})=>sum+item.actualMicrousd,0)).toBe(24000);
+    expect(job).toMatchObject({ state: "failed", attempt: 1, completedPageIds: [], failedPageIds: ["page-1"] });
+    expect(calls).toBe(1);
+    const events = (await operations.read()).events.filter((event) => event.streamId === created.body.id);
+    expect(events.some((event) => event.type === "generation.page.agent_repair_queued")).toBe(false);
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toEqual([expect.objectContaining({ status: "failed", actualMicrousd: 2_000 })]);
   }, 60_000);
 
   it("records already billed usage after cancellation without saving a stale draft", async () => {
@@ -1394,463 +1276,109 @@ describe("Course OS API", () => {
     }
   });
 
-  it("does not hide a rejected bridge to manufacture a successful lesson", async () => {
+  it("delivers the core page when the optional bridge request fails", async () => {
+    let bridgeCalls = 0;
     const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => {
-        const result = testTeachingResult(0.001);
-        result.content.chapterBridgeMarkdown = "上一页讨论了 PDA 的内部结构，但这里没有给出可靠的中文定义，因此不应让读者猜测这个缩写的含义";
-        return result;
+      generateTeachingPackage: async () => testTeachingResult(0.001),
+      generateBridge: async () => {
+        bridgeCalls += 1;
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:429", "deepseek-v4-flash", {
+          inputTokens: 20, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 25
+        }, "kuafu");
       }
     };
-    const { app, operations, release } = await seededApp(modelRouter);
+    const { app, operations, readweave, release } = await seededApp(modelRouter);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unsupported-bridge-test").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [] });
-    expect((await operations.read()).events.some(event => event.type === "generation.bridge.omitted")).toBe(false);
-  }, 60_000);
-
-  it("cross-checks technical teaching after structural repair and records the bounded model pass", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.title = "公式计算";
-    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式 $x=1+1=2$" }];
-    const calls: Array<{ stage: string; issues?: string[] }> = [];
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        calls.push({ stage: input.stage || "teach", issues: input.repair?.issues });
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SEMANTIC_CROSSCHECK")) result.content.fullExplanationMarkdown += "\n\n核验结果说明输入的一加一等于二，原值与输出值没有混淆";
-        return result;
-      }
-    };
-    const { app, operations, readweave, release } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-audit-technical-page")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.002 });
-    expect(calls).toEqual([{ stage: "teach", issues: undefined }, { stage: "repair", issues: ["TEACHING_SEMANTIC_CROSSCHECK"] }]);
-    const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("核验结果说明输入");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { stage?: string }).stage === "semantic_audit")).toBe(true);
-  }, 60_000);
-
-  it("uses a bounded semantic findings report without rewriting valid teaching fields", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "新概率 0.3，旧概率 0.2，原始比值 1.5，裁剪值 1.2" }];
-    let audits = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => {
-        const result = testTeachingResult(0.001);
-        result.content.fullExplanationMarkdown += "\n\n原始比值是 1.2，裁剪值也是 1.2";
-        return result;
-      },
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        if (audits === 2) expect(input.teachingPackage.fullExplanationMarkdown).toContain("原始比值是 1.5");
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          sourceChecks: [{ claim: "原始比值为 1.5", evidence: "来源写明原始比值 1.5", verdict: "supported" as const }],
-          findings: audits === 1 ? [{ field: "fullExplanationMarkdown", original: "原始比值是 1.2", replacement: "原始比值是 1.5", evidence: "原始比值 1.5，裁剪值 1.2" }] : [] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-findings-page")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.003 });
-    expect(audits).toBe(2);
-    const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("原始比值是 1.5，裁剪值也是 1.2");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { findingCount?: number }).findingCount === 1)).toBe(true);
-  }, 60_000);
-
-  it("verifies sequential source corrections against the latest audit instead of reopening resolved findings", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-sequence", pageId: "page-1", kind: "text", label: "提取文字",
-      text: "第一项不乘系数，第二项乘 $\\lambda$" }];
-    let audits = 0;
-    let sourceRepairs = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) sourceRepairs += 1;
-        else result.content.fullExplanationMarkdown += "\n\n第一项乘 $\\lambda$，第二项不乘系数";
-        return result;
-      },
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        if (audits === 2) expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数");
-        if (audits === 3) {
-          expect(input.teachingPackage.fullExplanationMarkdown).toContain("第一项不乘系数，第二项乘 $\\lambda$");
-          expect(input.repair?.issues).toContain("TEACHING_SOURCE_CLAIM_RECHECK");
-        }
-        return {
-          provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          sourceChecks: [{ claim: "系数位置", evidence: "来源写明第一项不乘，第二项乘", verdict: audits === 3 ? "supported" as const : "contradicted" as const }],
-          findings: audits === 1
-            ? [{ field: "fullExplanationMarkdown", original: "第一项乘 $\\lambda$", replacement: "第一项不乘系数", evidence: "来源页" }]
-            : audits === 2
-              ? [{ field: "fullExplanationMarkdown", original: "第二项不乘系数", replacement: "第二项乘 $\\lambda$", evidence: "来源页" }]
-              : []
-        };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-sequential-source-corrections")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.004 });
-    expect(audits).toBe(3);
-    expect(sourceRepairs).toBe(0);
-    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
-      .toContain("第一项不乘系数，第二项乘 $\\lambda$");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { sourceRepairAttempted?: boolean; recheckCount?: number }).sourceRepairAttempted === false
-        && (event.payload as { recheckCount?: number }).recheckCount === 2)).toBe(true);
-  }, 60_000);
-
-  it("rechecks an inapplicable semantic patch without accepting an empty replacement report", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-input", pageId: "page-1", kind: "text", label: "提取文字", text: "先检查输入条件，再执行规则" }];
-    let audits = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => testTeachingResult(0.001),
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        if (audits === 2) expect(input.repair?.issues).toContain("TEACHING_SEMANTIC_AUDIT_FINDING_INVALID");
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          sourceChecks: [{ claim: "先检查输入条件", evidence: "来源明确写出先检查输入条件", verdict: "supported" as const }],
-          findings: audits === 1
-            ? [{ field: "mainContentMarkdown", original: "不存在的原句", replacement: "先检查输入", evidence: "来源页" }]
-            : audits === 2 ? [{ field: "mainContentMarkdown", original: "先识别输入", replacement: "先检查输入", evidence: "来源页" }] : [] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-invalid-patch-recheck")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    const finished = await waitForJob(app, created.body.id);
-    expect(finished).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.004 });
-    expect(audits).toBe(3);
-    expect((await readweave.getDraftByPage("page-1"))?.page.quality.publishable).toBe(true);
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { stage?: string; recheckCount?: number }).stage === "semantic_audit" && (event.payload as { recheckCount?: number }).recheckCount === 2)).toBe(true);
-  }, 60_000);
-
-  it("rechecks a counted-object contradiction introduced by an audit patch", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-count", pageId: "page-1", kind: "text", label: "提取文字", text: "五种硬件供比较" }];
-    let audits = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => {
-        const result = testTeachingResult(0.001);
-        result.content.mainContentMarkdown += "\n- 图中有四种硬件供比较";
-        result.content.questions[0]!.prompt = "图中列出四种硬件分别是什么";
-        return result;
-      },
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        if (audits === 2) expect(input.repair?.issues).toContain("TEACHING_COUNT_CONTRADICTION:硬件");
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          findings: audits === 1
-            ? [{ field: "mainContentMarkdown", original: "四种硬件供比较", replacement: "五种硬件供比较", evidence: "五种硬件供比较" }]
-            : [{ field: "questions:0:prompt", original: "四种硬件", replacement: "五种硬件", evidence: "五种硬件供比较" }] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-count-recheck")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0.003 });
-    expect(audits).toBe(2);
-    expect((await readweave.getDraftByPage("page-1"))?.page.questionBank?.[0]?.prompt).toContain("五种硬件");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { recheckCount?: number }).recheckCount === 1)).toBe(true);
-  }, 60_000);
-
-  it("repairs an unsupported visual claim and reaudits the corrected whole page", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-agents", pageId: "page-1", kind: "text",
-      label: "提取文字", text: "图中两处写着 Agent，但材料没有说明它们是同一个对象" }];
-    let audits = 0;
-    let repairs = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
-          repairs += 1;
-          expect(input.repair.issues.join(" ")).toContain("原图证据");
-        } else {
-          result.content.fullExplanationMarkdown += "\n\n所有动作必然由同一个智能体执行";
-        }
-        return result;
-      },
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        if (audits === 3) expect(input.repair?.issues).toContain("TEACHING_SOURCE_CLAIM_VERIFICATION");
-        const unsupported = input.teachingPackage.fullExplanationMarkdown.includes("所有动作必然由同一个智能体执行");
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          sourceChecks: [{ claim: "所有动作必然由同一个智能体执行",
-            evidence: "原图只出现两个 Agent 标签，没有说明是否同一对象",
-            verdict: unsupported ? "unverified" as const : "supported" as const }], findings: [] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-source-repair")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [], spentUsd: 0.005 });
-    expect(audits).toBe(3);
-    expect(repairs).toBe(1);
-    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
-      .not.toContain("所有动作必然由同一个智能体执行");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
-  }, 60_000);
-
-  it("repairs only malformed math introduced by a sourced correction before final verification", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-claim", pageId: "page-1", kind: "text",
-      label: "提取文字", text: "页面没有说明两个对象一定相同" }];
-    let mathRepairs = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
-          result.content.mainContentMarkdown += "\n- 来源关系 $\\badmacro$";
-        } else if (input.stage === "teach") {
-          result.content.fullExplanationMarkdown += "\n\n两个对象一定相同";
-        }
-        return result;
-      },
-      repairTeachingFields: async (input, fields) => {
-        mathRepairs += 1;
-        expect(input.repair?.issues).toContain("TEACHING_MATH_INVALID:mainContentMarkdown");
-        expect(fields).toEqual(["mainContentMarkdown"]);
-        return testTeachingResult(0.001);
-      },
-      auditTeachingPackage: async (input) => ({ provider: "deepseek", model: "synthetic-vision",
-        usage: testTeachingResult(0.001).usage, findings: [],
-        sourceChecks: [{ claim: "两个对象一定相同", evidence: "来源未说明两者一定相同",
-          verdict: input.teachingPackage.fullExplanationMarkdown.includes("两个对象一定相同") ? "unverified" : "supported" }] })
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "sourced-math-repair")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [] });
-    expect(mathRepairs).toBe(1);
-    const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.page.quality.publishable).toBe(true);
-    expect(draft?.page.lessonSections?.find((section) => section.kind === "main_content")?.markdown).not.toContain("badmacro");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id)
-      .some((event) => (event.payload as { sourceRepairAccepted?: boolean; sourceRepairMathFixed?: boolean }).sourceRepairAccepted === true
-        && (event.payload as { sourceRepairMathFixed?: boolean }).sourceRepairMathFixed === true)).toBe(true);
-  }, 60_000);
-
-  it("applies a sourced final audit correction and verifies it before saving", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-step", pageId: "page-1", kind: "text",
-      label: "提取文字", text: "先检查输入；图中两个智能体标签不表示同一对象" }];
-    let audits = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SOURCE_CLAIM_REPAIR")) {
-          result.content.coverageEvidence = result.content.coverageEvidence.map((claim) => ({ ...claim, explanation: "这条新引用不在讲解中" }));
-        } else {
-          result.content.fullExplanationMarkdown += "\n\n两个智能体标签必然表示同一对象";
-        }
-        return result;
-      },
-      auditTeachingPackage: async (input) => {
-        audits += 1;
-        const falseAgentClaim = input.teachingPackage.fullExplanationMarkdown.includes("两个智能体标签必然表示同一对象");
-        const falseStepClaim = input.teachingPackage.mainContentMarkdown.includes("先识别输入");
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          findings: audits === 3 ? [{ field: "mainContentMarkdown", original: "先识别输入",
-            replacement: "先检查输入", evidence: "课件写着先检查输入" }] : [],
-          sourceChecks: [{ claim: falseAgentClaim ? "两个智能体标签必然表示同一对象" : "两个智能体标签分别出现",
-            evidence: "课件没有说明两个标签是同一对象", verdict: falseAgentClaim ? "unverified" as const : "supported" as const },
-          { claim: falseStepClaim ? "先识别输入" : "先检查输入", evidence: "课件写着先检查输入",
-            verdict: falseStepClaim ? "contradicted" as const : "supported" as const }] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-final-patch")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", failedPageIds: [] });
-    expect(audits).toBe(4);
-    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.find((section) => section.kind === "main_content")?.markdown)
-      .toContain("先检查输入");
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { finalAuditPatchApplied?: boolean; sourceRepairAccepted?: boolean }).finalAuditPatchApplied === true
-        && (event.payload as { sourceRepairAccepted?: boolean }).sourceRepairAccepted === true)).toBe(true);
-  }, 60_000);
-
-  it("does not mark a page ready when a source claim remains unverified after correction", async () => {
-    const technicalRelease = testRelease();
-    technicalRelease.pages[0]!.pageNumber = 2;
-    technicalRelease.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式第一项没有额外系数" }];
-    let audits = 0;
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => testTeachingResult(0.001),
-      auditTeachingPackage: async () => {
-        audits += 1;
-        return { provider: "deepseek", model: "synthetic-vision", usage: testTeachingResult(0.001).usage,
-          sourceChecks: [{ claim: "公式第一项的系数", evidence: "原图辨认不清", verdict: "unverified" as const }],
-          findings: audits === 1 ? [{ field: "mainContentMarkdown", original: "先识别输入", replacement: "先检查输入", evidence: "来源说明先检查输入" }] : [] };
-      }
-    };
-    const { app, readweave, release, operations } = await seededApp(modelRouter, technicalRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-unverified-page")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"] });
-    expect(audits).toBe(3);
-    expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
-    expect((await operations.read()).events.filter((event) => event.streamId === created.body.id && event.type === "generation.stage.completed")
-      .some((event) => (event.payload as { sourceRepairFailureKind?: string }).sourceRepairFailureKind === "final_audit_unsupported"
-        && (event.payload as { finalAuditUnsupportedCount?: number }).finalAuditUnsupportedCount === 1)).toBe(true);
-  }, 60_000);
-
-  it("keeps a candidate unready when the semantic pass introduces a new quality error", async () => {
-    const candidate = testRelease();
-    candidate.lifecycle = "draft_source";
-    candidate.pages[0]!.pageNumber = 2;
-    candidate.pages[0]!.anchors = [{ id: "source-formula", pageId: "page-1", kind: "text", label: "提取文字", text: "公式 $x=1+1=2$" }];
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.repair?.issues.includes("TEACHING_SEMANTIC_CROSSCHECK")) result.content.fullExplanationMarkdown += "\n\nGraph Encoder 没有解释就直接出现";
-        return result;
-      }
-    };
-    const { app, readweave, release } = await seededApp(modelRouter, candidate);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "semantic-audit-invalid-page")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], spentUsd: 0.002 });
-    const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.status).toBe("needs_review");
-    expect(draft?.page.quality.issues).toContain("TEACHING_SEMANTIC_AUDIT_INVALID");
-  }, 60_000);
-
-  it("repairs a structurally valid but overlong model draft once before saving", async () => {
-    const calls: Array<{ stage?: string; repair?: { issues: string[]; maximumExplanationCharacters: number } }> = [];
-    const coveredRelease = testRelease();
-    coveredRelease.pages[0]!.atoms = [{ kind: "image_region", id: "atom-1", label: "输入与输出关系", observation: "输入经过规则得到输出" }];
-    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-1", atomId: "atom-1", requiredFields: ["observation"], risk: "high" }];
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        calls.push({ stage: input.stage, repair: input.repair });
-        const result = testTeachingResult(0.001);
-        if (input.stage === "teach") {
-          result.content.fullExplanationMarkdown = `${result.content.fullExplanationMarkdown}\n\n${"这段内容故意超过页面允许的长度，用来触发一次受约束的模型修复\n".repeat(160)}`;
-          result.content.coverageEvidence = [{ atomId: "atom-1", coveredFields: ["observation"], explanation: "正文解释了输入经过规则得到输出的可见关系" }];
-        }
-        return result;
-      }
-    };
-    const { app, operations, readweave, release } = await seededApp(modelRouter, coveredRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-overlong-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.002 });
-    expect(calls).toHaveLength(2);
-    expect(calls[0]).toMatchObject({ stage: "teach" });
-    expect(calls[1]).toMatchObject({ stage: "repair", repair: { issues: expect.arrayContaining(["TEACHING_EXPLANATION_TOO_LONG"]), maximumExplanationCharacters: 900 } });
-    const savedDraft = await readweave.getDraftByPage("page-1");
-    expect(savedDraft?.status).toBe("ready");
-    expect(savedDraft?.page.coverageClaims).toEqual([expect.objectContaining({ requirementId: "requirement-1", coveredFields: ["observation"], status: "covered" })]);
-    const events = (await operations.read()).events.filter((event) => event.streamId === created.body.id);
-    expect(events.some((event) => event.type === "generation.stage.started" && (event.payload as { stage?: string }).stage === "repair")).toBe(true);
-    expect(events.some((event) => event.type === "generation.stage.completed" && (event.payload as { stage?: string; remainingIssueCount?: number }).stage === "repair" && (event.payload as { remainingIssueCount?: number }).remainingIssueCount === 0)).toBe(true);
-  }, 60_000);
-
-  it("repairs missing atom coverage and validates the repaired evidence", async () => {
-    const calls: Array<{ stage?: string; issues?: string[] }> = [];
-    const coveredRelease = testRelease();
-    coveredRelease.pages[0]!.atoms = [{ kind: "image_region", id: "atom-coverage", label: "输入与输出关系", observation: "输入经过规则得到输出" }];
-    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-coverage", atomId: "atom-coverage", requiredFields: ["observation"], risk: "high" }];
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async (input) => {
-        calls.push({ stage: input.stage, issues: input.repair?.issues });
-        const result = testTeachingResult(0.001);
-        if (input.stage === "repair") result.content.coverageEvidence = [{ atomId: "atom-coverage", coveredFields: ["observation"], explanation: "正文解释了输入经过规则得到输出的可见关系" }];
-        return result;
-      }
-    };
-    const { app, readweave, release } = await seededApp(modelRouter, coveredRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-missing-coverage").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
-    expect(calls).toEqual([
-      { stage: "teach", issues: undefined },
-      { stage: "repair", issues: ["TEACHING_COVERAGE_REQUIREMENT_MISSING"] }
-    ]);
-    expect((await readweave.getDraftByPage("page-1"))?.page.coverageClaims).toEqual([expect.objectContaining({ requirementId: "requirement-coverage", status: "covered" })]);
+    expect(bridgeCalls).toBe(1);
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.status).toBe("ready");
+    expect(draft?.page.lessonSections?.some((section) => section.kind === "chapter_bridge")).toBe(false);
+    expect((await operations.read()).events.some(event => event.type === "generation.page.completed" && (event.payload as { bridgeCompleted?: boolean }).bridgeCompleted === false)).toBe(true);
   }, 60_000);
 
-  it("repairs only a misconception without invalidating already valid source coverage", async () => {
-    const coveredRelease = testRelease();
-    coveredRelease.pages[0]!.atoms = [{ kind: "text_region", id: "atom-text", label: "原文片段", observation: "输入经过规则得到输出" }];
-    coveredRelease.pages[0]!.coverageRequirements = [{ id: "requirement-text", atomId: "atom-text", requiredFields: ["observation"], risk: "high" }];
+  it("records one final format repair inside the page generation and bills the combined call once", async () => {
+    let generationCalls = 0;
+    let formatRepairCalls = 0;
+    let fieldRepairCalls = 0;
+    let auditCalls = 0;
+    const reportedPhases: string[] = [];
+    const usage = testTeachingResult(0.003).usage;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
-        const result = testTeachingResult(0.001);
-        if (input.stage === "teach") {
-          result.content.misconceptions = ["不要跳过输入条件，应该先核对输出"];
-          result.content.coverageEvidence = [{ atomId: "atom-text", coveredFields: ["observation"], explanation: "输入是处理开始前已经知道的信息，规则限定允许执行的步骤" }];
-        } else {
-          result.content.fullExplanationMarkdown = result.content.fullExplanationMarkdown.replace("输入是处理开始前已经知道的信息", "输入在开始前已经确定");
+        generationCalls += 1;
+        for (const phase of ["plan", "teaching", "format_repair"]) {
+          if (phase === "format_repair") formatRepairCalls += 1;
+          reportedPhases.push(phase);
+          await input.onTeachingPhase?.(phase, "started");
+          await input.onTeachingPhase?.(phase, "completed", usage);
         }
+        const result = testTeachingResult(0.003);
+        result.content.fullExplanationMarkdown += "\n\n最终格式修复后的内容保留在交付页面中";
+        result.schemaRetries = 1;
         return result;
+      },
+      repairTeachingFields: async () => {
+        fieldRepairCalls += 1;
+        return testTeachingResult(0);
+      },
+      auditTeachingPackage: async () => {
+        auditCalls += 1;
+        return { provider: "test", model: "test", usage, findings: [], sourceChecks: [] };
       }
     };
-    const { app, readweave, release } = await seededApp(modelRouter, coveredRelease);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-misconception-only").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 7 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.002 });
-    const saved = await readweave.getDraftByPage("page-1");
-    expect(saved?.status).toBe("ready");
-    expect(saved?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown).toContain("输入是处理开始前已经知道的信息");
-    expect(saved?.page.lessonSections?.find((section) => section.kind === "misconceptions")?.items?.[0]?.text).toContain("因为规则只对满足前提的对象有效");
+    const { app, operations, readweave, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "app-final-format-repair")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+
+    expect(await waitForJob(app, created.body.id)).toMatchObject({
+      state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.003
+    });
+    expect(generationCalls).toBe(1);
+    expect(formatRepairCalls).toBe(1);
+    expect(reportedPhases).toEqual(["plan", "teaching", "format_repair"]);
+    expect(fieldRepairCalls).toBe(0);
+    expect(auditCalls).toBe(0);
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.status).toBe("ready");
+    expect(draft?.page.lessonSections?.find((section) => section.kind === "full_explanation")?.markdown)
+      .toContain("最终格式修复后的内容");
+    const events = (await operations.read()).events.filter((event) => event.streamId === created.body.id);
+    expect(events.filter((event) => event.type === "generation.stage.started"
+      && (event.payload as { stage?: string }).stage === "repair")).toHaveLength(1);
+    expect(events.some((event) => (event.payload as { phase?: string }).phase === "semantic_audit")).toBe(false);
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toHaveLength(1);
+    expect(costs.body.entries[0]).toMatchObject({ status: "succeeded", actualMicrousd: 3_000 });
   }, 60_000);
 
-  it("keeps a rejected candidate page readable while the generation job remains failed", async () => {
+  it("delivers pages with content-quality and coverage issues as ready drafts", async () => {
     const candidate = testRelease();
     candidate.lifecycle = "draft_source";
-    candidate.pages[0]!.atoms = [{ kind: "text_region", id: "atom-source", label: "来源片段", observation: "输入经过规则得到输出" }];
-    candidate.pages[0]!.coverageRequirements = [{ id: "requirement-source", atomId: "atom-source", requiredFields: ["observation"], risk: "high" }];
+    candidate.pages[0]!.atoms = [{ kind: "text_region", id: "source-atom", label: "来源片段", observation: "输入经过规则得到输出" }];
+    candidate.pages[0]!.coverageRequirements = [{ id: "source-requirement", atomId: "source-atom", requiredFields: ["observation"], risk: "high" }];
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
         const result = testTeachingResult(0.001);
-        result.content.priorKnowledge = ["输入条件：先确认参与计算的对象和输入范围，只有满足规则前提时才能计算结果\n输出结果：计算结束后核对输出是否属于允许范围，避免把中间值误当成最终答案"];
-        result.content.misconceptions = ["不要跳过输入条件"];
-        result.content.coverageEvidence = [{ atomId: "atom-source", coveredFields: ["observation"], explanation: "这段解释并没有出现在完整讲解正文之中" }];
+        result.content.fullExplanationMarkdown = "只给结论，没有展开说明";
+        result.content.questions = [];
+        result.content.coverageEvidence = [{ atomId: "unknown-atom", coveredFields: ["observation"], explanation: "无法对应来源的说明" }];
         return result;
       }
     };
     const { app, readweave, release } = await seededApp(modelRouter, candidate);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "candidate-rejected-draft").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 2 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"], completedPageIds: [] });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "app-nonblocking-content-quality")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+
+    expect(await waitForJob(app, created.body.id)).toMatchObject({
+      state: "completed", completedPageIds: ["page-1"], failedPageIds: []
+    });
     const draft = await readweave.getDraftByPage("page-1");
-    expect(draft).toMatchObject({ status: "needs_review", page: { quality: { publishable: false, issues: expect.arrayContaining(["TEACHING_MISCONCEPTION_REASON_MISSING", "TEACHING_COVERAGE_QUOTE_NOT_FOUND:atom-source"]) } } });
-    expect(draft?.page.lessonSections?.find((section) => section.kind === "prior_knowledge")?.items).toHaveLength(2);
+    expect(draft?.status).toBe("ready");
+    expect(draft?.page.quality.publishable).toBe(false);
+    expect(draft?.page.quality.issues.length).toBeGreaterThan(0);
     expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
   }, 60_000);
-
-  it("does not count a draft that failed publication checks as a completed page", async () => {
-    const candidate = testRelease();
-    candidate.lifecycle = "draft_source";
-    const modelRouter: ModelRouterClient = { generateTeachingPackage: async () => {
-      const result = testTeachingResult(0.005);
-      result.content.misconceptions = ["不要跳过输入条件"];
-      result.content.coverageEvidence = [{ atomId: "atom-source", coveredFields: ["observation"], explanation: "这段解释并没有出现在完整讲解正文之中" }];
-      return result;
-    } };
-    const { app, readweave, release } = await seededApp(modelRouter, candidate);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unpublishable-candidate")
-      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });
-    expect(await readweave.getDraftByPage("page-1")).toMatchObject({ status: "needs_review", page: { quality: { publishable: false } } });
-  }, 60_000);
-
   it("uses the requested batch budget for a page instead of a hidden fixed cap", async () => {
     const limits: number[] = [];
     const modelRouter: ModelRouterClient = {
@@ -2205,7 +1733,8 @@ describe("Course OS API", () => {
       idempotencyKey: "route-fallback-test"
     });
     expect(routeResult.provider).toBe("deepseek");
-    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(providerFetch).toHaveBeenCalledTimes(3);
+    expect(routeResult.usage.apiEquivalentUsd).toBe(0.003);
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
     expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"]);

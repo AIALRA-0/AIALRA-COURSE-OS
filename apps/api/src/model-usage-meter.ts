@@ -3,8 +3,9 @@ import { ModelRouterGenerationError, type ModelRouterClient, type ModelRouterUsa
 type UsageReceipt = { provider: string; model: string; usage: ModelRouterUsage };
 
 /** Receipts outlive content validation and cancellation; no draft writes happen here. */
-export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRouterClient; groupedUsage(): UsageReceipt[] } {
+export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRouterClient; markSettled(): void; groupedUsage(): UsageReceipt[] } {
   const receipts: UsageReceipt[] = [];
+  let settledCount = 0;
   const observe = async <T extends UsageReceipt>(call: () => Promise<T>): Promise<T> => {
     try {
       const result = await call();
@@ -17,12 +18,18 @@ export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRo
   };
   const client: ModelRouterClient = {
     generateTeachingPackage: input => observe(() => upstream.generateTeachingPackage(input)),
+    ...(upstream.understandPage ? { understandPage: (async input => {
+      const result = await upstream.understandPage!(input);
+      if (result) receipts.push({ provider: result.provider, model: result.model, usage: structuredClone(result.usage) });
+      return result;
+    }) as NonNullable<ModelRouterClient["understandPage"]> } : {}),
+    ...(upstream.generateBridge ? { generateBridge: (input => observe(() => upstream.generateBridge!(input))) as NonNullable<ModelRouterClient["generateBridge"]> } : {}),
     ...(upstream.repairTeachingFields ? { repairTeachingFields: ((input, fields) => observe(() => upstream.repairTeachingFields!(input, fields))) as NonNullable<ModelRouterClient["repairTeachingFields"]> } : {}),
     ...(upstream.auditTeachingPackage ? { auditTeachingPackage: (input => observe(() => upstream.auditTeachingPackage!(input))) as NonNullable<ModelRouterClient["auditTeachingPackage"]> } : {})
   };
-  return { client, groupedUsage() {
+  return { client, markSettled() { settledCount = receipts.length; }, groupedUsage() {
     const groups = new Map<string, UsageReceipt>();
-    for (const receipt of receipts) {
+    for (const receipt of receipts.slice(settledCount)) {
       const key = JSON.stringify([receipt.provider, receipt.model]);
       const previous = groups.get(key);
       if (!previous) { groups.set(key, structuredClone(receipt)); continue; }

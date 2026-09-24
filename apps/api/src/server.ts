@@ -3,7 +3,6 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { createApp, createDefaultDependencies, resumeIncompleteImports, resumeIncompleteJobs } from "./app.js";
-import { HttpModelRouterClient } from "./model-router.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
 import { EtapiSettingsRuntime, registerEtapiSettingsRoutes } from "./etapi-settings-routes.js";
 import { SecretVault } from "./secret-vault.js";
@@ -55,16 +54,8 @@ const etapiSettings = new EtapiSettingsRuntime({
   fallbackAdapter: fallbackReadweave
 });
 const readweave = await etapiSettings.initialize();
-const modelRouterToken = process.env.MODEL_ROUTER_API_KEY || await loadSecretFile(process.env.MODEL_ROUTER_API_KEY_FILE);
-const emergencyRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" && process.env.MODEL_ROUTER_URL && modelRouterToken
-  ? new HttpModelRouterClient(process.env.MODEL_ROUTER_URL, modelRouterToken)
-  : undefined;
-// Direct providers are resolved exclusively from Course OS settings and its
-// secret vault. The legacy router is only an explicitly enabled emergency
-// dependency and still requires the saved route policy to authorize it.
-const modelRouter = process.env.COURSE_OS_ALLOW_AIALRA_EMERGENCY === "true" ? emergencyRouter : undefined;
-
-const dependencies = createDefaultDependencies(dataDir, readweave, modelRouter);
+// Generation always uses the saved provider routes and the same teaching path.
+const dependencies = createDefaultDependencies(dataDir, readweave);
 dependencies.credentialVault = credentialVault;
 etapiSettings.bind(adapter => { dependencies.readweave = adapter; });
 if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {

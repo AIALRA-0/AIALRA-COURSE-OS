@@ -1,26 +1,21 @@
-# Planned teaching
+# 单页教学生成主路径
 
-The production provider adapter uses a source-grounded plan followed by three bounded writing calls. Previous-page context comes from generated lesson sections in the same workspace and release, preferring a ready draft. It never requests the previous slide image or substitutes extracted slide text for previously taught knowledge.
+一页课件依次经过：读取原图与离线文字 → 必要时用视觉模型理解页面并给出简短教学顺序 → 一次生成完整教学页 → 确定性排版与最终机器格式检查 → 格式损坏时最多局部修复一次 → 保存可阅读草稿并读回。没有视觉模型且文字足够时，使用一次自由文本教学规划，然后生成正文
 
-## Construction
+页面之间的主体生成并行。前页讲解只用于主体完成后的“承上启下”；该补写最多等待前页主体五秒，超时后使用已有前页内容，不拖住本页可阅读草稿
 
-1. `page-plan-prompt.md` reads the current image and source objects once. It assigns facts to ordered teaching steps, identifies required prerequisites, and connects approachable objectives to questions.
-2. `planned-writing-prompt.md` writes the bridge, prerequisites and objectives.
-3. The explanation call receives that actual opening as context, the plan and source facts. Previously defined concepts are applied rather than defined again.
-4. The final call receives a bounded, whole-paragraph extract of the explanation plus the opening. It produces the summary, misconceptions and four questions.
+## 输入边界
 
-The writing policy is the versioned `policy-format-rules.md`. Its page-facing presentation requirements are consolidated in `writing-format-contract.md`, pinned in the same Harness snapshot. Each call receives only its own section responsibilities plus this format contract. Content responsibilities belong to the teaching plan. Course-specific repair instructions are not sent by this path. Legacy direct clients retain their old response compatibility.
+原图、离线文字和旧版讲解分别标明来源。逐行文字、页脚、页码和提取区域只提供观察信息，不自动成为知识原子或强制覆盖任务。旧版讲解仅在没有可读提取文字、且旧页已通过发布质量检查时作为重写参考，不能冒充原图文字。视觉理解结果描述页面实际对象、关系与不确定处，不形成新的阻断合同
 
-## Checks and cost
+简短计划只安排“讲什么、按什么顺序、哪里可能误解”，它不存储事实对账、原子绑定或覆盖证据，也不做单独格式校验。模型生成完整的现有教学栏目和问题，写作提示包含当前批准写作策略的全部正文。计划与课件冲突时以课件为准
 
-The local validator verifies schemas, known source IDs, complete fact assignment, backward-only dependencies, objective/question links, exact evidence quotations, math parsing and answer options. These checks establish structural correctness, not proof that a reader understands the lesson. Different real slides must also be read and checked against their images.
+## 交付与失败
 
-Only one partial-stage repair is permitted per page. Preceding stages are not regenerated. The provider and model remain fixed throughout one page. Each request is bounded against the remaining page budget using the configured price snapshot; actual or estimated usage is accumulated, including failed calls. The current ceiling remains USD 0.06, a budget in USD rather than a guaranteed live currency conversion.
+最终输出必须能解析为 Course OS 教学页，必需字段要有正确类型。格式检查执行确定性规范化；剩余机器格式损坏最多调用模型修复一次。内容评价、术语检查、公式检查、覆盖评价和发布质量检查记录在草稿质量信息或离线评估中，不触发在线整页重跑。模型传输失败在当前请求阶段有限重试；不会回到页面理解、规划及旧的逐阶段修复循环
 
-Planned calls explicitly disable reasoning after real bounded trials exhausted their entire output allowance without producing content. The transport preserves explicit settings rather than silently overriding them. A token-limit response is distinct from malformed JSON and is not repeated with the same limit. Source fidelity constrains meaning, not the use of untranslated labels in learner prose. Imported image labels are locators; actual observed image content receives its own coverage claim. Local structural success does not establish semantic correctness or full style compliance; record actual source/content review separately.
+草稿写入 ReadWeave 后立即读回并核对哈希。模型、阶段、用量、费用、耗时、提示词与策略快照保留在私有事件和页面追踪中。任务之间应独立写状态，不能用一个全局大 JSON 写锁串行化全部页面
 
-`teachingTrace` persists the actual plan, preceding-page context and phase receipts inside the private lesson data. The public inspection endpoint shows the active prompts. Existing task leases, snapshot pinning, readback hashes and immutable releases remain in force.
+## 回归样本
 
-## Review cases
-
-Use at least one numerical/formula slide, one comparison/table slide and one diagram/process slide. Check whether the opening uses prior teaching, objectives are understandable before the main explanation, source objects remain covered, and summary/questions introduce no new claims. Evidence must include actual model, phase usage and the reader-visible page, not only a simulated provider test.
+每次变更同时检查高质量旧样例、文字页、公式页、图表页、代码页和历史失败页。记录每页实际请求次数、同时运行页数、各阶段墙钟时间、费用、质量问题、草稿读回哈希。旧的串行开头／讲解／总结请求、事实对账、强覆盖检查、语义审计、内容修复及从头再入队不得重新进入主路径

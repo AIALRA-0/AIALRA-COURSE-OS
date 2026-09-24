@@ -7,7 +7,7 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for the production worker");
 const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
 const apiBaseUrl = (process.env.COURSE_OS_API_URL || "http://api:4100").replace(/\/$/, "");
-const generationConcurrency = Math.max(1, Math.min(32, Math.trunc(Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 16)) || 16));
+const generationConcurrency = Math.max(1, Math.min(32, Math.trunc(Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 20)) || 20));
 const schemaPath = fileURLToPath(new URL("../../../infra/postgres/operational-schema.postgres", import.meta.url));
 
 async function loadSecret(filePath: string | undefined): Promise<string> {
@@ -36,11 +36,10 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { 
 while (!stopping) {
   try {
     const queued = await pool.query<{ id: string; workspaceId: string }>(`
-      SELECT job->>'id' AS id, job->>'workspaceId' AS "workspaceId"
-      FROM operational_state, jsonb_array_elements(state->'jobs') AS job
-      WHERE job->>'state' = 'queued'
-        AND COALESCE((job->>'cancelRequested')::boolean, false) = false
-      ORDER BY job->>'createdAt'
+      SELECT id::text AS id, workspace_id AS "workspaceId"
+      FROM generation_jobs
+      WHERE state = 'queued' AND cancel_requested = false
+      ORDER BY created_at, id
       LIMIT $1
     `, [generationConcurrency]);
     await Promise.all(queued.rows.map((job) => dispatch(job.id, job.workspaceId)));
