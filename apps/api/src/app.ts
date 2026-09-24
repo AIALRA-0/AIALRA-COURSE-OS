@@ -3339,15 +3339,21 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             true, teachingPlan ? "multimodal" : "text_only", generation.teachingTrace);
           bridged.quality = generatedPage.quality;
           const bridgedHash = sha256Text(stableStringify(bridged));
-          saved = await dependencies.readweave.saveDraft({ ...saved, page: bridged, revision: saved.revision,
-            contentHash: bridgedHash, updatedAt: new Date().toISOString() }, saved.revision,
-            systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge`, currentJob.workspaceId));
-          const bridgeReadBack = await dependencies.readweave.getDraftByPage(page.id);
-          if (!bridgeReadBack || bridgeReadBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
           const bridgeCost = makeGenerationCostEntry(jobId, currentJob, release, page.id, bridge.provider, bridge.model,
             bridge.usage, "succeeded", true);
           bridgeCost.id += ":bridge";
-          await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
+          const bridgeDraft = { ...saved, page: bridged, revision: saved.revision,
+            contentHash: bridgedHash, updatedAt: new Date().toISOString() };
+          const bridgeWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge`, currentJob.workspaceId);
+          const bundledBridgeCost = Boolean(dependencies.readweave.saveDraftWithCost);
+          saved = bundledBridgeCost
+            ? await dependencies.readweave.saveDraftWithCost!(bridgeDraft, saved.revision, bridgeWriteContext, bridgeCost)
+            : await dependencies.readweave.saveDraft(bridgeDraft, saved.revision, bridgeWriteContext);
+          const bridgeReadBack = await dependencies.readweave.getDraftByPage(page.id);
+          if (!bridgeReadBack || bridgeReadBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
+          if (!bundledBridgeCost) {
+            await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
+          }
           await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, bridgeCost, context));
           meter.markSettled();
           bridgeCompleted = true;

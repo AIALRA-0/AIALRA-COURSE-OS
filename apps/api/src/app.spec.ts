@@ -1313,6 +1313,24 @@ describe("Course OS API", () => {
     expect((await operations.read()).events.some(event => event.type === "generation.page.completed" && (event.payload as { bridgeCompleted?: boolean }).bridgeCompleted === false)).toBe(true);
   }, 60_000);
 
+  it("saves a completed bridge and its cost in one ReadWeave mutation", async () => {
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => testTeachingResult(0.001),
+      generateBridge: async () => ({ markdown: "上一页的结果引出本页的问题。", provider: "kuafu",
+        model: "deepseek-v4.1-flash", usage: testTeachingResult(0.001).usage })
+    };
+    const { app, readweave, release } = await seededApp(modelRouter);
+    const bundled = vi.spyOn(readweave, "saveDraftWithCost");
+    const separateCost = vi.spyOn(readweave, "appendCostEntry");
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "bundled-bridge-cost")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"] });
+    expect(bundled).toHaveBeenCalledTimes(2);
+    expect(separateCost).not.toHaveBeenCalled();
+    expect(await readweave.listCostEntries({ jobId: created.body.id })).toHaveLength(2);
+    expect((await readweave.getDraftByPage("page-1"))?.page.lessonSections?.some(section => section.kind === "chapter_bridge")).toBe(true);
+  }, 60_000);
+
   it("records one final format repair inside the page generation and bills the combined call once", async () => {
     let generationCalls = 0;
     let formatRepairCalls = 0;
