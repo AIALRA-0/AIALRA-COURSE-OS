@@ -58,6 +58,15 @@ export interface PlannedTrace {
   phases: PlannedPhaseReceipt[];
   formatWarnings?: Array<{ phase: string; issues: string[] }>;
   qualityWarnings?: Array<{ phase: string; issues: string[] }>;
+  repairDiagnostic?: {
+    initialShapeIssues: string[];
+    initialQuestionCount: number;
+    targetFields: string[];
+    repairedShapeIssues?: string[];
+    repairedQuestionCount?: number;
+    parseIssue?: string;
+    providerError?: string;
+  };
   coreFingerprint?: string;
 }
 
@@ -504,6 +513,11 @@ export async function writePlannedLesson(
     const repairFields = validCore && incompleteQuestions && onlyQuestionShapeErrors
       ? ["questions"] : repairFieldsFor(initialShapeIssues, [], incompleteQuestions);
     const questionOnlyRepair = repairFields.length === 1 && repairFields[0] === "questions";
+    trace.repairDiagnostic = {
+      initialShapeIssues,
+      initialQuestionCount: Array.isArray(initialCandidate?.questions) ? initialCandidate.questions.length : 0,
+      targetFields: repairFields
+    };
     const repairSchema = !initialParsed.issue && repairFields.length > 0 ? {
       type: "object",
       properties: Object.fromEntries(repairFields.map(field => [field, field === "questions"
@@ -537,10 +551,14 @@ export async function writePlannedLesson(
         maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000
       })).content;
       const repairedParsed = parseTeachingOutput(repairedRaw);
+      if (repairedParsed.issue) trace.repairDiagnostic.parseIssue = repairedParsed.issue;
       if (!repairedParsed.issue) {
         const patch = projectPlannedOutputToSchema(repairedParsed.content, repairSchema);
         repairedCandidate = normalizeTeachingOutput({ ...initialCandidate, ...patch as object });
         const repairedShapeIssues = plannedContentIssues(repairedCandidate);
+        trace.repairDiagnostic.repairedShapeIssues = repairedShapeIssues;
+        trace.repairDiagnostic.repairedQuestionCount = Array.isArray(repairedCandidate.questions)
+          ? repairedCandidate.questions.length : 0;
         if (repairedShapeIssues.length === 0) {
           accepted = repairedCandidate;
           finalShapeIssues = [];
@@ -549,6 +567,7 @@ export async function writePlannedLesson(
       }
     } catch (error) {
       // A failed repair may still leave a complete lesson body in the first response.
+      trace.repairDiagnostic.providerError = error instanceof Error ? error.message.split(":", 1)[0] : "unknown";
     }
   }
 
