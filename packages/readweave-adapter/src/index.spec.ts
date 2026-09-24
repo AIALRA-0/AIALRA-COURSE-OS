@@ -698,11 +698,27 @@ describe("ReadWeave ETAPI adapter", () => {
       vi.unstubAllEnvs();
       timingLog.mockRestore();
     }
-    expect(timingCalls).toHaveLength(1);
-    expect(timingCalls[0]?.[0]).toBe("course_os.readweave_draft_projection_timing");
-    const timing = JSON.parse(String(timingCalls[0]?.[1])) as Record<string, unknown>;
+    const projectionTimingCall = timingCalls.find(([event]) => event === "course_os.readweave_draft_projection_timing");
+    expect(projectionTimingCall).toBeDefined();
+    const timing = JSON.parse(String(projectionTimingCall?.[1])) as Record<string, unknown>;
     expect(timing).toEqual({ projectionCreated: true, ensureDraftProjectionMs: expect.any(Number), refreshDraftProjectionMs: expect.any(Number) });
     expect(Object.keys(timing).sort()).toEqual(["ensureDraftProjectionMs", "projectionCreated", "refreshDraftProjectionMs"]);
+    const queueTimingCall = timingCalls.find(([event]) => event === "course_os.readweave_write_queue_timing");
+    expect(queueTimingCall).toBeDefined();
+    expect(JSON.parse(String(queueTimingCall?.[1]))).toEqual({
+      queueWaitMs: expect.any(Number),
+      serializedWorkMs: expect.any(Number),
+      succeeded: true
+    });
+    const stateTimingCall = timingCalls.find(([event]) => event === "course_os.readweave_state_write_timing");
+    expect(stateTimingCall).toBeDefined();
+    expect(JSON.parse(String(stateTimingCall?.[1]))).toEqual({
+      encodeMs: expect.any(Number),
+      snapshotBytes: expect.any(Number),
+      stateNotePutMs: expect.any(Number),
+      phase: "complete",
+      succeeded: true
+    });
     const changed = structuredClone(saved);
     changed.page.blocks.push(
       { ...changed.page.blocks[0]!, id: "new-block-1", title: "new block 1", markdown: "first" },

@@ -1725,16 +1725,45 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async writeState(state: EtapiState): Promise<void> {
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+    let encodeMs: number | undefined;
+    let snapshotBytes: number | undefined;
+    let stateNotePutMs: number | undefined;
+    let phase: "encode" | "put" | "complete" = "encode";
+    let succeeded = false;
     try {
-      await this.putContent(state.projections.stateNoteId, encodeReadWeaveStateContent(state));
+      const encodeStartedAt = timingEnabled ? performance.now() : 0;
+      let content: string;
+      try {
+        content = encodeReadWeaveStateContent(state);
+      } finally {
+        if (timingEnabled) encodeMs = Math.round(performance.now() - encodeStartedAt);
+      }
+      if (timingEnabled) snapshotBytes = Buffer.byteLength(content);
+      phase = "put";
+      await this.putContent(state.projections.stateNoteId, content, timingEnabled
+        ? (durationMs) => { stateNotePutMs = durationMs; }
+        : undefined);
       this.lastWriteAt = new Date().toISOString();
       // `mutate` owns this object and serializes every writer through
       // `writeChain`, so the committed snapshot can become the cache directly.
       // Public reads still clone the values they return.
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      phase = "complete";
+      succeeded = true;
     } catch (error) {
       this.invalidateStateCache();
       throw error;
+    } finally {
+      if (timingEnabled) {
+        this.logWriteTiming("course_os.readweave_state_write_timing", {
+          encodeMs,
+          snapshotBytes,
+          stateNotePutMs,
+          phase,
+          succeeded
+        });
+      }
     }
   }
 
@@ -1834,17 +1863,38 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private enqueueWrite<T>(work: () => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+    const enqueuedAt = timingEnabled ? performance.now() : 0;
     const operation = this.writeChain.catch(() => undefined).then(async () => {
       const previousContext = this.activeWriteContext;
       this.activeWriteContext = context;
+      const workStartedAt = timingEnabled ? performance.now() : 0;
+      let succeeded = false;
       try {
-        return await work();
+        const result = await work();
+        succeeded = true;
+        return result;
       } finally {
         this.activeWriteContext = previousContext;
+        if (timingEnabled) {
+          this.logWriteTiming("course_os.readweave_write_queue_timing", {
+            queueWaitMs: Math.round(workStartedAt - enqueuedAt),
+            serializedWorkMs: Math.round(performance.now() - workStartedAt),
+            succeeded
+          });
+        }
       }
     });
     this.writeChain = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  private logWriteTiming(event: string, timing: Record<string, number | string | boolean | undefined>): void {
+    try {
+      console.info(event, JSON.stringify(timing));
+    } catch {
+      // Timing output must never change whether a write succeeds.
+    }
   }
 
   private invalidateStateCache(): void {
@@ -1990,13 +2040,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return response.text();
   }
 
-  private async putContent(noteId: string, content: string): Promise<void> {
+  private async putContent(noteId: string, content: string, onPutDuration?: (durationMs: number) => void): Promise<void> {
     await this.raw(`/notes/${encodeURIComponent(noteId)}/revision`, { method: "POST" });
-    await this.raw(`/notes/${encodeURIComponent(noteId)}/content`, {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-      body: Buffer.from(content)
-    });
+    const putStartedAt = onPutDuration ? performance.now() : 0;
+    try {
+      await this.raw(`/notes/${encodeURIComponent(noteId)}/content`, {
+        method: "PUT",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: Buffer.from(content)
+      });
+    } finally {
+      if (onPutDuration) onPutDuration(Math.round(performance.now() - putStartedAt));
+    }
   }
 
   private async putBinaryContent(noteId: string, content: Uint8Array, mediaType: string): Promise<void> {
