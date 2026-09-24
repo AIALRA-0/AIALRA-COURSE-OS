@@ -1,0 +1,21 @@
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_1488b4baaa2bee 520
+  s_e8850ef125fb32::t_d015d2e5eb483d 529,538,557,566,594,596
+  s_e8850ef125fb32::t_2b82b335b3c79b 516-519,521-528,530-537,539-556,558-565,567-593,595,597-599
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "31c2b8fcd9f6889f1b297a724e1d630bd833205e",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
