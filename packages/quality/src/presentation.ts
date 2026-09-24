@@ -13,7 +13,7 @@ export const teachingCompositionContract = {
 
 /** Normalize explicit role labels without rewriting the explanation itself. */
 export function formatMisconception(value: string): string {
-  const parts = value.trim().split(/\n\s*\n|[；;]\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])/u);
+  const parts = value.trim().split(/\n\s*\n|\r?\n\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])|[；;]\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])/u);
   const roles = ["错误理解", "错因", "正确判断", "核对方法"] as const;
   if (parts.length !== roles.length) return value;
   const bodies = parts.map((part, index) => {

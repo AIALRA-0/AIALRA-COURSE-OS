@@ -113,7 +113,7 @@ describe("planned teaching core writer", () => {
     expect(result.trace.formatWarnings).toBeUndefined();
   });
 
-  it("tries at most one format repair and accepts valid output with remaining format warnings", async () => {
+  it("records nonblocking style warnings without spending a model repair call", async () => {
     const calls: string[] = [];
     const formatted = teachingPackage();
     formatted.priorKnowledge = ["输入：处理开始时已经具备的信息"];
@@ -123,7 +123,7 @@ describe("planned teaching core writer", () => {
       return formatted;
     });
 
-    expect(calls).toEqual(["plan", "teaching", "format_repair"]);
+    expect(calls).toEqual(["plan", "teaching"]);
     expect(result.content.priorKnowledge).toEqual(formatted.priorKnowledge);
     expect(result.trace.formatWarnings?.[0]?.phase).toBe("teaching");
     expect(result.trace.formatWarnings?.[0]?.issues).toContain("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
@@ -215,6 +215,8 @@ describe("planned teaching core writer", () => {
       if (request.phase === "plan") return "先解释输入";
       if (request.phase === "teaching") return initial;
       expect(Object.keys(request.schema?.properties ?? {})).toEqual(["questions"]);
+      expect(request.instructions).not.toContain("一次写出所有主体栏目");
+      expect(request.instructions).toContain("先完整阅读以下格式规则与写作策略");
       return { questions: completed.questions };
     });
     expect(calls).toEqual(["plan", "teaching", "format_repair"]);

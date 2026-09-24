@@ -28,6 +28,13 @@ export function plannedInstructions(_fields: readonly string[], language = "zh-C
     + (completePolicy ? "\n\n---\n\n" + completePolicy : "");
 }
 
+function repairInstructions(language: string): string {
+  const completePolicy = writingPolicyInstructions(language);
+  return "你只修复请求中 targetFields 指定的最终 JSON 字段；其余教学内容已经保存，不得重写或返回。先完整阅读以下格式规则与写作策略，再输出修复字段组成的 JSON 对象。"
+    + "\n\n" + writingFormatContract
+    + (completePolicy ? "\n\n---\n\n" + completePolicy : "");
+}
+
 export interface PlannedCall {
   phase: string;
   instructions: string;
@@ -486,14 +493,17 @@ export async function writePlannedLesson(
   let finalShapeIssues = initialShapeIssues;
   let finalFormatIssues = initialFormatIssues;
 
-  if (initialShapeIssues.length || initialFormatIssues.length || incompleteQuestions) {
+  // Style findings remain visible in the trace. Only broken machine output
+  // and incomplete final question structure consume the single repair call.
+  if (initialShapeIssues.length || incompleteQuestions) {
     const validCore = initialCandidate && typeof initialCandidate.mainContentMarkdown === "string"
       && !!initialCandidate.mainContentMarkdown.trim()
       && typeof initialCandidate.fullExplanationMarkdown === "string"
       && !!initialCandidate.fullExplanationMarkdown.trim();
     const onlyQuestionShapeErrors = initialShapeIssues.every(issue => issue.startsWith("result.questions"));
     const repairFields = validCore && incompleteQuestions && onlyQuestionShapeErrors
-      ? ["questions"] : repairFieldsFor(initialShapeIssues, initialFormatIssues, incompleteQuestions);
+      ? ["questions"] : repairFieldsFor(initialShapeIssues, [], incompleteQuestions);
+    const questionOnlyRepair = repairFields.length === 1 && repairFields[0] === "questions";
     const repairSchema = !initialParsed.issue && repairFields.length > 0 ? {
       type: "object",
       properties: Object.fromEntries(repairFields.map(field => [field, field === "questions"
@@ -507,22 +517,21 @@ export async function writePlannedLesson(
       : initialParsed.raw;
     const repairPrompt = JSON.stringify({
       pageTitle: input.pageTitle,
-      source: input.sourceText.slice(0, 8_000),
+      source: input.sourceText.slice(0, questionOnlyRepair ? 4_000 : 8_000),
       currentOutput: currentFields,
       ...(initialCandidate ? {
-        mainContentMarkdown: initialCandidate.mainContentMarkdown?.slice(0, 2_000),
-        fullExplanationMarkdown: initialCandidate.fullExplanationMarkdown?.slice(0, 5_000)
+        mainContentMarkdown: initialCandidate.mainContentMarkdown?.slice(0, questionOnlyRepair ? 1_000 : 2_000),
+        fullExplanationMarkdown: initialCandidate.fullExplanationMarkdown?.slice(0, questionOnlyRepair ? 2_000 : 5_000)
       } : {}),
       targetFields: repairFields,
       machineShapeIssues: initialShapeIssues,
-      contentFormatIssues: initialFormatIssues,
+      contentFormatIssues: [],
       instruction: "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。questions 必须是 2 道理解题和 2 道四选一选择题。"
     });
     try {
       const repairedRaw = (await run({
         phase: "format_repair",
-        instructions: plannedInstructions(fields, input.language)
-          + "\n\n这是一次局部最终格式修复。只返回 targetFields 对应的 JSON 字段，其他字段由系统保留。不得返回完整教学包。",
+        instructions: repairInstructions(input.language),
         prompt: repairPrompt,
         schema: repairSchema,
         maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000

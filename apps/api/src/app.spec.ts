@@ -1733,8 +1733,8 @@ describe("Course OS API", () => {
       idempotencyKey: "route-fallback-test"
     });
     expect(routeResult.provider).toBe("deepseek");
-    expect(providerFetch).toHaveBeenCalledTimes(3);
-    expect(routeResult.usage.apiEquivalentUsd).toBe(0.003);
+    expect(providerFetch).toHaveBeenCalledTimes(2);
+    expect(routeResult.usage.apiEquivalentUsd).toBe(0.002);
 
     const searches = await request(app).get("/api/v1/search-providers").expect(200);
     expect(searches.body.map((provider: { id: string }) => provider.id)).toEqual(["tinyfish", "octen", "openalex", "parallel", "exa", "jina", "serper"]);

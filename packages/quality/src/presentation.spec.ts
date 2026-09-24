@@ -46,6 +46,13 @@ describe("composition regressions independent of a course or page number", () =>
     expect(formatMisconception(formatted)).toBe(formatted);
     expect(validateTeachingPresentation({ ...base, misconceptions: [formatted] })).toEqual([]);
   });
+  it("separates already labelled misconception lines into four readable paragraphs", () => {
+    const value = "**错误理解：** 把连接当作位置\n**错因：** 连接没有坐标\n**正确判断：** 两者描述不同信息\n**核对方法：** 检查是否给出坐标";
+    const formatted = formatMisconception(value);
+    expect(formatted.split("\n\n")).toHaveLength(4);
+    expect(formatted).toContain("**错因：** 连接没有坐标\n\n**正确判断：**");
+    expect(formatMisconception(formatted)).toBe(formatted);
+  });
   it("checks every choice option, not just the question prompt", () => {
     expect(validateTeachingNarrative({ ...base, strictWritingStyle: true,
       questions: [{ prompt: "选择正确公式", options: ["$\\frac{1{2}$"], expectedAnswer: "结果", explanation: "逐项核对" }]
