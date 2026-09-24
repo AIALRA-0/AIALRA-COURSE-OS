@@ -171,6 +171,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private bootstrapStateContent?: string;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly draftWriteChains = new Map<string, Promise<void>>();
+  private readonly costNoteEnsures = new Map<string, Promise<void>>();
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
@@ -539,20 +540,31 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async appendCostEntry(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry> {
-    return this.mutate(async (state) => {
+    const result = await this.mutate(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
-      if (replay) return state.costEntries.find((item) => item.id === replay.objectId) ?? entry;
-      const release = state.releases.find((item) => item.id === entry.materialVersionId || item.courseId === entry.courseId);
-      if (release) {
-        const course = await this.ensureCourseProjection(state, release);
-        const draft = entry.pageId ? state.drafts.find((item) => item.pageId === entry.pageId) : undefined;
-        const projection = draft ? state.projections.drafts[draft.id] : undefined;
-        await this.ensureCostNote(projection?.sectionNoteIds.quality ?? course.qualityNoteId, entry);
+      const saved = replay ? state.costEntries.find((item) => item.id === replay.objectId) ?? entry : structuredClone(entry);
+      if (!replay) {
+        state.costEntries.push(saved);
+        state.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: entry.id };
       }
-      state.costEntries.push(structuredClone(entry));
-      state.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: entry.id };
-      return entry;
+      const release = state.releases.find((item) => item.id === saved.materialVersionId || item.courseId === saved.courseId);
+      let parentNoteId: string | undefined;
+      if (release) {
+        const course = replay
+          ? state.projections.courses[release.courseId]
+          : await this.ensureCourseProjection(state, release);
+        const draft = saved.pageId ? state.drafts.find((item) => item.pageId === saved.pageId) : undefined;
+        const projection = draft ? state.projections.drafts[draft.id] : undefined;
+        parentNoteId = projection?.sectionNoteIds.quality ?? course?.qualityNoteId;
+      }
+      return { saved, parentNoteId };
     }, context);
+    // The durable index transaction is serialized, but the independent note
+    // projection can run alongside later writes for other pages.
+    if (result.parentNoteId) {
+      await this.writeContext.run(context, () => this.ensureCostNoteOnce(result.parentNoteId!, result.saved));
+    }
+    return result.saved;
   }
 
   async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}): Promise<GenerationCostEntry[]> {
@@ -2147,6 +2159,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await this.createNote(parentNoteId, `成本 · ${entry.stage} · ${entry.model}`, `<pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>`, "text", undefined, {
       courseOsType: "generation_cost", courseOsObjectId: entry.id, courseOsPageId: entry.pageId ?? ""
     });
+  }
+
+  private async ensureCostNoteOnce(parentNoteId: string, entry: GenerationCostEntry): Promise<void> {
+    const pending = this.costNoteEnsures.get(entry.id);
+    if (pending) return pending;
+    const operation = this.ensureCostNote(parentNoteId, entry);
+    this.costNoteEnsures.set(entry.id, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.costNoteEnsures.get(entry.id) === operation) this.costNoteEnsures.delete(entry.id);
+    }
   }
 
   private async getContent(noteId: string): Promise<string> {

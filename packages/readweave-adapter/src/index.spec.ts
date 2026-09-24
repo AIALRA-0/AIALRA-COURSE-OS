@@ -190,6 +190,53 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("commits cost entries before projecting their notes and coalesces same-entry retries", async () => {
+    const remote = new FakeEtapi();
+    let releaseFirstSearch!: () => void;
+    let markFirstSearchStarted!: () => void;
+    const firstSearchStarted = new Promise<void>((resolve) => { markFirstSearchStarted = resolve; });
+    const firstSearchGate = new Promise<void>((resolve) => { releaseFirstSearch = resolve; });
+    let holdFirstSearch = true;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (holdFirstSearch && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/notes")
+        && url.searchParams.get("search") === '#courseOsObjectId="cost-slow"') {
+        holdFirstSearch = false;
+        markFirstSearchStarted();
+        await firstSearchGate;
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const makeCost = (id: string): GenerationCostEntry => ({
+      id, workspaceId: "personal", courseId: pageRelease.courseId, materialVersionId: pageRelease.id,
+      pageId: "page-1", jobId: `job-${id}`, stage: "teach", provider: "test", model: "test-model",
+      inputTokens: 10, outputTokens: 20, cachedInputTokens: 0,
+      unitPriceSnapshot: { id: "price-1", provider: "test", model: "test-model", currency: "USD", capturedAt: new Date().toISOString(), source: "test", inputMicrousdPerMillion: 1, outputMicrousdPerMillion: 1, cachedInputMicrousdPerMillion: 0 },
+      estimatedMicrousd: 1, actualMicrousd: 1, durationMs: 25, retries: 0,
+      status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
+    });
+    const slow = makeCost("cost-slow");
+    const slowContext = { ...context, idempotencyKey: "append-cost-slow" };
+    const slowWrite = api.appendCostEntry(slow, slowContext);
+    try {
+      await firstSearchStarted;
+      expect(await api.listCostEntries({ pageId: "page-1" })).toContainEqual(slow);
+      await expect(api.appendCostEntry(makeCost("cost-fast"), { ...context, idempotencyKey: "append-cost-fast" })).resolves.toMatchObject({ id: "cost-fast" });
+
+      const retry = api.appendCostEntry(slow, slowContext);
+      releaseFirstSearch();
+      await expect(Promise.all([slowWrite, retry])).resolves.toHaveLength(2);
+      expect(remote.countNotesByLabel("courseOsObjectId", "cost-slow")).toBe(1);
+      expect(remote.countNotesByLabel("courseOsObjectId", "cost-fast")).toBe(1);
+      expect(await api.listCostEntries({ pageId: "page-1" })).toHaveLength(2);
+    } finally {
+      releaseFirstSearch();
+    }
+  });
+
   it("returns a minimal release index without cloning away the full release path", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
