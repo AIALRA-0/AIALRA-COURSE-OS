@@ -196,6 +196,16 @@ describe("planned teaching core writer", () => {
     });
   });
 
+  it("fills the empty options shape for a comprehension answer", () => {
+    const projected = projectPlannedOutputToSchema({
+      type: "short_answer", question: "这一步解决什么问题？", answer: "连接输入与输出", rationale: "从输入追踪到输出"
+    }, (teachingPackageSchema as any).properties.questions.items);
+    expect(projected).toEqual({
+      kind: "comprehension", prompt: "这一步解决什么问题？", options: [],
+      expectedAnswer: "连接输入与输出", explanation: "从输入追踪到输出"
+    });
+  });
+
   it("repairs only the question field while preserving the initial explanation", async () => {
     const initial = { ...teachingPackage(), questions: [] };
     const completed = teachingPackage();

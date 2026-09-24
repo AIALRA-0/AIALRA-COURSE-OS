@@ -108,12 +108,20 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
   }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
+    const questionKind = normalizeQuestionKind(record.kind ?? record.type);
+    const rawOptions = record.options ?? record.choices;
+    const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
+      ? Object.values(rawOptions as Record<string, unknown>) : rawOptions;
+    const rawAnswer = record.expectedAnswer ?? record.answer ?? record.correctAnswer;
+    const expectedAnswer = typeof rawAnswer === "string" && /^[A-D]$/iu.test(rawAnswer.trim())
+      && rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
+      ? (rawOptions as Record<string, unknown>)[rawAnswer.trim().toUpperCase()] ?? rawAnswer : rawAnswer;
     const normalized = schema.properties?.kind ? {
       ...record,
-      kind: normalizeQuestionKind(record.kind ?? record.type),
+      kind: questionKind,
       prompt: record.prompt ?? record.question ?? record.stem,
-      options: record.options ?? record.choices,
-      expectedAnswer: record.expectedAnswer ?? record.answer ?? record.correctAnswer,
+      options: options ?? (questionKind === "comprehension" ? [] : undefined),
+      expectedAnswer,
       explanation: record.explanation ?? record.rationale ?? record.reason
     } : schema.properties?.fullExplanationMarkdown ? {
       ...record,
@@ -479,10 +487,18 @@ export async function writePlannedLesson(
   let finalFormatIssues = initialFormatIssues;
 
   if (initialShapeIssues.length || initialFormatIssues.length || incompleteQuestions) {
-    const repairFields = repairFieldsFor(initialShapeIssues, initialFormatIssues, incompleteQuestions);
+    const validCore = initialCandidate && typeof initialCandidate.mainContentMarkdown === "string"
+      && !!initialCandidate.mainContentMarkdown.trim()
+      && typeof initialCandidate.fullExplanationMarkdown === "string"
+      && !!initialCandidate.fullExplanationMarkdown.trim();
+    const onlyQuestionShapeErrors = initialShapeIssues.every(issue => issue.startsWith("result.questions"));
+    const repairFields = validCore && incompleteQuestions && onlyQuestionShapeErrors
+      ? ["questions"] : repairFieldsFor(initialShapeIssues, initialFormatIssues, incompleteQuestions);
     const repairSchema = !initialParsed.issue && repairFields.length > 0 ? {
       type: "object",
-      properties: Object.fromEntries(repairFields.map(field => [field, schemaProperties[field]])),
+      properties: Object.fromEntries(repairFields.map(field => [field, field === "questions"
+        ? { ...schemaProperties.questions, minItems: 4, maxItems: 4 }
+        : schemaProperties[field]])),
       required: repairFields,
       additionalProperties: false
     } : teachingPackageSchema;
