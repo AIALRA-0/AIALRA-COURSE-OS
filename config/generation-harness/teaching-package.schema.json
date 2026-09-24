@@ -22,8 +22,6 @@
     },
     "questions": {
       "type": "array",
-      "minItems": 4,
-      "maxItems": 4,
       "items": {
         "type": "object",
         "properties": {

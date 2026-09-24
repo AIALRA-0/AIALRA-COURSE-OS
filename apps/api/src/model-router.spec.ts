@@ -28,7 +28,6 @@ describe("generation harness", () => {
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(schema.properties.questions).toMatchObject({ minItems: 4, maxItems: 4 });
     expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "policy-skill.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-skill.md")?.sha256).toBe("c0a8122648c926e06d6a43d27e9097f48e818fce17e19ab8429151ffc4d6d457");
