@@ -28,6 +28,17 @@ it("reopens a large published release through the compressed ETAPI index", async
   expect((await reopened.getRelease(largeRelease.id))?.pages[0]?.blocks[0]?.markdown).toBe(largeRelease.pages[0]!.blocks[0]!.markdown);
 });
 
+it("uses the bootstrap index download for the first cold state read", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  const before = remote.requests.length;
+  const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await reopened.listCourses();
+  expect(remote.requests.slice(before).filter((item) => item.method === "GET" && item.path.endsWith(`/notes/${stateNoteId}/content`))).toHaveLength(1);
+});
+
 it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
   const openCode = defaultModelProviders().find((item) => item.id === "opencode-go");
   expect(openCode?.models.find((model) => model.id === "gpt-5.6-luna")).toMatchObject({ protocol: "responses", supportsVision: true, supportsJsonSchema: true, billingMode: "subscription_quota" });

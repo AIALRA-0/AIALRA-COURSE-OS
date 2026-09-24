@@ -167,6 +167,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;
   private bootstrapPromise?: Promise<ProjectionIndex>;
+  private bootstrapStateContent?: string;
   private writeChain: Promise<void> = Promise.resolve();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
@@ -180,7 +181,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   constructor(private readonly config: EtapiReadWeaveConfig) {
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.workspaceId = config.workspaceId ?? "personal";
-    this.requestTimeoutMs = Math.max(1_000, config.requestTimeoutMs ?? 15_000);
+    this.requestTimeoutMs = Math.max(1_000, config.requestTimeoutMs ?? 30_000);
   }
 
   /** Verify credentials and access to the configured root without changing remote data. */
@@ -1694,7 +1695,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async readRemoteState(): Promise<EtapiState> {
     const projection = await this.ensureWorkspace();
-    const content = await this.getContent(projection.stateNoteId);
+    // Bootstrap already downloaded this immutable snapshot to locate the
+    // projection notes. Reuse it for the first read instead of fetching the
+    // same large index a second time during a cold API start.
+    const content = this.bootstrapStateContent ?? await this.getContent(projection.stateNoteId);
+    this.bootstrapStateContent = undefined;
     const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
     const state = normalizeState(parsed, projection);
     const activityStateNoteId = state.projections.activityStateNoteId;
@@ -1850,8 +1855,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const search = await this.request<SearchResponse>(`/notes?${query.toString()}`);
     const existing = search.results[0];
     if (existing) {
-      const parsed = decodeReadWeaveStateContent(await this.getContent(existing.noteId)) as Partial<EtapiState>;
+      const content = await this.getContent(existing.noteId);
+      const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
+      this.bootstrapStateContent = content;
       return parsed.projections;
     }
     const root = await this.createNote(this.config.parentNoteId, "Course OS", "<h2>Course OS</h2><p>课程制作、学习和长期复习的权威知识树</p>", "text", undefined, {
