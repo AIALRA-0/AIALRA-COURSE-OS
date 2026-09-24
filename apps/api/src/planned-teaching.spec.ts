@@ -144,6 +144,84 @@ describe("planned teaching core writer", () => {
     expect(result.trace.repairDiagnostic).toBeUndefined();
   });
 
+  it("accepts a complete package with mainContentSummary without a format repair", async () => {
+    const calls: string[] = [];
+    const { mainContentMarkdown, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, mainContentSummary: mainContentMarkdown };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toBe(mainContentMarkdown);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("maps assessmentQuestions to the four final questions without repair", async () => {
+    const calls: string[] = [];
+    const { questions, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, assessmentQuestions: questions };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.content.questions.map(question => question.prompt)).toEqual(questions.map(question => question.prompt));
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("maps mainPoints to main content while keeping four questions without repair", async () => {
+    const calls: string[] = [];
+    const { mainContentMarkdown: _main, ...body } = teachingPackage();
+    const mainPoints = ["识别输入条件", "按给定规则处理", "记录中间结果", "检查输出", "比较预期", "定位差异"];
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, mainPoints };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toBe(mainPoints.map(point => `- ${point}`).join("\n"));
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("maps keyPointsMarkdown to main content while keeping four questions without repair", async () => {
+    const calls: string[] = [];
+    const { mainContentMarkdown: _main, ...body } = teachingPackage();
+    const keyPointsMarkdown = "- 输入决定处理对象\n- 输出记录处理结果";
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, keyPointsMarkdown };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toBe(keyPointsMarkdown);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("maps explanationMarkdown to the complete explanation without repairing four questions", async () => {
+    const calls: string[] = [];
+    const { fullExplanationMarkdown: _explanation, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, explanationMarkdown: explanation };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.fullExplanationMarkdown).toContain("## 从输入开始");
+    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
   it.each(["quiz", "quizObject", "split", "comprehensionSplit"]) ("preserves provider %s questions without a repair", async variant => {
     const calls: string[] = [];
     const { questions, ...body } = teachingPackage();
@@ -379,6 +457,17 @@ describe("planned teaching core writer", () => {
       practiceQuestions: source.questions,
     }, teachingPackageSchema) as typeof source;
     expect(practice.questions).toHaveLength(4);
+  });
+
+  it("projects mainContentSummary to the final main content field", () => {
+    const source = teachingPackage();
+    const { mainContentMarkdown: _main, ...body } = source;
+    const projected = projectPlannedOutputToSchema({
+      ...body,
+      mainContentSummary: source.mainContentMarkdown
+    }, teachingPackageSchema) as typeof source;
+
+    expect(projected.mainContentMarkdown).toBe(source.mainContentMarkdown);
   });
 
   it("fills the empty options shape for a comprehension answer", () => {
