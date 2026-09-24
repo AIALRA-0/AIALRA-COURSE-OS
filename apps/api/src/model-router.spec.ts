@@ -185,7 +185,8 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(typeof instructions).toBe("string");
       expect(instructions).toContain("密集矩阵不要逐格转写");
       expect(instructions).toContain("按行、列位置核实");
-      expect(instructions).toContain("两处可见数值确有差异时逐处保留");
+      expect(instructions).toContain("两处确能独立定位的数值有差异时逐处保留");
+      expect(instructions).toContain("边相互交叉、标签邻近多条线或端点不清时");
       expect(instructions).toContain("没有单位或所计对象的数字标签保留原文");
       const imagePart = (body.messages[1]?.content as Array<{ type: string; image_url?: { detail?: string } }>).find(part => part.type === "image_url");
       expect(imagePart?.image_url?.detail).toBe("high");
