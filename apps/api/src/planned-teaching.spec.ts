@@ -144,6 +144,31 @@ describe("planned teaching core writer", () => {
     expect(result.trace.repairDiagnostic).toBeUndefined();
   });
 
+  it("maps four root exercises to questions without a model repair", async () => {
+    const calls: string[] = [];
+    const { questions, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, exercises: questions };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toEqual(questions);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("preserves canonical questions when root exercises are also present", async () => {
+    const canonical = teachingPackage().questions;
+    const exercises = canonical.map(question => ({ ...question, prompt: `别名：${question.prompt}` }));
+    const result = await writePlannedLesson(input(), async request => request.phase === "plan"
+      ? "先讲输入，再讲输出"
+      : { ...teachingPackage(), exercises });
+
+    expect(result.content.questions.map(question => question.prompt)).toEqual(canonical.map(question => question.prompt));
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
   it("accepts a complete package with mainContentSummary without a format repair", async () => {
     const calls: string[] = [];
     const { mainContentMarkdown, ...body } = teachingPackage();
@@ -156,6 +181,35 @@ describe("planned teaching core writer", () => {
     expect(calls).toEqual(["plan", "teaching"]);
     expect(result.content.mainContentMarkdown).toBe(mainContentMarkdown);
     expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("maps mainContentSummaryMarkdown without a model repair", async () => {
+    const calls: string[] = [];
+    const { mainContentMarkdown, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, mainContentSummaryMarkdown: mainContentMarkdown };
+    });
+
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toBe(mainContentMarkdown);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it("preserves canonical main content when mainContentSummaryMarkdown is also present", async () => {
+    const canonical = "- Canonical main content";
+    const result = await writePlannedLesson(input(), async request => request.phase === "plan"
+      ? "先讲输入，再讲输出"
+      : {
+        ...teachingPackage(),
+        mainContentMarkdown: canonical,
+        mainContentSummaryMarkdown: "- Alias main content"
+      });
+
+    expect(result.content.mainContentMarkdown).toBe(canonical);
     expect(result.trace.repairDiagnostic).toBeUndefined();
   });
 

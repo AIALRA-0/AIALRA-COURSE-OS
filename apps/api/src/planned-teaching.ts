@@ -188,7 +188,7 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...taggedQuestions(Array.isArray(record.multipleChoiceQuestions) && record.multipleChoiceQuestions.length
         ? record.multipleChoiceQuestions : record.choiceQuestions, "multiple_choice")
     ];
-    const questionChoices = [record.questions, record.quizQuestions, record.assessmentQuestions,
+    const questionChoices = [record.questions, record.exercises, record.quizQuestions, record.assessmentQuestions,
       providerQuizQuestions(record.quiz), record.practiceQuestions, splitQuestions];
     const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length === 4)
       ?? questionChoices.find(item => Array.isArray(item) && item.length > 0)
@@ -215,8 +215,8 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
       learningObjectives: record.learningObjectives ?? record.objectives ?? [],
-      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary) !== undefined
-        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary } : {}),
+      ...((record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary) !== undefined
+        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary } : {}),
       priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
       ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanationMarkdown ?? record.explanation) !== undefined
         ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanationMarkdown ?? record.explanation } : {}),
@@ -428,7 +428,7 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   let source = value;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
-    const main = record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints
+    const main = record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints
       ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways
       ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints
       ?? record.keyPointsMarkdown ?? record.summary;
