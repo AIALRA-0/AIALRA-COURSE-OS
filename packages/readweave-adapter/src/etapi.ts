@@ -539,47 +539,25 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async appendCostEntry(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry> {
-    const result = await this.enqueueWrite(async () => {
-      try {
-        const pendingRead = this.stateReadInFlight;
-        if (pendingRead) await pendingRead.catch(() => undefined);
-        const state = await this.readStateReference(true);
-        const legacyReplay = state.idempotency[context.idempotencyKey];
-        let saved: GenerationCostEntry;
-        if (legacyReplay?.kind === "cost_entry") {
-          const existing = state.costEntries.find((item) => item.id === legacyReplay.objectId);
-          if (!existing) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
-          saved = existing;
-        } else {
-          const { noteId, costState } = await this.ensureCostIndex(state);
-          const indexedReplay = costState.idempotency[context.idempotencyKey];
-          if (indexedReplay?.kind === "cost_entry") {
-            saved = costState.costEntries.find((item) => item.id === indexedReplay.objectId)
-              ?? state.costEntries.find((item) => item.id === indexedReplay.objectId)
-              ?? (() => { throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT"); })();
-          } else {
-            saved = costState.costEntries.find((item) => item.id === entry.id)
-              ?? state.costEntries.find((item) => item.id === entry.id)
-              ?? structuredClone(entry);
-            if (!costState.costEntries.some((item) => item.id === saved.id)) {
-              if (!state.costEntries.some((item) => item.id === saved.id)) costState.costEntries.push(saved);
-            }
-            costState.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: saved.id };
-            await this.writeCostIndex(noteId, costState);
-          }
-        }
-
-        // Resolve the projection parent while holding the queue. If the course
-        // scaffold is missing, create and persist it before releasing the lock;
-        // the slower per-entry quality-note write happens afterward.
-        const parentNoteId = await this.ensureCostProjectionParent(state, saved);
-        return { saved: structuredClone(saved), parentNoteId };
-      } catch (error) {
-        this.invalidateStateCache();
-        throw error;
+    const result = await this.mutate(async (state) => {
+      const replay = state.idempotency[context.idempotencyKey];
+      const saved = replay ? state.costEntries.find((item) => item.id === replay.objectId) ?? entry : structuredClone(entry);
+      if (!replay) {
+        state.costEntries.push(saved);
+        state.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: entry.id };
       }
+      const release = state.releases.find((item) => item.id === saved.materialVersionId || item.courseId === saved.courseId);
+      let parentNoteId: string | undefined;
+      if (release) {
+        const course = replay
+          ? state.projections.courses[release.courseId]
+          : await this.ensureCourseProjection(state, release);
+        const draft = saved.pageId ? state.drafts.find((item) => item.pageId === saved.pageId) : undefined;
+        const projection = draft ? state.projections.drafts[draft.id] : undefined;
+        parentNoteId = projection?.sectionNoteIds.quality ?? course?.qualityNoteId;
+      }
+      return { saved, parentNoteId };
     }, context);
-
     if (result.parentNoteId) {
       await this.writeContext.run(context, () => this.ensureCostNoteOnce(result.parentNoteId!, result.saved));
     }
@@ -1837,41 +1815,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
   }
 
-  private async ensureCostIndex(state: EtapiState): Promise<{ noteId: string; costState: EtapiCostIndexState }> {
-    const existingPointer = state.projections.costIndexNoteId;
-    if (existingPointer) return { noteId: existingPointer, costState: await this.readCostIndex(existingPointer) };
-
-    const query = new URLSearchParams({
-      search: `#courseOsCostIndex="${this.workspaceId}"`,
-      ancestorNoteId: this.config.parentNoteId,
-      fastSearch: "true"
-    });
-    const existing = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results[0];
-    let noteId: string;
-    let costState: EtapiCostIndexState;
-    if (existing) {
-      noteId = existing.noteId;
-      costState = await this.readCostIndex(noteId);
-    } else {
-      costState = { schemaVersion: "1.0.0", costEntries: [], idempotency: {} };
-      const note = await this.createNote(
-        state.projections.courseRootNoteId,
-        "02 Course OS 成本索引",
-        encodeReadWeaveStateContent(costState),
-        "code",
-        "application/json",
-        { courseOsCostIndex: this.workspaceId, courseOsType: "cost_index" }
-      );
-      noteId = note.noteId;
-    }
-
-    state.projections.costIndexNoteId = noteId;
-    // Persist the pointer once. If this write fails after the note was created,
-    // the next append discovers the labeled note and reuses it.
-    await this.writeState(state);
-    return { noteId, costState };
-  }
-
   private async readCostIndex(noteId: string): Promise<EtapiCostIndexState> {
     const parsed = decodeReadWeaveStateContent(await this.getContent(noteId)) as Partial<EtapiCostIndexState>;
     return {
@@ -1879,18 +1822,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       costEntries: parsed.costEntries ?? [],
       idempotency: parsed.idempotency ?? {}
     };
-  }
-
-  private async ensureCostProjectionParent(state: EtapiState, entry: GenerationCostEntry): Promise<string | undefined> {
-    const release = state.releases.find((item) => item.id === entry.materialVersionId || item.courseId === entry.courseId);
-    if (!release) return undefined;
-    const currentCourse = state.projections.courses[release.courseId];
-    const needsStateWrite = !currentCourse || !currentCourse.modules[release.moduleId];
-    const course = await this.ensureCourseProjection(state, release);
-    if (needsStateWrite) await this.writeState(state);
-    const draft = entry.pageId ? state.drafts.find((item) => item.pageId === entry.pageId) : undefined;
-    const projection = draft ? state.projections.drafts[draft.id] : undefined;
-    return projection?.sectionNoteIds.quality ?? course.qualityNoteId;
   }
 
   private async mutateActivity<T>(change: (state: EtapiState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
@@ -1989,7 +1920,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async ensureWorkspace(): Promise<ProjectionIndex> {
-    if (!this.bootstrapPromise) this.bootstrapPromise = this.bootstrap();
+    if (!this.bootstrapPromise) {
+      this.bootstrapPromise = this.bootstrap().catch(error => {
+        // A transient ETAPI failure must not pin every later read to the
+        // rejected bootstrap promise after ReadWeave recovers.
+        this.bootstrapPromise = undefined;
+        throw error;
+      });
+    }
     return this.bootstrapPromise;
   }
 
@@ -2108,11 +2046,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await this.createNote(parentNoteId, `成本 · ${entry.stage} · ${entry.model}`, `<pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>`, "text", undefined, {
       courseOsType: "generation_cost", courseOsObjectId: entry.id, courseOsPageId: entry.pageId ?? ""
     });
-  }
-
-  private async writeCostIndex(noteId: string, state: EtapiCostIndexState): Promise<void> {
-    await this.putContent(noteId, encodeReadWeaveStateContent(state));
-    this.lastWriteAt = new Date().toISOString();
   }
 
   private async ensureCostNoteOnce(parentNoteId: string, entry: GenerationCostEntry): Promise<void> {
