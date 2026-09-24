@@ -155,18 +155,21 @@ export function App() {
   useEffect(() => {
     let active = true;
     let timer = 0;
+    let initialPoll = true;
     const refresh = async () => {
       try {
         const records = await api.importTasks();
         if (!active) return;
         setTaskRecords(records);
-        if (records.some((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id))) {
-          records.filter((record) => record.state === "ready").forEach((record) => metadataReadyImports.current.add(record.id));
+        const newlyReady = records.filter((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id));
+        newlyReady.forEach((record) => metadataReadyImports.current.add(record.id));
+        if (!initialPoll && newlyReady.length) {
           void refreshMetadata().catch(() => undefined);
         }
       } catch {
         // Keep the last visible task list during a transient connection failure.
       } finally {
+        initialPoll = false;
         if (active) timer = window.setTimeout(() => void refresh(), 4000);
       }
     };
@@ -175,11 +178,14 @@ export function App() {
   }, [refreshMetadata]);
 
   useEffect(() => {
-    Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
+    // The lesson index is sufficient to open the requested page. Tree,
+    // settings, and sync status can arrive afterward without hiding it.
+    api.releases().then((items) => {
       setReleases(items);
       if (!items.some((item) => item.id === initialNavigation.current.releaseId)) setReleaseId(defaultRelease(items)?.id || "");
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法载入课程空间"))
       .finally(() => setLoading(false));
+    void refreshMetadata().catch(() => setSync(OFFLINE_SYNC));
   }, [refreshMetadata]);
 
   useEffect(() => {
