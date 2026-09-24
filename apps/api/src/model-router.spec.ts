@@ -178,6 +178,26 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("requests high detail for one chat-completions page image and limits matrix transcription", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string | Array<{ type: string; image_url?: { detail?: string } }> }> };
+      const instructions = body.messages[0]?.content;
+      expect(typeof instructions).toBe("string");
+      expect(instructions).toContain("密集矩阵不要逐格转写");
+      expect(instructions).toContain("按行、列位置核实");
+      expect(instructions).toContain("不推断或编造数值冲突");
+      const imagePart = (body.messages[1]?.content as Array<{ type: string; image_url?: { detail?: string } }>).find(part => part.type === "image_url");
+      expect(imagePart?.image_url?.detail).toBe("high");
+      return Response.json({ choices: [{ message: { content: "页面内容：矩阵中已核实的代表值见相应行列。\n教学顺序：先说明矩阵含义。" } }], usage: { prompt_tokens: 100, completion_tokens: 50 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-token",
+      model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true });
+    const result = await client.understandPage(providerInput("matrix-page-understanding", true));
+    expect(result?.sourceDescription).toContain("矩阵中已核实");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("generates a bridge from the previous explanation and current summary", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { input: string; text?: { format?: { name?: string } } };
