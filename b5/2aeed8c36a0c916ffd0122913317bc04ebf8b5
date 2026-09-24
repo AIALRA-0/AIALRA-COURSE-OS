@@ -1,0 +1,21 @@
+apps/api/src/image-payload.spec.ts
+  s_f4bc084e1b5e1b::t_042ec2ae44ef77 6-14,18,20,22-45
+apps/api/src/image-payload.ts
+  s_f4bc084e1b5e1b::t_53e3e8b4095a5a 3,8-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b52aeed8c36a0c916ffd0122913317bc04ebf8b5",
+  "prompts": {},
+  "sessions": {
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
