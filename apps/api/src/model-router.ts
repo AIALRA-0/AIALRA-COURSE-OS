@@ -272,11 +272,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       emptyUsage(Date.now()), this.connection.providerId);
     const response = await this.requestPlannedStage(input, {
       phase: "page_understanding",
-      instructions: "看清这一页课件，再为第一次接触本页知识的读者安排简短教学顺序。只根据图片和辅助提取文字描述实际可见对象、公式、图表、代码与关系。页码、页眉和纯排版元素不成为教学对象。输出两个自然语言小段，分别以“页面内容：”和“教学顺序：”开头；不输出 JSON、来源编号或覆盖账本。不确定的图像细节直接说不确定，不猜测。",
+      instructions: "看清这一页课件，再为第一次接触本页知识的读者安排简短教学顺序。先忠实转写可见内容：列表逐项保留，表格写明行列标题并逐行转写数值，公式保留变量和关系，图中的标签与箭头写明对应对象；不要根据提取文字的换行猜测项目数或表格值。只根据图片和辅助提取文字描述实际可见对象及关系；无法看清的局部直接标明不确定，不补成确定数字。页码、页眉和纯排版元素不成为教学对象。输出两个自然语言小段，分别以“页面内容：”和“教学顺序：”开头；不输出 JSON、来源编号或覆盖账本。",
       prompt: JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
         extractedText: input.sourceText.slice(0, 16_000) }),
       image: input.sourceImageDataUrl,
-      maxOutputTokens: 1_200
+      maxOutputTokens: 2_200
     }, input.maxCostUsd ?? 0.06);
     const value = typeof response.content === "string" ? response.content.trim() : String(response.content ?? "").trim();
     if (!value) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", response.model, response.usage, response.provider);

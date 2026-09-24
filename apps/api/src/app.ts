@@ -3191,6 +3191,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       let sourceText = buildGenerationSourceText(page);
       let previousPageContext: string | undefined;
       let teachingPlan: string | undefined;
+      let sourceDescription: string | undefined;
       let visionSpentUsd = 0;
       const sourceStartedAt = Date.now();
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
@@ -3206,6 +3207,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           maxCostUsd: currentJob.budgetUsd - currentJob.spentUsd });
         timings.pageUnderstandingMs = Date.now() - understandingStartedAt;
         if (understood) {
+          sourceDescription = understood.sourceDescription;
           sourceText += `\n\n## 页面图像观察\n${understood.sourceDescription}`;
           teachingPlan = understood.teachingPlan;
           const visionCost = makeGenerationCostEntry(jobId, currentJob, release, page.id, understood.provider,
@@ -3240,6 +3242,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             { phase, ...usage, ...(wallDurationMs !== undefined ? { wallDurationMs } : {}) }, fenceToken);
         } });
       timings.formatCheckMs = generation.teachingTrace?.formatCheckMs ?? 0;
+      if (generation.teachingTrace && sourceDescription) generation.teachingTrace.sourceDescription = sourceDescription;
       const reviewStartedAt = Date.now();
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);

@@ -205,10 +205,10 @@ describe("planned teaching core writer", () => {
     expect(result.content.mainContentMarkdown).toContain("- 输入确定处理对象");
   });
 
-  it.each(["keyContent", "keyTakeawaysMarkdown"]) ("uses provider %s as existing main content", async field => {
+  it.each(["keyContent", "keyTakeawaysMarkdown", "keyTakeaways", "mainSummaryMarkdown"]) ("uses provider %s as existing main content", async field => {
     const calls: string[] = [];
     const { mainContentMarkdown: _mainContentMarkdown, ...body } = teachingPackage();
-    const value = field === "keyContent" ? ["输入确定处理对象", "输出记录处理结果"]
+    const value = field === "keyContent" || field === "keyTakeaways" ? ["输入确定处理对象", "输出记录处理结果"]
       : "- 输入确定处理对象\n- 输出记录处理结果";
     const result = await writePlannedLesson(input(), async request => {
       calls.push(request.phase);
@@ -356,6 +356,29 @@ describe("planned teaching core writer", () => {
     expect(result.content.questions[0]).toEqual({
       kind: "comprehension", prompt: "输入改变后怎么办？", options: [], expectedAnswer: "重新计算", explanation: "输出依赖输入"
     });
+  });
+
+  it("projects the provider's complete explanation and split question aliases without a repair request", () => {
+    const source = teachingPackage();
+    const { fullExplanationMarkdown: _full, questions: _questions, ...body } = source;
+    const projected = projectPlannedOutputToSchema({
+      ...body,
+      completeExplanationMarkdown: source.fullExplanationMarkdown,
+      understandingQuestions: source.questions.slice(0, 2),
+      choiceQuestions: source.questions.slice(2),
+    }, teachingPackageSchema) as typeof source;
+    expect(projected.fullExplanationMarkdown).toBe(source.fullExplanationMarkdown);
+    expect(projected.questions).toHaveLength(4);
+    expect(projected.questions.map(question => question.kind)).toEqual([
+      "comprehension", "comprehension", "multiple_choice", "multiple_choice"
+    ]);
+
+    const practice = projectPlannedOutputToSchema({
+      ...body,
+      fullExplanationMarkdown: source.fullExplanationMarkdown,
+      practiceQuestions: source.questions,
+    }, teachingPackageSchema) as typeof source;
+    expect(practice.questions).toHaveLength(4);
   });
 
   it("fills the empty options shape for a comprehension answer", () => {

@@ -65,6 +65,8 @@ interface ProviderOutputDiagnostic {
 export interface PlannedTrace {
   version: 1;
   plan: string;
+  /** Private page evidence for offline source-fidelity review, never provider logs. */
+  sourceDescription?: string;
   phases: PlannedPhaseReceipt[];
   /** Passive timing of local final-output checks; never a delivery gate. */
   formatCheckMs?: number;
@@ -183,9 +185,11 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
     const splitQuestions = [
       ...taggedQuestions(Array.isArray(record.understandingQuestions) && record.understandingQuestions.length
         ? record.understandingQuestions : record.comprehensionQuestions, "comprehension"),
-      ...taggedQuestions(record.multipleChoiceQuestions, "multiple_choice")
+      ...taggedQuestions(Array.isArray(record.multipleChoiceQuestions) && record.multipleChoiceQuestions.length
+        ? record.multipleChoiceQuestions : record.choiceQuestions, "multiple_choice")
     ];
-    const questionChoices = [record.questions, record.quizQuestions, providerQuizQuestions(record.quiz), splitQuestions];
+    const questionChoices = [record.questions, record.quizQuestions, providerQuizQuestions(record.quiz),
+      record.practiceQuestions, splitQuestions];
     const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length === 4)
       ?? questionChoices.find(item => Array.isArray(item) && item.length > 0)
       ?? record.questions ?? [];
@@ -211,11 +215,11 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
       learningObjectives: record.learningObjectives ?? record.objectives ?? [],
-      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary) !== undefined
-        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary } : {}),
+      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.summary) !== undefined
+        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.summary } : {}),
       priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
-      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation) !== undefined
-        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation } : {}),
+      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation) !== undefined
+        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanation } : {}),
       misconceptions: record.misconceptions ?? record.commonMistakes ?? [],
       coverageEvidence: record.coverageEvidence ?? [],
       questions: sourceQuestions
@@ -425,7 +429,8 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     const main = record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints
-      ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.summary;
+      ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways
+      ?? record.mainSummaryMarkdown ?? record.summary;
     if (Array.isArray(main) && main.length > 0 && main.every(item => typeof item === "string" && item.trim())) {
       source = { ...record, mainContentMarkdown: main.map(item => /^\s*[-*+]\s/u.test(item)
         ? item.trim() : `- ${item.trim()}`).join("\n") };
