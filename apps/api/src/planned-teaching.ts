@@ -56,6 +56,8 @@ export interface PlannedTrace {
   version: 1;
   plan: string;
   phases: PlannedPhaseReceipt[];
+  /** Passive timing of local final-output checks; never a delivery gate. */
+  formatCheckMs?: number;
   formatWarnings?: Array<{ phase: string; issues: string[] }>;
   qualityWarnings?: Array<{ phase: string; issues: string[] }>;
   repairDiagnostic?: {
@@ -524,6 +526,7 @@ export async function writePlannedLesson(
   }
 
   const initialParsed = parseTeachingOutput(initialRaw);
+  const initialCheckStarted = performance.now();
   const initialCandidate = initialParsed.issue ? undefined : normalizeTeachingOutput(initialParsed.content);
   const initialShapeIssues = initialParsed.issue
     ? [initialParsed.issue]
@@ -531,6 +534,7 @@ export async function writePlannedLesson(
   const initialFormatIssues = initialShapeIssues.length === 0
     ? plannedFormatIssues(initialCandidate as TeachingPackage) : [];
   const incompleteQuestions = questionsNeedRepair(initialCandidate);
+  trace.formatCheckMs = Math.round(performance.now() - initialCheckStarted);
   let accepted = initialCandidate;
   let repairedCandidate: TeachingPackage | undefined;
   let finalShapeIssues = initialShapeIssues;
@@ -587,6 +591,7 @@ export async function writePlannedLesson(
       const repairedParsed = parseTeachingOutput(repairedRaw);
       if (repairedParsed.issue) trace.repairDiagnostic.parseIssue = repairedParsed.issue;
       if (!repairedParsed.issue) {
+        const repairedCheckStarted = performance.now();
         const patch = projectPlannedOutputToSchema(repairedParsed.content, repairSchema);
         repairedCandidate = normalizeTeachingOutput({ ...initialCandidate, ...patch as object });
         const repairedShapeIssues = plannedContentIssues(repairedCandidate);
@@ -598,6 +603,7 @@ export async function writePlannedLesson(
           finalShapeIssues = [];
           finalFormatIssues = plannedFormatIssues(repairedCandidate);
         }
+        trace.formatCheckMs += Math.round(performance.now() - repairedCheckStarted);
       }
     } catch (error) {
       // A failed repair may still leave a complete lesson body in the first response.
@@ -606,12 +612,14 @@ export async function writePlannedLesson(
   }
 
   if (finalShapeIssues.length) {
+    const salvageCheckStarted = performance.now();
     const salvaged = salvageFinalTeachingPackage(initialCandidate, repairedCandidate);
     if (salvaged) {
       accepted = salvaged;
       finalShapeIssues = plannedContentIssues(salvaged);
       finalFormatIssues = plannedFormatIssues(salvaged);
     }
+    trace.formatCheckMs += Math.round(performance.now() - salvageCheckStarted);
   }
 
   if (finalShapeIssues.length || !accepted) {

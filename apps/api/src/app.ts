@@ -3111,7 +3111,8 @@ export async function executeGenerationJob(jobId: string, dependencies: AppDepen
   const claimed = await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
     if (job.state !== "queued" || job.cancelRequested) return undefined;
     Object.assign(job, claimGenerationLease({ ...transitionJob(job, "running"), attempt: job.attempt + 1 }, leaseOwner));
-    context.appendEvent("job.running", { attempt: job.attempt });
+    context.appendEvent("job.running", { attempt: job.attempt,
+      queueWaitMs: Math.max(0, Date.now() - Date.parse(job.createdAt)) });
     return job.lease!.fenceToken;
   });
   const fenceToken = claimed?.result;
@@ -3178,6 +3179,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     const page = preparePageForGeneration(sourcePage);
     const meter = meterModelRouter(runtimeModelRouter);
     const pageModelRouter = meter.client;
+    const pageStartedAt = Date.now();
+    const timings: Record<string, number> = {};
+    const phaseStartedAt = new Map<string, number>();
     let finalizedCost: GenerationCostEntry | undefined;
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
@@ -3188,15 +3192,19 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       let previousPageContext: string | undefined;
       let teachingPlan: string | undefined;
       let visionSpentUsd = 0;
+      const sourceStartedAt = Date.now();
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
+      timings.sourceReadMs = Date.now() - sourceStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       if (sourceImageDataUrl && pageModelRouter.understandPage) {
         await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies, { activity: "visual_understanding" });
+        const understandingStartedAt = Date.now();
         const understood = await pageModelRouter.understandPage({ pageTitle: page.title, pageNumber: page.pageNumber,
           sourceText, sourceImageDataUrl, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
           language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
           idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:understand:v1`,
           maxCostUsd: currentJob.budgetUsd - currentJob.spentUsd });
+        timings.pageUnderstandingMs = Date.now() - understandingStartedAt;
         if (understood) {
           sourceText += `\n\n## 页面图像观察\n${understood.sourceDescription}`;
           teachingPlan = understood.teachingPlan;
@@ -3224,8 +3232,15 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const pageCostLimitUsd = currentJob.budgetUsd - currentJob.spentUsd - visionSpentUsd;
       let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl: teachingPlan ? undefined : sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v15`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         onTeachingPhase: async (phase, state, usage) => {
-          await appendGenerationStageEvent(jobId, page.id, phase === "format_repair" ? "repair" : "teach", state, dependencies, { phase, ...usage }, fenceToken);
+          if (state === "started") phaseStartedAt.set(phase, Date.now());
+          const wallDurationMs = state === "completed" && phaseStartedAt.has(phase)
+            ? Date.now() - phaseStartedAt.get(phase)! : undefined;
+          if (wallDurationMs !== undefined) timings[`${phase}Ms`] = wallDurationMs;
+          await appendGenerationStageEvent(jobId, page.id, phase === "format_repair" ? "repair" : "teach", state, dependencies,
+            { phase, ...usage, ...(wallDurationMs !== undefined ? { wallDurationMs } : {}) }, fenceToken);
         } });
+      timings.formatCheckMs = generation.teachingTrace?.formatCheckMs ?? 0;
+      const reviewStartedAt = Date.now();
       generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, {
@@ -3250,10 +3265,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       };
       const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
       finalizedCost = cost;
+      timings.pageCompileAndReviewMs = Date.now() - reviewStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
         provider: cost.provider, model: cost.model, estimatedMicrousd: cost.estimatedMicrousd, actualMicrousd: cost.actualMicrousd, costBasis: cost.costBasis });
       persistenceStage = "load_draft";
+      const loadDraftStartedAt = Date.now();
       const existing = await dependencies.readweave.getDraftByPage(page.id);
+      timings.draftLookupMs = Date.now() - loadDraftStartedAt;
       await assertGenerationFence(jobId, fenceToken, dependencies);
       const now = new Date().toISOString();
       const contentHash = sha256Text(stableStringify(generatedPage));
@@ -3273,20 +3291,30 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         updatedAt: now
       };
       persistenceStage = "save_draft";
+      const saveDraftStartedAt = Date.now();
       let saved = await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId));
+      timings.draftWriteMs = Date.now() - saveDraftStartedAt;
       persistenceStage = "read_back";
+      const readBackStartedAt = Date.now();
       const readBack = await dependencies.readweave.getDraftByPage(page.id);
       if (!readBack || readBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_DRAFT_READBACK_MISMATCH");
+      timings.draftReadBackMs = Date.now() - readBackStartedAt;
+      const readableAt = new Date().toISOString();
+      const readableMs = Date.now() - Date.parse(currentJob.createdAt);
       persistenceStage = "append_cost";
+      const appendCostStartedAt = Date.now();
       await dependencies.readweave.appendCostEntry(cost, systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:cost`, currentJob.workspaceId));
+      timings.costWriteMs = Date.now() - appendCostStartedAt;
       finalizedCostPersisted = true;
       meter.markSettled();
       await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
         context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
-          contentHash: saved.contentHash, provider: generation.provider, model: generation.model });
+          contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
+          readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt, timings: { ...timings } });
       });
       persistenceStage = undefined;
       let bridgeCompleted = false;
+      const bridgeStartedAt = Date.now();
       if (pageModelRouter.generateBridge) {
         try {
           const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: currentJob.workspaceId,
@@ -3322,11 +3350,15 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             phase: "bridge", reason: safeGenerationIssue(bridgeError) });
         }
       }
+      timings.bridgeAndSettlementMs = Date.now() - bridgeStartedAt;
       await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
         if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
         applyScopedCost(job, cost, context);
         if (!job.completedPageIds.includes(page.id)) job.completedPageIds.push(page.id);
-        context.appendEvent("generation.page.completed", { pageId: page.id, draftRevision: saved.revision, contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd, publishable: generatedPage.quality.publishable, bridgeCompleted });
+        context.appendEvent("generation.page.completed", { pageId: page.id, draftRevision: saved.revision,
+          contentHash: saved.contentHash, actualMicrousd: cost.actualMicrousd,
+          publishable: generatedPage.quality.publishable, bridgeCompleted,
+          settledMs: Date.now() - Date.parse(currentJob.createdAt), timings: { ...timings } });
         if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {
           Object.assign(job, transitionJob(job, "failed"));
           context.appendEvent("job.failed", { issue: "JOB_BUDGET_EXHAUSTED", spentUsd: job.spentUsd, budgetUsd: job.budgetUsd });

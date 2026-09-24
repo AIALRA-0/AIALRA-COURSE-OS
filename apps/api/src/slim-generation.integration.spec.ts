@@ -135,6 +135,26 @@ describe("slim page generation integration", () => {
     expect(maxInFlightModelPages).toBeGreaterThanOrEqual(2);
     expect(maxInFlightProviderPages).toBeGreaterThanOrEqual(2);
 
+    const events = (await dependencies.operations.read()).events;
+    for (const page of release.pages) {
+      const readable = events.find(event => event.type === "generation.page.core_saved"
+        && (event.payload as { pageId?: string }).pageId === page.id);
+      const settled = events.find(event => event.type === "generation.page.completed"
+        && (event.payload as { pageId?: string }).pageId === page.id);
+      expect(readable, page.id).toBeDefined();
+      expect(settled, page.id).toBeDefined();
+      const core = readable!.payload as { readableAt: string; readableMs: number; timings: Record<string, number> };
+      const completion = settled!.payload as { settledMs: number; timings: Record<string, number> };
+      expect(Number.isFinite(Date.parse(core.readableAt))).toBe(true);
+      expect(core.readableMs).toBeGreaterThanOrEqual(0);
+      expect(completion.settledMs).toBeGreaterThanOrEqual(core.readableMs);
+      expect(core.timings.teachingMs).toBeGreaterThanOrEqual(0);
+      expect(core.timings.draftWriteMs).toBeGreaterThanOrEqual(0);
+      expect(core.timings.draftReadBackMs).toBeGreaterThanOrEqual(0);
+      expect(core.timings.formatCheckMs).toBeGreaterThanOrEqual(0);
+      expect(completion.timings.bridgeAndSettlementMs).toBeGreaterThanOrEqual(0);
+    }
+
     for (const page of release.pages) {
       const draft = await readweave.getDraftByPage(page.id);
       expect(draft?.status, page.id).toBe("ready");
