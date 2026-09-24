@@ -48,6 +48,12 @@ describe("generation error classification", () => {
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 1, 0, 4)).toBe(false);
     expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_INVALID_RESPONSE"), 3, 0, 4)).toBe(false);
   });
+  it("classifies a missing streaming final event as a provider transport failure", () => {
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING")))
+      .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_STREAM_INTERRUPTED")))
+      .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
+  });
   it("classifies a ReadWeave network failure as storage rather than model transport", () => {
     expect(classifyGenerationFailure(new Error("READWEAVE_ETAPI_NETWORK:fetch failed")))
       .toMatchObject({ category: "storage", action: "retry_readback", code: "READWEAVE_UNAVAILABLE" });

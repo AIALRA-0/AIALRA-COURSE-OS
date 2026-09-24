@@ -270,6 +270,24 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       usage: { inputTokens: 220, cachedInputTokens: 20, outputTokens: 330, apiEquivalentUsd: 0.004 } });
   });
 
+  it("retries an HTTP 200 event stream that closes without its final response", async () => {
+    const incomplete = new Response("event: response.created\ndata: {\"type\":\"response.created\"}\n\n", {
+      headers: { "Content-Type": "text/event-stream" }
+    });
+    const completed = new Response("event: response.completed\ndata: "
+      + JSON.stringify({ type: "response.completed", response: { status: "completed", output_text: "ok",
+        usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.001 } } }) + "\n\n", {
+      headers: { "Content-Type": "text/event-stream" }
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(incomplete).mockResolvedValueOnce(completed);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+    const result = await runPlannedStageForTest(client);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.providerDiagnostic).toMatchObject({ status: "completed", rawOutputChars: 2 });
+  });
+
   it("preserves the HTTP status when a relay returns plain text instead of JSON or events", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream unavailable", {
       status: 502, headers: { "Content-Type": "text/plain" }

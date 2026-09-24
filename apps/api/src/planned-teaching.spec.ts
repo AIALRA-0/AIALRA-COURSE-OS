@@ -131,6 +131,63 @@ describe("planned teaching core writer", () => {
     expect(result.content.mainContentMarkdown).toBe("- 输入确定处理对象\n- 输出记录处理结果");
   });
 
+  it("keeps four provider quizQuestions instead of spending a model repair on an alias", async () => {
+    const calls: string[] = [];
+    const { questions, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, quizQuestions: questions };
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
+  it.each(["quiz", "split"]) ("preserves provider %s questions without a repair", async variant => {
+    const calls: string[] = [];
+    const { questions, ...body } = teachingPackage();
+    const providerContent = variant === "quiz" ? { ...body, quiz: questions } : {
+      ...body,
+      understandingQuestions: questions.slice(0, 2).map(({ kind: _kind, ...question }) => question),
+      multipleChoiceQuestions: questions.slice(2).map(({ kind: _kind, ...question }) => question)
+    };
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出" : providerContent;
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions.map(question => question.kind)).toEqual([
+      "comprehension", "comprehension", "multiple_choice", "multiple_choice"
+    ]);
+  });
+
+  it.each(["lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown"]) (
+    "uses %s as the provider's existing complete explanation", async field => {
+    const calls: string[] = [];
+    const { fullExplanationMarkdown, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, [field]: fullExplanationMarkdown };
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.fullExplanationMarkdown).toContain("## 从输入开始");
+    }
+  );
+
+  it("uses keyPoints list as the provider's existing main content", async () => {
+    const calls: string[] = [];
+    const { mainContentMarkdown: _mainContentMarkdown, ...body } = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先讲输入，再讲输出"
+        : { ...body, keyPoints: ["输入确定处理对象", "输出记录处理结果"] };
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.mainContentMarkdown).toContain("- 输入确定处理对象");
+  });
+
   it("keeps model questions when an explanation is returned as paragraphs", async () => {
     const calls: string[] = [];
     const content = teachingPackage();

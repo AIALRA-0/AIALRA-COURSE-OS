@@ -161,6 +161,22 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
   }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
+    // Compatible relays sometimes rename or split the final question array
+    // despite strict JSON Schema. These aliases preserve already-written work.
+    const taggedQuestions = (items: unknown, kind: "comprehension" | "multiple_choice") =>
+      Array.isArray(items) ? items.map(item => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+        const question = item as Record<string, unknown>;
+        return { ...question, kind: question.kind ?? kind };
+      }) : [];
+    const splitQuestions = [
+      ...taggedQuestions(record.understandingQuestions, "comprehension"),
+      ...taggedQuestions(record.multipleChoiceQuestions, "multiple_choice")
+    ];
+    const questionChoices = [record.questions, record.quizQuestions, record.quiz, splitQuestions];
+    const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length === 4)
+      ?? questionChoices.find(item => Array.isArray(item) && item.length > 0)
+      ?? record.questions ?? [];
     const questionKind = normalizeQuestionKind(record.kind ?? record.type);
     const rawOptions = record.options ?? record.choices;
     const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
@@ -181,14 +197,14 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
       learningObjectives: record.learningObjectives ?? record.objectives ?? [],
-      ...((record.mainContentMarkdown ?? record.mainContent ?? record.summary) !== undefined
-        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.summary } : {}),
+      ...((record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary) !== undefined
+        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary } : {}),
       priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
-      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.explanation) !== undefined
-        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.explanation } : {}),
+      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.explanation) !== undefined
+        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.explanation } : {}),
       misconceptions: record.misconceptions ?? record.commonMistakes ?? [],
       coverageEvidence: record.coverageEvidence ?? [],
-      questions: record.questions ?? []
+      questions: sourceQuestions
     } : record;
     return Object.fromEntries(Object.entries(schema.properties ?? {})
       .filter(([key]) => key in normalized)
@@ -394,7 +410,7 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   let source = value;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
-    const main = record.mainContentMarkdown ?? record.mainContent ?? record.summary;
+    const main = record.mainContentMarkdown ?? record.mainContent ?? record.keyPoints ?? record.summary;
     if (Array.isArray(main) && main.length > 0 && main.every(item => typeof item === "string" && item.trim())) {
       source = { ...record, mainContentMarkdown: main.map(item => /^\s*[-*+]\s/u.test(item)
         ? item.trim() : `- ${item.trim()}`).join("\n") };

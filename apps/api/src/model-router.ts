@@ -358,6 +358,14 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         if (error instanceof Error && error.name === "AbortError") {
           throw new ModelRouterGenerationError("MODEL_PROVIDER_TIMEOUT", this.connection.model, emptyUsage(started), this.connection.providerId);
         }
+        if (response.ok && error instanceof Error && error.message === "MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING") {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING", this.connection.model,
+            emptyUsage(started), this.connection.providerId);
+        }
+        if (useResponsesStream && response.ok) {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_STREAM_INTERRUPTED", this.connection.model,
+            emptyUsage(started), this.connection.providerId);
+        }
         if (!response.ok) {
           throw new ModelRouterGenerationError(`MODEL_PROVIDER_FAILED:${response.status}`, this.connection.model, emptyUsage(started), this.connection.providerId);
         }
@@ -602,6 +610,7 @@ function retryableProviderResponse(status: number, error: ProviderResponseBody["
 function retryableProviderError(code: string): boolean {
   if (code === "MODEL_PROVIDER_INSUFFICIENT_BALANCE") return false;
   return code === "MODEL_PROVIDER_NETWORK_FAILURE" || code === "MODEL_PROVIDER_TIMEOUT"
+    || code === "MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING" || code === "MODEL_PROVIDER_STREAM_INTERRUPTED"
     || /^MODEL_PROVIDER_FAILED:(?:429|5\d\d|rate_limited|rate_limit_exceeded|upstream_error|upstream_reasoning_only|gateway_concurrency_limit)$/u.test(code);
 }
 
