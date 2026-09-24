@@ -1,0 +1,20 @@
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_9fbd8b11d79a9a 8
+  s_e8850ef125fb32::t_98118434af798f 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a6d34603c4b3923504119cd177fdd0516dc0b44",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
