@@ -108,9 +108,26 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
   }
   if (schema?.type === "object" && candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
     const record = candidate as Record<string, unknown>;
-    const kind = record.kind ?? record.type;
-    const normalized = schema.properties?.kind && kind !== undefined
-      ? { ...record, kind: normalizeQuestionKind(kind) } : record;
+    const normalized = schema.properties?.kind ? {
+      ...record,
+      kind: normalizeQuestionKind(record.kind ?? record.type),
+      prompt: record.prompt ?? record.question ?? record.stem,
+      options: record.options ?? record.choices,
+      expectedAnswer: record.expectedAnswer ?? record.answer ?? record.correctAnswer,
+      explanation: record.explanation ?? record.rationale ?? record.reason
+    } : schema.properties?.fullExplanationMarkdown ? {
+      ...record,
+      chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
+      learningObjectives: record.learningObjectives ?? record.objectives ?? [],
+      ...((record.mainContentMarkdown ?? record.mainContent ?? record.summary) !== undefined
+        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContent ?? record.summary } : {}),
+      priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
+      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.explanation) !== undefined
+        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.explanation } : {}),
+      misconceptions: record.misconceptions ?? record.commonMistakes ?? [],
+      coverageEvidence: record.coverageEvidence ?? [],
+      questions: record.questions ?? []
+    } : record;
     return Object.fromEntries(Object.entries(schema.properties ?? {})
       .filter(([key]) => key in normalized)
       .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(normalized[key], childSchema)]));
@@ -317,6 +334,32 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   } as TeachingPackage;
 }
 
+/** Keep the model's valid lesson text when one malformed question survives the single repair. */
+function salvageFinalTeachingPackage(
+  initial: TeachingPackage | undefined, repaired: TeachingPackage | undefined
+): TeachingPackage | undefined {
+  const usable = (value: unknown): value is string => typeof value === "string" && !!value.trim();
+  const mainContent = [repaired?.mainContentMarkdown, initial?.mainContentMarkdown].find(usable);
+  const explanation = [repaired?.fullExplanationMarkdown, initial?.fullExplanationMarkdown].find(usable);
+  if (!mainContent && !explanation) return undefined;
+  const candidate = { ...initial, ...repaired } as TeachingPackage;
+  const strings = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string") : [];
+  const validItems = <T>(value: unknown, schema: unknown): T[] => Array.isArray(value)
+    ? value.filter(item => machineShapeIssues(item, schema).length === 0) as T[] : [];
+  return {
+    ...candidate,
+    mainContentMarkdown: mainContent ?? explanation!.split(/\n\s*\n/u).filter(Boolean).slice(0, 3).join("\n\n"),
+    fullExplanationMarkdown: explanation ?? mainContent!,
+    chapterBridgeMarkdown: typeof candidate.chapterBridgeMarkdown === "string" ? candidate.chapterBridgeMarkdown : "",
+    learningObjectives: strings(candidate.learningObjectives),
+    priorKnowledge: strings(candidate.priorKnowledge),
+    misconceptions: strings(candidate.misconceptions),
+    coverageEvidence: validItems(candidate.coverageEvidence, schemaProperties.coverageEvidence.items),
+    questions: validItems(candidate.questions, schemaProperties.questions.items)
+  };
+}
+
 function recordFormatWarnings(trace: PlannedTrace, issues: string[]): void {
   if (issues.length) trace.formatWarnings = [{ phase: "teaching", issues: [...new Set(issues)] }];
 }
@@ -409,6 +452,7 @@ export async function writePlannedLesson(
   const initialFormatIssues = initialShapeIssues.length === 0
     ? plannedFormatIssues(initialCandidate as TeachingPackage) : [];
   let accepted = initialCandidate;
+  let repairedCandidate: TeachingPackage | undefined;
   let finalShapeIssues = initialShapeIssues;
   let finalFormatIssues = initialFormatIssues;
 
@@ -430,7 +474,7 @@ export async function writePlannedLesson(
       })).content;
       const repairedParsed = parseTeachingOutput(repairedRaw);
       if (!repairedParsed.issue) {
-        const repairedCandidate = normalizeTeachingOutput(repairedParsed.content);
+        repairedCandidate = normalizeTeachingOutput(repairedParsed.content);
         const repairedShapeIssues = plannedContentIssues(repairedCandidate);
         if (repairedShapeIssues.length === 0) {
           accepted = repairedCandidate;
@@ -439,7 +483,16 @@ export async function writePlannedLesson(
         }
       }
     } catch (error) {
-      if (initialShapeIssues.length) throw error;
+      // A failed repair may still leave a complete lesson body in the first response.
+    }
+  }
+
+  if (finalShapeIssues.length) {
+    const salvaged = salvageFinalTeachingPackage(initialCandidate, repairedCandidate);
+    if (salvaged) {
+      accepted = salvaged;
+      finalShapeIssues = plannedContentIssues(salvaged);
+      finalFormatIssues = plannedFormatIssues(salvaged);
     }
   }
 

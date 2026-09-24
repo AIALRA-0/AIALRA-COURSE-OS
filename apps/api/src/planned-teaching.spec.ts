@@ -167,6 +167,56 @@ describe("planned teaching core writer", () => {
     ]);
   });
 
+  it("keeps a complete lesson when the only format repair still returns malformed questions", async () => {
+    const calls: string[] = [];
+    const malformed = {
+      ...teachingPackage(),
+      questions: [{ kind: "comprehension", prompt: 42, options: null, expectedAnswer: null, explanation: "说明" }]
+    };
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先解释输入" : malformed;
+    });
+    expect(calls).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.fullExplanationMarkdown).toContain("输入是处理开始时已经具备的信息");
+    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
+    expect(result.content.questions).toEqual([]);
+    expect(result.trace.qualityWarnings?.[0]?.issues).toContain("TEACHING_QUALITY:QUESTION_COUNT:0");
+  });
+
+  it("accepts common provider question aliases without changing lesson content", async () => {
+    const aliased = {
+      ...teachingPackage(),
+      questions: [{ type: "comprehension", question: "输入改变后怎么办？", choices: [], answer: "重新计算", rationale: "输出依赖输入" }]
+    };
+    const result = await writePlannedLesson(input(), async request =>
+      request.phase === "plan" ? "先解释输入" : aliased);
+    expect(result.content.questions[0]).toEqual({
+      kind: "comprehension", prompt: "输入改变后怎么办？", options: [], expectedAnswer: "重新计算", explanation: "输出依赖输入"
+    });
+  });
+
+  it("merges complementary core fields from the first answer and its only repair", async () => {
+    const original = { ...teachingPackage(), mainContentMarkdown: undefined };
+    const repaired = { ...teachingPackage(), fullExplanationMarkdown: undefined };
+    const result = await writePlannedLesson(input(), async request => {
+      if (request.phase === "plan") return "先解释输入";
+      return request.phase === "teaching" ? original : repaired;
+    });
+    expect(result.trace.phases.map(phase => phase.phase)).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.mainContentMarkdown).toContain("输入确定处理对象");
+    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
+    expect(plannedContentIssues(result.content)).toEqual([]);
+  });
+
+  it("recovers the final required summary from existing explanation text", async () => {
+    const answer = { ...teachingPackage(), mainContentMarkdown: undefined };
+    const result = await writePlannedLesson(input(), async request =>
+      request.phase === "plan" ? "先解释输入" : answer);
+    expect(result.content.mainContentMarkdown).toContain("输入是处理开始时已经具备的信息");
+    expect(plannedContentIssues(result.content)).toEqual([]);
+  });
+
   it("keeps deterministic typography and provider-shape normalizers", () => {
     const opening = normalizePlannedOpening({
       chapterBridgeMarkdown: "",
