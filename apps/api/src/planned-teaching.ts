@@ -371,6 +371,27 @@ function recordQualityWarnings(trace: PlannedTrace, content: TeachingPackage): v
   if (issues.length) trace.qualityWarnings = [{ phase: "teaching", issues }];
 }
 
+function questionsNeedRepair(value: TeachingPackage | undefined): boolean {
+  const questions = value?.questions;
+  if (!Array.isArray(questions) || questions.length !== 4) return true;
+  const comprehension = questions.filter(question => question.kind === "comprehension");
+  const choices = questions.filter(question => question.kind === "multiple_choice");
+  return comprehension.length !== 2 || choices.length !== 2
+    || choices.some(question => !Array.isArray(question.options) || question.options.length !== 4
+      || !question.options.includes(question.expectedAnswer));
+}
+
+function repairFieldsFor(issues: string[], formatIssues: string[], questionsIncomplete: boolean): string[] {
+  const fields = new Set<string>();
+  for (const issue of [...issues, ...formatIssues]) {
+    for (const field of Object.keys(schemaProperties)) {
+      if (issue.includes(`result.${field}`) || issue.includes(`:${field}:`)) fields.add(field);
+    }
+  }
+  if (questionsIncomplete) fields.add("questions");
+  return [...fields];
+}
+
 function outputAsPlanText(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined || value === null) return "";
@@ -451,30 +472,49 @@ export async function writePlannedLesson(
     : plannedContentIssues(initialCandidate as TeachingPackage);
   const initialFormatIssues = initialShapeIssues.length === 0
     ? plannedFormatIssues(initialCandidate as TeachingPackage) : [];
+  const incompleteQuestions = questionsNeedRepair(initialCandidate);
   let accepted = initialCandidate;
   let repairedCandidate: TeachingPackage | undefined;
   let finalShapeIssues = initialShapeIssues;
   let finalFormatIssues = initialFormatIssues;
 
-  if (initialShapeIssues.length || initialFormatIssues.length) {
+  if (initialShapeIssues.length || initialFormatIssues.length || incompleteQuestions) {
+    const repairFields = repairFieldsFor(initialShapeIssues, initialFormatIssues, incompleteQuestions);
+    const repairSchema = !initialParsed.issue && repairFields.length > 0 ? {
+      type: "object",
+      properties: Object.fromEntries(repairFields.map(field => [field, schemaProperties[field]])),
+      required: repairFields,
+      additionalProperties: false
+    } : teachingPackageSchema;
+    const currentFields = initialCandidate && repairFields.length > 0
+      ? Object.fromEntries(repairFields.map(field => [field, (initialCandidate as unknown as Record<string, unknown>)[field]]))
+      : initialParsed.raw;
     const repairPrompt = JSON.stringify({
-      currentOutput: initialParsed.issue ? initialParsed.raw : initialCandidate,
+      pageTitle: input.pageTitle,
+      source: input.sourceText.slice(0, 8_000),
+      currentOutput: currentFields,
+      ...(initialCandidate ? {
+        mainContentMarkdown: initialCandidate.mainContentMarkdown?.slice(0, 2_000),
+        fullExplanationMarkdown: initialCandidate.fullExplanationMarkdown?.slice(0, 5_000)
+      } : {}),
+      targetFields: repairFields,
       machineShapeIssues: initialShapeIssues,
       contentFormatIssues: initialFormatIssues,
-      instruction: "只修复列出的 JSON 结构或呈现格式问题。保留原有教学内容与事实，不补充新事实，不重写未指出的内容。返回完整 TeachingPackage。"
+      instruction: "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。questions 必须是 2 道理解题和 2 道四选一选择题。"
     });
     try {
       const repairedRaw = (await run({
         phase: "format_repair",
         instructions: plannedInstructions(fields, input.language)
-          + "\n\n这是一次有范围的最终格式修复。只修复提示中列出的问题，保持原教学内容与事实不变，并返回完整 TeachingPackage。",
+          + "\n\n这是一次局部最终格式修复。只返回 targetFields 对应的 JSON 字段，其他字段由系统保留。不得返回完整教学包。",
         prompt: repairPrompt,
-        schema: teachingPackageSchema,
-        maxOutputTokens: 9_000
+        schema: repairSchema,
+        maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000
       })).content;
       const repairedParsed = parseTeachingOutput(repairedRaw);
       if (!repairedParsed.issue) {
-        repairedCandidate = normalizeTeachingOutput(repairedParsed.content);
+        const patch = projectPlannedOutputToSchema(repairedParsed.content, repairSchema);
+        repairedCandidate = normalizeTeachingOutput({ ...initialCandidate, ...patch as object });
         const repairedShapeIssues = plannedContentIssues(repairedCandidate);
         if (repairedShapeIssues.length === 0) {
           accepted = repairedCandidate;

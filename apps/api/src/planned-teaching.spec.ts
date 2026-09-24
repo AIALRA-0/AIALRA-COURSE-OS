@@ -103,7 +103,7 @@ describe("planned teaching core writer", () => {
       calls.push(request.phase);
       if (request.phase === "plan") return "讲解顺序";
       if (request.phase === "teaching") return incomplete;
-      expect(request.schema).toBe(teachingPackageSchema);
+      expect(Object.keys(request.schema?.properties ?? {})).toContain("mainContentMarkdown");
       expect(request.prompt).toContain("result.mainContentMarkdown:required");
       return complete;
     });
@@ -158,7 +158,7 @@ describe("planned teaching core writer", () => {
       return partial;
     });
 
-    expect(calls).toEqual(["plan", "teaching"]);
+    expect(calls).toEqual(["plan", "teaching", "format_repair"]);
     expect(result.content.questions).toEqual([]);
     expect(result.content.fullExplanationMarkdown).toBe("简短讲解");
     expect(result.trace.qualityWarnings?.[0]?.issues).toEqual([
@@ -194,6 +194,22 @@ describe("planned teaching core writer", () => {
     expect(result.content.questions[0]).toEqual({
       kind: "comprehension", prompt: "输入改变后怎么办？", options: [], expectedAnswer: "重新计算", explanation: "输出依赖输入"
     });
+  });
+
+  it("repairs only the question field while preserving the initial explanation", async () => {
+    const initial = { ...teachingPackage(), questions: [] };
+    const completed = teachingPackage();
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      if (request.phase === "plan") return "先解释输入";
+      if (request.phase === "teaching") return initial;
+      expect(Object.keys(request.schema?.properties ?? {})).toEqual(["questions"]);
+      return { questions: completed.questions };
+    });
+    expect(calls).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.questions).toHaveLength(4);
+    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
   });
 
   it("merges complementary core fields from the first answer and its only repair", async () => {
