@@ -778,7 +778,11 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, pageId);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
-      const saved = await dependencies.readweave.getDraftByPage(pageId);
+      // Learning previews only need the saved teaching snapshot. Editing still
+      // uses the reconciled read so external ReadWeave changes remain visible.
+      const saved = request.query.view === "snapshot" && dependencies.readweave.getDraftSnapshotByPage
+        ? await dependencies.readweave.getDraftSnapshotByPage(pageId)
+        : await dependencies.readweave.getDraftByPage(pageId);
       if (saved && saved.workspaceId === workspaceId && saved.courseId === source.release.courseId) return response.json(saved);
       response.json(createVirtualDraft(source.release, source.page, workspaceId));
     } catch (error) { next(error); }

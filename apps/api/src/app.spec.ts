@@ -483,6 +483,19 @@ describe("Course OS API", () => {
     expect(reconciledRead).not.toHaveBeenCalled();
   });
 
+  it("serves candidate previews from a saved snapshot while preserving reconciled editor reads", async () => {
+    const { app, readweave } = await seededApp();
+    const snapshot = await readweave.getDraftByPage("page-1");
+    const fastRead = vi.fn(async () => snapshot);
+    (readweave as ReadWeaveCourseApi).getDraftSnapshotByPage = fastRead;
+    const reconciledRead = vi.spyOn(readweave, "getDraftByPage").mockResolvedValue(snapshot);
+    await request(app).get("/api/v1/pages/page-1/draft?view=snapshot").expect(200);
+    expect(fastRead).toHaveBeenCalledWith("page-1");
+    expect(reconciledRead).not.toHaveBeenCalled();
+    await request(app).get("/api/v1/pages/page-1/draft").expect(200);
+    expect(reconciledRead).toHaveBeenCalledWith("page-1");
+  });
+
   it("quotes exact source headings and translates a formula-heading reference without changing its symbol", () => {
     const content = testTeachingResult(0).content;
     content.chapterBridgeMarkdown = "上一页把 EDGE-GNN 接入了网络";

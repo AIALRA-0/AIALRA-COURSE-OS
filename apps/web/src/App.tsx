@@ -235,7 +235,7 @@ export function App() {
     if (mode !== "learn" || release?.lifecycle !== "draft_source" || !page) { setCandidatePreview(undefined); return; }
     let active = true;
     setCandidatePreview({ pageId: page.id });
-    api.draft(page.id).then((draft) => {
+    api.draftSnapshot(page.id).then((draft) => {
       if (!active) return;
       if (draft.sourceReleaseId === release.id && draft.page.id === page.id && draft.status === "ready") {
         const title = readablePageTitle(draft.page.title);
