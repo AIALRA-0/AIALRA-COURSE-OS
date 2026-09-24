@@ -150,6 +150,21 @@ interface EtapiCostIndexState {
   idempotency: ReadWeaveFileState["idempotency"];
 }
 
+interface EtapiDraftPageRecord {
+  schemaVersion: "1.0.0";
+  pageId: string;
+  draft: LessonDraft;
+  projection: DraftProjection;
+  costEntries: GenerationCostEntry[];
+  idempotency: ReadWeaveFileState["idempotency"];
+  conflicts: CourseConflict[];
+}
+
+interface LocatedDraftPageRecord {
+  noteId: string;
+  record: EtapiDraftPageRecord;
+}
+
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
 
 const SECTION_DEFINITIONS = [
@@ -177,6 +192,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private bootstrapPromise?: Promise<ProjectionIndex>;
   private bootstrapStateContent?: string;
   private writeChain: Promise<void> = Promise.resolve();
+  private readonly draftWriteChains = new Map<string, Promise<void>>();
+  private readonly draftPageRecordCache = new Map<string, LocatedDraftPageRecord>();
+  private readonly draftPageRecordVersions = new Map<string, number>();
+  private draftPageRecordVersion = 0;
+  private draftPageRecordsHydrated = false;
+  private draftPageRecordsHydration?: Promise<void>;
   private readonly costNoteEnsures = new Map<string, Promise<void>>();
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private stateCache?: { state: EtapiState; expiresAt: number };
@@ -186,7 +207,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
   private lastReadAt?: string;
   private lastWriteAt?: string;
-  private activeWriteContext?: IdempotentWriteContext;
 
   constructor(private readonly config: EtapiReadWeaveConfig) {
     this.fetchImpl = config.fetchImpl ?? fetch;
@@ -251,6 +271,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (projection) {
           await this.deleteNote(projection.pageNoteId);
           delete state.projections.drafts[draft.id];
+        }
+        const pageRecord = await this.findDraftPageRecord(draft.pageId);
+        if (pageRecord) {
+          await this.deleteNote(pageRecord.noteId);
+          this.draftPageRecordCache.delete(draft.pageId);
         }
       }
       const course = state.projections.courses[release.courseId];
@@ -333,6 +358,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const projection = await this.ensureDraftProjection(state, draft);
         await this.refreshDraftProjection(draft, projection);
         draft.readweaveNoteId = projection.pageNoteId;
+        const pageRecord = await this.findDraftPageRecord(page.id);
+        if (pageRecord) {
+          const refreshed = this.makeDraftPageRecord(state, draft, projection, pageRecord.record);
+          await this.writeDraftPageRecord(refreshed, pageRecord.noteId, state);
+        }
       }
       state.idempotency[context.idempotencyKey] = { kind: "release", objectId: release.id };
       return release;
@@ -539,6 +569,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async appendCostEntry(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry> {
+    if (entry.pageId) {
+      const pageCost = await this.appendDraftPageCost(entry, context);
+      if (pageCost) return pageCost;
+    }
     const result = await this.mutate(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       const saved = replay ? state.costEntries.find((item) => item.id === replay.objectId) ?? entry : structuredClone(entry);
@@ -564,12 +598,66 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return result.saved;
   }
 
+  private async appendDraftPageCost(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry | undefined> {
+    if (!entry.pageId) return undefined;
+    return this.withDraftPageLock(entry.pageId, context, async () => {
+      const state = structuredClone(await this.readStateReference(true));
+      const located = await this.findDraftPageRecord(entry.pageId!);
+      if (located) this.mergeDraftPageRecord(state, located.record);
+      const release = state.releases.find((item) => item.id === entry.materialVersionId || item.courseId === entry.courseId);
+      let draft = located?.record.draft ?? state.drafts.find((item) => item.pageId === entry.pageId);
+      if (!draft && release) {
+        const page = release.pages.find((item) => item.id === entry.pageId);
+        if (page) {
+          draft = {
+            id: `draft:${page.id}`,
+            workspaceId: this.workspaceId,
+            courseId: release.courseId,
+            moduleId: release.moduleId,
+            sourceReleaseId: release.id,
+            pageId: page.id,
+            revision: 0,
+            status: "clean",
+            page: structuredClone(page),
+            changedBlockIds: [],
+            contentHash: sha256(JSON.stringify(page)),
+            updatedAt: release.publishedAt
+          };
+        }
+      }
+      if (!draft || !release) return undefined;
+
+      const projection = located?.record.projection ?? state.projections.drafts[draft.id]
+        ?? await this.ensureDraftProjection(state, draft);
+      state.projections.drafts[draft.id] = projection;
+      const existingCost = located?.record.costEntries.find((item) => item.id === entry.id)
+        ?? state.costEntries.find((item) => item.id === entry.id);
+      const replay = located?.record.idempotency[context.idempotencyKey] ?? state.idempotency[context.idempotencyKey];
+      const saved = replay
+        ? located?.record.costEntries.find((item) => item.id === replay.objectId)
+          ?? state.costEntries.find((item) => item.id === replay.objectId)
+          ?? existingCost
+          ?? entry
+        : existingCost ?? structuredClone(entry);
+      const record = this.makeDraftPageRecord(state, draft, projection, located?.record);
+      if (!record.costEntries.some((item) => item.id === saved.id)) record.costEntries.push(structuredClone(saved));
+      record.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: saved.id };
+      record.idempotency[saved.id] = { kind: "cost_entry", objectId: saved.id };
+      if (!located || !replay || !existingCost) {
+        await this.writeDraftPageRecord(record, located?.noteId, state);
+      }
+      const parentNoteId = projection.sectionNoteIds.quality;
+      await this.writeContext.run(context, () => this.ensureCostNoteOnce(parentNoteId, saved));
+      return structuredClone(saved);
+    });
+  }
+
   async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}): Promise<GenerationCostEntry[]> {
     const state = await this.readState();
     const costIndex = state.projections.costIndexNoteId
       ? await this.readCostIndex(state.projections.costIndexNoteId)
       : undefined;
-    return mergeCostEntries(state.costEntries, costIndex?.costEntries).filter((item) =>
+    return mergeCostEntries(costIndex?.costEntries, state.costEntries).filter((item) =>
       (!filters.courseId || item.courseId === filters.courseId) &&
       (!filters.materialVersionId || item.materialVersionId === filters.materialVersionId) &&
       (!filters.pageId || item.pageId === filters.pageId) &&
@@ -631,24 +719,38 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // where only ownership/counts are needed. Re-reading every explanation
     // block from ReadWeave here turned one refresh into hundreds of ETAPI
     // requests. Reconcile the single page when it is opened instead.
-    return structuredClone((await this.readStateReference()).drafts);
+    return structuredClone((await this.readState()).drafts);
   }
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
     const cached = this.draftReadCache.get(pageId);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
-    const state = await this.readState();
-    const index = state.drafts.findIndex((draft) => draft.pageId === pageId);
-    if (index < 0) return undefined;
-    const reconciled = await this.reconcileDraft(state, state.drafts[index]!);
-    this.draftReadCache.set(pageId, { draft: structuredClone(reconciled.draft), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs });
-    return reconciled.draft;
+    return this.withDraftPageLock(pageId, undefined, async () => {
+      const state = structuredClone(await this.readStateReference(true));
+      const located = await this.findDraftPageRecord(pageId);
+      if (located) this.mergeDraftPageRecord(state, located.record);
+      const draft = state.drafts.find((item) => item.pageId === pageId);
+      if (!draft) return undefined;
+      const reconciled = await this.reconcileDraft(state, draft);
+      if (reconciled.changed) {
+        const projection = state.projections.drafts[reconciled.draft.id];
+        if (projection) {
+          const record = this.makeDraftPageRecord(state, reconciled.draft, projection, located?.record);
+          await this.writeDraftPageRecord(record, located?.noteId, state);
+        }
+      }
+      this.draftReadCache.set(pageId, { draft: structuredClone(reconciled.draft), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs });
+      return reconciled.draft;
+    });
   }
 
   async getDraftSnapshotByPage(pageId: string): Promise<LessonDraft | undefined> {
     const cached = this.draftReadCache.get(pageId);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
-    const draft = (await this.readStateReference()).drafts.find((item) => item.pageId === pageId);
+    const state = structuredClone(await this.readStateReference());
+    const located = this.draftPageRecordCache.get(pageId) ?? await this.findDraftPageRecord(pageId);
+    if (located) this.mergeDraftPageRecord(state, located.record);
+    const draft = state.drafts.find((item) => item.pageId === pageId);
     return draft ? structuredClone(draft) : undefined;
   }
 
@@ -661,27 +763,61 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {
-    const result = await this.mutate(async (state): Promise<{ saved?: LessonDraft; conflict?: CourseConflict }> => {
-      const replay = state.idempotency[context.idempotencyKey];
+    return this.withDraftPageLock(draft.pageId, context, async () => {
+      const state = structuredClone(await this.readStateReference(true));
+      const located = await this.findDraftPageRecord(draft.pageId);
+      if (located) this.mergeDraftPageRecord(state, located.record);
+      const previous = located?.record;
+      let current = previous?.draft ?? state.drafts.find((item) => item.pageId === draft.pageId);
+      let projection = previous?.projection ?? (current ? state.projections.drafts[current.id] : undefined);
+      const replay = previous?.idempotency[context.idempotencyKey] ?? state.idempotency[context.idempotencyKey];
       if (replay) {
-        const existing = state.drafts.find((item) => item.id === replay.objectId);
+        const existing = current?.id === replay.objectId
+          ? current
+          : state.drafts.find((item) => item.id === replay.objectId);
         if (!existing) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
-        return { saved: existing };
+        projection = projection ?? state.projections.drafts[existing.id] ?? await this.ensureDraftProjection(state, existing, sourceAsset);
+        if (!previous) {
+          const migrated = this.makeDraftPageRecord(state, existing, projection);
+          await this.writeDraftPageRecord(migrated, undefined, state);
+        }
+        if (cost) await this.writeContext.run(context, () => this.ensureCostNoteOnce(projection!.sectionNoteIds.quality, cost));
+        return structuredClone(existing);
       }
-      const index = state.drafts.findIndex((item) => item.pageId === draft.pageId);
-      let current = index >= 0 ? state.drafts[index] : undefined;
-      if (current) current = (await this.reconcileDraft(state, current)).draft;
-      const currentRevision = current?.revision ?? 0;
-      if (currentRevision !== expectedRevision) {
-        const conflict = this.createConflict(draft, expectedRevision, current);
-        state.conflicts.push(conflict);
-        return { conflict };
-      }
-      const projectionCreated = !state.projections.drafts[draft.id];
+
+      if (current) current = (await this.reconcileDraft(state, current, draft)).draft;
+      const conflictResult = async (remoteDraft: LessonDraft | undefined, remoteProjection: DraftProjection | undefined): Promise<never> => {
+        const conflictDraft = remoteDraft ?? current ?? draft;
+        const conflictProjection = state.projections.drafts[conflictDraft.id] ?? remoteProjection
+          ?? await this.ensureDraftProjection(state, conflictDraft, sourceAsset);
+        const conflict = this.createConflict(draft, expectedRevision, conflictDraft);
+        const record = this.makeDraftPageRecord(state, conflictDraft, conflictProjection, previous);
+        record.conflicts = [...record.conflicts.filter((item) => item.id !== conflict.id), conflict];
+        await this.writeDraftPageRecord(record, located?.noteId, state);
+        this.draftReadCache.delete(draft.pageId);
+        throw new Error(`READWEAVE_REVISION_CONFLICT:${conflict.id}`);
+      };
+
+      if ((current?.revision ?? 0) !== expectedRevision) return conflictResult(current, projection);
+
+      const projectionCreated = !projection;
       const ensureStartedAt = performance.now();
-      const projection = await this.ensureDraftProjection(state, draft, sourceAsset);
+      projection = await this.ensureDraftProjection(state, current ?? draft, sourceAsset);
       const ensuredAt = performance.now();
-      await this.refreshDraftProjection(draft, projection, sourceAsset, 4);
+      if (current) {
+        current = (await this.reconcileDraft(state, current, draft)).draft;
+        if (current.revision !== expectedRevision) return conflictResult(current, projection);
+      }
+
+      try {
+        await this.refreshDraftProjection(draft, projection, sourceAsset, 4, current);
+      } catch (error) {
+        if (error instanceof Error && error.message === "READWEAVE_DRAFT_BLOCK_CONFLICT" && current) {
+          const latest = await this.reconcileDraft(state, current, draft);
+          if (latest.changed) return conflictResult(latest.draft, projection);
+        }
+        throw error;
+      }
       if (process.env.COURSE_OS_READWEAVE_TIMING === "1") {
         console.info("course_os.readweave_draft_projection_timing", JSON.stringify({
           projectionCreated,
@@ -689,27 +825,25 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           refreshDraftProjectionMs: Math.round(performance.now() - ensuredAt)
         }));
       }
+
       const saved: LessonDraft = structuredClone({
         ...draft,
         readweaveNoteId: projection.pageNoteId,
-        revision: currentRevision + 1,
+        revision: (current?.revision ?? 0) + 1,
         contentHash: sha256(JSON.stringify(draft.page)),
         updatedAt: new Date().toISOString()
       });
-      if (index >= 0) state.drafts[index] = saved;
-      else state.drafts.push(saved);
-      if (cost && !state.costEntries.some((item) => item.id === cost.id)) {
-        await this.ensureCostNote(projection.sectionNoteIds.quality, cost);
-        state.costEntries.push(structuredClone(cost));
-        state.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
-      }
-      state.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
-      return { saved };
-    }, context);
-    if (result.conflict) throw new Error(`READWEAVE_REVISION_CONFLICT:${result.conflict.id}`);
-    if (!result.saved) throw new Error("READWEAVE_DRAFT_SAVE_FAILED");
-    this.draftReadCache.delete(draft.pageId);
-    return result.saved;
+      if (cost) await this.writeContext.run(context, () => this.ensureCostNoteOnce(projection!.sectionNoteIds.quality, cost));
+      const record = this.makeDraftPageRecord(state, saved, projection, previous);
+      if (cost && !record.costEntries.some((item) => item.id === cost.id)) record.costEntries.push(structuredClone(cost));
+      record.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
+      if (cost) record.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
+      await this.writeDraftPageRecord(record, located?.noteId, state);
+      return saved;
+    }).catch((error: unknown) => {
+      this.invalidateStateCache();
+      throw error;
+    });
   }
 
   async listConflicts(): Promise<CourseConflict[]> {
@@ -717,6 +851,43 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict> {
+    const initial = (await this.readState()).conflicts.find((item) => item.id === conflictId);
+    if (initial?.objectType === "lesson_draft") {
+      return this.withDraftPageLock(initial.objectId, context, async () => {
+        const state = structuredClone(await this.readStateReference(true));
+        const located = await this.findDraftPageRecord(initial.objectId);
+        if (located) this.mergeDraftPageRecord(state, located.record);
+        const conflict = state.conflicts.find((item) => item.id === conflictId);
+        if (!conflict) throw new Error("READWEAVE_CONFLICT_NOT_FOUND");
+        if (conflict.status === "resolved") return conflict;
+        if (resolution === "merged" && !mergedContent?.trim()) throw new Error("READWEAVE_MERGED_CONTENT_REQUIRED");
+        const draft = located?.record.draft ?? state.drafts.find((item) => item.pageId === conflict.objectId);
+        if (!draft) throw new Error("READWEAVE_DRAFT_NOT_FOUND");
+        const selected = resolution === "local" ? conflict.localContent : resolution === "remote" ? conflict.remoteContent : mergedContent!;
+        const previousDraft = structuredClone(draft);
+        try {
+          draft.page = JSON.parse(selected);
+        } catch {
+          throw new Error("READWEAVE_CONFLICT_CONTENT_INVALID");
+        }
+        draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision) + 1;
+        draft.status = "editing";
+        draft.contentHash = sha256(JSON.stringify(draft.page));
+        draft.updatedAt = new Date().toISOString();
+        const projection = located?.record.projection ?? state.projections.drafts[draft.id]
+          ?? await this.ensureDraftProjection(state, draft);
+        conflict.status = "resolved";
+        conflict.resolution = resolution;
+        conflict.resolvedAt = draft.updatedAt;
+        state.idempotency[context.idempotencyKey] = { kind: "conflict", objectId: conflict.id };
+        await this.refreshDraftProjection(draft, projection, undefined, 4, previousDraft);
+        const record = this.makeDraftPageRecord(state, draft, projection, located?.record);
+        record.conflicts = [...record.conflicts.filter((item) => item.id !== conflict.id), conflict];
+        record.idempotency[context.idempotencyKey] = { kind: "conflict", objectId: conflict.id };
+        await this.writeDraftPageRecord(record, located?.noteId, state);
+        return structuredClone(conflict);
+      });
+    }
     return this.mutate(async (state) => {
       const conflict = state.conflicts.find((item) => item.id === conflictId);
       if (!conflict) throw new Error("READWEAVE_CONFLICT_NOT_FOUND");
@@ -732,7 +903,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       }
       draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision) + 1;
       draft.status = "editing";
-      draft.contentHash = sha256(selected);
+      draft.contentHash = sha256(JSON.stringify(draft.page));
       draft.updatedAt = new Date().toISOString();
       conflict.status = "resolved";
       conflict.resolution = resolution;
@@ -1045,6 +1216,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.trash.splice(index, 1);
       if (item.nodeKind === "course") {
         const releaseIds = new Set(state.releases.filter((release) => release.courseId === item.nodeId).map((release) => release.id));
+        const removedDrafts = state.drafts.filter((draft) => draft.courseId === item.nodeId);
+        for (const draft of removedDrafts) {
+          const pageRecord = await this.findDraftPageRecord(draft.pageId);
+          if (pageRecord) {
+            await this.deleteNote(pageRecord.noteId);
+            this.draftPageRecordCache.delete(draft.pageId);
+          }
+        }
         state.courses = state.courses.filter((course) => course.id !== item.nodeId);
         state.releases = state.releases.filter((release) => release.courseId !== item.nodeId);
         state.drafts = state.drafts.filter((draft) => draft.courseId !== item.nodeId);
@@ -1397,7 +1576,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     });
   }
 
-  private async reconcileDraft(state: EtapiState, draft: LessonDraft): Promise<{ draft: LessonDraft; changed: boolean }> {
+  private async reconcileDraft(state: EtapiState, draft: LessonDraft, pendingDraft?: LessonDraft): Promise<{ draft: LessonDraft; changed: boolean }> {
     const projection = state.projections.drafts[draft.id];
     if (!projection) return { draft, changed: false };
     const next = structuredClone(draft);
@@ -1411,9 +1590,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (remoteMarkdown === undefined) continue;
       const remoteHash = sha256(remoteMarkdown);
       if (remoteHash !== projection.blockHashes[block.id]) {
-        block.markdown = remoteMarkdown;
+        const pendingBlock = pendingDraft?.page.blocks.find((candidate) => candidate.id === block.id);
+        if (remoteHash !== sha256(block.markdown) && (!pendingBlock || remoteHash !== sha256(pendingBlock.markdown))) {
+          block.markdown = remoteMarkdown;
+          changed = true;
+        }
         projection.blockHashes[block.id] = remoteHash;
-        changed = true;
       }
     }
     if (changed) {
@@ -1498,18 +1680,31 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return projection;
   }
 
-  private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset, maxConcurrency = 1): Promise<void> {
+  private async refreshDraftProjection(draft: LessonDraft, projection: DraftProjection, sourceAsset?: DraftSourceAsset, maxConcurrency = 1, expectedDraft?: LessonDraft): Promise<void> {
+    const interruptedSectionContents = new Map<string, string>();
     if (projection.pageOverviewHash) {
       const actualOverview = await this.getContent(projection.pageNoteId);
       const actualHash = sha256(actualOverview);
       if (actualHash !== projection.pageOverviewHash) {
         const pendingHash = sha256(this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName));
-        if (actualHash !== pendingHash && !(await this.isInterruptedOverviewWrite(actualOverview, draft, projection))) {
+        if (actualHash !== pendingHash && !(await this.isInterruptedOverviewWrite(actualOverview, draft, projection, interruptedSectionContents))) {
           throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
         }
         // A previous attempt updated the note before its state transaction failed.
         projection.pageOverviewHash = actualHash;
       }
+    }
+    const currentBlockHashes = await Promise.all(draft.page.blocks.map(async (block) => {
+      const noteId = projection.blockNoteIds[block.id];
+      return noteId ? sha256(await this.getContent(noteId)) : undefined;
+    }));
+    for (const [index, block] of draft.page.blocks.entries()) {
+      const actualHash = currentBlockHashes[index];
+      if (actualHash === undefined) continue;
+      const targetHash = sha256(block.markdown);
+      const expectedHash = projection.blockHashes[block.id];
+      if (actualHash !== expectedHash && actualHash !== targetHash) throw new Error("READWEAVE_DRAFT_BLOCK_CONFLICT");
+      if (actualHash === targetHash) projection.blockHashes[block.id] = targetHash;
     }
     if (sourceAsset) {
       projection.sourceImageFileName = sourceAsset.fileName;
@@ -1528,14 +1723,42 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (projection.pageOverviewHash) {
       const overview = this.renderPageOverview(draft, projection.sourceImageNoteId, projection.sourceImageFileName);
       updates.push(async () => {
+        const actual = await this.getContent(projection.pageNoteId);
+        const actualHash = sha256(actual);
+        const nextHash = sha256(overview);
+        if (actualHash === nextHash) {
+          projection.pageOverviewHash = actualHash;
+          return;
+        }
+        if (actualHash !== projection.pageOverviewHash && !(await this.isInterruptedOverviewWrite(actual, draft, projection, interruptedSectionContents))) {
+          throw new Error("READWEAVE_PAGE_OVERVIEW_CONFLICT");
+        }
         await this.putContent(projection.pageNoteId, overview);
         projection.pageOverviewHash = sha256(await this.getContent(projection.pageNoteId));
       });
     }
-    updates.push(() => this.putContent(projection.sectionNoteIds.source, this.renderSource(draft, projection.sourceImageNoteId, projection.sourceImageFileName)));
+    const queueContentUpdate = (noteId: string, content: string, expectedContent?: string): void => {
+      updates.push(async () => {
+        const actual = await this.getContent(noteId);
+        if (actual === content) return;
+        if (expectedContent !== undefined && actual !== expectedContent && actual !== interruptedSectionContents.get(noteId)) {
+          throw new Error("READWEAVE_DRAFT_SECTION_CONFLICT");
+        }
+        await this.putContent(noteId, content);
+      });
+    };
+    queueContentUpdate(
+      projection.sectionNoteIds.source,
+      this.renderSource(draft, projection.sourceImageNoteId, projection.sourceImageFileName),
+      sourceAsset ? undefined : expectedDraft ? this.renderSource(expectedDraft, projection.sourceImageNoteId, projection.sourceImageFileName) : undefined
+    );
     for (const [key] of SECTION_DEFINITIONS) {
       if (key === "source") continue;
-      updates.push(() => this.putContent(projection.sectionNoteIds[key], this.renderSectionOverview(draft, key)));
+      queueContentUpdate(
+        projection.sectionNoteIds[key],
+        this.renderSectionOverview(draft, key),
+        expectedDraft ? this.renderSectionOverview(expectedDraft, key) : undefined
+      );
     }
     for (const block of draft.page.blocks) {
       const nextHash = sha256(block.markdown);
@@ -1543,16 +1766,35 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (!noteId) {
         blockCreations.push(async () => {
           const section = this.sectionForBlock(block);
-          const note = await this.createNote(projection.sectionNoteIds[section], block.title, block.markdown, "code", "text/markdown", {
-            courseOsType: "explanation_block",
-            courseOsObjectId: block.id,
-            courseOsPageId: draft.pageId
+          const query = new URLSearchParams({
+            search: `#courseOsObjectId="${block.id}"`,
+            ancestorNoteId: projection.sectionNoteIds[section],
+            ancestorDepth: "lt3",
+            fastSearch: "true"
           });
-          projection.blockNoteIds[block.id] = note.noteId;
+          const existing = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results.find((item) => item.title === block.title);
+          if (existing) {
+            if (await this.getContent(existing.noteId) !== block.markdown) throw new Error("READWEAVE_DRAFT_BLOCK_CONFLICT");
+            projection.blockNoteIds[block.id] = existing.noteId;
+          } else {
+            const note = await this.createNote(projection.sectionNoteIds[section], block.title, block.markdown, "code", "text/markdown", {
+              courseOsType: "explanation_block",
+              courseOsObjectId: block.id,
+              courseOsPageId: draft.pageId
+            });
+            projection.blockNoteIds[block.id] = note.noteId;
+          }
           projection.blockHashes[block.id] = nextHash;
         });
-      } else if (projection.blockHashes[block.id] !== nextHash) {
+      } else {
+        const baselineHash = projection.blockHashes[block.id];
         updates.push(async () => {
+          const actualHash = sha256(await this.getContent(noteId!));
+          if (actualHash === nextHash) {
+            projection.blockHashes[block.id] = nextHash;
+            return;
+          }
+          if (actualHash !== baselineHash) throw new Error("READWEAVE_DRAFT_BLOCK_CONFLICT");
           await this.putContent(noteId!, block.markdown);
           projection.blockHashes[block.id] = nextHash;
         });
@@ -1562,7 +1804,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     for (const createBlock of blockCreations) await createBlock();
   }
 
-  private async isInterruptedOverviewWrite(actual: string, draft: LessonDraft, projection: DraftProjection): Promise<boolean> {
+  private async isInterruptedOverviewWrite(actual: string, draft: LessonDraft, projection: DraftProjection, recoveredSections?: Map<string, string>): Promise<boolean> {
     const emptyPage = { ...draft.page, lessonSections: [] };
     const prefix = this.renderPageOverview({ ...draft, page: emptyPage }, projection.sourceImageNoteId, projection.sourceImageFileName);
     if (!actual.startsWith(prefix)) return false;
@@ -1576,12 +1818,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const headings = [...actual.matchAll(/<h3>([^<]+)<\/h3>/gu)];
     if (headings.map((match) => match[1]).join("|") !== "承上启下|先验知识|学习目标|完整讲解|主要内容|易错点") return false;
     const contents = await Promise.all(sections.map(async ([key]) => this.getContent(projection.sectionNoteIds[key])));
-    return sections.every(([, title], index) => {
+    const matches = sections.every(([, title], index) => {
       const heading = `<h3>${title}</h3>`;
       const start = actual.indexOf(heading);
       const next = actual.indexOf("<h3>", start + heading.length);
       return start >= 0 && actual.slice(start + heading.length, next < 0 ? undefined : next) === contents[index];
     });
+    if (matches && recoveredSections) {
+      sections.forEach(([key], index) => recoveredSections.set(projection.sectionNoteIds[key], contents[index]!));
+    }
+    return matches;
   }
 
   private async ensureCourseProjection(state: EtapiState, release: CourseRelease): Promise<CourseProjection> {
@@ -1690,7 +1936,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async readState(requireFresh = false): Promise<EtapiState> {
-    return structuredClone(await this.readStateReference(requireFresh));
+    const state = structuredClone(await this.readStateReference(requireFresh));
+    await this.mergeDraftPageRecords(state);
+    return state;
   }
 
   private async readStateReference(requireFresh = false): Promise<EtapiState> {
@@ -1729,8 +1977,266 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.mastery = activity.mastery ?? state.mastery;
       state.idempotency = { ...state.idempotency, ...(activity.idempotency ?? {}) };
     }
+    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     this.lastReadAt = new Date().toISOString();
     return state;
+  }
+
+  private async mergeDraftPageRecords(state: EtapiState): Promise<void> {
+    await this.hydrateDraftPageRecords();
+    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+  }
+
+  private async hydrateDraftPageRecords(): Promise<void> {
+    if (this.draftPageRecordsHydrated) return;
+    if (!this.draftPageRecordsHydration) {
+      const hydration = this.readDraftPageRecords().then(() => {
+        this.draftPageRecordsHydrated = true;
+      });
+      this.draftPageRecordsHydration = hydration;
+      void hydration.catch(() => {
+        if (this.draftPageRecordsHydration === hydration) this.draftPageRecordsHydration = undefined;
+      }).finally(() => {
+        if (this.draftPageRecordsHydration === hydration) this.draftPageRecordsHydration = undefined;
+      });
+    }
+    await this.draftPageRecordsHydration;
+  }
+
+  private async readDraftPageRecords(pageId?: string): Promise<LocatedDraftPageRecord[]> {
+    const observedVersions = new Map(this.draftPageRecordVersions);
+    const labels = pageId
+      ? `#courseOsDraftRecordPageId="${pageId}"`
+      : '#courseOsType="draft_record"';
+    const query = new URLSearchParams({
+      search: labels,
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const search = await this.request<SearchResponse>(`/notes?${query.toString()}`);
+    const located: LocatedDraftPageRecord[] = [];
+    for (let index = 0; index < search.results.length; index += 8) {
+      const batch = await Promise.all(search.results.slice(index, index + 8).map(async (note) => {
+        const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
+        if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return undefined;
+        if (pageId && parsed.pageId !== pageId) return undefined;
+        const located = {
+          noteId: note.noteId,
+          record: {
+            schemaVersion: "1.0.0" as const,
+            pageId: parsed.pageId,
+            draft: parsed.draft,
+            projection: parsed.projection,
+            costEntries: parsed.costEntries ?? [],
+            idempotency: parsed.idempotency ?? {},
+            conflicts: parsed.conflicts ?? []
+          }
+        };
+        if ((this.draftPageRecordVersions.get(parsed.pageId) ?? 0) <= (observedVersions.get(parsed.pageId) ?? 0)) {
+          this.cacheDraftPageRecord(located);
+        }
+        return located;
+      }));
+      located.push(...batch.filter((item): item is LocatedDraftPageRecord => item !== undefined));
+    }
+    return located;
+  }
+
+  private async findDraftPageRecord(pageId: string): Promise<LocatedDraftPageRecord | undefined> {
+    const located = (await this.readDraftPageRecords(pageId))[0];
+    const cached = this.draftPageRecordCache.get(pageId);
+    if (cached || located) return cached ?? located;
+    return this.recoverUnlabelledDraftPageRecord(pageId);
+  }
+
+  private async recoverUnlabelledDraftPageRecord(pageId: string): Promise<LocatedDraftPageRecord | undefined> {
+    const projection = await this.ensureWorkspace();
+    const title = `Course OS draft record · ${pageId}`;
+    const query = new URLSearchParams({
+      search: `"${title}"`,
+      ancestorNoteId: projection.stateNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const results = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results
+      .filter((note) => note.title === title);
+    const candidates = (await Promise.all(results.map(async (note) => {
+      const content = await this.getContent(note.noteId);
+      let parsed: Partial<EtapiDraftPageRecord>;
+      try {
+        parsed = decodeReadWeaveStateContent(content) as Partial<EtapiDraftPageRecord>;
+      } catch {
+        return undefined;
+      }
+      if (parsed.pageId !== pageId || !parsed.draft?.page || !parsed.projection || parsed.draft.pageId !== pageId
+        || parsed.draft.contentHash !== sha256(JSON.stringify(parsed.draft.page))) return undefined;
+      return {
+        content,
+        located: {
+          noteId: note.noteId,
+          record: {
+            schemaVersion: "1.0.0" as const,
+            pageId,
+            draft: parsed.draft,
+            projection: parsed.projection,
+            costEntries: parsed.costEntries ?? [],
+            idempotency: parsed.idempotency ?? {},
+            conflicts: parsed.conflicts ?? []
+          }
+        } satisfies LocatedDraftPageRecord
+      };
+    }))).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined);
+    candidates.sort((left, right) => right.located.record.draft.revision - left.located.record.draft.revision
+      || left.located.noteId.localeCompare(right.located.noteId));
+    const selected = candidates[0];
+    if (!selected) return undefined;
+
+    for (const duplicate of candidates.slice(1)) {
+      if (duplicate.content === selected.content) await this.deleteNote(duplicate.located.noteId);
+    }
+    const [typeLabel, pageLabel] = await Promise.all([
+      this.searchDraftRecordLabel(projection.stateNoteId, "courseOsType", "draft_record"),
+      this.searchDraftRecordLabel(projection.stateNoteId, "courseOsDraftRecordPageId", pageId)
+    ]);
+    if (!typeLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsType", "draft_record");
+    if (!pageLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsDraftRecordPageId", pageId);
+    this.cacheDraftPageRecord(selected.located);
+    return selected.located;
+  }
+
+  private async searchDraftRecordLabel(stateNoteId: string, name: string, value: string): Promise<Set<string>> {
+    const query = new URLSearchParams({
+      search: `#${name}="${value}"`,
+      ancestorNoteId: stateNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    return new Set((await this.request<SearchResponse>(`/notes?${query.toString()}`)).results.map((note) => note.noteId));
+  }
+
+  private async addDraftRecordLabel(noteId: string, name: string, value: string): Promise<void> {
+    await this.request("/attributes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId, type: "label", name, value, position: 10, isInheritable: false })
+    });
+  }
+
+  private cacheDraftPageRecord(located: LocatedDraftPageRecord): void {
+    this.draftPageRecordCache.set(located.record.pageId, located);
+    this.draftPageRecordVersion += 1;
+    this.draftPageRecordVersions.set(located.record.pageId, this.draftPageRecordVersion);
+  }
+
+  private mergeDraftPageRecord(state: EtapiState, record: EtapiDraftPageRecord): void {
+    const draftIndex = state.drafts.findIndex((draft) => draft.pageId === record.pageId);
+    if (draftIndex >= 0) state.drafts[draftIndex] = structuredClone(record.draft);
+    else state.drafts.push(structuredClone(record.draft));
+    state.projections.drafts[record.draft.id] = structuredClone(record.projection);
+
+    const costsById = new Map(state.costEntries.filter((entry) => entry.pageId !== record.pageId).map((entry) => [entry.id, entry]));
+    for (const entry of state.costEntries.filter((item) => item.pageId === record.pageId)) costsById.set(entry.id, entry);
+    for (const entry of record.costEntries) costsById.set(entry.id, structuredClone(entry));
+    state.costEntries = [...costsById.values()];
+
+    state.idempotency = { ...state.idempotency, ...record.idempotency };
+    const conflictsById = new Map(state.conflicts.filter((item) => item.objectId !== record.pageId).map((item) => [item.id, item]));
+    for (const item of state.conflicts.filter((conflict) => conflict.objectId === record.pageId)) conflictsById.set(item.id, item);
+    for (const item of record.conflicts) conflictsById.set(item.id, structuredClone(item));
+    state.conflicts = [...conflictsById.values()];
+  }
+
+  private makeDraftPageRecord(
+    state: EtapiState,
+    draft: LessonDraft,
+    projection: DraftProjection,
+    previous?: EtapiDraftPageRecord
+  ): EtapiDraftPageRecord {
+    const costEntries = mergeCostEntries(
+      state.costEntries.filter((entry) => entry.pageId === draft.pageId),
+      previous?.costEntries
+    );
+    const costIds = new Set(costEntries.map((entry) => entry.id));
+    const legacyIdempotency = Object.fromEntries(Object.entries(state.idempotency).filter(([, value]) =>
+      (value.kind === "draft" && value.objectId === draft.id) ||
+      (value.kind === "cost_entry" && costIds.has(value.objectId)) ||
+      (value.kind === "conflict" && state.conflicts.some((item) => item.objectId === draft.pageId && item.id === value.objectId))
+    ));
+    const conflictMap = new Map(state.conflicts.filter((item) => item.objectId === draft.pageId).map((item) => [item.id, item]));
+    for (const item of previous?.conflicts ?? []) conflictMap.set(item.id, item);
+    return {
+      schemaVersion: "1.0.0",
+      pageId: draft.pageId,
+      draft: structuredClone(draft),
+      projection: structuredClone(projection),
+      costEntries,
+      idempotency: { ...legacyIdempotency, ...(previous?.idempotency ?? {}) },
+      conflicts: [...conflictMap.values()]
+    };
+  }
+
+  private async withDraftPageLock<T>(pageId: string, context: IdempotentWriteContext | undefined, work: () => Promise<T>): Promise<T> {
+    const predecessor = this.draftWriteChains.get(pageId) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.draftWriteChains.set(pageId, current);
+    await predecessor.catch(() => undefined);
+    try {
+      return context ? await this.writeContext.run(context, work) : await work();
+    } finally {
+      release();
+      if (this.draftWriteChains.get(pageId) === current) this.draftWriteChains.delete(pageId);
+    }
+  }
+
+  private async writeDraftPageRecord(
+    record: EtapiDraftPageRecord,
+    noteId: string | undefined,
+    fallbackState: EtapiState
+  ): Promise<string> {
+    try {
+      const content = encodeReadWeaveStateContent(record);
+      let savedNoteId = noteId;
+      if (savedNoteId) {
+        await this.putContent(savedNoteId, content);
+      } else {
+        const note = await this.createNote(fallbackState.projections.stateNoteId, `Course OS draft record · ${record.pageId}`, content, "code", "application/json", {
+          courseOsType: "draft_record",
+          courseOsDraftRecordPageId: record.pageId
+        });
+        savedNoteId = note.noteId;
+      }
+      const readback = decodeReadWeaveStateContent(await this.getContent(savedNoteId)) as Partial<EtapiDraftPageRecord>;
+      if (readback.pageId !== record.pageId
+        || readback.draft?.revision !== record.draft.revision
+        || readback.draft?.contentHash !== record.draft.contentHash
+        || readback.draft?.contentHash !== sha256(JSON.stringify(readback.draft.page))) {
+        throw new Error("READWEAVE_DRAFT_RECORD_READBACK_FAILED");
+      }
+      const located: LocatedDraftPageRecord = {
+        noteId: savedNoteId,
+        record: {
+          schemaVersion: "1.0.0",
+          pageId: record.pageId,
+          draft: structuredClone(record.draft),
+          projection: structuredClone(record.projection),
+          costEntries: structuredClone(record.costEntries),
+          idempotency: structuredClone(record.idempotency),
+          conflicts: structuredClone(record.conflicts)
+        }
+      };
+      this.cacheDraftPageRecord(located);
+      this.lastWriteAt = new Date().toISOString();
+      const next = structuredClone(this.stateCache?.state ?? fallbackState);
+      this.mergeDraftPageRecord(next, record);
+      this.stateCache = { state: next, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      this.draftReadCache.delete(record.pageId);
+      return savedNoteId;
+    } catch (error) {
+      this.invalidateStateCache();
+      throw error;
+    }
   }
 
   private async writeState(state: EtapiState): Promise<void> {
@@ -1741,6 +2247,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     let phase: "encode" | "put" | "complete" = "encode";
     let succeeded = false;
     try {
+      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
       let content: string;
       try {
@@ -1754,6 +2261,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         ? (durationMs) => { stateNotePutMs = durationMs; }
         : undefined);
       this.lastWriteAt = new Date().toISOString();
+      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
       // `mutate` owns this object and serializes every writer through
       // `writeChain`, so the committed snapshot can become the cache directly.
       // Public reads still clone the values they return.
@@ -1808,6 +2316,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     try {
       await this.putContent(noteId, encodeReadWeaveStateContent(this.activityState(state)));
       this.lastWriteAt = new Date().toISOString();
+      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
     } catch (error) {
       this.invalidateStateCache();
@@ -1829,7 +2338,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       try {
         const pendingRead = this.stateReadInFlight;
         if (pendingRead) await pendingRead.catch(() => undefined);
-        const state = await this.readStateReference(true);
+        const state = structuredClone(await this.readStateReference(true));
+        if (!state.projections.activityStateNoteId) await this.mergeDraftPageRecords(state);
         const replay = Boolean(state.idempotency[context.idempotencyKey]);
         const result = structuredClone(await change(state));
         if (!replay) {
@@ -1854,7 +2364,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         // ownership and revisions, so downloading the same multi-megabyte note
         // again only adds seconds of latency. An expired or missing snapshot is
         // still fetched from ReadWeave before the mutation.
-        const state = await this.readStateReference(true);
+        const state = structuredClone(await this.readStateReference(true));
+        await this.mergeDraftPageRecords(state);
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
         const activityBefore = state.projections.activityStateNoteId
           ? JSON.stringify(this.activityState(state)) : undefined;
@@ -1884,16 +2395,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     const enqueuedAt = timingEnabled ? performance.now() : 0;
     const operation = this.writeChain.catch(() => undefined).then(async () => {
-      const previousContext = this.activeWriteContext;
-      this.activeWriteContext = context;
       const workStartedAt = timingEnabled ? performance.now() : 0;
       let succeeded = false;
       try {
-        const result = await work();
+        const result = await (context ? this.writeContext.run(context, work) : work());
         succeeded = true;
         return result;
       } finally {
-        this.activeWriteContext = previousContext;
         if (timingEnabled) {
           this.logWriteTiming("course_os.readweave_write_queue_timing", {
             queueWaitMs: Math.round(workStartedAt - enqueuedAt),
@@ -2101,7 +2609,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     headers.set("Authorization", this.config.token);
     headers.set("Accept", "application/json");
     if (init?.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-    const writeContext = this.writeContext.getStore() ?? this.activeWriteContext;
+    const writeContext = this.writeContext.getStore();
     if (writeContext) {
       headers.set("Idempotency-Key", writeContext.idempotencyKey);
       headers.set("X-Actor", writeContext.actor);

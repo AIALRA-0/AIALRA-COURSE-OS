@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -208,31 +209,37 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(api.getSyncStatus()).resolves.toMatchObject({ state: "connected" });
   });
 
-  it("appends costs to the main index and replays without duplicating entries", async () => {
+  it("stores page costs in the durable page record and replays without an index write", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
     const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const indexWritesBeforeAppend = remote.contentWriteCount(stateNoteId);
     const first = costEntryFor(pageRelease, "cost-standalone-1");
     const writeContext = { ...context, idempotencyKey: "append-cost-standalone-1" };
     await api.appendCostEntry(first, writeContext);
 
     const firstWriteCount = remote.contentWriteCount(stateNoteId);
-    const firstIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[]; idempotency: Record<string, { objectId: string }> };
-    expect(firstIndex.costEntries).toEqual([first]);
-    expect(firstIndex.idempotency[writeContext.idempotencyKey]?.objectId).toBe(first.id);
+    const firstRecord = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[]; idempotency: Record<string, { objectId: string }> };
+    expect(firstRecord.costEntries).toEqual([first]);
+    expect(firstRecord.idempotency[writeContext.idempotencyKey]?.objectId).toBe(first.id);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(indexWritesBeforeAppend);
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[] }).costEntries).toEqual([]);
     expect(remote.countNotesByLabel("courseOsCostIndex", "personal")).toBe(0);
 
+    const recordWritesAfterFirstAppend = remote.contentWriteCount(remote.noteIdByTitle("Course OS draft record · page-1"));
     await expect(api.appendCostEntry(first, writeContext)).resolves.toEqual(first);
     expect(remote.contentWriteCount(stateNoteId)).toBe(firstWriteCount);
+    expect(remote.contentWriteCount(remote.noteIdByTitle("Course OS draft record · page-1"))).toBe(recordWritesAfterFirstAppend);
 
     const second = costEntryFor(pageRelease, "cost-standalone-2");
     await api.appendCostEntry(second, { ...context, idempotencyKey: "append-cost-standalone-2" });
     expect(await api.listCostEntries({ pageId: "page-1" })).toHaveLength(2);
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] }).costEntries).toHaveLength(2);
   });
 
-  it("reads historical compact costs after restart and appends new costs to the main index", async () => {
+  it("reads historical compact costs after restart and appends new costs to the page record", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     const pageRelease = releaseWithPage();
@@ -250,8 +257,9 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(reopened.appendCostEntry(appended, writeContext)).resolves.toEqual(appended);
     await expect(reopened.appendCostEntry(appended, writeContext)).resolves.toEqual(appended);
     const savedMainIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[]; projections: { costIndexNoteId?: string } };
-    expect(savedMainIndex.costEntries).toEqual([appended]);
+    expect(savedMainIndex.costEntries).toEqual([]);
     expect(savedMainIndex.projections.costIndexNoteId).toBe(costIndexId);
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] }).costEntries).toEqual([appended]);
     expect(decodeReadWeaveStateContent(remote.contentByTitle("02 Course OS 成本索引"))).toMatchObject({ costEntries: [historical] });
     await expect(reopened.listCostEntries({ pageId: "page-1" }).then((entries) => entries.map((item) => item.id).sort()))
       .resolves.toEqual([historical.id, appended.id].sort());
@@ -451,6 +459,8 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
     remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
     const requestsBeforeSnapshot = remote.requests.length;
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBeforeRead = remote.contentWriteCount(stateNoteId);
     const snapshot = await api.getDraftSnapshotByPage("page-1");
     expect(snapshot?.revision).toBe(1);
     expect(remote.requests).toHaveLength(requestsBeforeSnapshot);
@@ -458,7 +468,8 @@ describe("ReadWeave ETAPI adapter", () => {
     const reconciled = await api.getDraftByPage("page-1");
     expect(reconciled?.revision).toBe(2);
     expect(reconciled?.page.blocks[0]?.markdown).toBe("ReadWeave 中直接完成的逐块修改");
-    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeRead);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeRead);
+    expect(remote.requests.filter((item) => item.method !== "GET").length - writesBeforeRead).toBeLessThanOrEqual(2);
     const readsAfterFirstOpen = remote.requests.length;
     expect((await api.getDraftByPage("page-1"))?.revision).toBe(2);
     expect(remote.requests).toHaveLength(readsAfterFirstOpen);
@@ -500,7 +511,8 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
     expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id).sort()).toEqual([standaloneCost.id, cost.id].sort());
     const mainIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { costEntries: GenerationCostEntry[] };
-    expect(mainIndex.costEntries).toEqual([standaloneCost, cost]);
+    expect(mainIndex.costEntries).toEqual([]);
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] }).costEntries).toEqual([standaloneCost, cost]);
     expect(remote.titles()).not.toContain("02 Course OS 成本索引");
     expect(remote.titles()).toEqual(expect.arrayContaining(["成本 · teach · test-model"]));
     expect((await api.getDraftByPage("page-1"))?.contentHash).toBe(first.contentHash);
@@ -581,54 +593,90 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(render.renderPageOverview(retry));
   });
 
-  it("reuses cost notes when the shared state write fails during draft saves", async () => {
+  it("recovers an ambiguous page-record PUT without duplicating its cost note", async () => {
     const remote = new FakeEtapi();
-    let stateNoteId = "";
-    let failNextStateWrite = false;
+    let pageRecordNoteId = "";
+    let ambiguousRecordPuts = 0;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(String(input));
       const path = url.pathname.replace(/^\/etapi/, "");
-      if (failNextStateWrite && init?.method === "PUT" && path === `/notes/${stateNoteId}/content`) {
-        failNextStateWrite = false;
-        return new Response("injected state write failure", { status: 400 });
+      if (ambiguousRecordPuts > 0 && init?.method === "PUT" && path === `/notes/${pageRecordNoteId}/content`) {
+        ambiguousRecordPuts -= 1;
+        await remote.fetch(input, init);
+        return new Response("write committed but response was lost", { status: 503 });
       }
       return remote.fetch(input, init);
     };
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
-    stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
     const initial = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "cost-retry-base" });
-    const costFor = (id: string): GenerationCostEntry => ({
-      id, workspaceId: "personal", courseId: pageRelease.courseId,
-      materialVersionId: pageRelease.id, pageId: "page-1", jobId: `job-${id}`, stage: "teach",
-      provider: "test", model: "test-model", inputTokens: 10, outputTokens: 20,
-      cachedInputTokens: 0, unitPriceSnapshot: {
-        id: "price-1", provider: "test", model: "test-model", currency: "USD",
-        capturedAt: new Date().toISOString(), source: "test",
-        inputMicrousdPerMillion: 1, outputMicrousdPerMillion: 1,
-        cachedInputMicrousdPerMillion: 0
-      }, estimatedMicrousd: 1, actualMicrousd: 1, durationMs: 25,
-      retries: 0, status: "succeeded", qualityPassed: true, createdAt: new Date().toISOString()
-    });
+    pageRecordNoteId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBefore = remote.contentWriteCount(stateNoteId);
+    const next = structuredClone(initial);
+    next.page.blocks[0]!.markdown = "内容在记录响应丢失时已提交";
+    const cost = costEntryFor(pageRelease, "cost-ambiguous-record-put");
+    const writeContext = { ...context, idempotencyKey: "ambiguous-record-put" };
+    ambiguousRecordPuts = 3;
 
-    const firstCost = costFor("cost-first-retry");
-    const firstContext = { ...context, idempotencyKey: "cost-first-retry-save" };
-    failNextStateWrite = true;
-    await expect(api.saveDraftWithCost(initial, 1, firstContext, firstCost)).rejects.toThrow("READWEAVE_ETAPI_400");
-    await expect(api.saveDraftWithCost(initial, 1, firstContext, firstCost)).resolves.toMatchObject({ revision: 2 });
-    expect(remote.countNotesByLabel("courseOsObjectId", firstCost.id)).toBe(1);
+    await expect(api.saveDraftWithCost(next, 1, writeContext, cost)).rejects.toThrow("READWEAVE_ETAPI_503");
+    const committed = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { draft: LessonDraft; costEntries: GenerationCostEntry[]; idempotency: Record<string, { objectId: string }> };
+    expect(committed.draft.revision).toBe(2);
+    expect(committed.draft.page.blocks[0]?.markdown).toBe("内容在记录响应丢失时已提交");
+    expect(committed.idempotency[writeContext.idempotencyKey]?.objectId).toBe(initial.id);
+    await expect(api.saveDraftWithCost(next, 1, writeContext, cost)).resolves.toMatchObject({ revision: 2, contentHash: expect.any(String) });
+    expect(remote.countNotesByLabel("courseOsObjectId", cost.id)).toBe(1);
+    expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id)).toEqual([cost.id]);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBefore);
+  });
 
-    const latest = (await api.getDraftSnapshotByPage("page-1"))!;
-    const withNewBlock = structuredClone(latest);
-    withNewBlock.page.blocks.push({ ...withNewBlock.page.blocks[0]!, id: "cost-retry-new-block", title: "新增讲解块", markdown: "新增内容" });
-    const serializedCost = costFor("cost-serialized-retry");
-    const serializedContext = { ...context, idempotencyKey: "cost-serialized-retry-save" };
-    failNextStateWrite = true;
-    await expect(api.saveDraftWithCost(withNewBlock, 2, serializedContext, serializedCost)).rejects.toThrow("READWEAVE_ETAPI_400");
-    await expect(api.saveDraftWithCost(withNewBlock, 2, serializedContext, serializedCost)).resolves.toMatchObject({ revision: 3 });
-    expect(remote.countNotesByLabel("courseOsObjectId", serializedCost.id)).toBe(1);
-    expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id).sort()).toEqual([firstCost.id, serializedCost.id]);
+  it.each(["ambiguous create response", "partial label failure"] as const)("recovers a page record after %s without leaving duplicates", async (failureMode) => {
+    const remote = new FakeEtapi();
+    let createAttempts = 0;
+    let failPageIdLabel = true;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      if (path === "/create-note" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { title: string };
+        if (failureMode === "ambiguous create response" && body.title === "Course OS draft record · page-1") {
+          createAttempts += 1;
+          await remote.fetch(input, init);
+          return new Response("created but response was lost", { status: 503 });
+        }
+      }
+      if (failureMode === "partial label failure" && failPageIdLabel && path === "/attributes" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { name: string };
+        if (body.name === "courseOsDraftRecordPageId") {
+          failPageIdLabel = false;
+          return new Response("page label response failed", { status: 400 });
+        }
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const indexWritesBeforeSave = remote.contentWriteCount(stateNoteId);
+    const draft = draftFor(pageRelease);
+    const writeContext = { ...context, idempotencyKey: `record-create-recovery-${failureMode}` };
+
+    await expect(api.saveDraft(draft, 0, writeContext)).rejects.toThrow(
+      failureMode === "ambiguous create response" ? "READWEAVE_ETAPI_503" : "READWEAVE_ETAPI_400"
+    );
+    const title = "Course OS draft record · page-1";
+    expect(remote.countActiveNotesByTitle(title)).toBe(failureMode === "ambiguous create response" ? 3 : 1);
+    await expect(api.saveDraft(draft, 0, writeContext)).resolves.toMatchObject({ revision: 1, contentHash: expect.any(String) });
+
+    expect(remote.countActiveNotesByTitle(title)).toBe(1);
+    expect(remote.countNotesByLabel("courseOsType", "draft_record")).toBe(1);
+    expect(remote.countNotesByLabel("courseOsDraftRecordPageId", "page-1")).toBe(1);
+    expect(createAttempts).toBe(failureMode === "ambiguous create response" ? 3 : 0);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(indexWritesBeforeSave);
+    const recovered = decodeReadWeaveStateContent(remote.contentByTitle(title)) as { idempotency: Record<string, { objectId: string }> };
+    expect(recovered.idempotency[writeContext.idempotencyKey]?.objectId).toBe(draft.id);
   });
 
   it("updates independent draft notes with a limit of four while keeping each revision before its content", async () => {
@@ -666,6 +714,8 @@ describe("ReadWeave ETAPI adapter", () => {
     }));
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
     const initialDraft = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "bounded-draft-initial" });
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBeforeSave = remote.contentWriteCount(stateNoteId);
     const changedDraft = structuredClone(initialDraft);
     changedDraft.page.blocks.forEach((block, index) => { block.markdown = `并发保存后的内容 ${index + 1}`; });
 
@@ -674,6 +724,7 @@ describe("ReadWeave ETAPI adapter", () => {
     trackWrites = false;
 
     expect(saved.revision).toBe(2);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeSave);
     expect(maxActiveWrites).toBeGreaterThan(1);
     expect(maxActiveWrites).toBeLessThanOrEqual(4);
     const eventsByNote = new Map<string, string[]>();
@@ -684,6 +735,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const writesAfterSave = remote.requests.filter((item) => item.method !== "GET").length;
     await expect(api.saveDraft(changedDraft, 1, { ...context, idempotencyKey: "bounded-draft-update" })).resolves.toMatchObject({ revision: 2 });
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesAfterSave);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeSave);
     await expect(api.getDraftByPage("page-1")).resolves.toMatchObject({ revision: 2 });
 
     remote.editByTitle("讲解块 1", "ReadWeave 的新内容");
@@ -691,11 +743,208 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(reopenedApi.getDraftByPage("page-1")).resolves.toMatchObject({ revision: 3, page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "ReadWeave 的新内容" })]) } });
   });
 
+  it("overlaps two page saves, skips the shared index, and hydrates page snapshots once after restart", async () => {
+    const remote = new FakeEtapi();
+    const pageRecordNoteIds = new Set<string>();
+    let trackingSaves = false;
+    let activeRecordWrites = 0;
+    let maxActiveRecordWrites = 0;
+    let fullRecordSearches = 0;
+    let recordReadbacks = 0;
+    const pendingRecordReadbacks = new Set<string>();
+    const recordWriteContexts = new Map<string, string | null>();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      if (path === "/notes" && (init?.method ?? "GET") === "GET" && url.searchParams.get("search") === '#courseOsType="draft_record"') {
+        fullRecordSearches += 1;
+      }
+      const noteId = /^\/notes\/([^/]+)\/content$/.exec(path)?.[1];
+      const isRecordPut = trackingSaves && init?.method === "PUT" && noteId && pageRecordNoteIds.has(noteId);
+      if (isRecordPut) {
+        recordWriteContexts.set(noteId, new Headers(init?.headers).get("idempotency-key"));
+        activeRecordWrites += 1;
+        maxActiveRecordWrites = Math.max(maxActiveRecordWrites, activeRecordWrites);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        try {
+          const response = await remote.fetch(input, init);
+          pendingRecordReadbacks.add(noteId);
+          return response;
+        } finally {
+          activeRecordWrites -= 1;
+        }
+      }
+      if (trackingSaves && (init?.method ?? "GET") === "GET" && noteId && pendingRecordReadbacks.delete(noteId)) recordReadbacks += 1;
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    const secondPage = structuredClone(pageRelease.pages[0]!);
+    secondPage.id = "page-2";
+    secondPage.pageNumber = 2;
+    secondPage.title = "第二测试页面";
+    secondPage.blocks[0]!.id = "block-2";
+    secondPage.blocks[0]!.title = "第二核心解释";
+    pageRelease.pages.push(secondPage);
+    pageRelease.pageIds.push(secondPage.id);
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const savedPages = new Map<string, LessonDraft>();
+    for (const pageId of ["page-1", "page-2"]) {
+      savedPages.set(pageId, await api.saveDraft(draftFor(pageRelease, pageId), 0, { ...context, idempotencyKey: `initial-${pageId}` }));
+      pageRecordNoteIds.add(remote.noteIdByTitle(`Course OS draft record · ${pageId}`));
+    }
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBefore = remote.contentWriteCount(stateNoteId);
+    const fullScansBeforeSaves = fullRecordSearches;
+    const updates = ["page-1", "page-2"].map((pageId) => {
+      const update = structuredClone(savedPages.get(pageId)!);
+      update.page.blocks[0]!.markdown = `并发修改 ${pageId}`;
+      return api.saveDraft(update, 1, { ...context, idempotencyKey: `update-${pageId}` });
+    });
+    trackingSaves = true;
+    const results = await Promise.all(updates);
+    trackingSaves = false;
+
+    expect(results.map((draft) => draft.revision)).toEqual([2, 2]);
+    expect(maxActiveRecordWrites).toBe(2);
+    expect(recordReadbacks).toBe(2);
+    expect(recordWriteContexts.get(remote.noteIdByTitle("Course OS draft record · page-1"))).toBe("update-page-1");
+    expect(recordWriteContexts.get(remote.noteIdByTitle("Course OS draft record · page-2"))).toBe("update-page-2");
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBefore);
+    expect(fullRecordSearches).toBe(fullScansBeforeSaves);
+    await expect(api.listDrafts()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ pageId: "page-1", revision: 2 }),
+      expect.objectContaining({ pageId: "page-2", revision: 2 })
+    ]));
+
+    const restartScanBaseline = fullRecordSearches;
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const snapshots = await Promise.all([reopened.getDraftSnapshotByPage("page-1"), reopened.getDraftSnapshotByPage("page-2")]);
+    expect(snapshots.map((draft) => draft?.page.blocks[0]?.markdown)).toEqual(["并发修改 page-1", "并发修改 page-2"]);
+    expect(fullRecordSearches).toBe(restartScanBaseline);
+    const hydrated = await reopened.listDrafts();
+    expect(hydrated.filter((draft) => ["page-1", "page-2"].includes(draft.pageId)).map((draft) => draft.revision)).toEqual([2, 2]);
+    expect(fullRecordSearches).toBe(restartScanBaseline + 1);
+    await reopened.listDrafts();
+    expect(fullRecordSearches).toBe(restartScanBaseline + 1);
+  });
+
+  it("preserves an external block edit made during a save and records both versions", async () => {
+    const remote = new FakeEtapi();
+    let blockNoteId = "";
+    let injectExternalEdit = false;
+    let injected = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      const response = await remote.fetch(input, init);
+      if (injectExternalEdit && !injected && (init?.method ?? "GET") === "GET" && path === `/notes/${blockNoteId}/content`) {
+        injected = true;
+        remote.editByTitle("核心解释", "外部编辑 during save");
+      }
+      return response;
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const initial = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "external-edit-base" });
+    blockNoteId = remote.noteIdByTitle("核心解释");
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBefore = remote.contentWriteCount(stateNoteId);
+    const local = structuredClone(initial);
+    local.page.blocks[0]!.markdown = "用户提交的新内容";
+    injectExternalEdit = true;
+
+    let saveError: unknown;
+    try {
+      await api.saveDraft(local, 1, { ...context, idempotencyKey: "external-edit-race" });
+    } catch (error) {
+      saveError = error;
+    }
+    expect(saveError).toBeInstanceOf(Error);
+    expect(String(saveError)).toContain("READWEAVE_REVISION_CONFLICT:");
+
+    expect(injected).toBe(true);
+    expect(remote.contentByTitle("核心解释")).toBe("外部编辑 during save");
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBefore);
+    const conflict = (await api.listConflicts()).find((item) => item.status === "open");
+    expect(conflict).toBeDefined();
+    expect(JSON.parse(conflict!.localContent).blocks[0].markdown).toBe("用户提交的新内容");
+    expect(JSON.parse(conflict!.remoteContent).blocks[0].markdown).toBe("外部编辑 during save");
+  });
+
+  it("migrates legacy index drafts, costs, and idempotency into a page record after restart", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const legacyDraft = draftFor(pageRelease);
+    legacyDraft.revision = 4;
+    legacyDraft.page.blocks[0]!.markdown = "旧共享索引中的草稿";
+    legacyDraft.contentHash = createHash("sha256").update(JSON.stringify(legacyDraft.page)).digest("hex");
+    const legacyCost = costEntryFor(pageRelease, "legacy-cost");
+    const legacyKey = "legacy-draft-idempotency";
+    const state = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      drafts: LessonDraft[];
+      costEntries: GenerationCostEntry[];
+      idempotency: Record<string, { kind: string; objectId: string }>;
+    };
+    state.drafts = state.drafts.map((draft) => draft.pageId === "page-1" ? legacyDraft : draft);
+    state.costEntries = [...state.costEntries, legacyCost];
+    state.idempotency[legacyKey] = { kind: "draft", objectId: legacyDraft.id };
+    state.idempotency[legacyCost.id] = { kind: "cost_entry", objectId: legacyCost.id };
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(state));
+
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(reopened.listDrafts()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ pageId: "page-1", revision: 4 })]));
+    await expect(reopened.listCostEntries({ pageId: "page-1" })).resolves.toEqual([legacyCost]);
+    const indexWritesBeforeMigration = remote.contentWriteCount(remote.noteIdByTitle("00 Course OS 结构化索引"));
+    await expect(reopened.saveDraft(legacyDraft, 4, { ...context, idempotencyKey: legacyKey })).resolves.toMatchObject({ revision: 4 });
+    const migrated = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+      draft: LessonDraft;
+      costEntries: GenerationCostEntry[];
+      idempotency: Record<string, { objectId: string }>;
+    };
+    expect(migrated.draft.contentHash).toBe(legacyDraft.contentHash);
+    expect(migrated.costEntries).toEqual([legacyCost]);
+    expect(migrated.idempotency[legacyKey]?.objectId).toBe(legacyDraft.id);
+    expect(remote.contentWriteCount(remote.noteIdByTitle("00 Course OS 结构化索引"))).toBe(indexWritesBeforeMigration);
+  });
+
+  it("rehydrates durable page records after an old shared index is restored", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const oldIndex = remote.contentByTitle("00 Course OS 结构化索引");
+    const cost = costEntryFor(pageRelease, "rollback-cost");
+    await api.saveDraftWithCost(draftFor(pageRelease), 0, { ...context, idempotencyKey: "rollback-draft" }, cost);
+    remote.editByTitle("00 Course OS 结构化索引", oldIndex);
+
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(reopened.listDrafts()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ pageId: "page-1", revision: 1 })]));
+    await expect(reopened.getDraftSnapshotByPage("page-1")).resolves.toMatchObject({ revision: 1 });
+    await expect(reopened.listCostEntries({ pageId: "page-1" })).resolves.toEqual([cost]);
+
+    const settings = await reopened.getWorkspaceSettings();
+    await reopened.saveWorkspaceSettings(settings, { ...context, idempotencyKey: "rollback-rehydrate-index" });
+    const restoredIndex = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      drafts: LessonDraft[];
+      costEntries: GenerationCostEntry[];
+      idempotency: Record<string, { objectId: string }>;
+    };
+    expect(restoredIndex.drafts).toEqual(expect.arrayContaining([expect.objectContaining({ pageId: "page-1", revision: 1 })]));
+    expect(restoredIndex.costEntries).toEqual([cost]);
+    expect(restoredIndex.idempotency["rollback-draft"]?.objectId).toBe("draft:page-1");
+  });
+
   it("serializes same-page saves and records a stale revision conflict", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBeforeSaves = remote.contentWriteCount(stateNoteId);
     const winner = draftFor(pageRelease);
     winner.page.blocks[0]!.markdown = "first same-page write";
     const stale = draftFor(pageRelease);
@@ -705,10 +954,14 @@ describe("ReadWeave ETAPI adapter", () => {
     const staleSave = api.saveDraft(stale, 0, { ...context, idempotencyKey: "same-page-stale" });
     await expect(firstSave).resolves.toMatchObject({ revision: 1 });
     await expect(staleSave).rejects.toThrow("READWEAVE_REVISION_CONFLICT");
+    const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
+    await expect(api.saveDraft(winner, 0, { ...context, idempotencyKey: "same-page-first" })).resolves.toMatchObject({ revision: 1 });
+    expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
 
     expect((await api.listConflicts()).filter((item) => item.status === "open")).toHaveLength(1);
     expect((await api.getDraftSnapshotByPage("page-1"))?.page.blocks[0]?.markdown).toBe("first same-page write");
     expect(remote.contentByTitle("核心解释")).toBe("first same-page write");
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeSaves);
   });
 
   it("creates newly added block notes in order and stops creating after a partial failure", async () => {
@@ -738,6 +991,8 @@ describe("ReadWeave ETAPI adapter", () => {
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
     const source = { ...releaseWithPage(), id: "partial-block-source", lifecycle: "draft_source" as const };
     await api.registerDraftSource(source, { ...context, idempotencyKey: "partial-block-source" });
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const stateWritesBeforeDraft = remote.contentWriteCount(stateNoteId);
     const timingLog = vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.stubEnv("COURSE_OS_READWEAVE_TIMING", "1");
     let saved: LessonDraft;
@@ -754,22 +1009,9 @@ describe("ReadWeave ETAPI adapter", () => {
     const timing = JSON.parse(String(projectionTimingCall?.[1])) as Record<string, unknown>;
     expect(timing).toEqual({ projectionCreated: true, ensureDraftProjectionMs: expect.any(Number), refreshDraftProjectionMs: expect.any(Number) });
     expect(Object.keys(timing).sort()).toEqual(["ensureDraftProjectionMs", "projectionCreated", "refreshDraftProjectionMs"]);
-    const queueTimingCall = timingCalls.find(([event]) => event === "course_os.readweave_write_queue_timing");
-    expect(queueTimingCall).toBeDefined();
-    expect(JSON.parse(String(queueTimingCall?.[1]))).toEqual({
-      queueWaitMs: expect.any(Number),
-      serializedWorkMs: expect.any(Number),
-      succeeded: true
-    });
-    const stateTimingCall = timingCalls.find(([event]) => event === "course_os.readweave_state_write_timing");
-    expect(stateTimingCall).toBeDefined();
-    expect(JSON.parse(String(stateTimingCall?.[1]))).toEqual({
-      encodeMs: expect.any(Number),
-      snapshotBytes: expect.any(Number),
-      stateNotePutMs: expect.any(Number),
-      phase: "complete",
-      succeeded: true
-    });
+    expect(timingCalls.some(([event]) => event === "course_os.readweave_write_queue_timing")).toBe(false);
+    expect(timingCalls.some(([event]) => event === "course_os.readweave_state_write_timing")).toBe(false);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeDraft);
     const changed = structuredClone(saved);
     changed.page.blocks.push(
       { ...changed.page.blocks[0]!, id: "new-block-1", title: "new block 1", markdown: "first" },
@@ -780,6 +1022,7 @@ describe("ReadWeave ETAPI adapter", () => {
     trackBlockCreates = true;
     await expect(api.saveDraft(changed, 1, { ...context, idempotencyKey: "partial-block-update" })).rejects.toThrow("READWEAVE_ETAPI_400");
     trackBlockCreates = false;
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeDraft);
 
     expect(attemptedBlockTitles).toEqual(["new block 1", "new block 2"]);
     expect(maxActiveBlockCreates).toBe(1);
@@ -1034,6 +1277,7 @@ class FakeEtapi {
       const query = url.searchParams.get("search") ?? "";
       const match = /^#([^=]+)=(.*)$/.exec(query);
       const value = match?.[2]?.replace(/^"|"$/g, "");
+        const exactTitle = /^"([^"]+)"$/.exec(query)?.[1];
       const ancestor = url.searchParams.get("ancestorNoteId");
       const isDescendant = (noteId: string): boolean => {
         if (!ancestor) return true;
@@ -1051,7 +1295,9 @@ class FakeEtapi {
         }
         return false;
       };
-      const results = [...this.notes.entries()].filter(([noteId, note]) => !note.deleted && match && note.labels[match[1]!] === value && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
+        const results = [...this.notes.entries()].filter(([noteId, note]) => !note.deleted
+          && (match ? note.labels[match[1]!] === value : exactTitle ? note.title === exactTitle : false)
+          && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
       return Response.json({ results });
     }
     if (path === "/create-note" && init?.method === "POST") {
@@ -1189,6 +1435,10 @@ class FakeEtapi {
 
   countNotesByLabel(name: string, value: string): number {
     return [...this.notes.values()].filter((note) => !note.deleted && note.labels[name] === value).length;
+  }
+
+  countActiveNotesByTitle(title: string): number {
+    return [...this.notes.values()].filter((note) => !note.deleted && note.title === title).length;
   }
 
   contentWriteCount(noteId: string): number {
