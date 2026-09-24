@@ -1,0 +1,25 @@
+config/generation-harness/page-plan-prompt.md
+  s_e8850ef125fb32::t_a7a45a5b28ceca 6
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_497980fc306176 275
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_c0c29aa28067b7 188-189
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_0e15fad14e709b 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8225df52d370b0bcdfff245bdcea06cb5f1bf13d",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
