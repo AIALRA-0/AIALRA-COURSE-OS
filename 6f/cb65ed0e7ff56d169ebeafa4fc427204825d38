@@ -1,0 +1,45 @@
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_ab1eddbf86ffac 3963
+  s_e8850ef125fb32::t_5f024cecedc3ef 3838-3841,3843-3845
+  s_e8850ef125fb32::t_2838e1f45b5874 54,873,3310
+  s_e8850ef125fb32::t_7290ea98bad805 3842
+  s_e8850ef125fb32::t_e261d656051a82 3962
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_cb660f3a0479de 960-967
+  s_e8850ef125fb32::t_e24bceee0377e0 717,1111,1227,1237-1240,1242-1243
+  s_e8850ef125fb32::t_414c32135ed93f 946,957,997,1026,1035,1044,1074,1091-1092,1105,1107-1108
+  s_e8850ef125fb32::t_7a54619b726655 1241,1261
+  s_e8850ef125fb32::t_149373f28a4e5c 49-50,704,709-716
+  s_e8850ef125fb32::t_75591efb9d7cb5 958-959
+  s_e8850ef125fb32::t_58bb432c02d679 53,1106,1110
+  s_e8850ef125fb32::t_842b9e1ae54632 1109
+  s_e8850ef125fb32::t_4aa8f706d9fb17 718,1112
+packages/quality/src/index.spec.ts
+  s_e8850ef125fb32::t_34592e1c102af0 66
+  s_e8850ef125fb32::t_b07fde88ebe4df 32-39
+  s_e8850ef125fb32::t_7d9dbdae7c3af7 28
+  s_e8850ef125fb32::t_9c03b73e4278de 2,43-52
+  s_e8850ef125fb32::t_4b72c285dde951 3,16-24,27,29-31,40-42,53-65,67-70
+  s_e8850ef125fb32::t_4af33ea5d6ffd8 25-26
+  s_e8850ef125fb32::t_c0a459631cc4c1 71
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_b0e674d8a0b573 566
+  s_e8850ef125fb32::t_925164b2a9b47a 551-558,564-565,567-568
+  s_e8850ef125fb32::t_b5669eafd5810f 559-563
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6fcb65ed0e7ff56d169ebeafa4fc427204825d38",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
