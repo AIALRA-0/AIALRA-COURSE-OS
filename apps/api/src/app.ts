@@ -790,17 +790,22 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/pages/:id/lesson", async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, request.params.id);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
+      const sourceLookupMs = performance.now() - startedAt;
       const candidateDraft = dependencies.readweave.getDraftSnapshotByPage
         ? await dependencies.readweave.getDraftSnapshotByPage(request.params.id)
         : await dependencies.readweave.getDraftByPage(request.params.id);
       const draft = candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined;
+      const draftLookupMs = performance.now() - startedAt - sourceLookupMs;
+      const qaRecords = await dependencies.readweave.listQuestions(request.params.id);
+      response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}, qa;dur=${(performance.now() - startedAt - sourceLookupMs - draftLookupMs).toFixed(1)}`);
       response.json({
         releaseId: source.release.id,
         page: draft?.page ?? source.page,
-        qaRecords: await dependencies.readweave.listQuestions(request.params.id)
+        qaRecords
       });
     } catch (error) { next(error); }
   });
@@ -1638,13 +1643,18 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.post(/^\/api\/v1\/pages\/[^/]+\/questions:select$/, async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const pageId = decodeURIComponent(request.path.slice("/api/v1/pages/".length, -"/questions:select".length));
       const sessionId = String(request.body.sessionId || "");
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const session = (await dependencies.operations.read()).sessions.find((item) => item.id === sessionId && (item.workspaceId ?? workspaceId) === workspaceId);
+      const candidateSession = await dependencies.operations.findLearningSession(sessionId);
+      const session = candidateSession && (candidateSession.workspaceId ?? workspaceId) === workspaceId ? candidateSession : undefined;
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      const sessionLookupMs = performance.now() - startedAt;
       const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
+      const releaseLookupMs = performance.now() - startedAt - sessionLookupMs;
       const page = release ? await learningPageForQuestions(dependencies.readweave, release, pageId, workspaceId) : undefined;
+      const pageLookupMs = performance.now() - startedAt - sessionLookupMs - releaseLookupMs;
       if (!release || !release.pageIds.includes(pageId)) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
       if (!page) return sendError(request, response, 409, "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", false);
       const seed = String(request.body.seed || `${session.id}:${page.id}:${new Date().toISOString().slice(0, 10)}`);
@@ -1656,6 +1666,7 @@ export function createApp(dependencies: AppDependencies): Express {
         questionIds: questions.map((item) => item.id), createdAt: new Date().toISOString()
       };
       const saved = await dependencies.readweave.saveQuestionSelection(selection, writeContext(request, requireIdempotencyKey(request)));
+      response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=${(performance.now() - startedAt - sessionLookupMs - releaseLookupMs - pageLookupMs).toFixed(1)}`);
       response.status(201).json({
         selection: saved,
         questions,
