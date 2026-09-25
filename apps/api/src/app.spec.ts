@@ -1429,7 +1429,25 @@ describe("Course OS API", () => {
     expect(draft?.status).toBe("ready");
     expect(draft?.page.quality.publishable).toBe(false);
     expect(draft?.page.quality.issues.length).toBeGreaterThan(0);
+    expect(draft?.page.quality.issues.some((issue) => issue.includes(":MISSING:"))).toBe(false);
     expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
+  }, 60_000);
+
+  it("does not make a complete Slim teaching page fail solely for legacy coverage fields", async () => {
+    const candidate = testRelease();
+    candidate.lifecycle = "draft_source";
+    candidate.pages[0]!.atoms = [{ kind: "text_region", id: "source-atom", label: "来源片段", observation: "输入经过规则得到输出" }];
+    candidate.pages[0]!.coverageRequirements = [{ id: "source-requirement", atomId: "source-atom", requiredFields: ["observation"], risk: "high" }];
+    const { app, readweave, release } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0.001) }, candidate);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "slim-coverage-is-diagnostic")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"] });
+    const draft = await readweave.getDraftByPage("page-1");
+    expect(draft?.page.quality.issues.some((issue) => issue.includes(":MISSING:"))).toBe(false);
+    const validation = await request(app).post("/api/v1/pages/page-1:validate").expect(200);
+    expect(validation.body.issues.some((issue: string) => issue.includes(":MISSING:"))).toBe(false);
+    expect(validation.body.publishable).toBe(true);
+    expect(draft?.page.quality.publishable).toBe(true);
   }, 60_000);
   it("uses the requested batch budget for a page instead of a hidden fixed cap", async () => {
     const limits: number[] = [];

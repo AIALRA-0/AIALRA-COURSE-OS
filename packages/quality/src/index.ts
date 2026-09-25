@@ -1216,7 +1216,14 @@ export function validatePageForPublication(page: PageLesson): string[] {
   ];
   const questionIssues = page.questionBank && page.questionBank.filter((item) => item.status === "approved").length < 4 ? ["QUESTION_BANK_MINIMUM_NOT_MET"] : [];
   const narrativeIssues = page.teachingCompositionVersion === 1 ? evaluateTeachingPage(page).issues : [];
-  return [...narrativeIssues, ...page.quality.issues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverage.missing.map((item) => `${item.requirementId}:MISSING:${item.fields.join(",")}`), ...sectionIssues, ...placeholderIssues, ...questionIssues];
+  // Slim teaching pages no longer create field-by-field coverage claims. Keep
+  // legacy coverage diagnostics for older releases without blocking new pages.
+  const coverageIssues = page.teachingCompositionVersion === 1 ? []
+    : coverage.missing.map((item) => `${item.requirementId}:MISSING:${item.fields.join(",")}`);
+  const persistedIssues = page.teachingCompositionVersion === 1
+    ? page.quality.issues.filter((issue) => !issue.includes(":MISSING:"))
+    : page.quality.issues;
+  return [...narrativeIssues, ...persistedIssues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverageIssues, ...sectionIssues, ...placeholderIssues, ...questionIssues];
 }
 
 export function hasPlaceholderContent(markdown: string): boolean {

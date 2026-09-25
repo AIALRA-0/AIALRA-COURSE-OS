@@ -862,7 +862,7 @@ export function createApp(dependencies: AppDependencies): Express {
         pageId,
         draftId: draft.id,
         revision: draft.revision,
-        publishable: issues.length === 0 && coverage.publishable,
+        publishable: issues.length === 0 && (draft.page.teachingCompositionVersion === 1 || coverage.publishable),
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
         mathValid: issues.every((issue) => !issue.includes("MATH")),
@@ -3265,7 +3265,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
         mathValid: issues.every((issue) => !issue.includes("MATH")),
-        publishable: coverage.publishable && issues.length === 0 && Boolean(runtimeModelRouter),
+        publishable: issues.length === 0 && Boolean(runtimeModelRouter),
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
       const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
