@@ -70,6 +70,9 @@ describe("planned teaching core writer", () => {
     expect(calls[0]?.instructions).toContain("不输出 JSON");
     expect(calls[1]?.schema).toBe(teachingPackageSchema);
     expect(calls[1]?.instructions).toContain("chapterBridgeMarkdown 必须是空字符串");
+    expect(calls[1]?.instructions).toContain("无法自行核对原图");
+    expect(calls[1]?.instructions).toContain("候选分数不自动等于实际操作收益");
+    expect(calls[1]?.instructions).toContain("主要内容只列三至六条简短结论");
     expect(calls[1]?.prompt).toContain("仅用于安排讲解顺序，不是事实来源");
     expect(result.trace).toMatchObject({
       plan: "先解释输入，再说明规则和结果",
@@ -87,7 +90,7 @@ describe("planned teaching core writer", () => {
     const result = await writePlannedLesson({ ...input(), teachingPlan: supplied, sourceImageDataUrl: "data:image/png;base64,iVBORw0KGgo=" } as ModelRouterInput, async request => {
       calls.push(request.phase);
       expect(request.image).toBe("data:image/png;base64,iVBORw0KGgo=");
-      expect(request.instructions).toContain("原图是页面事实的最高依据");
+      expect(request.instructions).toContain("你能同时看原图");
       return teachingPackage();
     });
 

@@ -186,6 +186,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(instructions).toContain("密集数值表或矩阵只说明行列含义");
       expect(instructions).toContain("最多选两个能同时按行标签、列标签和交叉位置核实的例值");
       expect(instructions).toContain("不能完成核对就不要写具体数值");
+      expect(instructions).toContain("候选比较值也不自动等于实际操作收益");
       expect(instructions).toContain("边相互交叉、标签邻近多条线或端点不清时");
       expect(instructions).toContain("没有单位或所计对象的数字保留原文");
       const imagePart = (body.messages[1]?.content as Array<{ type: string; image_url?: { detail?: string } }>).find(part => part.type === "image_url");

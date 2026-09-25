@@ -563,10 +563,13 @@ export async function writePlannedLesson(
   }
 
   const fields = Object.keys(schemaProperties);
+  const sourceAccess = input.sourceImageDataUrl
+    ? "你能同时看原图；页面事实以原图为准，图像观察和旧版讲解仅供定位。"
+    : "你现在只能看来源文字与图像观察，无法自行核对原图；图像观察可能转写错误，密集数值对象只用少量明确定位的例值，其余说明读法，不扩写具体数据。";
   const teachingRequest: PlannedCall = {
     phase: "teaching",
     instructions: plannedInstructions(fields, input.language)
-      + "\n\n本次只生成核心教学包。chapterBridgeMarkdown 必须是空字符串。计划只用于安排讲解顺序，不是事实来源。原图是页面事实的最高依据；页面图像观察和旧版讲解都可能转写错误。数字、表格位置、标签及图中关系若不能从原图清楚核实，不写成确定事实；密集表格只用少量可核实的例值，不复述长串单元格。不要把页眉、页脚或来源核对过程当作教学正文。",
+      + `\n\n本次只生成核心教学包。chapterBridgeMarkdown 必须是空字符串。计划只用于安排讲解顺序，不是事实来源。${sourceAccess}数字、表格位置、标签及图中关系若不能核实，不写成确定事实。代码或伪代码中未定义的辅助函数，其内部收益、状态更新和提交规则不能由名称猜出；比较用的候选分数不自动等于实际操作收益。例子只跟踪页面明确给出的条件、赋值和顺序，不能替未定义函数编造数值结果。主要内容只列三至六条简短结论，总长不超过四百五十个汉字，不复制代码或完整讲解。正文聚焦知识，页眉、页脚和“本页没有给出什么”等来源说明只在理解必需时提一次。`,
     prompt: JSON.stringify({
       language: input.language,
       pageTitle: input.pageTitle,
