@@ -1248,11 +1248,64 @@ describe("Course OS API", () => {
     }
   }, 15_000);
 
+  it("documents the bridge-draft window before its matching core-saved receipt", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.025)) };
+      const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "bridge-draft-before-receipt")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+      const generation = await modelRouter.generateTeachingPackage({
+        pageTitle: release.pages[0]!.title, pageNumber: 1, sourceText: "模拟桥接草稿写入前的教学包响应",
+        writingPolicySnapshotId: release.writingPolicySnapshotId, language: "zh-CN", qualityMode: "balanced",
+        idempotencyKey: "bridge-window-model-response", stage: "teach", maxCostUsd: 4
+      });
+      const coreCost = testGenerationCost(created.body.id, release, "page-1");
+      const corePage = applyTeachingPackage(release.pages[0]!, generation.content, true, "text_only");
+      const coreDraft = await readweave.saveDraftWithCost({
+        id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+        sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page: corePage,
+        changedBlockIds: corePage.blocks.map(block => block.id), contentHash: "bridge-window-core-hash",
+        updatedAt: new Date().toISOString()
+      }, 0, { idempotencyKey: "bridge-window-core", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "bridge-window-core" }, coreCost);
+      const bridgedPage = applyTeachingPackage(release.pages[0]!, {
+        ...generation.content, chapterBridgeMarkdown: "本页承接上一页已经确认的结论"
+      }, true, "text_only");
+      const bridgeCost = { ...testGenerationCost(created.body.id, release, "page-1"), id: `${coreCost.id}:bridge` };
+      const bridgeDraft = await readweave.saveDraftWithCost({
+        ...coreDraft, page: bridgedPage, revision: coreDraft.revision, contentHash: "bridge-window-saved-hash",
+        updatedAt: new Date().toISOString()
+      }, coreDraft.revision, { idempotencyKey: "bridge-window-write", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "bridge-window-write" }, bridgeCost);
+      await operations.mutateGenerationJob(created.body.id, (job, context) => {
+        job.state = "running";
+        job.attempt = 1;
+        context.appendEvent("generation.page.core_saved", {
+          pageId: "page-1", draftRevision: coreDraft.revision, contentHash: coreDraft.contentHash,
+          costEntryIds: [coreCost.id], publishable: coreDraft.page.quality.publishable, bridgeCompleted: false
+        });
+      });
+
+      // Without a durable marker for the newer bridge revision, its authorship cannot be proven from the draft alone.
+      delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      await resumeIncompleteJobs(dependencies);
+      await waitForJob(app, created.body.id);
+
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
+      expect((await readweave.getDraftByPage("page-1"))?.revision).toBe(bridgeDraft.revision + 1);
+      expect((await readweave.getDraftByPage("page-1"))?.contentHash).not.toBe(bridgeDraft.contentHash);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
+  }, 15_000);
+
   it("retries only the page that failed to save and preserves completed page drafts", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: vi.fn(async () => testTeachingResult(0))
     };
-    const { app, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
+    const { app, dependencies, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
+    const readJobEvents = vi.spyOn(dependencies.operations, "readGenerationJobEvents");
     const originalSave = readweave.saveDraftWithCost.bind(readweave);
     let failSecondPageOnce = true;
     vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) => {
@@ -1267,10 +1320,12 @@ describe("Course OS API", () => {
     expect(await waitForJob(app, created.body.id)).toMatchObject({
       state: "completed", completedPageIds: ["page-1"], failedPageIds: ["page-2"]
     });
+    expect(readJobEvents).not.toHaveBeenCalled();
     const completedDraft = await readweave.getDraftByPage("page-1");
 
     await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "retry-only-page-2").expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
+    expect(readJobEvents).toHaveBeenCalledTimes(1);
 
     expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(3);
     expect(vi.mocked(modelRouter.generateTeachingPackage).mock.calls.map(([input]) => input.pageNumber)).toEqual([1, 2, 2]);

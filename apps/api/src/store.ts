@@ -117,6 +117,10 @@ export class OperationalStore {
     return { plan, jobs, events };
   }
 
+  async readGenerationJobEvents(jobId: string): Promise<OrderedEvent[]> {
+    return (await this.read()).events.filter((event) => event.streamId === jobId);
+  }
+
   async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
     let result!: T;
     const emitted: OrderedEvent[] = [];
@@ -313,6 +317,15 @@ export class PostgresOperationalStore extends OperationalStore {
     } finally {
       client.release();
     }
+  }
+
+  override async readGenerationJobEvents(jobId: string): Promise<OrderedEvent[]> {
+    await this.ready;
+    const result = await this.pool.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+      "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
+    );
+    return result.rows.map((row) => ({ id: Number(row.id), streamId: row.stream_id, type: row.event_type,
+      occurredAt: new Date(row.occurred_at).toISOString(), payload: row.payload }));
   }
 
   override async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {

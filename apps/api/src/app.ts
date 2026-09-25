@@ -3225,7 +3225,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
-      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt)) continue;
+      if (currentJob.attempt > 1
+        && await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt)) continue;
       if (currentJob.spentUsd >= currentJob.budgetUsd) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
@@ -3512,8 +3513,8 @@ async function settleCoreSavedPage(
   timings: Record<string, number>,
   pageStartedAt: number
 ): Promise<boolean> {
-  const snapshot = await dependencies.operations.read();
-  const event = snapshot.events.filter((item) => item.streamId === jobId && item.type === "generation.page.core_saved"
+  const events = await dependencies.operations.readGenerationJobEvents(jobId);
+  const event = events.filter((item) => item.type === "generation.page.core_saved"
     && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
   if (!event) return false;
 

@@ -18,6 +18,25 @@ const postgresDescribe = connectionString ? describe : describe.skip;
 const schemaPath = fileURLToPath(new URL("../../../infra/postgres/operational-schema.postgres", import.meta.url));
 
 describe("OperationalStore generation job mutation", () => {
+  it("reads events from one generation job stream", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-job-events-"));
+    try {
+      const store = new OperationalStore(join(directory, "operations.json"));
+      const job = makeJob(randomUUID());
+      await store.mutate(state => {
+        state.jobs.push(job);
+        store.appendEvent(state, job.id, "generation.page.core_saved", { pageId: "page-1" });
+        store.appendEvent(state, "another-job", "generation.page.core_saved", { pageId: "page-2" });
+      });
+
+      await expect(store.readGenerationJobEvents(job.id)).resolves.toMatchObject([
+        { streamId: job.id, type: "generation.page.core_saved", payload: { pageId: "page-1" } }
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("returns the updated job and persists scoped events and checkpoints", async () => {
     const directory = await mkdtemp(join(tmpdir(), "course-os-job-store-"));
     try {
