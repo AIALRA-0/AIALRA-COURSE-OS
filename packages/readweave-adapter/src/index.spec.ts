@@ -191,6 +191,62 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("keeps a committed candidate when an older state read finishes after its write", async () => {
+    const remote = new FakeEtapi();
+    let stateNoteId = "";
+    let oldContent = "";
+    let holdStatePut = false;
+    let holdStaleGet = false;
+    let releasePut!: () => void;
+    let releaseGet!: () => void;
+    let putStarted!: () => void;
+    let getStarted!: () => void;
+    const putGate = new Promise<void>(resolve => { releasePut = resolve; });
+    const getGate = new Promise<void>(resolve => { releaseGet = resolve; });
+    const putStartedPromise = new Promise<void>(resolve => { putStarted = resolve; });
+    const getStartedPromise = new Promise<void>(resolve => { getStarted = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const stateContent = stateNoteId && url.pathname.endsWith(`/notes/${stateNoteId}/content`);
+      if (stateContent && holdStatePut && init?.method === "PUT") {
+        holdStatePut = false;
+        const response = await remote.fetch(input, init);
+        putStarted();
+        await putGate;
+        return response;
+      }
+      if (stateContent && holdStaleGet && (init?.method ?? "GET") === "GET") {
+        holdStaleGet = false;
+        getStarted();
+        await getGate;
+        return new Response(oldContent, { status: 200 });
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const base = releaseWithPage();
+    await api.publishRelease(base, { ...manifest, courseReleaseId: base.id }, context);
+    stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    oldContent = remote.contentByTitle("00 Course OS 结构化索引");
+    await api.getRelease(base.id);
+    const first = { ...base, id: "candidate-race-first", lifecycle: "draft_source" as const };
+    const second = { ...base, id: "candidate-race-second", lifecycle: "draft_source" as const };
+    holdStatePut = true;
+    const firstWrite = api.registerDraftSource(first, { ...context, idempotencyKey: "candidate-race-first" });
+    await putStartedPromise;
+    Reflect.set(api, "stateCache", undefined);
+    holdStaleGet = true;
+    const staleRead = api.getRelease(first.id);
+    await getStartedPromise;
+    releasePut();
+    await firstWrite;
+    releaseGet();
+    await expect(staleRead).resolves.toMatchObject({ id: first.id });
+    await api.registerDraftSource(second, { ...context, idempotencyKey: "candidate-race-second" });
+    await expect(api.getRelease(first.id)).resolves.toMatchObject({ id: first.id });
+    await expect(api.getRelease(second.id)).resolves.toMatchObject({ id: second.id });
+  });
+
   it("returns an unrecorded page miss without cloning the global state", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -293,6 +349,13 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(record.draft.sourceReleaseId).toBe(candidate.id);
     expect(record.costEntries).toEqual([cost]);
     expect(remote.contentWriteCount(stateNoteId)).toBe(indexWritesBeforeCost);
+
+    const generated = draftFor(candidate);
+    generated.page.blocks[0]!.markdown = "生成后的完整讲解";
+    generated.page.lessonSections = [{ id: "generated-main", kind: "main_content", title: "主要内容", markdown: "先解释概念，再解释例子。", sourceAnchorIds: [], atomIds: [] }];
+    const saved = await api.saveDraftWithCost(generated, 0, { ...context, idempotencyKey: "candidate-generated-draft" }, { ...cost, id: "generated-cost" });
+    expect(saved.revision).toBe(1);
+    expect((await api.getDraftByPage("candidate-page"))?.page.lessonSections?.[0]?.markdown).toBe("先解释概念，再解释例子。");
   });
 
   it("reads historical compact costs after restart and appends new costs to the page record", async () => {

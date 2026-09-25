@@ -206,6 +206,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
+  private stateVersion = 0;
   private readonly draftReadCache = new Map<string, { draft: LessonDraft; expiresAt: number }>();
   private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
   private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
@@ -1647,7 +1648,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     });
     const sectionNoteIds = {} as Record<SectionKey, string>;
     for (const [key, title] of SECTION_DEFINITIONS) {
-      sectionNoteIds[key] = (await this.createNote(pageNote.noteId, title, "", "text", undefined, { courseOsType: `page_${key}`, courseOsPageId: draft.pageId })).noteId;
+      sectionNoteIds[key] = (await this.createNote(pageNote.noteId, title, key === "source" ? "" : this.renderSectionOverview(draft, key), "text", undefined, { courseOsType: `page_${key}`, courseOsPageId: draft.pageId })).noteId;
     }
     let sourceImageNoteId: string | undefined;
     if (sourceAsset) {
@@ -1749,7 +1750,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       updates.push(async () => {
         const actual = await this.getContent(noteId);
         if (actual === content) return;
-        if (expectedContent !== undefined && actual !== expectedContent && actual !== interruptedSectionContents.get(noteId)) {
+        if (expectedContent !== undefined && actual !== expectedContent && actual !== interruptedSectionContents.get(noteId)
+          && !(expectedDraft?.revision === 0 && actual === "")) {
           throw new Error("READWEAVE_DRAFT_SECTION_CONFLICT");
         }
         await this.putContent(noteId, content);
@@ -1953,10 +1955,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const now = Date.now();
     if (this.stateCache && this.stateCache.expiresAt > now) return this.stateCache.state;
     if (!this.stateReadInFlight) {
+      const versionAtReadStart = this.stateVersion;
       const read = this.readRemoteState();
       this.stateReadInFlight = read;
       void read.then((state) => {
-        if (this.stateReadInFlight === read) this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        if (this.stateReadInFlight === read && this.stateVersion === versionAtReadStart) {
+          this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        }
       }).catch(() => undefined).finally(() => {
         if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
       });
@@ -1964,7 +1969,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
       return this.stateCache.state;
     }
-    return await this.stateReadInFlight;
+    const state = await this.stateReadInFlight;
+    return this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
   }
 
   private async readRemoteState(): Promise<EtapiState> {
@@ -2258,6 +2264,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.lastWriteAt = new Date().toISOString();
       const next = structuredClone(this.stateCache?.state ?? fallbackState);
       this.mergeDraftPageRecord(next, record);
+      this.stateVersion += 1;
       this.stateCache = { state: next, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       this.draftReadCache.delete(record.pageId);
       return savedNoteId;
@@ -2293,6 +2300,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       // `mutate` owns this object and serializes every writer through
       // `writeChain`, so the committed snapshot can become the cache directly.
       // Public reads still clone the values they return.
+      this.stateVersion += 1;
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       phase = "complete";
       succeeded = true;
@@ -2345,6 +2353,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       await this.putContent(noteId, encodeReadWeaveStateContent(this.activityState(state)));
       this.lastWriteAt = new Date().toISOString();
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      this.stateVersion += 1;
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
     } catch (error) {
       this.invalidateStateCache();
@@ -2452,6 +2461,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private invalidateStateCache(): void {
+    this.stateVersion += 1;
     this.stateCache = undefined;
   }
 
