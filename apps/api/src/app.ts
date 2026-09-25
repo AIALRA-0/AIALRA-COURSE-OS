@@ -51,7 +51,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, validatePageForPublication, validateTex } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -870,7 +870,7 @@ export function createApp(dependencies: AppDependencies): Express {
         publishable: issues.length === 0 && (draft.page.teachingCompositionVersion === 1 || coverage.publishable),
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
-        mathValid: issues.every((issue) => !issue.includes("MATH")),
+        mathValid: validatePageMath(draft.page).length === 0,
         pseudocodeLines: pseudocode.length,
         explainedPseudocodeLines: pseudocode.filter((line) => line.semantic && line.preState && line.postState).length,
         issues,
@@ -3307,7 +3307,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       generatedPage.quality = {
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
-        mathValid: issues.every((issue) => !issue.includes("MATH")),
+        mathValid: validatePageMath(generatedPage).length === 0,
         publishable: issues.length === 0 && Boolean(runtimeModelRouter),
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
@@ -3835,9 +3835,14 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
     .split(/(```[\s\S]*?```|`[^`\r\n]+`|https?:\/\/\S+|“[^”\r\n]+”)/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(/\b(?:What|Which) is\s+(\$[^$\r\n]+\$)\??\s+(一栏|区域|区块|栏目)/gu, "解释 $1 的$2"))
     .join("");
-  const normalize = (value: string) => normalizeEmbeddedDefinitionAbbreviation(quoteRepeatedSourceLabels(
-    normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(normalizeGeneratedMathPunctuation(
-      normalizeKnownTeachingTerms(normalizeNearMissMathTerms(normalizeBareMathSymbols(quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText)), mathTerms))))), quotedSourceLabels));
+  const normalize = (value: string) => {
+    const sourceLabels = quoteContextualSourceLabels(normalizeSourceLabelCodeSpans(translateMathHeadingReference(value), sourceText), sourceText);
+    const bareSymbols = normalizeBareMathSymbols(sourceLabels);
+    const knownTerms = normalizeKnownTeachingTerms(normalizeNearMissMathTerms(bareSymbols, mathTerms));
+    const punctuation = normalizeGeneratedMathPunctuation(knownTerms);
+    return normalizeEmbeddedDefinitionAbbreviation(quoteRepeatedSourceLabels(
+      normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(punctuation)), quotedSourceLabels));
+  };
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
     const normalizedValue = normalizePriorDefinitionClauseCount(normalize(normalizePriorDefinitionAbbreviation(value)));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -3954,7 +3959,8 @@ function termDistance(left: string, right: string): number {
 }
 
 export function normalizeGeneratedMathPunctuation(value: string): string {
-  const repairedEscapes = normalizeLegacyMathDelimiters(value)
+  const plainChineseRestored = value.replace(/(?<![A-Za-z0-9}_$])\$([\u3400-\u9fff、，；。！？\s]+)\$(?!\$)/gu, "$1");
+  const repairedEscapes = normalizeLegacyMathDelimiters(plainChineseRestored)
     .replace(/\u000crac/g, "\\frac")
     .replace(/\u0009ext(?=\{)/g, "\\text")
     .replace(/\u0009heta(?=(?:\b|[_^{]))/gu, "\\theta")

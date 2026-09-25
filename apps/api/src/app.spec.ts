@@ -548,6 +548,24 @@ describe("Course OS API", () => {
     expect(normalized.questions[0]!.explanation).toBe("把 $e^0$ = 1 代入，再比较 $x_1$ 与 $x_2$");
   });
 
+  it("repairs sample compound math while retaining source anchor relationships", () => {
+    const content = testTeachingResult(0).content;
+    content.fullExplanationMarkdown = "交换 $e_i$ 与 e_{i+1}，并使用 N_{i+1}；概率项为 e^{-Δcost/T}";
+    const normalized = normalizeTeachingPackageMath(content);
+    expect(normalized.fullExplanationMarkdown).toContain("$e_{i+1}$");
+    expect(normalized.fullExplanationMarkdown).toContain("$N_{i+1}$");
+    expect(normalized.fullExplanationMarkdown).toContain("$e^{-\\Delta cost/T}$");
+
+    const sourcePage = {
+      ...testRelease().pages[0]!,
+      anchors: [{ id: "source-anchor-1" }] as never[],
+      blocks: testRelease().pages[0]!.blocks.map((block) => ({ ...block, sourceAnchorIds: ["source-anchor-1"] }))
+    };
+    const compiled = applyTeachingPackage(sourcePage, normalized, false);
+    expect(compiled.lessonSections?.every((section) => section.sourceAnchorIds.includes("source-anchor-1"))).toBe(true);
+    expect(compiled.blocks[0]!.sourceAnchorIds).toEqual(["source-anchor-1"]);
+  });
+
   it("removes page-number commentary while preserving the surrounding lesson", () => {
     const content = testTeachingResult(0).content;
     content.fullExplanationMarkdown = "先解释宏单元怎样进入放置流程\n\n页面右下角的“12/27”是页码，不属于讲解对象\n\n再解释布线结果怎样产生";

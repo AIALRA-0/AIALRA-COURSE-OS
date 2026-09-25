@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoverage, formatMisconception, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTeachingSourceFocus, validateTex } from "./index.js";
+import { calculateCoverage, evaluateTeachingPage, formatMisconception, hasPlaceholderContent, hasUnpairedEnglishPhrase, maximumTeachingExplanationCharacters, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, sourceNarrationLines, unpairedEnglishTeachingFields, validateHumanReadableChinese, validateLessonStructure, validateMarkdownMath, validatePageMath, validatePseudoCodeLines, validateTeachingCountConsistency, validateTeachingNarrative, validateTeachingSourceFocus, validateTex } from "./index.js";
+import type { PageLesson } from "@course-os/contracts";
 
 describe("strict math", () => {
   it("accepts valid fractions and rejects broken TeX", () => {
@@ -10,6 +11,62 @@ describe("strict math", () => {
   it("checks every math fragment inside teaching Markdown", () => {
     expect(validateMarkdownMath("有效公式 $\\frac{4}{2}=2$")).toEqual([]);
     expect(validateMarkdownMath("损坏公式 $\\frac{4{2}$")).not.toEqual([]);
+  });
+
+  it("keeps compound subscripts and exponents intact when adding delimiters", () => {
+    expect(normalizeBareMathSymbols("e_{i+1}, N_{i+1}, e^{-Δcost/T}"))
+      .toBe("$e_{i+1}$, $N_{i+1}$, $e^{-Δcost/T}$");
+    expect(validateMarkdownMath(normalizeLegacyMathDelimiters("e_{i+1}, N_{i+1}, e^{-Δcost/T}"))).toEqual([]);
+  });
+
+  it("repairs mixed Chinese and count labels inside math without changing their wording", () => {
+    const sourceMath = "$$对每个 E_i = e_1 ... e_i, #operands > #operators$$\n- $#operands$ 是当前前缀中的个数";
+    const normalized = normalizeLegacyMathDelimiters(sourceMath);
+    expect(normalized).toContain("对每个\n\n$$\nE_i");
+    expect(normalized).not.toContain("\\text{对每个}");
+    expect(normalized).toContain("\\#\\text{operands} > \\#\\text{operators}");
+    expect(normalized).toContain("$\\#\\text{operands}$ 是当前前缀中的个数");
+    expect(validateMarkdownMath(normalized)).toEqual([]);
+  });
+
+  it("moves a display formula's Chinese lead-in above the displayed expression", () => {
+    const sourceMath = "$$ 对每个 E_i = e_1 ... e_i, 1 ≤ i ≤ 2n−1, #operands > #operators $$";
+    const webMarkdown = normalizeLegacyMathDelimiters(sourceMath);
+    expect(webMarkdown).toBe("对每个\n\n$$\nE_i = e_1 ... e_i, 1 ≤ i ≤ 2n−1, \\#\\text{operands} > \\#\\text{operators} $$");
+    expect(webMarkdown.slice(webMarkdown.indexOf("$$") + 2, webMarkdown.lastIndexOf("$$"))).not.toMatch(/[\p{Script=Han}]/u);
+    expect(validateMarkdownMath(webMarkdown)).toEqual([]);
+  });
+
+  it("preserves mathematical range meaning while making an en dash KaTeX-safe", () => {
+    expect(normalizeLegacyMathDelimiters("$k = 5–10$")).toBe("$k = 5\\text{–}10$");
+    expect(validateMarkdownMath("$k = 5–10$")).toEqual([]);
+  });
+
+  it("reports KaTeX parser failures through page math validity", () => {
+    const page = {
+      atoms: [],
+      blocks: [{ id: "broken-formula", markdown: "$\\frac{1}{2$", sourceAnchorIds: ["source-a"], atomIds: [] }],
+      lessonSections: [],
+      questionBank: []
+    } as unknown as PageLesson;
+    expect(validatePageMath(page)).toEqual(expect.arrayContaining([expect.stringContaining("KaTeX parse error")]));
+  });
+
+  it("does not count repeated pure formulas as repeated teaching paragraphs", () => {
+    const page = {
+      pageNumber: 26,
+      title: "Formula",
+      atoms: [],
+      lessonSections: [{ kind: "full_explanation", markdown: [
+        "$$P_1 = \\text{25V1H374VH6V8VH}$$",
+        "$$P_2 = \\text{25V1H734VH6V8VH}$$",
+        "$$P_1 = \\text{25V1H374VH6V8VH}$$",
+        "这段说明先解释表达式中的符号，再说明它们怎样对应到布局关系",
+        "另一段补充读取顺序，并保留页面给出的判断边界"
+      ].join("\n\n") }],
+      questionBank: []
+    } as unknown as PageLesson;
+    expect(evaluateTeachingPage(page).issues).not.toContain("TEACHING_REPETITION_TOO_HIGH");
   });
 
   it("converts an unescaped TeX bracket only when its contents are clearly mathematical", () => {

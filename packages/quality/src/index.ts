@@ -46,10 +46,11 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   const required = ["learning_objectives", "main_content", "prior_knowledge", "full_explanation", "misconceptions"];
   const issues = required.filter((kind) => !sections.some((section) => section.kind === kind)).map((kind) => `TEACHING_SECTION_MISSING:${kind}`);
   if (explanation.length < minimumExplanationCharacters(page)) issues.push("TEACHING_EXPLANATION_TOO_SHORT");
-  const paragraphs = explanation.split(/\n\s*\n/).map((value) => value.replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim()).filter((value) => value.length >= 24);
+  const paragraphs = explanation.split(/\n\s*\n/).filter((value) => !isMathOnlyParagraph(value))
+    .map((value) => value.replace(/[`*_>#-]/g, "").replace(/\s+/g, "").trim()).filter((value) => value.length >= 24);
   const counts = new Map<string, number>();
   for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) ?? 0) + 1);
-  const repeatedParagraphRatio = paragraphs.length ? paragraphs.filter((paragraph) => (counts.get(paragraph) ?? 0) > 1).length / paragraphs.length : 1;
+  const repeatedParagraphRatio = paragraphs.length ? paragraphs.filter((paragraph) => (counts.get(paragraph) ?? 0) > 1).length / paragraphs.length : 0;
   if (repeatedParagraphRatio > 0.15) issues.push("TEACHING_REPETITION_TOO_HIGH");
   const forbidden = ["页面元素核对", "来源状态", "等待审核", "等待验证", "模型推断", "已覆盖"];
   for (const phrase of forbidden) if (explanation.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
@@ -700,9 +701,19 @@ export function quoteContextualSourceLabels(text: string, sourceText: string): s
 export function normalizeBareMathSymbols(text: string): string {
   return text.split(/(```[\s\S]*?```|`[^`\r\n]+`|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\r\n]+\$(?!\$)|https?:\/\/\S+|“[^”\r\n]+”|"[^"\r\n]+")/gu)
     .map((part, index) => index % 2 === 1 ? part : part.replace(
-      /(?<![\p{L}\p{N}])([A-Za-z]{1,3}(?:_[A-Za-z0-9{}]+|\^[A-Za-z0-9{}]+))(?![\p{L}\p{N}])/gu,
+      /(?<![\p{L}\p{N}_])([A-Za-z]{1,3}(?:[_^](?:\{[\p{L}\p{N}+\-*/=<>.,]+\}|[A-Za-z0-9]{1,3}))+)(?![\p{L}\p{N}_])/gu,
       "$$$1$"
     )).join("");
+}
+
+function isMathOnlyParagraph(paragraph: string): boolean {
+  const visible = paragraph.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/gu, "")
+    .replace(/\$\$[\s\S]*?\$\$/gu, "")
+    .replace(/(?<!\$)\$[^$\r\n]+\$(?!\$)/gu, "")
+    .replace(/\\\[[\s\S]*?\\\]|\\\([^\r\n]*?\\\)/gu, "")
+    .replace(/`[^`\r\n]+`/gu, "")
+    .replace(/\s+/gu, "");
+  return visible.length === 0;
 }
 
 /** Move a trailing abbreviation before the Chinese term and keep only the official English name in parentheses. */
@@ -932,7 +943,7 @@ export function validateMarkdownMath(markdown: string): string[] {
   const normalized = normalizeBareTexFragments(initial.normalized);
   const scanned = normalized === initial.normalized ? initial : scanMarkdownMath(normalized);
   return [...scanned.issues, ...scanned.formulas.flatMap((tex) => {
-    const result = validateTex(tex);
+    const result = validateTex(normalizeKaTeXCompatibleTex(tex));
     return result.valid ? [] : [result.error];
   })];
 }
@@ -943,7 +954,17 @@ export function validateMarkdownMath(markdown: string): string[] {
  * `\\(`, so ordinary Chinese square brackets remain ordinary text
  */
 export function normalizeLegacyMathDelimiters(markdown: string): string {
-  return normalizeBareVariableMath(normalizeBareTexFragments(scanMarkdownMath(markdown).normalized));
+  const bareNormalized = normalizeBareVariableMath(normalizeBareTexFragments(scanMarkdownMath(markdown).normalized));
+  const movedLeadIn = moveDisplayMathLeadIn(scanMarkdownMath(bareNormalized).normalized);
+  return scanMarkdownMath(movedLeadIn, true).normalized;
+}
+
+/** Move a standalone natural-language lead-in above a display formula. */
+function moveDisplayMathLeadIn(markdown: string): string {
+  return markdown.replace(
+    /(^|\n)([ \t]*)\$\$[ \t]*([\p{Script=Han}，、；：]{1,24})[ \t]+(?=(?:[A-Za-z][A-Za-z0-9]*(?:[_^]|[ \t]*(?:=|∈))|\\(?:forall|exists|sum|prod|frac|sqrt|int)\b))/gu,
+    (_whole, lineStart: string, indent: string, leadIn: string) => `${lineStart}${indent}${leadIn}\n\n${indent}$$\n`
+  );
 }
 
 function normalizeBareVariableMath(markdown: string): string {
@@ -973,7 +994,7 @@ interface MathScanResult {
   issues: string[];
 }
 
-function scanMarkdownMath(markdown: string): MathScanResult {
+function scanMarkdownMath(markdown: string, normalizeTex = false): MathScanResult {
   const output: string[] = [];
   const formulas: string[] = [];
   const issues: string[] = [];
@@ -1002,7 +1023,7 @@ function scanMarkdownMath(markdown: string): MathScanResult {
       if (close < 0) { issues.push("MATH_UNCLOSED_DISPLAY_DELIMITER"); output.push(markdown.slice(index)); break; }
       const tex = markdown.slice(index + 2, close);
       formulas.push(tex);
-      output.push(`$$${tex}$$`);
+      output.push(`$$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$$`);
       index = close + 2;
       continue;
     }
@@ -1011,7 +1032,7 @@ function scanMarkdownMath(markdown: string): MathScanResult {
       if (close < 0) { issues.push("MATH_UNCLOSED_INLINE_DELIMITER"); output.push(markdown.slice(index)); break; }
       const tex = markdown.slice(index + 2, close);
       formulas.push(tex);
-      output.push(`$${tex}$`);
+      output.push(`$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$`);
       index = close + 2;
       continue;
     }
@@ -1020,7 +1041,7 @@ function scanMarkdownMath(markdown: string): MathScanResult {
       if (close < 0) { issues.push("MATH_UNCLOSED_DISPLAY_DELIMITER"); output.push(markdown.slice(index)); break; }
       const tex = markdown.slice(index + 2, close);
       formulas.push(tex);
-      output.push(`$$${tex}$$`);
+      output.push(`$$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$$`);
       index = close + 2;
       continue;
     }
@@ -1050,7 +1071,7 @@ function scanMarkdownMath(markdown: string): MathScanResult {
       }
       const tex = candidate;
       formulas.push(tex);
-      output.push(`$${tex}$`);
+      output.push(`$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$`);
       index = close + 1;
       continue;
     }
@@ -1067,7 +1088,8 @@ function scanMarkdownMath(markdown: string): MathScanResult {
           const onlyIndent = markdown.slice(lineStart, index).trim() === "";
           const atLineEnd = markdown.slice(close + 1).match(/^[ \t]*(?:\r?\n|$)/);
           formulas.push(tex);
-          output.push(onlyIndent && atLineEnd ? `$$\n${tex.trim()}\n$$` : `$${tex.trim()}$`);
+          const normalizedTex = normalizeTex ? normalizeKaTeXCompatibleTex(tex.trim()) : tex.trim();
+          output.push(onlyIndent && atLineEnd ? `$$\n${normalizedTex}\n$$` : `$${normalizedTex}$`);
           index = close + 1;
           continue;
         }
@@ -1078,6 +1100,14 @@ function scanMarkdownMath(markdown: string): MathScanResult {
     index += 1;
   }
   return { normalized: output.join(""), formulas, issues };
+}
+
+function normalizeKaTeXCompatibleTex(tex: string): string {
+  return tex.split(/(\\text\{[^{}]*\})/gu).map((part, index) => index % 2 === 1 ? part : part
+    .replace(/(?<!\\)#([A-Za-z][A-Za-z0-9_-]*)/gu, "\\#\\text{$1}")
+    .replace(/–/gu, "\\text{–}")
+    .replace(/Δ/gu, "\\Delta ")
+    .replace(/[\u3400-\u9fff]+/gu, (cjk) => `\\text{${cjk}}`)).join("");
 }
 
 function findUnescaped(value: string, needle: string, from: number): number {
@@ -1194,10 +1224,8 @@ export function calculateCoverage(requirements: CoverageRequirement[], claims: C
   return { highRiskCoverage, generalCoverage, missing, publishable: highRiskCoverage === 1 && generalCoverage >= 0.98 };
 }
 
-export function validatePageForPublication(page: PageLesson): string[] {
+export function validatePageMath(page: PageLesson): string[] {
   const mathIssues = validateMathAtoms(page.atoms.filter((atom): atom is MathExpression => atom.kind === "math_expression"));
-  const pseudoIssues = validatePseudoCodeLines(page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line"));
-  const coverage = calculateCoverage(page.coverageRequirements, page.coverageClaims);
   const markdownMathIssues = [
     ...page.blocks.map((block) => ({ id: block.id, markdown: block.markdown })),
     ...(page.lessonSections ?? []).flatMap((section) => [
@@ -1206,6 +1234,13 @@ export function validatePageForPublication(page: PageLesson): string[] {
     ]),
     ...(page.questionBank ?? []).flatMap(q => [q.prompt, ...(q.options ?? []), q.expectedAnswer, q.explanation].map((markdown, i) => ({ id: `${q.id}:${i}`, markdown })))
   ].flatMap((block) => validateMarkdownMath(block.markdown).map((issue) => `${block.id}:${issue}`));
+  return [...mathIssues, ...markdownMathIssues];
+}
+
+export function validatePageForPublication(page: PageLesson): string[] {
+  const mathIssues = validatePageMath(page);
+  const pseudoIssues = validatePseudoCodeLines(page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line"));
+  const coverage = calculateCoverage(page.coverageRequirements, page.coverageClaims);
   const sectionIssues = validateLessonStructure(page);
   const placeholderIssues = [
     ...page.blocks.filter((block) => hasPlaceholderContent(block.markdown)).map((block) => `${block.id}:PLACEHOLDER_CONTENT`),
@@ -1223,7 +1258,7 @@ export function validatePageForPublication(page: PageLesson): string[] {
   const persistedIssues = page.teachingCompositionVersion === 1
     ? page.quality.issues.filter((issue) => !issue.includes(":MISSING:"))
     : page.quality.issues;
-  return [...narrativeIssues, ...persistedIssues, ...mathIssues, ...markdownMathIssues, ...pseudoIssues, ...coverageIssues, ...sectionIssues, ...placeholderIssues, ...questionIssues];
+  return [...narrativeIssues, ...persistedIssues, ...mathIssues, ...pseudoIssues, ...coverageIssues, ...sectionIssues, ...placeholderIssues, ...questionIssues];
 }
 
 export function hasPlaceholderContent(markdown: string): boolean {
