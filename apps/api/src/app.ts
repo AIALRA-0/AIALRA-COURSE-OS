@@ -3210,10 +3210,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     if (initial.completedPageIds.includes(pageId)) continue;
     const currentJob = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
-    if (currentJob.spentUsd >= currentJob.budgetUsd) {
-      await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
-      return;
-    }
     const sourcePage = release.pages.find((item) => item.id === pageId);
     if (!sourcePage) {
       await markGenerationPageFailed(jobId, pageId, "PAGE_NOT_FOUND", dependencies, {}, fenceToken);
@@ -3229,6 +3225,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
+      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt)) continue;
+      if (currentJob.spentUsd >= currentJob.budgetUsd) {
+        await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
+        return;
+      }
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       let sourceText = buildGenerationSourceText(page);
@@ -3367,7 +3368,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
           contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
           readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
-          costBundledIntoDraft: bundledCost, timings: { ...timings } });
+          costBundledIntoDraft: bundledCost, costEntryIds: [cost.id], publishable: generatedPage.quality.publishable,
+          bridgeCompleted: false, timings: { ...timings } });
       });
       persistenceStage = undefined;
       let bridgeCompleted = false;
@@ -3403,6 +3405,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           if (!bundledBridgeCost) {
             await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
           }
+          await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
+            context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
+              contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
+              readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
+              costBundledIntoDraft: bundledCost, costEntryIds: [cost.id, bridgeCost.id],
+              publishable: generatedPage.quality.publishable, bridgeCompleted: true, timings: { ...timings } });
+          });
           await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, bridgeCost, context));
           meter.markSettled();
           bridgeCompleted = true;
@@ -3492,6 +3501,64 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
 async function assertGenerationFence(jobId: string, fenceToken: number, dependencies: AppDependencies): Promise<void> {
   const job = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
   if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
+}
+
+async function settleCoreSavedPage(
+  jobId: string,
+  pageId: string,
+  release: CourseRelease,
+  fenceToken: number,
+  dependencies: AppDependencies,
+  timings: Record<string, number>,
+  pageStartedAt: number
+): Promise<boolean> {
+  const snapshot = await dependencies.operations.read();
+  const event = snapshot.events.filter((item) => item.streamId === jobId && item.type === "generation.page.core_saved"
+    && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
+  if (!event) return false;
+
+  const saved = event.payload as {
+    pageId: string;
+    draftRevision?: number;
+    contentHash?: string;
+    costEntryIds?: string[];
+    publishable?: boolean;
+    bridgeCompleted?: boolean;
+  };
+  const draft = await dependencies.readweave.getDraftByPage(pageId);
+  if (!draft || draft.status !== "ready" || draft.sourceReleaseId !== release.id
+    || draft.revision !== saved.draftRevision || draft.contentHash !== saved.contentHash) return false;
+
+  const availableCosts = await dependencies.readweave.listCostEntries({ jobId, pageId });
+  const costEntryIds = saved.costEntryIds?.filter((id): id is string => typeof id === "string");
+  const costs = costEntryIds?.length
+    ? costEntryIds.map((id) => availableCosts.find((entry) => entry.id === id)).filter((entry): entry is GenerationCostEntry => Boolean(entry))
+    : availableCosts.filter((entry) => entry.stage === "teach" && entry.status === "succeeded");
+  if (costs.length === 0 || (costEntryIds && costs.length !== costEntryIds.length)
+    || (!costEntryIds?.length && costs.length !== 1)) {
+    throw new Error("GENERATION_CORE_SAVED_COST_UNAVAILABLE");
+  }
+
+  await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
+    if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) return;
+    for (const cost of costs) applyScopedCost(job, cost, context);
+    if (!job.completedPageIds.includes(pageId)) job.completedPageIds.push(pageId);
+    context.appendEvent("generation.page.completed", {
+      pageId, draftRevision: draft.revision, contentHash: draft.contentHash,
+      actualMicrousd: costs[0]!.actualMicrousd,
+      publishable: saved.publishable ?? draft.page.quality.publishable,
+      bridgeCompleted: saved.bridgeCompleted === true,
+      settledMs: Date.now() - Date.parse(job.createdAt),
+      timings: { ...timings, recoverySettlementMs: Date.now() - pageStartedAt }
+    });
+    if (job.spentUsd > job.budgetUsd || (job.spentUsd >= job.budgetUsd && job.completedPageIds.length + job.failedPageIds.length < job.pageIds.length)) {
+      Object.assign(job, transitionJob(job, "failed"));
+      context.appendEvent("job.failed", { issue: "JOB_BUDGET_EXHAUSTED", spentUsd: job.spentUsd, budgetUsd: job.budgetUsd });
+      return;
+    }
+    if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, context);
+  });
+  return true;
 }
 
 async function appendGenerationStageEvent(jobId: string, pageId: string, stage: GenerationCostEntry["stage"], status: "started" | "completed" | "skipped", dependencies: AppDependencies, details: Record<string, unknown> = {}, fenceToken?: number): Promise<void> {

@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import type { CourseRelease, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import type { CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -1167,7 +1167,7 @@ describe("Course OS API", () => {
     const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
     process.env.COURSE_OS_EXTERNAL_WORKER = "true";
     try {
-      const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.025)) };
       const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
       const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-core-saved-page")
         .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
@@ -1177,17 +1177,19 @@ describe("Course OS API", () => {
         idempotencyKey: "pre-crash-model-call", stage: "teach", maxCostUsd: 4
       });
       const generatedPage = applyTeachingPackage(release.pages[0]!, initialGeneration.content, true, "text_only");
-      const persisted = await readweave.saveDraft({
+      const savedCost = testGenerationCost(created.body.id, release, "page-1");
+      const persisted = await readweave.saveDraftWithCost({
         id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
         sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page: generatedPage,
         changedBlockIds: generatedPage.blocks.map(block => block.id), contentHash: "crash-window-draft-hash",
         updatedAt: new Date().toISOString()
-      }, 0, { idempotencyKey: "crash-window-draft", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "crash-window-draft" });
+      }, 0, { idempotencyKey: "crash-window-draft", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "crash-window-draft" }, savedCost);
       await operations.mutateGenerationJob(created.body.id, (job, context) => {
         job.state = "running";
         job.attempt = 1;
         context.appendEvent("generation.page.core_saved", {
-          pageId: "page-1", draftRevision: persisted.revision, contentHash: persisted.contentHash
+          pageId: "page-1", draftRevision: persisted.revision, contentHash: persisted.contentHash,
+          costEntryIds: [savedCost.id], publishable: persisted.page.quality.publishable, bridgeCompleted: false
         });
       });
 
@@ -1195,9 +1197,51 @@ describe("Course OS API", () => {
       await resumeIncompleteJobs(dependencies);
       const recovered = await waitForJob(app, created.body.id);
 
-      expect(recovered).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+      expect(recovered).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [], spentUsd: 0.025 });
       expect.soft(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
       expect.soft(await readweave.getDraftByPage("page-1")).toEqual(persisted);
+      const recordedCosts = await readweave.listCostEntries({ jobId: created.body.id });
+      expect(recordedCosts).toEqual([savedCost]);
+      expect((await operations.read()).events.filter((item) => item.streamId === created.body.id && item.type === "generation.cost.recorded")).toHaveLength(1);
+
+      const otherJob = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "new-job-regenerates-old-draft")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+      await waitForJob(app, otherJob.body.id);
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
+      expect((await readweave.getDraftByPage("page-1"))?.revision).toBe(persisted.revision + 1);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
+  }, 15_000);
+
+  it("cannot reconcile a model charge when interruption precedes the first durable page receipt", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.025)) };
+      const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "lost-pre-persistence-receipt")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+      // This mock response represents a provider call that may already be billed; the crash leaves no draft, cost, or core_saved event.
+      await modelRouter.generateTeachingPackage({
+        pageTitle: release.pages[0]!.title, pageNumber: 1, sourceText: "模型已响应，但尚无持久化回执",
+        writingPolicySnapshotId: release.writingPolicySnapshotId, language: "zh-CN", qualityMode: "balanced",
+        idempotencyKey: "unpersisted-model-response", stage: "teach", maxCostUsd: 4
+      });
+      await operations.mutateGenerationJob(created.body.id, (job) => {
+        job.state = "running";
+        job.attempt = 1;
+      });
+
+      delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      await resumeIncompleteJobs(dependencies);
+      const recovered = await waitForJob(app, created.body.id);
+
+      expect(recovered).toMatchObject({ state: "completed", spentUsd: 0.025 });
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
+      expect(await readweave.listCostEntries({ jobId: created.body.id })).toHaveLength(1);
+      expect((await operations.read()).events.filter((item) => item.streamId === created.body.id && item.type === "generation.cost.recorded")).toHaveLength(1);
     } finally {
       if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
       else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
@@ -2207,5 +2251,20 @@ function testTeachingResult(apiEquivalentUsd: number): TeachingGenerationResult 
         { kind: "multiple_choice" as const, prompt: "最后一步应该做什么", options: ["核对输出", "忽略目标", "删除结果", "改变题意"], expectedAnswer: "核对输出", explanation: "正确选项是核对输出，因为结果还要与目标和条件比较；忽略目标只看输出数值，无法判断处理是否成功，改变题意更不能替代结果检验" }
       ]
     }
+  };
+}
+
+function testGenerationCost(jobId: string, release: CourseRelease, pageId: string): GenerationCostEntry {
+  return {
+    id: `cost:${jobId}:fence:1:attempt:1:${pageId}:teach`, workspaceId: "personal", courseId: release.courseId,
+    materialVersionId: release.id, pageId, objectId: `draft:${pageId}`, jobId, stage: "teach",
+    provider: "aialra-model-router", model: "gpt-5.6-terra", inputTokens: 100, outputTokens: 200, cachedInputTokens: 0,
+    unitPriceSnapshot: { id: "test-price", provider: "aialra-model-router", model: "gpt-5.6-terra", currency: "USD",
+      capturedAt: "2026-09-24T00:00:00.000Z", source: "test", inputMicrousdPerMillion: 0,
+      outputMicrousdPerMillion: 0, cachedInputMicrousdPerMillion: 0 },
+    estimatedMicrousd: 25_000, actualMicrousd: 25_000, durationMs: 500, retries: 0, status: "succeeded",
+    qualityPassed: true, billingMode: "metered", cashCostMicrousd: 25_000, quotaConsumedMicrousd: 0,
+    estimatedCashCostMicrousd: 25_000, estimatedQuotaConsumedMicrousd: 0, costBasis: "provider_reported",
+    createdAt: "2026-09-24T00:00:00.000Z"
   };
 }
