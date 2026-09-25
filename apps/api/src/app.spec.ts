@@ -172,9 +172,15 @@ describe("Course OS API", () => {
         plan: { content: "private generation plan payload" }
       }, "2026-09-22T10:03:00.000Z");
       append(completedJob!.id, "generation.stage.started", { stage: "repair", phase: "opening_repair", secret: "inactive job event" }, "2026-09-22T10:04:00.000Z");
+      append(completedJob!.id, "generation.stage.completed", { stage: "repair" }, "2026-09-22T10:04:30.000Z");
+      append(firstJob!.id, "generation.page.core_saved", { pageId: "page-1" }, "2026-09-22T10:05:00.000Z");
+      append(secondJob!.id, "generation.page.completed", { pageId: "page-2", bridgeCompleted: true }, "2026-09-22T10:06:00.000Z");
+      append(secondJob!.id, "generation.cost.recorded", { provider: "test-provider", model: "test-model" }, "2026-09-22T10:07:00.000Z");
     });
 
+    const fullRead = vi.spyOn(operations, "read").mockRejectedValue(new Error("DETAIL_ROUTE_USED_FULL_READ"));
     const response = await request(app).get(`/api/v1/generation-plans/${planId}`).expect(200);
+    expect(fullRead).not.toHaveBeenCalled();
     expect(response.body.activeJobs).toHaveLength(2);
     expect(response.body.activeJobs[0].latestStageActivity).toEqual({
       stage: "teach",
@@ -187,9 +193,20 @@ describe("Course OS API", () => {
       occurredAt: "2026-09-22T10:03:00.000Z"
     });
     expect(response.body.currentJob.latestStageActivity).toEqual(response.body.activeJobs[0].latestStageActivity);
+    expect(response.body.progress).toMatchObject({
+      core: { completed: 1, total: 3 },
+      crossPage: { completed: 1, total: 2 },
+      repairCount: 1,
+      concurrency: { running: 2, limit: 2 },
+      provider: "test-provider",
+      model: "test-model",
+      costUsd: 0
+    });
     expect(JSON.stringify(response.body)).not.toContain("private stage prompt");
     expect(JSON.stringify(response.body)).not.toContain("private generation plan payload");
     expect(JSON.stringify(response.body)).not.toContain("inactive job event");
+    await request(app).get(`/api/v1/generation-plans/${planId}`).set("X-Workspace-Id", "other")
+      .expect(404).expect(({ body }) => expect(body.error.code).toBe("GENERATION_PLAN_NOT_FOUND"));
   });
   it("indexes independent generation jobs under their course and restores their task page after refresh", async () => {
     const release = testRelease();

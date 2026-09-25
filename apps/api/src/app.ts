@@ -1314,24 +1314,24 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-plans/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const snapshot = await dependencies.operations.read();
-      const plan = snapshot.generationPlans.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
+      const detail = await dependencies.operations.readGenerationPlanDetail(request.params.id, workspaceId);
+      const plan = detail.plan;
       if (!plan) return sendError(request, response, 404, "GENERATION_PLAN_NOT_FOUND", "没有找到这个生成计划", false);
-      const activeJobs = snapshot.jobs
+      const activeJobs = detail.jobs
         .filter((item) => item.planId === plan.id && ["queued", "running", "pending_sync"].includes(item.state))
-        .map((job) => ({ ...job, latestStageActivity: latestGenerationStageActivity(snapshot.events, job.id) }));
-      const currentJob = activeJobs[0] ?? snapshot.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
-      const planJobs = snapshot.jobs.filter(item => item.planId === plan.id);
+        .map((job) => ({ ...job, latestStageActivity: latestGenerationStageActivity(detail.events, job.id) }));
+      const currentJob = activeJobs[0] ?? detail.jobs.find((item) => item.id === (plan.currentJobId || plan.lastJobId));
+      const planJobs = detail.jobs.filter(item => item.planId === plan.id);
       const jobIds = new Set(planJobs.map(item => item.id));
-      const repairCount = snapshot.events.filter(event => jobIds.has(event.streamId)
+      const repairCount = detail.events.filter(event => jobIds.has(event.streamId)
         && event.type === "generation.stage.completed"
         && (event.payload as { stage?: string }).stage === "repair").length;
-      const coreSaved = new Set([...plan.completedPageIds, ...snapshot.events.filter(event => jobIds.has(event.streamId)
+      const coreSaved = new Set([...plan.completedPageIds, ...detail.events.filter(event => jobIds.has(event.streamId)
         && event.type === "generation.page.core_saved").map(event => (event.payload as { pageId: string }).pageId)]);
-      const bridgeSaved = new Set([...(plan.bridgeCompletedPageIds ?? []), ...snapshot.events.filter(event => jobIds.has(event.streamId)
+      const bridgeSaved = new Set([...(plan.bridgeCompletedPageIds ?? []), ...detail.events.filter(event => jobIds.has(event.streamId)
         && event.type === "generation.page.completed" && (event.payload as { bridgeCompleted?: boolean }).bridgeCompleted)
         .map(event => (event.payload as { pageId: string }).pageId)]);
-      const latestCost = snapshot.events.filter(event => jobIds.has(event.streamId) && event.type === "generation.cost.recorded").at(-1)?.payload as { provider?: string; model?: string } | undefined;
+      const latestCost = detail.events.filter(event => jobIds.has(event.streamId) && event.type === "generation.cost.recorded").at(-1)?.payload as { provider?: string; model?: string } | undefined;
       const route = latestCost?.provider && latestCost.model ? latestCost : plan.modelRoutes?.at(-1);
       const crossPageIds = new Set(plan.pageIds.slice(1));
       const progress = {

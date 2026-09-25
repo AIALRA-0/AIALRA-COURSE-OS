@@ -29,6 +29,17 @@ export interface OperationalState {
 
 export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans">;
 
+export interface GenerationPlanDetailRead {
+  plan?: GenerationPlan;
+  jobs: GenerationJob[];
+  events: OrderedEvent[];
+}
+
+const generationPlanDetailEventTypes = new Set([
+  "generation.stage.started", "generation.stage.completed", "generation.stage.skipped",
+  "generation.page.core_saved", "generation.page.completed", "generation.cost.recorded"
+]);
+
 export type LearningSessionPatch = Partial<Pick<LearningSession,
   "currentPageId" | "currentAnchorId" | "explanationScroll" | "zoom" | "panX" | "panY">>;
 
@@ -82,6 +93,28 @@ export class OperationalStore {
   async readTaskIndex(): Promise<TaskIndex> {
     const state = await this.read();
     return { imports: state.imports, jobs: state.jobs, generationPlans: state.generationPlans };
+  }
+
+  /** Read only one workspace plan, its jobs, and events used by its detail response. */
+  async readGenerationPlanDetail(id: string, workspaceId: string): Promise<GenerationPlanDetailRead> {
+    let value: Partial<OperationalState>;
+    try {
+      value = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<OperationalState>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { jobs: [], events: [] };
+      throw error;
+    }
+    const plans = Array.isArray(value.generationPlans) ? value.generationPlans : [];
+    const storedJobs = Array.isArray(value.jobs) ? value.jobs : [];
+    const storedEvents = Array.isArray(value.events) ? value.events : [];
+    const plan = plans.find(item => item.id === id && item.workspaceId === workspaceId);
+    if (!plan) return { jobs: [], events: [] };
+    const jobs = storedJobs.filter(job => job.planId === plan.id
+      || job.id === plan.currentJobId || job.id === plan.lastJobId);
+    const planJobIds = new Set(storedJobs.filter(job => job.planId === plan.id).map(job => job.id));
+    const events = storedEvents.filter(event => planJobIds.has(event.streamId)
+      && generationPlanDetailEventTypes.has(event.type));
+    return { plan, jobs, events };
   }
 
   async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
@@ -209,6 +242,77 @@ export class PostgresOperationalStore extends OperationalStore {
       jobs: mergeGenerationJobs(Array.isArray(row.jobs) ? row.jobs : [], row.relationalJobs ?? []),
       generationPlans: Array.isArray(row.generationPlans) ? row.generationPlans : []
     };
+  }
+
+  override async readGenerationPlanDetail(id: string, workspaceId: string): Promise<GenerationPlanDetailRead> {
+    await this.ready;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const planResult = await client.query<{ plan: GenerationPlan | null }>(
+      `SELECT entry.plan
+       FROM operational_state,
+            jsonb_array_elements(COALESCE(state->'generationPlans', '[]'::jsonb)) AS entry(plan)
+       WHERE operational_state.id = 1 AND entry.plan->>'id' = $1 AND entry.plan->>'workspaceId' = $2
+       LIMIT 1`, [id, workspaceId]
+      );
+      const plan = planResult.rows[0]?.plan;
+      if (!plan) {
+        await client.query("COMMIT");
+        return { jobs: [], events: [] };
+      }
+      const selectedIds = [...new Set([...(plan.jobIds ?? []), plan.currentJobId, plan.lastJobId]
+        .filter((jobId): jobId is string => Boolean(jobId)))];
+      const [legacyResult, relationalResult] = await Promise.all([
+        client.query<{ job: GenerationJob }>(
+        `SELECT entry.job
+         FROM operational_state,
+              jsonb_array_elements(COALESCE(state->'jobs', '[]'::jsonb)) WITH ORDINALITY AS entry(job, position)
+         WHERE operational_state.id = 1
+           AND (entry.job->>'planId' = $1 OR entry.job->>'id' = ANY($2::text[]))
+         ORDER BY entry.position`, [plan.id, selectedIds]
+        ),
+        client.query<{ job_data: GenerationJob }>(
+        `SELECT job_data FROM generation_jobs
+         WHERE job_data->>'planId' = $1 OR id::text = ANY($2::text[])
+         ORDER BY created_at, id`, [plan.id, selectedIds]
+        )
+      ]);
+      const jobs = mergeGenerationJobs(legacyResult.rows.map(row => row.job), relationalResult.rows.map(row => row.job_data));
+      const planJobIds = [...new Set(jobs.filter(job => job.planId === plan.id).map(job => job.id))];
+      const [legacyEventsResult, relationalEventsResult] = await Promise.all([
+        client.query<{ event: OrderedEvent }>(
+        `SELECT entry.event
+         FROM operational_state,
+              jsonb_array_elements(COALESCE(state->'events', '[]'::jsonb)) AS entry(event)
+         WHERE operational_state.id = 1
+           AND entry.event->>'streamId' = ANY($1::text[])
+           AND entry.event->>'type' = ANY($2::text[])`,
+        [planJobIds, [...generationPlanDetailEventTypes]]
+        ),
+        client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+        `SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events
+         WHERE stream_id = ANY($1::text[]) AND event_type = ANY($2::text[]) ORDER BY id`,
+        [planJobIds, [...generationPlanDetailEventTypes]]
+        )
+      ]);
+      const baseEvents = legacyEventsResult.rows.map(row => row.event);
+      const eventMap = new Map(baseEvents.map(event => [event.id, event]));
+      for (const row of relationalEventsResult.rows) {
+        const event: OrderedEvent = {
+          id: Number(row.id), streamId: row.stream_id, type: row.event_type,
+          occurredAt: new Date(row.occurred_at).toISOString(), payload: row.payload
+        };
+        eventMap.set(event.id, event);
+      }
+      await client.query("COMMIT");
+      return { plan, jobs, events: [...eventMap.values()].sort((left, right) => left.id - right.id) };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   override async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
