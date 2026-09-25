@@ -386,6 +386,7 @@ export interface CourseProject {
 
 export interface LessonDraft {
   id: Identifier;
+  generationJobId?: Identifier;
   workspaceId: Identifier;
   courseId: Identifier;
   moduleId: Identifier;

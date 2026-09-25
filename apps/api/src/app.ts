@@ -3325,6 +3325,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const contentHash = sha256Text(stableStringify(generatedPage));
       const draft: LessonDraft = {
         id: existing?.id ?? `draft:${page.id}`,
+        generationJobId: jobId,
         workspaceId: currentJob.workspaceId,
         courseId: release.courseId,
         moduleId: release.moduleId,
@@ -3394,7 +3395,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           const bridgeCost = makeGenerationCostEntry(jobId, currentJob, release, page.id, bridge.provider, bridge.model,
             bridge.usage, "succeeded", true);
           bridgeCost.id += ":bridge";
-          const bridgeDraft = { ...saved, page: bridged, revision: saved.revision,
+          const bridgeDraft = { ...saved, generationJobId: jobId, page: bridged, revision: saved.revision,
             contentHash: bridgedHash, updatedAt: new Date().toISOString() };
           const bridgeWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge`, currentJob.workspaceId);
           const bundledBridgeCost = Boolean(dependencies.readweave.saveDraftWithCost);
@@ -3516,9 +3517,7 @@ async function settleCoreSavedPage(
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
     && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
-  if (!event) return false;
-
-  const saved = event.payload as {
+  const saved = event?.payload as {
     pageId: string;
     draftRevision?: number;
     contentHash?: string;
@@ -3527,16 +3526,18 @@ async function settleCoreSavedPage(
     bridgeCompleted?: boolean;
   };
   const draft = await dependencies.readweave.getDraftByPage(pageId);
-  if (!draft || draft.status !== "ready" || draft.sourceReleaseId !== release.id
-    || draft.revision !== saved.draftRevision || draft.contentHash !== saved.contentHash) return false;
+  if (!draft || draft.status !== "ready" || draft.sourceReleaseId !== release.id) return false;
+  const eventMatchesDraft = Boolean(event && draft.revision === saved?.draftRevision && draft.contentHash === saved.contentHash);
+  const metadataMatchesJob = draft.generationJobId === jobId;
+  if (!eventMatchesDraft && !metadataMatchesJob) return false;
 
   const availableCosts = await dependencies.readweave.listCostEntries({ jobId, pageId });
-  const costEntryIds = saved.costEntryIds?.filter((id): id is string => typeof id === "string");
+  const costEntryIds = eventMatchesDraft ? saved?.costEntryIds?.filter((id): id is string => typeof id === "string") : undefined;
   const costs = costEntryIds?.length
     ? costEntryIds.map((id) => availableCosts.find((entry) => entry.id === id)).filter((entry): entry is GenerationCostEntry => Boolean(entry))
     : availableCosts.filter((entry) => entry.stage === "teach" && entry.status === "succeeded");
   if (costs.length === 0 || (costEntryIds && costs.length !== costEntryIds.length)
-    || (!costEntryIds?.length && costs.length !== 1)) {
+    || (!metadataMatchesJob && !costEntryIds?.length && costs.length !== 1)) {
     throw new Error("GENERATION_CORE_SAVED_COST_UNAVAILABLE");
   }
 
@@ -3544,11 +3545,12 @@ async function settleCoreSavedPage(
     if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) return;
     for (const cost of costs) applyScopedCost(job, cost, context);
     if (!job.completedPageIds.includes(pageId)) job.completedPageIds.push(pageId);
+    const primaryCost = costs.find((cost) => cost.stage === "teach" && !cost.id.endsWith(":bridge")) ?? costs[0]!;
     context.appendEvent("generation.page.completed", {
       pageId, draftRevision: draft.revision, contentHash: draft.contentHash,
-      actualMicrousd: costs[0]!.actualMicrousd,
-      publishable: saved.publishable ?? draft.page.quality.publishable,
-      bridgeCompleted: saved.bridgeCompleted === true,
+      actualMicrousd: primaryCost.actualMicrousd,
+      publishable: saved?.publishable ?? draft.page.quality.publishable,
+      bridgeCompleted: saved?.bridgeCompleted === true || costs.some((cost) => cost.id.endsWith(":bridge")),
       settledMs: Date.now() - Date.parse(job.createdAt),
       timings: { ...timings, recoverySettlementMs: Date.now() - pageStartedAt }
     });

@@ -1160,15 +1160,19 @@ describe("Course OS API", () => {
     const saved = await readweave.getDraftByPage("page-1");
     const event = (await operations.read()).events.find((item) => item.streamId === created.body.id && item.type === "generation.page.completed");
     expect(saved?.contentHash).toMatch(/^remote:/);
+    expect(saved?.generationJobId).toBe(created.body.id);
     expect(event?.payload).toMatchObject({ contentHash: saved?.contentHash, draftRevision: saved?.revision });
   }, 15_000);
 
-  it("recovers a draft saved before the completed-page event without regenerating or overwriting it", async () => {
+  it("falls back to core_saved when ReadWeave drops generationJobId", async () => {
     const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
     process.env.COURSE_OS_EXTERNAL_WORKER = "true";
     try {
       const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.025)) };
       const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
+      const originalSave = readweave.saveDraftWithCost.bind(readweave);
+      vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) =>
+        originalSave({ ...draft, generationJobId: undefined }, revision, context, cost, asset));
       const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-core-saved-page")
         .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
       const initialGeneration = await modelRouter.generateTeachingPackage({
@@ -1184,6 +1188,7 @@ describe("Course OS API", () => {
         changedBlockIds: generatedPage.blocks.map(block => block.id), contentHash: "crash-window-draft-hash",
         updatedAt: new Date().toISOString()
       }, 0, { idempotencyKey: "crash-window-draft", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "crash-window-draft" }, savedCost);
+      expect(persisted.generationJobId).toBeUndefined();
       await operations.mutateGenerationJob(created.body.id, (job, context) => {
         job.state = "running";
         job.attempt = 1;
@@ -1248,7 +1253,7 @@ describe("Course OS API", () => {
     }
   }, 15_000);
 
-  it("documents the bridge-draft window before its matching core-saved receipt", async () => {
+  it("recovers a bridge draft before its matching core_saved receipt by job metadata", async () => {
     const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
     process.env.COURSE_OS_EXTERNAL_WORKER = "true";
     try {
@@ -1264,7 +1269,7 @@ describe("Course OS API", () => {
       const coreCost = testGenerationCost(created.body.id, release, "page-1");
       const corePage = applyTeachingPackage(release.pages[0]!, generation.content, true, "text_only");
       const coreDraft = await readweave.saveDraftWithCost({
-        id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+        id: "draft:page-1", generationJobId: created.body.id, workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
         sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page: corePage,
         changedBlockIds: corePage.blocks.map(block => block.id), contentHash: "bridge-window-core-hash",
         updatedAt: new Date().toISOString()
@@ -1286,14 +1291,15 @@ describe("Course OS API", () => {
         });
       });
 
-      // Without a durable marker for the newer bridge revision, its authorship cannot be proven from the draft alone.
+      // The only core_saved receipt points to the prior draft revision; the durable job field identifies this bridge revision.
       delete process.env.COURSE_OS_EXTERNAL_WORKER;
       await resumeIncompleteJobs(dependencies);
-      await waitForJob(app, created.body.id);
+      const recovered = await waitForJob(app, created.body.id);
 
-      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
-      expect((await readweave.getDraftByPage("page-1"))?.revision).toBe(bridgeDraft.revision + 1);
-      expect((await readweave.getDraftByPage("page-1"))?.contentHash).not.toBe(bridgeDraft.contentHash);
+      expect(recovered).toMatchObject({ state: "completed", completedPageIds: ["page-1"], spentUsd: 0.05 });
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+      expect(await readweave.getDraftByPage("page-1")).toEqual(bridgeDraft);
+      expect((await operations.read()).events.filter((item) => item.streamId === created.body.id && item.type === "generation.cost.recorded")).toHaveLength(2);
     } finally {
       if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
       else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;

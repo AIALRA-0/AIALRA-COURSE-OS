@@ -144,6 +144,21 @@ const manifest: ReleaseManifest = {
 };
 
 describe("file ReadWeave adapter", () => {
+  it("round-trips the optional generation job owner for recovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-readweave-generation-owner-"));
+    const path = join(root, "state.json");
+    const api = new FileReadWeaveCourseApi(path);
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const draft = { ...draftFor(pageRelease), generationJobId: "job-file-owner" };
+
+    const saved = await api.saveDraft(draft, 0, { ...context, idempotencyKey: "draft-generation-owner" });
+    const reopened = new FileReadWeaveCourseApi(path);
+
+    expect(saved.generationJobId).toBe("job-file-owner");
+    await expect(reopened.getDraftByPage("page-1")).resolves.toMatchObject({ generationJobId: "job-file-owner" });
+  });
+
   it("replays the same idempotency key and rejects an in-place release replacement", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-readweave-"));
     const api = new FileReadWeaveCourseApi(join(root, "state.json"));
@@ -191,6 +206,20 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("round-trips the optional generation job owner in its draft record", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+
+    const saved = await api.saveDraft({ ...draftFor(pageRelease), generationJobId: "job-etapi-owner" }, 0,
+      { ...context, idempotencyKey: "etapi-draft-generation-owner" });
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+
+    expect(saved.generationJobId).toBe("job-etapi-owner");
+    await expect(reopened.getDraftByPage("page-1")).resolves.toMatchObject({ generationJobId: "job-etapi-owner" });
+  });
+
   it("keeps a committed candidate when an older state read finishes after its write", async () => {
     const remote = new FakeEtapi();
     let stateNoteId = "";
@@ -1332,6 +1361,34 @@ describe("ReadWeave ETAPI adapter", () => {
 });
 
 describe("ReadWeave HTTP deep links", () => {
+  it("detects an HTTP server that drops generationJobId on save and readback", async () => {
+    let storedDraft: Record<string, unknown> | undefined;
+    let submittedDraft: Record<string, unknown> | undefined;
+    const api = new HttpReadWeaveCourseApi("https://readweave.example/api/course/v1", "secret", async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/drafts") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { draft: Record<string, unknown>; expectedRevision: number };
+        submittedDraft = body.draft;
+        const { generationJobId: _dropped, ...persistedDraft } = body.draft;
+        storedDraft = { ...persistedDraft, revision: body.expectedRevision + 1 };
+        return Response.json(storedDraft);
+      }
+      if (url.pathname.endsWith("/drafts/by-page/page-1")) {
+        return storedDraft ? Response.json(storedDraft) : new Response(null, { status: 404 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const pageRelease = releaseWithPage();
+    const submitted = { ...draftFor(pageRelease), generationJobId: "job-http-owner" };
+
+    const saved = await api.saveDraft(submitted, 0, { ...context, idempotencyKey: "http-generation-owner" });
+    const readBack = await api.getDraftByPage("page-1");
+
+    expect(submittedDraft?.generationJobId).toBe("job-http-owner");
+    expect(saved.generationJobId).toBeUndefined();
+    expect(readBack?.generationJobId).toBeUndefined();
+  });
+
   it("projects only masked credential status and never sends the provider secret to ReadWeave", async () => {
     let requestBody = "";
     let requestHeaders: Record<string, string> = {};
