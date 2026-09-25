@@ -3234,7 +3234,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       }
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = currentJob.budgetUsd - currentJob.spentUsd - visionSpentUsd;
-      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl: teachingPlan ? undefined : sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v15`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v16`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         onTeachingPhase: async (phase, state, usage) => {
           if (state === "started") phaseStartedAt.set(phase, Date.now());
           const wallDurationMs = state === "completed" && phaseStartedAt.has(phase)

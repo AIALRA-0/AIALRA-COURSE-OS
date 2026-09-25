@@ -566,7 +566,7 @@ export async function writePlannedLesson(
   const teachingRequest: PlannedCall = {
     phase: "teaching",
     instructions: plannedInstructions(fields, input.language)
-      + "\n\n本次只生成核心教学包。chapterBridgeMarkdown 必须是空字符串。计划只用于安排讲解顺序，不是事实来源；事实、公式、数字、条件和边界以 SOURCE 为准，计划与 SOURCE 不一致时舍弃计划内容。",
+      + "\n\n本次只生成核心教学包。chapterBridgeMarkdown 必须是空字符串。计划只用于安排讲解顺序，不是事实来源。原图是页面事实的最高依据；页面图像观察和旧版讲解都可能转写错误。数字、表格位置、标签及图中关系若不能从原图清楚核实，不写成确定事实；密集表格只用少量可核实的例值，不复述长串单元格。不要把页眉、页脚或来源核对过程当作教学正文。",
     prompt: JSON.stringify({
       language: input.language,
       pageTitle: input.pageTitle,

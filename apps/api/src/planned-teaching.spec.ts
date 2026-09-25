@@ -84,8 +84,10 @@ describe("planned teaching core writer", () => {
   it("uses a supplied freeform plan without calling the plan model", async () => {
     const supplied = "先说明对象，再讲解操作顺序";
     const calls: string[] = [];
-    const result = await writePlannedLesson({ ...input(), teachingPlan: supplied } as ModelRouterInput, async request => {
+    const result = await writePlannedLesson({ ...input(), teachingPlan: supplied, sourceImageDataUrl: "data:image/png;base64,iVBORw0KGgo=" } as ModelRouterInput, async request => {
       calls.push(request.phase);
+      expect(request.image).toBe("data:image/png;base64,iVBORw0KGgo=");
+      expect(request.instructions).toContain("原图是页面事实的最高依据");
       return teachingPackage();
     });
 
