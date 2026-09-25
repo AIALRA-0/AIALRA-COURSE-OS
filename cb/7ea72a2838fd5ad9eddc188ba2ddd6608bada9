@@ -1,0 +1,25 @@
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_5df0a914b63d8e 566-568,572
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_c8320004f9d84b 189
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_8069a2422c0c65 73-75,93
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_95efb43134ea13 275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cb7ea72a2838fd5ad9eddc188ba2ddd6608bada9",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
