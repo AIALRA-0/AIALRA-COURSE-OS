@@ -766,8 +766,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.saveDraftInternal(draft, expectedRevision, context, sourceAsset);
   }
 
-  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft> {
-    return this.saveDraftInternal(draft, expectedRevision, context, undefined, cost);
+  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry, sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
+    return this.saveDraftInternal(draft, expectedRevision, context, sourceAsset, cost);
   }
 
   private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {

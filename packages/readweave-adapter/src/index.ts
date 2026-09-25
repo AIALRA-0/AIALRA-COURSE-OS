@@ -107,7 +107,7 @@ export interface ReadWeaveCourseApi {
   getDraftSnapshotByPage?(pageId: string): Promise<LessonDraft | undefined>;
   saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft>;
   /** Store a generated draft and its teaching cost in one authority mutation. */
-  saveDraftWithCost?(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft>;
+  saveDraftWithCost?(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry, sourceAsset?: DraftSourceAsset): Promise<LessonDraft>;
   listConflicts(): Promise<CourseConflict[]>;
   resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict>;
   getSyncStatus(): Promise<ReadWeaveSyncStatus>;
@@ -759,7 +759,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.saveDraftInternal(draft, expectedRevision, context);
   }
 
-  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry): Promise<LessonDraft> {
+  async saveDraftWithCost(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, cost: GenerationCostEntry, _sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
     return this.saveDraftInternal(draft, expectedRevision, context, cost);
   }
 

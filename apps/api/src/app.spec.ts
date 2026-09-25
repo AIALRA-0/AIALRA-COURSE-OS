@@ -801,11 +801,13 @@ describe("Course OS API", () => {
   it("runs independent pages concurrently while keeping one job per page", async () => {
     let releaseGeneration!: () => void;
     const generationGate = new Promise<void>((resolve) => { releaseGeneration = resolve; });
-    const { app, operations, release } = await seededApp({ generateTeachingPackage: async () => { await generationGate; return testTeachingResult(0); } }, testReleaseWithPages(3));
+    const { app, operations, readweave, release } = await seededApp({ generateTeachingPackage: async () => { await generationGate; return testTeachingResult(0); } }, testReleaseWithPages(3));
     const created = await request(app).post("/api/v1/release-candidates")
       .set("Idempotency-Key", "candidate-plan-serial")
       .send({ baseReleaseId: release.id, releaseId: "test-release-v2-serial-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
+    expect(created.body.draftIds).toHaveLength(3);
+    expect(await readweave.listDrafts()).toHaveLength(0);
     const running = await request(app).get(`/api/v1/generation-plans/${created.body.generationPlan.id}`).expect(200);
     expect(running.body.plan).toMatchObject({ maxConcurrency: 20 });
     expect(running.body.plan.jobIds).toHaveLength(3);
@@ -833,6 +835,7 @@ describe("Course OS API", () => {
     expect(jobs.every((job) => job.pageIds.length === 1)).toBe(true);
     expect(jobs.map((job) => job.batchIndex)).toEqual([0, 1, 2]);
     expect(jobs.every((job) => job.batchCount === 3)).toBe(true);
+    expect(await readweave.listDrafts()).toHaveLength(3);
   }, 45_000);
 
   it("holds a selected candidate anchor plan for review without generating other pages", async () => {

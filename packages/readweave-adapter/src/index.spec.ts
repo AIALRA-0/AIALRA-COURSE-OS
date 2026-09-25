@@ -559,10 +559,12 @@ describe("ReadWeave ETAPI adapter", () => {
     await api.appendCostEntry(standaloneCost, { ...context, idempotencyKey: "append-standalone-before-draft" });
     const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
     const activityWritesBeforeDraft = remote.contentWriteCount(activityNoteId);
-    const first = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
+    const sourceImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const sourceAsset = { sha256: "generated-page-image-hash", fileName: "page-001.png", mediaType: "image/png" as const, bytes: sourceImage };
+    const first = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost, sourceAsset);
     expect(remote.contentWriteCount(activityNoteId)).toBe(activityWritesBeforeDraft);
     const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
-    const replay = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost);
+    const replay = await api.saveDraftWithCost(draftFor(release), 0, writeContext, cost, sourceAsset);
     expect(replay.revision).toBe(first.revision);
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
     expect((await api.listCostEntries({ pageId: "page-1" })).map((item) => item.id).sort()).toEqual([standaloneCost.id, cost.id].sort());
@@ -571,7 +573,9 @@ describe("ReadWeave ETAPI adapter", () => {
     expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] }).costEntries).toEqual([standaloneCost, cost]);
     expect(remote.titles()).not.toContain("02 Course OS 成本索引");
     expect(remote.titles()).toEqual(expect.arrayContaining(["成本 · teach · test-model"]));
-    expect((await api.getDraftByPage("page-1"))?.contentHash).toBe(first.contentHash);
+    expect(remote.titles().filter((title) => title === sourceAsset.fileName)).toHaveLength(1);
+    expect(remote.contentByTitle("第 001 页 · 测试页面")).toContain("<img src=\"api/images/");
+    expect(await api.getDraftByPage("page-1")).toEqual(first);
   });
 
   it("shows the original image and teaching on the ReadWeave page while preserving remote overview edits", async () => {

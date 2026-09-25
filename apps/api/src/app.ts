@@ -1210,7 +1210,10 @@ export function createApp(dependencies: AppDependencies): Express {
       const existing = await dependencies.readweave.getRelease(candidateId);
       if (existing) {
         if (existing.lifecycle !== "draft_source" || existing.candidateBaseReleaseId !== base.id || existing.courseId !== base.courseId || existing.moduleId !== base.moduleId) return sendError(request, response, 409, "CANDIDATE_RELEASE_EXISTS", "候选版本编号已经被其他内容占用，请换一个编号", false);
-        const savedDrafts = await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request, pageNumbers);
+        const holdForReview = pageNumbers !== undefined && request.body.holdForReview !== false;
+        const savedDrafts = holdForReview
+          ? await ensureCandidateDrafts(existing, workspaceId, idempotencyKey, new Date().toISOString(), dependencies, request, pageNumbers)
+          : (pageNumbers ? pageNumbers.map((number) => existing.pages.find((page) => page.pageNumber === number)!.id) : existing.pageIds).map((pageId) => `draft:${pageId}`);
         const policy = await currentWritingPolicy();
         const snapshot = await dependencies.operations.read();
         const selectedPageIds = pageNumbers ? pageNumbers.map((number) => existing.pages.find((page) => page.pageNumber === number)!.id) : existing.pageIds;
@@ -1227,7 +1230,7 @@ export function createApp(dependencies: AppDependencies): Express {
           const budgetUsd = Number(request.body.budgetUsd ?? generationBudget(qualityMode));
           if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 8) return sendError(request, response, 422, "BUDGET_INVALID", "单次候选生成预算必须大于 0 且不超过 8 美元", false);
           const language = String(request.body.language || "zh-CN").trim() || "zh-CN";
-          const generation = await createGenerationPlan({ idempotencyKey: `${idempotencyKey}:generation-plan`, workspaceId, materialVersionId: existing.id, pageIds: selectedPageIds, budgetUsd, qualityMode, language, writingPolicySnapshotId: existing.writingPolicySnapshotId, holdForReview: pageNumbers !== undefined && request.body.holdForReview !== false }, dependencies);
+          const generation = await createGenerationPlan({ idempotencyKey: `${idempotencyKey}:generation-plan`, workspaceId, materialVersionId: existing.id, pageIds: selectedPageIds, budgetUsd, qualityMode, language, writingPolicySnapshotId: existing.writingPolicySnapshotId, holdForReview }, dependencies);
           generationPlan = generation.plan;
           existingJob = generation.job;
           planCreated = generation.created;
@@ -1250,7 +1253,10 @@ export function createApp(dependencies: AppDependencies): Express {
       const now = new Date().toISOString();
       const candidate = createReleaseCandidate(base, candidateId, policy, now);
       await dependencies.readweave.registerDraftSource(candidate, writeContext(request, `${idempotencyKey}:source`));
-      const savedDrafts = await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request, pageNumbers);
+      const holdForReview = pageNumbers !== undefined && request.body.holdForReview !== false;
+      const savedDrafts = holdForReview
+        ? await ensureCandidateDrafts(candidate, workspaceId, idempotencyKey, now, dependencies, request, pageNumbers)
+        : (pageNumbers ? pageNumbers.map((number) => candidate.pages.find((page) => page.pageNumber === number)!.id) : candidate.pageIds).map((pageId) => `draft:${pageId}`);
       const selectedPageIds = pageNumbers ? pageNumbers.map((number) => candidate.pages.find((page) => page.pageNumber === number)!.id) : candidate.pageIds;
       const generation = await createGenerationPlan({
         idempotencyKey: `${idempotencyKey}:generation-plan`,
@@ -1261,7 +1267,7 @@ export function createApp(dependencies: AppDependencies): Express {
         qualityMode,
         language,
         writingPolicySnapshotId: policy.policySnapshotId,
-        holdForReview: pageNumbers !== undefined && request.body.holdForReview !== false
+        holdForReview
       }, dependencies);
       await rememberCandidateIdempotency(dependencies, idempotencyKey, candidate.id);
       startCreatedGenerationPlanJobs(generation, dependencies);
@@ -3297,9 +3303,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const saveDraftStartedAt = Date.now();
       const draftWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId);
       const bundledCost = Boolean(dependencies.readweave.saveDraftWithCost);
+      const sourceAsset = !existing && release.lifecycle === "draft_source" && release.candidateBaseReleaseId
+        ? await candidateSourceAsset(page, dependencies)
+        : undefined;
       let saved = bundledCost
-        ? await dependencies.readweave.saveDraftWithCost!(draft, existing?.revision ?? 0, draftWriteContext, cost)
-        : await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, draftWriteContext);
+        ? await dependencies.readweave.saveDraftWithCost!(draft, existing?.revision ?? 0, draftWriteContext, cost, sourceAsset)
+        : await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, draftWriteContext, sourceAsset);
       timings.draftWriteMs = Date.now() - saveDraftStartedAt;
       if (bundledCost) finalizedCostPersisted = true;
       persistenceStage = "read_back";
