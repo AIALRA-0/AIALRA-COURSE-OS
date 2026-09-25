@@ -1,0 +1,25 @@
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_f69b07bf98ca03 1219-1226
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_f69b07bf98ca03 865,3268
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_0aa0698b4092e0 1432,1435-1448
+  s_e8850ef125fb32::t_cc29e0e3d621fd 1449-1450
+  s_e8850ef125fb32::t_f6e8aa346e83a1 1451
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dc185a87c4371e58f266b70b15992213165a9d59",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
