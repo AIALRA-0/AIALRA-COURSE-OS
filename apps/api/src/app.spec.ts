@@ -1237,6 +1237,48 @@ describe("Course OS API", () => {
     }
   });
 
+  it("limits whole page jobs across independent submissions before they claim a lease", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    const previousConcurrency = process.env.COURSE_OS_GENERATION_CONCURRENCY;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    process.env.COURSE_OS_GENERATION_CONCURRENCY = "2";
+    let releaseTeaching!: () => void;
+    const teachingGate = new Promise<void>((resolve) => { releaseTeaching = resolve; });
+    let active = 0;
+    let peak = 0;
+    let entered = 0;
+    try {
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: async () => {
+        active += 1;
+        entered += 1;
+        peak = Math.max(peak, active);
+        await teachingGate;
+        active -= 1;
+        return testTeachingResult(0.001);
+      } };
+      const { app, dependencies, release } = await seededApp(modelRouter, testReleaseWithPages(3));
+      const ids: string[] = [];
+      for (const pageId of release.pageIds) {
+        const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", `whole-page-cap-${pageId}`)
+          .send({ materialVersionId: release.id, pageIds: [pageId], budgetUsd: 1 }).expect(202);
+        ids.push(created.body.id);
+      }
+      const executions = ids.map((id) => executeGenerationJob(id, dependencies));
+      await vi.waitFor(() => expect(entered).toBe(2));
+      expect(peak).toBe(2);
+      releaseTeaching();
+      await Promise.all(executions);
+      expect(entered).toBe(3);
+      expect(peak).toBe(2);
+    } finally {
+      releaseTeaching();
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+      if (previousConcurrency === undefined) delete process.env.COURSE_OS_GENERATION_CONCURRENCY;
+      else process.env.COURSE_OS_GENERATION_CONCURRENCY = previousConcurrency;
+    }
+  }, 60_000);
+
   it("records failed provider usage in the authoritative cost ledger", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {

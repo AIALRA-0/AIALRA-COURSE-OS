@@ -3107,7 +3107,37 @@ function startGenerationJob(jobId: string, dependencies: AppDependencies): void 
   if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => executeGenerationJob(jobId, dependencies).catch(() => undefined));
 }
 
-export async function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+const inProcessGenerationJobs = new Map<string, Promise<void>>();
+let runningGenerationJobs = 0;
+const generationJobWaiters: Array<() => void> = [];
+
+async function acquireGenerationJobSlot(): Promise<() => void> {
+  const limit = generationPlanConcurrency();
+  if (runningGenerationJobs >= limit) await new Promise<void>((resolve) => generationJobWaiters.push(resolve));
+  else runningGenerationJobs += 1;
+  return () => {
+    const next = generationJobWaiters.shift();
+    if (next) next();
+    else runningGenerationJobs -= 1;
+  };
+}
+
+export function executeGenerationJob(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const existing = inProcessGenerationJobs.get(jobId);
+  if (existing) return existing;
+  const execution = (async () => {
+    const releaseSlot = await acquireGenerationJobSlot();
+    try { await executeGenerationJobWithinSlot(jobId, dependencies); }
+    finally { releaseSlot(); }
+  })();
+  inProcessGenerationJobs.set(jobId, execution);
+  void execution.finally(() => {
+    if (inProcessGenerationJobs.get(jobId) === execution) inProcessGenerationJobs.delete(jobId);
+  }).catch(() => undefined);
+  return execution;
+}
+
+async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDependencies): Promise<void> {
   const leaseOwner = `course-os-worker:${process.pid}`;
   const claimed = await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
     if (job.state !== "queued" || job.cancelRequested) return undefined;
