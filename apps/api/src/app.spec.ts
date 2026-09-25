@@ -2180,6 +2180,32 @@ describe("Course OS API", () => {
     expect(published.body).toMatchObject({ id: "test-release-v2", version: 2, modelRoute: "quality-gated-draft-v2" });
     expect((await request(app).get("/api/v1/releases/test-release-v2/manifest").expect(200)).body.courseReleaseId).toBe("test-release-v2");
   });
+
+  it("promotes a valid edited draft to ready only when requested", async () => {
+    const { app } = await seededApp();
+    const virtual = await request(app).get("/api/v1/pages/page-1/draft").expect(200);
+    const correctedPage = { ...virtual.body.page, title: "修订后的页面" };
+
+    const firstSave = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "ready-draft-first-save")
+      .send({ baseRevision: 0, page: correctedPage }).expect(200);
+    expect(firstSave.body).toMatchObject({ revision: 1, status: "needs_review" });
+
+    const promoted = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "ready-draft-promotion")
+      .send({ baseRevision: 1, page: correctedPage, keepReady: true }).expect(200);
+    expect(promoted.body).toMatchObject({ revision: 2, status: "ready" });
+
+    const invalidPage = {
+      ...correctedPage,
+      blocks: correctedPage.blocks.map((block: { id: string; markdown: string }, index: number) => index === 0
+        ? { ...block, markdown: `${block.markdown}\n损坏公式 \\[x^2` }
+        : block)
+    };
+    const rejected = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "ready-draft-invalid")
+      .send({ baseRevision: 2, page: invalidPage, keepReady: true }).expect(422);
+    expect(rejected.body.error.code).toBe("DRAFT_NOT_PUBLISHABLE");
+    expect(rejected.body.error.details.issues.length).toBeGreaterThan(0);
+    expect(await request(app).get("/api/v1/pages/page-1/draft").then((response) => response.body)).toMatchObject({ revision: 2, status: "ready" });
+  });
 });
 
 async function waitForImport(app: ReturnType<typeof createApp>, importId: string) {

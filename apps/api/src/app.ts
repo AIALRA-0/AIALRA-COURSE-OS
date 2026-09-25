@@ -834,6 +834,11 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return sendError(request, response, 422, "BASE_REVISION_INVALID", "保存草稿时必须提供有效的 baseRevision", false);
       const page = request.body.page;
       if (!page || page.id !== pageId || !Array.isArray(page.blocks)) return sendError(request, response, 422, "DRAFT_PAGE_INVALID", "草稿页面结构无效", false);
+      const keepReady = request.body.keepReady === true;
+      if (keepReady) {
+        const issues = validatePageForPublication(page);
+        if (issues.length > 0) return sendError(request, response, 422, "DRAFT_NOT_PUBLISHABLE", "页面仍有发布检查问题，无法标记为可用", false, { issues });
+      }
       const currentCandidate = await dependencies.readweave.getDraftByPage(pageId);
       const current = currentCandidate && currentCandidate.workspaceId === (request.header("X-Workspace-Id") || "personal") && currentCandidate.courseId === source.release.courseId ? currentCandidate : undefined;
       const changedBlockIds = Array.isArray(request.body.changedBlockIds) ? request.body.changedBlockIds.map(String) : page.blocks.map((block: { id: string }) => block.id);
@@ -841,7 +846,7 @@ export function createApp(dependencies: AppDependencies): Express {
         ...(current ?? createVirtualDraft(source.release, source.page, request.header("X-Workspace-Id") || "personal")),
         page,
         revision: expectedRevision + 1,
-        status: "needs_review",
+        status: keepReady ? "ready" : "needs_review",
         changedBlockIds,
         contentHash: sha256Text(stableStringify(page)),
         updatedAt: new Date().toISOString()
