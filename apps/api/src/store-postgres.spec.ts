@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
-import type { GenerationJob, LearningSession, OrderedEvent } from "@course-os/contracts";
-import { describe, expect, it } from "vitest";
+import type { GenerationJob, GenerationPlan, LearningSession, OrderedEvent } from "@course-os/contracts";
+import { describe, expect, it, vi } from "vitest";
 import { OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
@@ -86,6 +86,40 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("reads one plan's jobs and events without loading all operational state", async () => {
+    const planId = randomUUID();
+    const selectedJob = { ...makeJob(randomUUID()), planId };
+    const unrelatedJob = { ...makeJob(randomUUID()), planId: randomUUID() };
+    const fixture = await startFixture([selectedJob, unrelatedJob]);
+    const now = new Date().toISOString();
+    const plan: GenerationPlan = {
+      id: planId, workspaceId: selectedJob.workspaceId, materialVersionId: selectedJob.materialVersionId,
+      qualityMode: "quality", language: "zh-CN", writingPolicySnapshotId: "policy-test",
+      pageIds: ["page-1"], completedPageIds: [], failedPageIds: [], jobIds: [selectedJob.id],
+      budgetUsd: 1, spentUsd: 0, holdForReview: false, state: "running", createdAt: now, updatedAt: now
+    };
+    try {
+      await fixture.store.mutate((state) => { state.generationPlans.push(plan); });
+      await fixture.store.mutateGenerationJob(selectedJob.id, (_job, context) => {
+        context.appendEvent("generation.stage.started", { stage: "teach" });
+      });
+      await fixture.store.mutateGenerationJob(unrelatedJob.id, (_job, context) => {
+        context.appendEvent("generation.stage.started", { stage: "teach", unrelated: true });
+      });
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+      const detail = await fixture.store.readGenerationPlanDetail(planId, selectedJob.workspaceId);
+      expect(detail.plan?.id).toBe(planId);
+      expect(detail.jobs.map((job) => job.id)).toEqual([selectedJob.id]);
+      expect(detail.events).toHaveLength(1);
+      expect(detail.events[0]?.streamId).toBe(selectedJob.id);
+      expect((await fixture.store.readGenerationPlanDetail(planId, "other-workspace")).plan).toBeUndefined();
+      expect(fullRead).not.toHaveBeenCalled();
+      fullRead.mockRestore();
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("updates one session without changing the generation projection", async () => {
     const fixture = await startFixture([]);
     const session = makeSession(randomUUID());
