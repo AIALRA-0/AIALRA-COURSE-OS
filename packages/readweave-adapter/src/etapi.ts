@@ -756,8 +756,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   async getDraftSnapshotByPage(pageId: string): Promise<LessonDraft | undefined> {
     const cached = this.draftReadCache.get(pageId);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
-    const state = structuredClone(await this.readStateReference());
-    const located = this.draftPageRecordCache.get(pageId) ?? await this.findDraftPageRecord(pageId);
+    const cachedLocated = this.draftPageRecordCache.get(pageId);
+    const [stateReference, located] = await Promise.all([
+      this.readStateReference(),
+      cachedLocated ?? this.findDraftPageRecord(pageId)
+    ]);
+    const state = structuredClone(stateReference);
     if (located) this.mergeDraftPageRecord(state, located.record);
     const draft = state.drafts.find((item) => item.pageId === pageId);
     return draft ? structuredClone(draft) : undefined;

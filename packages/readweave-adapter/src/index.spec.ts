@@ -624,6 +624,47 @@ describe("ReadWeave ETAPI adapter", () => {
     expect((await api.getSyncStatus()).mode).toBe("etapi");
   });
 
+  it("starts the draft record lookup while the state snapshot is loading", async () => {
+    const remote = new FakeEtapi();
+    const setup = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await setup.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "snapshot-overlap" });
+
+    let startRecordLookup!: () => void;
+    let startStateRead!: () => void;
+    let releaseStateRead!: () => void;
+    const recordLookupStarted = new Promise<void>((resolve) => { startRecordLookup = resolve; });
+    const stateReadStarted = new Promise<void>((resolve) => { startStateRead = resolve; });
+    const stateReadGate = new Promise<void>((resolve) => { releaseStateRead = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      if ((init?.method ?? "GET") === "GET" && path === "/notes"
+        && url.searchParams.get("search") === '#courseOsDraftRecordPageId="page-1"') {
+        startRecordLookup();
+      }
+      if ((init?.method ?? "GET") === "GET" && /\/notes\/[^/]+\/content$/.test(path)) {
+        startStateRead();
+        await stateReadGate;
+      }
+      return remote.fetch(input, init);
+    };
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const snapshotPromise = reopened.getDraftSnapshotByPage("page-1");
+    try {
+      await stateReadStarted;
+      const overlapped = await Promise.race([
+        recordLookupStarted.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
+      ]);
+      expect(overlapped).toBe(true);
+    } finally {
+      releaseStateRead();
+    }
+    await expect(snapshotPromise).resolves.toMatchObject({ pageId: "page-1", revision: 1 });
+  });
+
   it("stores a generated draft and its cost in one idempotent ReadWeave mutation", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
