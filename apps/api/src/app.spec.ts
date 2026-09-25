@@ -670,6 +670,10 @@ describe("Course OS API", () => {
     expect(normalizeGeneratedMathPunctuation("$$\\frac12+\u000crac12=1。$$")).toBe("$$\\frac12+\\frac12=1$$。");
     expect(normalizeGeneratedMathPunctuation("系数 $\u0009ext{Wirelength}$ 与 $\\gamma$")).toBe("系数 $\\text{Wirelength}$ 与 $\\gamma$");
     expect(normalizeGeneratedMathPunctuation("参数 $\u0009heta_1=0.1$ 与 $\u0008eta_1=0.2$")).toBe("参数 $\\theta_1=0.1$ 与 $\\beta_1=0.2$");
+    expect(normalizeGeneratedMathPunctuation("第 16 行先让 $MT$ 加一，再计算 $\\Delta cost = cost(NE) - cost(E)"))
+      .toBe("第 16 行先让 $MT$ 加一，再计算 $\\Delta cost = cost(NE) - cost(E)$");
+    expect(normalizeGeneratedMathPunctuation("价格约 $5 美元，https://example.test/x_1 保持原样"))
+      .toBe("价格约 $5 美元，https://example.test/x_1 保持原样");
   });
   it("corrects a near-miss technical term only when the page's own formula supplies one unambiguous spelling", () => {
     const content = {

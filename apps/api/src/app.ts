@@ -51,7 +51,7 @@ import type {
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -3973,7 +3973,14 @@ export function normalizeGeneratedMathPunctuation(value: string): string {
     .replace(/\u0000(?=(?:alpha|beta|gamma|lambda|mu|pi|sigma|theta)\b)/gu, "\\")
     .replace(/\\text\{\s*μm\s*\}/g, "\\,\\mu\\mathrm{m}");
   const displaysNormalized = repairedEscapes.replace(/\$\$([\s\S]*?)\$\$/g, (match, source: string) => normalizeMathSpan(match, source, "$$"));
-  return displaysNormalized.replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, (match, source: string) => normalizeMathSpan(match, source, "$"));
+  const inlineNormalized = displaysNormalized.replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, (match, source: string) => normalizeMathSpan(match, source, "$"));
+  return inlineNormalized.split(/\r?\n/u).map((line) => {
+    if (!validateMarkdownMath(line).includes("MATH_UNCLOSED_INLINE_DELIMITER")) return line;
+    const open = line.match(/(?<!\$)\$([^$\r\n]+)$/u);
+    if (!open || /[\p{Script=Han}]|https?:\/\//u.test(open[1]!)
+      || !/(?:\\[A-Za-z]+|[=^_{}])/u.test(open[1]!)) return line;
+    return `${line}$`;
+  }).join("\n");
 }
 
 function normalizeMathSpan(match: string, source: string, delimiter: "$" | "$$"): string {
