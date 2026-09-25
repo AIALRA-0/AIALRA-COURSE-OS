@@ -1163,6 +1163,76 @@ describe("Course OS API", () => {
     expect(event?.payload).toMatchObject({ contentHash: saved?.contentHash, draftRevision: saved?.revision });
   }, 15_000);
 
+  it("recovers a draft saved before the completed-page event without regenerating or overwriting it", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
+      const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-core-saved-page")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+      const initialGeneration = await modelRouter.generateTeachingPackage({
+        pageTitle: release.pages[0]!.title, pageNumber: 1, sourceText: "模拟中断前已完成的教学包生成",
+        writingPolicySnapshotId: release.writingPolicySnapshotId, language: "zh-CN", qualityMode: "balanced",
+        idempotencyKey: "pre-crash-model-call", stage: "teach", maxCostUsd: 4
+      });
+      const generatedPage = applyTeachingPackage(release.pages[0]!, initialGeneration.content, true, "text_only");
+      const persisted = await readweave.saveDraft({
+        id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+        sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page: generatedPage,
+        changedBlockIds: generatedPage.blocks.map(block => block.id), contentHash: "crash-window-draft-hash",
+        updatedAt: new Date().toISOString()
+      }, 0, { idempotencyKey: "crash-window-draft", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "crash-window-draft" });
+      await operations.mutateGenerationJob(created.body.id, (job, context) => {
+        job.state = "running";
+        job.attempt = 1;
+        context.appendEvent("generation.page.core_saved", {
+          pageId: "page-1", draftRevision: persisted.revision, contentHash: persisted.contentHash
+        });
+      });
+
+      delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      await resumeIncompleteJobs(dependencies);
+      const recovered = await waitForJob(app, created.body.id);
+
+      expect(recovered).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+      expect.soft(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+      expect.soft(await readweave.getDraftByPage("page-1")).toEqual(persisted);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
+  }, 15_000);
+
+  it("retries only the page that failed to save and preserves completed page drafts", async () => {
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: vi.fn(async () => testTeachingResult(0))
+    };
+    const { app, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
+    const originalSave = readweave.saveDraftWithCost.bind(readweave);
+    let failSecondPageOnce = true;
+    vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) => {
+      if (draft.pageId === "page-2" && failSecondPageOnce) {
+        failSecondPageOnce = false;
+        return Promise.reject(new Error("READWEAVE_ETAPI_503:temporary"));
+      }
+      return originalSave(draft, revision, context, cost, asset);
+    });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "retry-only-unsaved-page")
+      .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 4 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({
+      state: "completed", completedPageIds: ["page-1"], failedPageIds: ["page-2"]
+    });
+    const completedDraft = await readweave.getDraftByPage("page-1");
+
+    await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "retry-only-page-2").expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
+
+    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(modelRouter.generateTeachingPackage).mock.calls.map(([input]) => input.pageNumber)).toEqual([1, 2, 2]);
+    expect(await readweave.getDraftByPage("page-1")).toEqual(completedDraft);
+  }, 15_000);
+
   it("adds refill questions as drafts and keeps the refill idempotent", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-api-refill-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
