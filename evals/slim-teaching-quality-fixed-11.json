@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "seed": "ee680-slim-quality-fixed-11-v1",
+  "concurrency": 1,
+  "maxPages": 7,
+  "latestFormalPerModule": false,
+  "selection": {
+    "releaseIds": [
+      "ee680-introduction-full-v3",
+      "ee680-chapter-2-full-v3"
+    ],
+    "pageIds": [
+      "ee680-introduction:aca940a9f0e4:page:18",
+      "ee680-introduction:aca940a9f0e4:page:20",
+      "ee680-chapter-2:4551f99cd4b3:page:1",
+      "ee680-chapter-2:4551f99cd4b3:page:6",
+      "ee680-chapter-2:4551f99cd4b3:page:9",
+      "ee680-chapter-2:4551f99cd4b3:page:37",
+      "ee680-chapter-2:4551f99cd4b3:page:41"
+    ]
+  },
+  "tagsByPageId": {
+    "ee680-introduction:aca940a9f0e4:page:18": ["chart"],
+    "ee680-introduction:aca940a9f0e4:page:20": ["concept", "text-heavy-slide"],
+    "ee680-chapter-2:4551f99cd4b3:page:1": ["short-transition"],
+    "ee680-chapter-2:4551f99cd4b3:page:6": ["schematic"],
+    "ee680-chapter-2:4551f99cd4b3:page:9": ["pseudocode"],
+    "ee680-chapter-2:4551f99cd4b3:page:37": ["table", "matrix"],
+    "ee680-chapter-2:4551f99cd4b3:page:41": ["formula-derivation", "complex-visual-relationships"]
+  }
+}

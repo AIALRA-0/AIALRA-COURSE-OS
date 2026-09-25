@@ -1592,13 +1592,12 @@ export function createApp(dependencies: AppDependencies): Express {
       const release = await getWorkspaceRelease(dependencies.readweave, releaseId, workspaceId);
       if (!release) return sendError(request, response, 404, "RELEASE_NOT_FOUND", "没有找到要学习的课程版本", false);
       const requestedId = asOptionalString(request.body.sessionId);
-      const session = await dependencies.operations.mutate((state) => {
-        const existing = requestedId ? state.sessions.find((item) => item.id === requestedId && item.courseReleaseId === releaseId && (item.workspaceId ?? workspaceId) === workspaceId) : undefined;
-        if (existing) return existing;
-        const created: LearningSession = { id: randomUUID(), workspaceId, courseReleaseId: releaseId, currentPageId: release.pageIds[0] ?? "", explanationScroll: 0, zoom: 1, panX: 0, panY: 0, updatedAt: new Date().toISOString() };
-        state.sessions.push(created);
-        return created;
-      });
+      const existing = requestedId ? await dependencies.operations.findLearningSession(requestedId) : undefined;
+      if (existing && existing.courseReleaseId === releaseId && (existing.workspaceId ?? workspaceId) === workspaceId) {
+        return response.status(200).json(existing);
+      }
+      const created: LearningSession = { id: randomUUID(), workspaceId, courseReleaseId: releaseId, currentPageId: release.pageIds[0] ?? "", explanationScroll: 0, zoom: 1, panX: 0, panY: 0, updatedAt: new Date().toISOString() };
+      const session = await dependencies.operations.createLearningSession(created);
       response.status(requestedId ? 200 : 201).json(session);
     } catch (error) { next(error); }
   });
@@ -1606,14 +1605,10 @@ export function createApp(dependencies: AppDependencies): Express {
   app.patch("/api/v1/sessions/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const session = await dependencies.operations.mutate((state) => {
-        const current = state.sessions.find((item) => item.id === request.params.id && (item.workspaceId ?? workspaceId) === workspaceId);
-        if (!current) return undefined;
-        const allowed = ["currentPageId", "currentAnchorId", "explanationScroll", "zoom", "panX", "panY"] as const;
-        for (const key of allowed) if (request.body[key] !== undefined) Object.assign(current, { [key]: request.body[key] });
-        current.updatedAt = new Date().toISOString();
-        return current;
-      });
+      const allowed = ["currentPageId", "currentAnchorId", "explanationScroll", "zoom", "panX", "panY"] as const;
+      const patch: Partial<LearningSession> = {};
+      for (const key of allowed) if (request.body[key] !== undefined) Object.assign(patch, { [key]: request.body[key] });
+      const session = await dependencies.operations.patchLearningSession(request.params.id, workspaceId, patch);
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
       response.json(session);
     } catch (error) { next(error); }
@@ -3171,6 +3166,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     return;
   }
   for (const pageId of initial.pageIds) {
+    if (initial.completedPageIds.includes(pageId)) continue;
     const currentJob = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
     if (currentJob.spentUsd >= currentJob.budgetUsd) {

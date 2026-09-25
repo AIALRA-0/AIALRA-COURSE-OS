@@ -29,6 +29,9 @@ export interface OperationalState {
 
 export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans">;
 
+export type LearningSessionPatch = Partial<Pick<LearningSession,
+  "currentPageId" | "currentAnchorId" | "explanationScroll" | "zoom" | "panX" | "panY">>;
+
 export interface GenerationJobMutationContext {
   /** Events already recorded for this job, in stream order. */
   events: OrderedEvent[];
@@ -99,6 +102,26 @@ export class OperationalStore {
   /** Bypass accumulated background writes for user control actions. */
   async urgentMutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
     return this.mutate(change);
+  }
+
+  async findLearningSession(id: string): Promise<LearningSession | undefined> {
+    return (await this.read()).sessions.find(session => session.id === id);
+  }
+
+  async createLearningSession(session: LearningSession): Promise<LearningSession> {
+    return this.mutate(state => {
+      state.sessions.push(session);
+      return session;
+    });
+  }
+
+  async patchLearningSession(id: string, workspaceId: string, patch: LearningSessionPatch): Promise<LearningSession | undefined> {
+    return this.mutate(state => {
+      const session = state.sessions.find(item => item.id === id && (item.workspaceId ?? workspaceId) === workspaceId);
+      if (!session) return undefined;
+      Object.assign(session, patch, { updatedAt: new Date().toISOString() });
+      return session;
+    });
   }
 
   /** Mutate one job and its private progress records without exposing the full operational state. */
@@ -199,6 +222,51 @@ export class PostgresOperationalStore extends OperationalStore {
 
   override async urgentMutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
     return this.writePostgresState(change);
+  }
+
+  override async findLearningSession(id: string): Promise<LearningSession | undefined> {
+    await this.ready;
+    const result = await this.pool.query<{ session: LearningSession }>(
+      `SELECT entry.session FROM operational_state,
+       jsonb_array_elements(COALESCE(state->'sessions', '[]'::jsonb)) AS entry(session)
+       WHERE operational_state.id = 1 AND entry.session->>'id' = $1 LIMIT 1`, [id]
+    );
+    return result.rows[0]?.session;
+  }
+
+  override async createLearningSession(session: LearningSession): Promise<LearningSession> {
+    await this.ready;
+    const result = await this.pool.query(
+      `UPDATE operational_state
+       SET state = jsonb_set(state, '{sessions}', COALESCE(state->'sessions', '[]'::jsonb) || $1::jsonb),
+           updated_at = now()
+       WHERE id = 1`, [JSON.stringify(session)]
+    );
+    if (result.rowCount !== 1) throw new Error("OPERATIONAL_STATE_MISSING");
+    return session;
+  }
+
+  override async patchLearningSession(id: string, workspaceId: string, patch: LearningSessionPatch): Promise<LearningSession | undefined> {
+    await this.ready;
+    const changes = { ...patch, updatedAt: new Date().toISOString() };
+    const result = await this.pool.query<{ session: LearningSession }>(
+      `WITH target AS (
+         SELECT position - 1 AS index
+         FROM operational_state,
+              jsonb_array_elements(COALESCE(state->'sessions', '[]'::jsonb)) WITH ORDINALITY AS entry(session, position)
+         WHERE operational_state.id = 1 AND entry.session->>'id' = $1
+           AND COALESCE(entry.session->>'workspaceId', $2) = $2
+         LIMIT 1
+       )
+       UPDATE operational_state AS store
+       SET state = jsonb_set(store.state, ARRAY['sessions', target.index::text],
+         (store.state #> ARRAY['sessions', target.index::text]) || $3::jsonb),
+           updated_at = now()
+       FROM target WHERE store.id = 1
+       RETURNING store.state #> ARRAY['sessions', target.index::text] AS session`,
+      [id, workspaceId, JSON.stringify(changes)]
+    );
+    return result.rows[0]?.session;
   }
 
   override async mutateGenerationJob<T>(

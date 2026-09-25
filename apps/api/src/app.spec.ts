@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import type { CourseRelease, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
-import { applyTeachingPackage, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, safeReadWeaveFailureKind } from "./app.js";
+import { applyTeachingPackage, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 
@@ -1052,6 +1052,21 @@ describe("Course OS API", () => {
     await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "job-wrong-page").send({ materialVersionId: release.id, pageIds: ["missing-page"], budgetUsd: 4 }).expect(422);
   });
 
+  it("resumes a learning session without creating a duplicate and preserves its view", async () => {
+    const { app, operations, release } = await seededApp();
+    const created = await request(app).post("/api/v1/sessions")
+      .send({ courseReleaseId: release.id }).expect(201);
+    const id = created.body.id as string;
+    await request(app).patch(`/api/v1/sessions/${id}`)
+      .send({ currentPageId: release.pageIds[0], zoom: 1.5, panX: 24 }).expect(200);
+    const resumed = await request(app).post("/api/v1/sessions")
+      .send({ courseReleaseId: release.id, sessionId: id }).expect(200);
+    expect(resumed.body).toMatchObject({ id, zoom: 1.5, panX: 24 });
+    expect((await operations.read()).sessions.filter(session => session.id === id)).toHaveLength(1);
+    await request(app).patch(`/api/v1/sessions/${id}`).set("X-Workspace-Id", "other")
+      .send({ zoom: 3 }).expect(404);
+  });
+
   it("does not mark a paraphrased free-text answer wrong or change mastery", async () => {
     const { app, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
@@ -1528,6 +1543,76 @@ describe("Course OS API", () => {
       else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
     }
   });
+
+  it("requeues a still-leased running job after restart without regenerating completed pages", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    const previousWorkerToken = process.env.COURSE_OS_WORKER_TOKEN;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    process.env.COURSE_OS_WORKER_TOKEN = "synthetic-worker-token";
+    try {
+      const generatedPages: number[] = [];
+      const modelRouter: ModelRouterClient = {
+        generateTeachingPackage: async input => {
+          generatedPages.push(input.pageNumber);
+          return testTeachingResult(0.001);
+        }
+      };
+      const { app, dependencies, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
+      const accepted = await request(app).post("/api/v1/generation-jobs")
+        .set("Idempotency-Key", "leased-restart-job")
+        .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 4 })
+        .expect(202);
+      const completedPage = release.pages[0]!;
+      await readweave.saveDraft({
+        id: `draft:${completedPage.id}`, workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+        sourceReleaseId: release.id, pageId: completedPage.id, revision: 0, status: "ready",
+        page: completedPage, changedBlockIds: [], contentHash: "completed-before-restart", updatedAt: new Date().toISOString()
+      }, 0, {
+        idempotencyKey: "restart-seed-completed-page", actor: "test", workspaceId: "personal",
+        schemaVersion: "2.4.0", requestId: "restart-seed-completed-page"
+      });
+      const now = Date.now();
+      await dependencies.operations.mutate(state => {
+        const job = state.jobs.find(item => item.id === accepted.body.id)!;
+        Object.assign(job, {
+          state: "running", attempt: 4, completedPageIds: [completedPage.id],
+          lease: { owner: "previous-api", fenceToken: 7, expiresAt: new Date(now + 60_000).toISOString() }
+        });
+      });
+
+      // A new API process opens the same temporary operational store. The external
+      // worker then picks up the recovered queued job through its normal endpoint.
+      const restartedDependencies = createDefaultDependencies(dependencies.dataDir, readweave, modelRouter);
+      const restartedApp = createApp(restartedDependencies);
+      await resumeIncompleteJobs(restartedDependencies);
+
+      const recovered = (await restartedDependencies.operations.readTaskIndex()).jobs.find(item => item.id === accepted.body.id)!;
+      expect(recovered).toMatchObject({ state: "queued", attempt: 4, completedPageIds: [completedPage.id] });
+      expect(Date.parse(recovered.lease!.expiresAt)).toBeGreaterThan(Date.now());
+
+      await request(restartedApp).post(`/api/internal/worker/jobs/${accepted.body.id}/run`)
+        .set("X-Course-Worker-Token", "synthetic-worker-token")
+        .set("X-Workspace-Id", "personal")
+        .expect(202);
+      const finished = await waitForJob(restartedApp, accepted.body.id);
+
+      expect(finished).toMatchObject({
+        state: "completed", attempt: 5,
+        lease: { owner: `course-os-worker:${process.pid}`, fenceToken: 8 },
+        completedPageIds: release.pageIds
+      });
+      expect(generatedPages).toEqual([2]);
+      const recoveredEvents = (await restartedDependencies.operations.read()).events
+        .filter(event => event.streamId === accepted.body.id && event.type === "job.recovered");
+      expect(recoveredEvents).toHaveLength(1);
+      expect(recoveredEvents[0]?.payload).toMatchObject({ previousState: "running", attempt: 4 });
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+      if (previousWorkerToken === undefined) delete process.env.COURSE_OS_WORKER_TOKEN;
+      else process.env.COURSE_OS_WORKER_TOKEN = previousWorkerToken;
+    }
+  }, 45_000);
 
   it("creates an empty general-purpose course before any material is imported", async () => {
     const app = await testApp();

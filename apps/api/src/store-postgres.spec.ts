@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
-import type { GenerationJob, OrderedEvent } from "@course-os/contracts";
+import type { GenerationJob, LearningSession, OrderedEvent } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
 import { OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
@@ -41,6 +41,24 @@ describe("OperationalStore generation job mutation", () => {
   });
 });
 
+describe("OperationalStore learning session mutation", () => {
+  it("creates, resumes, and patches only the requested workspace session", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-session-store-"));
+    try {
+      const store = new OperationalStore(join(directory, "operations.json"));
+      const session = makeSession(randomUUID());
+      await store.createLearningSession(session);
+      expect(await store.findLearningSession(session.id)).toEqual(session);
+      expect(await store.patchLearningSession(session.id, "other", { zoom: 2 })).toBeUndefined();
+      expect(await store.patchLearningSession(session.id, session.workspaceId!, { zoom: 2 }))
+        .toMatchObject({ id: session.id, zoom: 2, currentPageId: "page-1" });
+      expect((await store.read()).sessions).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 interface PostgresFixture {
   pool: pg.Pool;
   store: PostgresOperationalStore;
@@ -49,6 +67,29 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("updates one session without changing the generation projection", async () => {
+    const fixture = await startFixture([]);
+    const session = makeSession(randomUUID());
+    try {
+      const before = await fixture.pool.query<{ jobs: unknown; events: unknown }>(
+        "SELECT state->'jobs' AS jobs, state->'events' AS events FROM operational_state WHERE id = 1"
+      );
+      await fixture.store.createLearningSession(session);
+      expect(await fixture.store.findLearningSession(session.id)).toEqual(session);
+      expect(await fixture.store.patchLearningSession(session.id, "other", { zoom: 2 })).toBeUndefined();
+      const updated = await fixture.store.patchLearningSession(session.id, session.workspaceId!, { zoom: 2 });
+      expect(updated).toMatchObject({ id: session.id, zoom: 2, currentPageId: "page-1" });
+      const projected = await fixture.store.read();
+      expect(projected.sessions.filter(item => item.id === session.id)).toHaveLength(1);
+      const after = await fixture.pool.query<{ jobs: unknown; events: unknown }>(
+        "SELECT state->'jobs' AS jobs, state->'events' AS events FROM operational_state WHERE id = 1"
+      );
+      expect(after.rows[0]).toEqual(before.rows[0]);
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("creates a new generation job through the production mutation path", async () => {
     const fixture = await startFixture([]);
     const job = makeJob(randomUUID());
@@ -187,6 +228,13 @@ function makeJob(id: string): GenerationJob {
     cancelRequested: false,
     createdAt: at,
     updatedAt: at
+  };
+}
+
+function makeSession(id: string): LearningSession {
+  return {
+    id, workspaceId: "postgres-session-spec", courseReleaseId: "release-session-spec", currentPageId: "page-1",
+    explanationScroll: 0, zoom: 1, panX: 0, panY: 0, updatedAt: new Date().toISOString()
   };
 }
 
