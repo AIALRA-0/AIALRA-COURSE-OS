@@ -1,0 +1,39 @@
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_1c32e31472ce6b 2,4,43-86,88-90
+  s_e8850ef125fb32::t_e08f2f680a257c 87
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_1087adae5f2186 31-35,657-658,666-668,673
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_1087adae5f2186 208,212,228-252
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_1087adae5f2186 11,14,434,437,439,444-451,453-454,457-463,685-693,696,703-714,719-720
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_f2caa442bc2730 29-31,35
+  s_e8850ef125fb32::t_7653f1c2a81224 1-2,4,13-28,32-34,36-44
+  s_e8850ef125fb32::t_5998ef3b952f71 45
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_1087adae5f2186 294
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_1ff613e0099e39 54
+  s_e8850ef125fb32::t_e267bed44670b8 8
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_bd7868a561ee09 2,255,263,1412-1416
+  s_e8850ef125fb32::t_d1c8d79220e7c7 91-92,190-194,203-206,222,225-231,236,265,527,567,611,625,659,1406-1411,1418
+  s_e8850ef125fb32::t_f4c1f358cf2cca 1417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "23acceb92ef5511fa4a8c293f8f2a146662e8fbc",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
