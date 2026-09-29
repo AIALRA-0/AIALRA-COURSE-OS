@@ -178,13 +178,15 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("requests high detail and retains readable matrix data and full extracted source", async () => {
+  it("sends same-image visual cross-check guidance and retains full extracted source", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string | Array<{ type: string; image_url?: { detail?: string } }> }> };
       const instructions = body.messages[0]?.content;
       expect(typeof instructions).toBe("string");
       expect(instructions).toContain("不遗漏清楚可读的数据");
       expect(instructions).toContain("不猜填模糊单元格");
+      expect(instructions).toContain("当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。");
+      expect(instructions).toContain("若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。");
       const textPart = (body.messages[1]?.content as Array<{ type: string; text?: string }>).find(part => part.type === "text");
       const sent = JSON.parse(textPart!.text!);
       expect(sent.extractedText).toBe("完整来源".repeat(5000));

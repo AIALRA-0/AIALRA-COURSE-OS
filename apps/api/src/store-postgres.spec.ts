@@ -157,7 +157,7 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       expect(sql).toContain("state->'modelProviders'");
       expect(sql).toContain("state->'modelRoutePolicy'");
       expect(sql).not.toContain("state->'events'");
-      expect(sql).not.toMatch(/\bSELECT\s+state\b/i);
+      expect(sql).not.toMatch(/\bSELECT\s+(?:\w+\.)?state\s*(?=,|\bAS\b|\bFROM\b)/i);
     } finally {
       await stopFixture(fixture);
     }
