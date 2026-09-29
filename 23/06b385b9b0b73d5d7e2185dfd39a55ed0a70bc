@@ -1,0 +1,46 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_be1b8d86bd007b 1376
+  s_e8850ef125fb32::t_a09b96fc0836d2 1377-1383,1385,1387-1388
+  s_e8850ef125fb32::t_52cced2b0be7ed 99-104,117-118,1117-1129
+  s_7e23799dc317a2::t_43ffef8f74ee32 1130-1131
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_e2bf4ea5afb6c8 348
+  s_e8850ef125fb32::t_f89462beebe704 31,93,96-97,240-248,742,751-756
+  s_e8850ef125fb32::t_705806c441410b 94-95
+  s_e8850ef125fb32::t_89e7f02639464f 340-347,349-351
+  s_e8850ef125fb32::t_e93f205f263cd7 249
+  s_e8850ef125fb32::t_23c354b05feb65 757
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_9d91b7c9d9f002 9,81,83-85,88-90,92-97,143-149,151,154-155,161-165
+  s_e8850ef125fb32::t_8243503e25cb72 106-142
+  s_e8850ef125fb32::t_3844cda802bedf 160
+  s_e8850ef125fb32::t_20faadaf38f4af 82,86-87,91
+  s_e8850ef125fb32::t_6ecd6b66639cce 150,156-159
+  s_e8850ef125fb32::t_40a4bf0beee1d5 152-153
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_41a3e87258478f 1486,1488-1489,1631-1632,2771,2784
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2306b385b9b0b73d5d7e2185dfd39a55ed0a70bc",
+  "prompts": {},
+  "sessions": {
+    "s_7e23799dc317a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ad52-c35f-7882-a496-5c0fabb841af",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
