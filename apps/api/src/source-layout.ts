@@ -17,11 +17,16 @@ export function codeLayoutHint(tsv: string): string {
   const ordered = [...lines.values()].sort((a, b) => a.top - b.top);
   const text = ordered.map(line => line.words.map(word => word.text).join(" ")).join("\n");
   if ((text.match(/\b(?:while|for|if|begin|end)\b/giu) ?? []).length < 3) return "";
-  return "原图代码位置参考：x 是每行首个文字在原图中的横向像素位置，只用于核对缩进；OCR 字符可能错读，文字与符号仍以原图为准，不把位置数字写入讲解\n"
-    + ordered.map(line => {
+  const positioned = ordered.map(line => {
       const first = line.words.find(word => /[\p{L}\p{N}]/u.test(word.text)) ?? line.words[0]!;
-      return `x=${first.left} ${line.words.map(word => word.text).join(" ")}`;
-    }).join("\n").slice(0, 12_000);
+      return { left: first.left, text: line.words.map(word => word.text).join(" ") };
+    });
+  const origin = Math.min(...positioned.map(line => line.left));
+  // Preserve geometry as whitespace too: this is a layout aid, not inferred syntax.
+  const layout = positioned.map(line => " ".repeat(Math.min(100, Math.round((line.left - origin) / 10))) + line.text).join("\n");
+  return ("原图代码位置参考：x 是每行首个文字在原图中的横向像素位置，只用于核对缩进；OCR 字符可能错读，文字与符号仍以原图为准，不把位置数字写入讲解\n"
+    + positioned.map(line => `x=${line.left} ${line.text}`).join("\n")
+    + "\n\n按横向位置还原的排版参考（未推断语法，字符按原图核对）：\n```text\n" + layout + "\n```\n同一横向位置表示同层；退回较小横向位置的语句已退出之前的深层块，不能重新缩进到该块内。").slice(0, 12_000);
 }
 
 /** Optional source hint; failure must not block the existing visual reader. */

@@ -46,6 +46,18 @@ describe("source layout hints", () => {
     expect(hint).toBe("");
   });
 
+  it("preserves a dedented sibling rather than inventing continued nesting", () => {
+    const hint = codeLayoutHint([
+      tsvHeader,
+      word("while", { line: 1, word: 1, left: 30, top: 10 }),
+      word("for", { line: 2, word: 1, left: 60, top: 20 }),
+      word("if", { line: 3, word: 1, left: 90, top: 30 }),
+      word("commit()", { line: 4, word: 1, left: 60, top: 40 }),
+      word("end", { line: 5, word: 1, left: 30, top: 50 })
+    ].join("\n"));
+    expect(hint).toContain("```text\nwhile\n   for\n      if\n   commit()\nend\n```");
+  });
+
   it("keeps each line's x origin local to that line", () => {
     const hint = codeLayoutHint([
       tsvHeader,
