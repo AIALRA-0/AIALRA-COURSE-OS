@@ -201,6 +201,7 @@ async function withVaultCredentialStatus<T extends ModelProviderConfig | SearchP
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
   const learningSessionCache = new Map<string, LearningSession>();
+  const persistedQuestionSelections = new Map<string, QuestionSelection>();
   const rememberLearningSession = (workspaceId: string, session: LearningSession) => {
     const key = JSON.stringify([workspaceId, session.id]);
     learningSessionCache.delete(key);
@@ -1693,11 +1694,18 @@ export function createApp(dependencies: AppDependencies): Express {
       const questions = selectQuestionBank(bank, seed, count);
       requireIdempotencyKey(request);
       const selectionKey = `question-selection:${sha256Text(stableStringify({ workspaceId, sessionId: session.id, releaseId: release.id, pageId: page.id, seed, questionIds: questions.map((item) => item.id) }))}`;
+      const cachedSelection = persistedQuestionSelections.get(selectionKey);
+      if (cachedSelection) {
+        response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=0.0`);
+        return response.status(201).json({ selection: cachedSelection, questions, available: bank.filter((item) => item.status === "approved").length, draftCount: bank.filter((item) => item.status === "draft").length });
+      }
       const selection: QuestionSelection = {
         id: randomUUID(), sessionId: session.id, courseReleaseId: release.id, pageId: page.id, seed,
         questionIds: questions.map((item) => item.id), createdAt: new Date().toISOString()
       };
       const saved = await dependencies.readweave.saveQuestionSelection(selection, writeContext(request, selectionKey));
+      persistedQuestionSelections.set(selectionKey, saved);
+      if (persistedQuestionSelections.size > 256) persistedQuestionSelections.delete(persistedQuestionSelections.keys().next().value!);
       response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=${(performance.now() - startedAt - sessionLookupMs - releaseLookupMs - pageLookupMs).toFixed(1)}`);
       response.status(201).json({
         selection: saved,

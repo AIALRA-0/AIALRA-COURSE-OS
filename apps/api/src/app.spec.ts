@@ -1132,7 +1132,7 @@ describe("Course OS API", () => {
   });
 
   it("reuses the scoped session while preserving question-selection idempotency", async () => {
-    const { app, operations, readweave, release } = await seededApp();
+    const { app, dependencies, operations, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
     const sessionLookup = vi.spyOn(operations, "findLearningSession");
     const saveSelection = vi.spyOn(readweave, "saveQuestionSelection");
@@ -1146,10 +1146,14 @@ describe("Course OS API", () => {
       .toEqual(first.body.questions.map((item: QuestionBankItem) => item.id));
     expect(sessionLookup).not.toHaveBeenCalled();
     expect(saveSelection.mock.calls[0]?.[1].idempotencyKey).toMatch(/^question-selection:/);
-    expect(saveSelection.mock.calls[1]?.[1].idempotencyKey).toBe(saveSelection.mock.calls[0]?.[1].idempotencyKey);
+    expect(saveSelection).toHaveBeenCalledTimes(1);
 
     const changed = await select("explicitly-changed-seed", "returning-select-3").expect(201);
     expect(changed.body.selection.id).not.toBe(first.body.selection.id);
+    const restartedApp = createApp(dependencies);
+    const afterRestart = await request(restartedApp).post("/api/v1/pages/page-1/questions:select")
+      .set("Idempotency-Key", "returning-select-after-restart").send({ sessionId: session.body.id, seed: "returning-seed", count: 2 }).expect(201);
+    expect(afterRestart.body.selection.id).toBe(first.body.selection.id);
     await request(app).post("/api/v1/pages/page-1/questions:select").set("X-Workspace-Id", "other")
       .set("Idempotency-Key", "returning-select-other").send({ sessionId: session.body.id, seed: "returning-seed", count: 2 }).expect(404);
   });

@@ -203,17 +203,14 @@ export function App() {
   }, []);
 
   const refreshMetadata = useCallback(async ({ includeReview = false }: { includeReview?: boolean } = {}) => {
-    const [workspaceTree, workspaceSettings] = await Promise.all([
-      api.workspaceTree(),
-      api.settings().catch(() => undefined)
-    ]);
-    setTree(workspaceTree);
-    await refreshSyncStatus({ includeConflicts: false }).catch(() => setSync(OFFLINE_SYNC));
-    if (includeReview) await api.reviewMap().then(setReviewMap).catch(() => setReviewMap(undefined));
-    if (workspaceSettings) {
+    void api.settings().then((workspaceSettings) => {
       document.documentElement.style.setProperty("--course-font-scale", String(workspaceSettings.baseFontScale));
       if (workspaceSettings.theme === "light" || workspaceSettings.theme === "dark") setTheme(workspaceSettings.theme);
-    }
+    }).catch(() => undefined);
+    void refreshSyncStatus({ includeConflicts: false }).catch(() => setSync(OFFLINE_SYNC));
+    const workspaceTree = await api.workspaceTree();
+    setTree(workspaceTree);
+    if (includeReview) await api.reviewMap().then(setReviewMap).catch(() => setReviewMap(undefined));
   }, [refreshSyncStatus]);
 
   useEffect(() => {
@@ -251,8 +248,21 @@ export function App() {
       if (!initialNavigation.current.releaseId) setError(reason instanceof Error ? reason.message : "无法载入课程空间");
     })
       .finally(() => setLoading(false));
-    void refreshMetadata().catch(() => setSync(OFFLINE_SYNC));
+    let metadataRetryTimer = 0;
+    let metadataActive = true;
+    const loadMetadata = () => {
+      void refreshMetadata().catch(() => {
+        if (metadataActive) metadataRetryTimer = window.setTimeout(loadMetadata, 5000);
+      });
+    };
+    loadMetadata();
+    return () => { metadataActive = false; window.clearTimeout(metadataRetryTimer); };
   }, [refreshMetadata]);
+  useEffect(() => {
+    if (sync?.state === "connected") return;
+    const timer = window.setInterval(() => { void refreshSyncStatus({ includeConflicts: false }).catch(() => undefined); }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [sync?.state, refreshSyncStatus]);
 
   useEffect(() => {
     const followHashNavigation = () => {

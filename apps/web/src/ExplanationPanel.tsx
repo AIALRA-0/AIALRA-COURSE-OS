@@ -25,7 +25,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
         setInteractiveReady(true);
         observer.disconnect();
       }
-    }, { root: loadRootRef?.current ?? null, rootMargin: "600px 0px" });
+    }, { root: loadRootRef?.current ?? null, rootMargin: "1600px 0px" });
     observer.observe(marker);
     return () => observer.disconnect();
   }, [page.id, loadRootRef]);
