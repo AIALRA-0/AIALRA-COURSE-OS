@@ -761,6 +761,46 @@ describe("ReadWeave ETAPI adapter", () => {
     ]);
   });
 
+  it("opens a course while an unrelated activity index read is stalled", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await writer.saveQuestionSelection({ id: "fast-course-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" },
+    { ...context, idempotencyKey: "fast-course-selection" });
+    const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    let releaseActivityRead!: () => void;
+    let activityReadStarted!: () => void;
+    const activityGate = new Promise<void>((resolve) => { releaseActivityRead = resolve; });
+    const activityStarted = new Promise<void>((resolve) => { activityReadStarted = resolve; });
+    const reader = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/u, "");
+        if ((init?.method ?? "GET") === "GET" && path === `/notes/${activityNoteId}/content`) {
+          activityReadStarted();
+          await activityGate;
+        }
+        return remote.fetch(input, init);
+      }
+    });
+    try {
+      const [indexes, release] = await Promise.race([
+        Promise.all([reader.listReleaseIndexes(), reader.getRelease(pageRelease.id)]),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("course read waited for activity")), 1000))
+      ]);
+      expect(indexes.map((item) => item.id)).toContain(pageRelease.id);
+      expect(release?.id).toBe(pageRelease.id);
+      const attempts = reader.listQuestionAttempts("page-1");
+      await activityStarted;
+      releaseActivityRead();
+      await expect(attempts).resolves.toEqual([]);
+    } finally {
+      releaseActivityRead();
+    }
+  });
+
   it("reloads after an ambiguous activity PUT and does not duplicate the attempt note on replay", async () => {
     const remote = new FakeEtapi();
     let activityNoteId = "";

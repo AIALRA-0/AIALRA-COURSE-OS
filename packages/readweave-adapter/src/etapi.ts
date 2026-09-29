@@ -319,17 +319,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listReleases(courseId?: string): Promise<CourseRelease[]> {
-    const releases = (await this.readStateReference()).releases;
+    const releases = (await this.readStateReference(false, false)).releases;
     return structuredClone(courseId ? releases.filter((release) => release.courseId === courseId) : releases);
   }
 
   async listReleaseIndexes(courseId?: string): Promise<CourseReleaseIndex[]> {
-    const releases = (await this.readStateReference()).releases;
+    const releases = (await this.readStateReference(false, false)).releases;
     return (courseId ? releases.filter((release) => release.courseId === courseId) : releases).map(toCourseReleaseIndex);
   }
 
   async getRelease(releaseId: string): Promise<CourseRelease | undefined> {
-    const release = (await this.readStateReference()).releases.find((item) => item.id === releaseId);
+    const release = (await this.readStateReference(false, false)).releases.find((item) => item.id === releaseId);
     return release ? structuredClone(release) : undefined;
   }
 
@@ -776,7 +776,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       return structuredClone(draft);
     }
     const [stateReference, located] = await Promise.all([
-      this.readStateReference(),
+      this.readStateReference(false, false),
       this.findDraftPageRecord(pageId)
     ]);
     const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === pageId);
@@ -1994,9 +1994,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return state;
   }
 
-  private async readStateReference(requireFresh = false): Promise<EtapiState> {
+  private async readStateReference(requireFresh = false, includeActivity = true): Promise<EtapiState> {
+    const withActivity = async (state: EtapiState): Promise<EtapiState> => {
+      if (includeActivity && state.projections.activityStateNoteId) {
+        this.applyActivityState(state, await this.readActivityReference(state.projections.activityStateNoteId));
+      }
+      return state;
+    };
     const now = Date.now();
-    if (this.stateCache && this.stateCache.expiresAt > now) return this.stateCache.state;
+    if (this.stateCache && this.stateCache.expiresAt > now) return withActivity(this.stateCache.state);
     if (!this.stateReadInFlight) {
       const versionAtReadStart = this.stateVersion;
       const read = this.readRemoteState();
@@ -2010,12 +2016,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       });
     }
     if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
-      return this.stateCache.state;
+      return withActivity(this.stateCache.state);
     }
     const state = await this.stateReadInFlight;
     const current = this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
-    if (this.activityCache) this.applyActivityState(current, this.activityCache.state);
-    return current;
+    return withActivity(current);
   }
 
   private async readRemoteState(): Promise<EtapiState> {
@@ -2028,10 +2033,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
     const state = normalizeState(parsed, projection);
     this.cacheActivityRoutes(state);
-    const activityStateNoteId = state.projections.activityStateNoteId;
-    if (activityStateNoteId) {
-      this.applyActivityState(state, await this.readActivityReference(activityStateNoteId));
-    }
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     this.lastReadAt = new Date().toISOString();
     return state;
