@@ -118,6 +118,7 @@ export function App() {
   const [releases, setReleases] = useState<CourseRelease[]>([]);
   const [tree, setTree] = useState<WorkspaceTree>();
   const [sync, setSync] = useState<ReadWeaveSyncStatus>();
+  const syncReadInFlight = useRef<Promise<ReadWeaveSyncStatus> | undefined>(undefined);
   const [conflicts, setConflicts] = useState<CourseConflict[]>([]);
   const [reviewMap, setReviewMap] = useState<ReviewMap>();
   const [releaseId, setReleaseId] = useState(initialNavigation.current.releaseId);
@@ -139,6 +140,7 @@ export function App() {
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
   const [activeImportId, setActiveImportId] = useState(readActiveImportId);
   const [taskRecords, setTaskRecords] = useState<ImportTaskSummary[]>([]);
+  const [secondaryReadsStarted, setSecondaryReadsStarted] = useState(false);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanel>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
@@ -202,8 +204,15 @@ export function App() {
   }, []);
 
   const refreshSyncStatus = useCallback(async ({ includeConflicts = true }: { includeConflicts?: boolean } = {}) => {
+    let syncRead = syncReadInFlight.current;
+    if (!syncRead) {
+      syncRead = api.syncStatus();
+      syncReadInFlight.current = syncRead;
+      void syncRead.then(() => { if (syncReadInFlight.current === syncRead) syncReadInFlight.current = undefined; },
+        () => { if (syncReadInFlight.current === syncRead) syncReadInFlight.current = undefined; });
+    }
     const [syncStatus, openConflicts] = await Promise.all([
-      api.syncStatus(),
+      syncRead,
       includeConflicts ? api.conflicts() : Promise.resolve<CourseConflict[] | undefined>(undefined)
     ]);
     setSync(syncStatus);
@@ -223,31 +232,6 @@ export function App() {
   }, [refreshSyncStatus]);
 
   useEffect(() => {
-    let active = true;
-    let timer = 0;
-    let initialPoll = true;
-    const refresh = async () => {
-      try {
-        const records = await api.importTasks();
-        if (!active) return;
-        setTaskRecords(records);
-        const newlyReady = records.filter((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id));
-        newlyReady.forEach((record) => metadataReadyImports.current.add(record.id));
-        if (!initialPoll && newlyReady.length) {
-          void refreshMetadata().catch(() => undefined);
-        }
-      } catch {
-        // Keep the last visible task list during a transient connection failure.
-      } finally {
-        initialPoll = false;
-        if (active) timer = window.setTimeout(() => void refresh(), 4000);
-      }
-    };
-    void refresh();
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [refreshMetadata]);
-
-  useEffect(() => {
     // The lesson index is sufficient to open the requested page. Tree,
     // settings, and sync status can arrive afterward without hiding it.
     api.releases().then((items) => {
@@ -257,21 +241,12 @@ export function App() {
       if (!initialNavigation.current.releaseId) setError(reason instanceof Error ? reason.message : "无法载入课程空间");
     })
       .finally(() => setLoading(false));
-    let metadataRetryTimer = 0;
-    let metadataActive = true;
-    const loadMetadata = () => {
-      void refreshMetadata().catch(() => {
-        if (metadataActive) metadataRetryTimer = window.setTimeout(loadMetadata, 5000);
-      });
-    };
-    loadMetadata();
-    return () => { metadataActive = false; window.clearTimeout(metadataRetryTimer); };
-  }, [refreshMetadata]);
+  }, []);
   useEffect(() => {
-    if (sync?.state === "connected") return;
+    if (!secondaryReadsStarted || sync?.state === "connected") return;
     const timer = window.setInterval(() => { void refreshSyncStatus({ includeConflicts: false }).catch(() => undefined); }, 10_000);
     return () => window.clearInterval(timer);
-  }, [sync?.state, refreshSyncStatus]);
+  }, [secondaryReadsStarted, sync?.state, refreshSyncStatus]);
 
   useEffect(() => {
     const followHashNavigation = () => {
@@ -414,6 +389,50 @@ export function App() {
       window.removeEventListener("focus", reconcileCandidatePreview);
     };
   }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
+  const firstContentReady = mode !== "learn" || !releaseId || Boolean(activeImportId || error || formalPageError || candidatePreview?.error
+    || (release?.lifecycle === "draft_source" ? candidatePreview?.page : detailedPage));
+  useEffect(() => {
+    if (firstContentReady) { setSecondaryReadsStarted(true); return; }
+    const timer = window.setTimeout(() => setSecondaryReadsStarted(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [firstContentReady]);
+  useEffect(() => {
+    if (!secondaryReadsStarted) return;
+    let active = true;
+    let timer = 0;
+    let initialPoll = true;
+    const refresh = async () => {
+      let nextPollMs = 30_000;
+      try {
+        const records = await api.importTasks();
+        if (!active) return;
+        setTaskRecords(records);
+        const newlyReady = records.filter((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id));
+        newlyReady.forEach((record) => metadataReadyImports.current.add(record.id));
+        if (!initialPoll && newlyReady.length) void refreshMetadata().catch(() => undefined);
+        if (activeImportId || records.some((record) => ["queued", "running"].includes(getImportTaskState(record)))) nextPollMs = 4000;
+      } catch {
+        // Keep the last visible task list during a transient connection failure.
+      } finally {
+        initialPoll = false;
+        if (active) timer = window.setTimeout(() => void refresh(), nextPollMs);
+      }
+    };
+    void refresh();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [secondaryReadsStarted, activeImportId, refreshMetadata]);
+  useEffect(() => {
+    if (!secondaryReadsStarted) return;
+    let metadataRetryTimer = 0;
+    let metadataActive = true;
+    const loadMetadata = () => {
+      void refreshMetadata().catch(() => {
+        if (metadataActive) metadataRetryTimer = window.setTimeout(loadMetadata, 5000);
+      });
+    };
+    loadMetadata();
+    return () => { metadataActive = false; window.clearTimeout(metadataRetryTimer); };
+  }, [secondaryReadsStarted, refreshMetadata]);
   const previewRelease = useMemo(() => release
     ? { ...release, pages: release.pages.map((item, index) => {
       const source = index === pageIndex

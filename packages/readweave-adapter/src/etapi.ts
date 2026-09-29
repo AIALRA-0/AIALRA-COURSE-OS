@@ -245,7 +245,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listCourses(): Promise<CourseProject[]> {
-    const state = await this.readStateReference();
+    const state = await this.readStateReference(false, false);
     return mergeReleaseCourses(state.courses, state.releases, this.workspaceId);
   }
 
@@ -971,7 +971,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listTreeNodes(): Promise<CourseTreeNode[]> {
-    const state = await this.readStateReference();
+    const state = await this.readStateReference(false, false);
     const courses = mergeReleaseCourses(state.courses, state.releases, this.workspaceId).filter((course) => course.status !== "archived");
     const stableMaterialIds = new Set(materialGroups(state.releases).map((group) => stableMaterialId(group.courseId, group.moduleId)));
     const archivedMaterialIds = new Set(state.treeNodes
@@ -1333,7 +1333,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return { noteId, url: `${base.origin}/#root/${encodeURIComponent(noteId)}`, host: base.hostname, verified: true, verifiedAt: new Date().toISOString() };
   }
 
-  async getWorkspaceSettings(): Promise<WorkspaceSettings> { const state = await this.readState(); return structuredClone(state.settings ?? defaultWorkspaceSettings(this.workspaceId)); }
+  async getWorkspaceSettings(): Promise<WorkspaceSettings> {
+    const state = await this.readStateReference(false, false);
+    return structuredClone(state.settings ?? defaultWorkspaceSettings(this.workspaceId));
+  }
 
   async saveWorkspaceSettings(settings: WorkspaceSettings, context: IdempotentWriteContext): Promise<WorkspaceSettings> {
     return this.mutate(async (state) => {
