@@ -614,6 +614,7 @@ describe("ReadWeave ETAPI adapter", () => {
 
     const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     expect(await reopened.listQuestionAttempts("page-1")).toEqual([questionAttempt]);
+    expect(Reflect.get(reopened, "draftPageRecordsHydrated")).toBe(false);
     expect(await reopened.listAssessmentAttempts()).toEqual([assessmentAttempt, legacyAttempt]);
     expect(await reopened.listMastery()).toEqual([mastery, legacyMastery]);
     expect(await reopened.getDraftSnapshotByPage("page-1")).toMatchObject({ revision: 1 });

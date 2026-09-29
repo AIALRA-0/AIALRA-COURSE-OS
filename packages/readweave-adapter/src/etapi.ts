@@ -484,7 +484,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {
-    const attempts = (await this.readState()).questionAttempts;
+    // Attempts live in the activity index; draft page hydration cannot change them.
+    const attempts = (await this.readStateReference()).questionAttempts;
     return pageId ? attempts.filter((item) => item.pageId === pageId) : attempts;
   }
 
