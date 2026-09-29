@@ -2205,7 +2205,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     for (const entry of record.costEntries) costsById.set(entry.id, structuredClone(entry));
     state.costEntries = [...costsById.values()];
 
-    state.idempotency = { ...state.idempotency, ...record.idempotency };
+    // Callers own this state snapshot. Preserve spread's own data properties,
+    // including __proto__, without copying the full dictionary for every page.
+    for (const key of Reflect.ownKeys(record.idempotency)) {
+      if (!Object.prototype.propertyIsEnumerable.call(record.idempotency, key)) continue;
+      Object.defineProperty(state.idempotency, key, {
+        value: Reflect.get(record.idempotency, key), writable: true, enumerable: true, configurable: true
+      });
+    }
     const conflictsById = new Map(state.conflicts.filter((item) => item.objectId !== record.pageId).map((item) => [item.id, item]));
     for (const item of state.conflicts.filter((conflict) => conflict.objectId === record.pageId)) conflictsById.set(item.id, item);
     for (const item of record.conflicts) conflictsById.set(item.id, structuredClone(item));
@@ -2381,12 +2388,24 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async writeActivityState(state: EtapiState): Promise<void> {
     const noteId = state.projections.activityStateNoteId;
     if (!noteId) throw new Error("READWEAVE_ACTIVITY_INDEX_NOT_INITIALIZED");
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     try {
-      await this.putContent(noteId, encodeReadWeaveStateContent(this.activityState(state)));
+      const encodeStartedAt = timingEnabled ? performance.now() : 0;
+      const content = encodeReadWeaveStateContent(this.activityState(state));
+      const putStartedAt = timingEnabled ? performance.now() : 0;
+      await this.putContent(noteId, content);
+      const putFinishedAt = timingEnabled ? performance.now() : 0;
       this.lastWriteAt = new Date().toISOString();
+      const mergeStartedAt = timingEnabled ? performance.now() : 0;
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      const mergeFinishedAt = timingEnabled ? performance.now() : 0;
       this.stateVersion += 1;
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_state_write_timing", {
+        encodeMs: Math.round(putStartedAt - encodeStartedAt), revisionAndPutMs: Math.round(putFinishedAt - putStartedAt),
+        cachedRecordsMergeMs: Math.round(mergeFinishedAt - mergeStartedAt),
+        cachedRecordCount: this.draftPageRecordCache.size, idempotencyKeyCount: Object.keys(state.idempotency).length
+      });
     } catch (error) {
       this.invalidateStateCache();
       throw error;
@@ -2404,17 +2423,30 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async mutateActivity<T>(change: (state: EtapiState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
     return this.enqueueWrite(async () => {
+      const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
       try {
+        const pendingReadStartedAt = timingEnabled ? performance.now() : 0;
         const pendingRead = this.stateReadInFlight;
         if (pendingRead) await pendingRead.catch(() => undefined);
-        const state = structuredClone(await this.readStateReference(true));
+        const stateReferenceStartedAt = timingEnabled ? performance.now() : 0;
+        const stateReference = await this.readStateReference(true);
+        const cloneStartedAt = timingEnabled ? performance.now() : 0;
+        const state = structuredClone(stateReference);
+        const cloneFinishedAt = timingEnabled ? performance.now() : 0;
         if (!state.projections.activityStateNoteId) await this.mergeDraftPageRecords(state);
         const replay = Boolean(state.idempotency[context.idempotencyKey]);
+        const changeStartedAt = timingEnabled ? performance.now() : 0;
         const result = structuredClone(await change(state));
+        const activityWriteStartedAt = timingEnabled ? performance.now() : 0;
         if (!replay) {
           if (state.projections.activityStateNoteId) await this.writeActivityState(state);
           else await this.initializeActivityState(state);
         }
+        if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_mutation_timing", {
+          pendingReadWaitMs: Math.round(stateReferenceStartedAt - pendingReadStartedAt), stateReferenceWaitMs: Math.round(cloneStartedAt - stateReferenceStartedAt),
+          structuredCloneMs: Math.round(cloneFinishedAt - cloneStartedAt), changeMs: Math.round(activityWriteStartedAt - changeStartedAt),
+          activityWriteMs: Math.round(performance.now() - activityWriteStartedAt)
+        });
         return result;
       } catch (error) {
         this.invalidateStateCache();

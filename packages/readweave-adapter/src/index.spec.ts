@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
+import { EMPTY_STATE } from "./index.js";
+import { sha256Text, stableStringify } from "@course-os/domain";
 
 it("reads legacy state and round-trips a large compressed ReadWeave index", () => {
   const small = { releases: [{ id: "release-1" }] };
@@ -492,11 +494,69 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(full[0]!.pages[0]!.questionBank).toEqual(fullPage.questionBank);
   });
 
-  it("partitions high-frequency learning activity and preserves it across restart", async () => {
+  it("merges owned draft records with the same full result and safe own idempotency keys", () => {
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root" });
+    const first = draftFor(releaseWithPage());
+    const other = { ...structuredClone(first), id: "draft:other", pageId: "other" };
+    const oldCost = costEntryFor(releaseWithPage(), "same-cost");
+    const otherCost = { ...oldCost, id: "other-cost", pageId: "other" };
+    const conflict = { id: "same-conflict", objectId: first.pageId, localContent: "old" };
+    const otherConflict = { ...conflict, id: "other-conflict", objectId: "other" };
+    const projection = { pageNoteId: "page-note", blockHashes: { "block-1": "old" } };
+    const state = { ...structuredClone(EMPTY_STATE), drafts: [first, other], costEntries: [oldCost, otherCost],
+      conflicts: [conflict, otherConflict], projections: { drafts: { [first.id]: projection } },
+      idempotency: { untouched: { kind: "attempt", objectId: "attempt-1" }, shared: { kind: "draft", objectId: "old" } } };
+    const record = { pageId: first.pageId, draft: { ...structuredClone(first), revision: 2 },
+      projection: { ...projection, blockHashes: { "block-1": "new" } },
+      costEntries: [{ ...oldCost, actualMicrousd: 99 }, { ...oldCost, id: "new-cost" }],
+      conflicts: [{ ...conflict, localContent: "new" }],
+      idempotency: Object.fromEntries([
+        ["shared", { kind: "draft", objectId: "new" }],
+        ["__proto__", { kind: "draft", objectId: first.id }],
+        ["constructor", { kind: "cost_entry", objectId: "new-cost" }]
+      ]) };
+    const ownSymbol = Symbol("own-key");
+    Object.defineProperty(record.idempotency, ownSymbol, { value: { kind: "draft", objectId: first.id }, enumerable: true });
+    Object.defineProperty(record.idempotency, "hidden", { value: { kind: "draft", objectId: "ignored" }, enumerable: false });
+    Object.setPrototypeOf(record.idempotency, { inherited: { kind: "draft", objectId: "ignored" } });
+    const setter = vi.fn();
+    Object.defineProperty(state.idempotency, "shared", { get: () => ({ kind: "draft", objectId: "old" }), set: setter, enumerable: true, configurable: true });
+    const expected = { ...structuredClone(state), drafts: [structuredClone(record.draft), other],
+      costEntries: [otherCost, ...record.costEntries], conflicts: [otherConflict, ...record.conflicts],
+      projections: { drafts: { [first.id]: structuredClone(record.projection) } },
+      idempotency: { ...state.idempotency, ...record.idempotency } };
+    const borrowedSnapshot = structuredClone(state);
+    const borrowedHash = sha256Text(stableStringify(borrowedSnapshot));
+    const dictionary = state.idempotency;
+    const merge = api as unknown as { mergeDraftPageRecord(snapshot: typeof state, value: typeof record): void };
+    merge.mergeDraftPageRecord(state, record);
+    expect(sha256Text(stableStringify(state))).toBe(sha256Text(stableStringify(expected)));
+    expect(state.idempotency).toBe(dictionary);
+    expect(setter).not.toHaveBeenCalled();
+    expect(Object.getPrototypeOf(state.idempotency)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(state.idempotency, "__proto__")).toEqual({ value: record.idempotency.__proto__, writable: true, enumerable: true, configurable: true });
+    expect(Reflect.get(state.idempotency, ownSymbol)).toEqual(Reflect.get(expected.idempotency, ownSymbol));
+    expect(Object.hasOwn(state.idempotency, "hidden")).toBe(false);
+    expect(Object.hasOwn(state.idempotency, "inherited")).toBe(false);
+    expect(sha256Text(stableStringify(borrowedSnapshot))).toBe(borrowedHash);
+    state.drafts[0]!.page.blocks[0]!.markdown = "owned change";
+    state.projections.drafts[first.id]!.blockHashes["block-1"] = "owned change";
+    expect(record.draft.page.blocks[0]!.markdown).toBe("原始讲解");
+    expect(record.projection.blockHashes["block-1"]).toBe("new");
+  });
+
+  it("partitions high-frequency learning activity and preserves it across restart and failed writes", async () => {
     const remote = new FakeEtapi();
-    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    let failingActivityNoteId = "";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (failingActivityNoteId && init?.method === "PUT" && new URL(String(input)).pathname.endsWith(`/notes/${failingActivityNoteId}/content`)) return new Response("temporary failure", { status: 503 });
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, { ...context, idempotencyKey: "activity-release" });
+    await api.saveDraftWithCost(draftFor(pageRelease), 0, { ...context, idempotencyKey: "activity-cached-draft" }, costEntryFor(pageRelease, "activity-cost"));
+    await api.listDrafts();
 
     const firstSelection = {
       id: "selection-1", sessionId: "session-1", courseReleaseId: pageRelease.id, pageId: "page-1",
@@ -508,7 +568,11 @@ describe("ReadWeave ETAPI adapter", () => {
     const stateWritesAfterInitialization = remote.contentWriteCount(stateNoteId);
     const activityWritesAfterInitialization = remote.contentWriteCount(activityNoteId);
 
+    const selectionRequests = remote.requests.length;
     await api.saveQuestionSelection({ ...firstSelection, id: "selection-2", seed: "seed-2" }, { ...context, idempotencyKey: "activity-selection-2" });
+    expect(remote.requests.slice(selectionRequests).map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: "POST", path: `/notes/${activityNoteId}/revision` }, { method: "PUT", path: `/notes/${activityNoteId}/content` }
+    ]);
     expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
     expect(remote.contentWriteCount(activityNoteId)).toBe(activityWritesAfterInitialization + 1);
 
@@ -528,16 +592,80 @@ describe("ReadWeave ETAPI adapter", () => {
     };
     const attemptContext = { ...context, idempotencyKey: "activity-attempt-1" };
     await api.saveQuestionAttemptTransaction(questionAttempt, assessmentAttempt, () => mastery, attemptContext);
+    const legacyAttempt = { ...assessmentAttempt, id: "legacy-attempt", objectiveId: "legacy-objective" };
+    const legacyMastery = { ...mastery, objectiveId: legacyAttempt.objectiveId };
+    await api.saveAttempt(legacyAttempt, legacyMastery, { ...context, idempotencyKey: "activity-legacy-attempt" });
     expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
+
+    const beforeFailure = decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引"));
+    const cachedState = Reflect.get(api, "stateCache").state;
+    const cacheHash = sha256Text(stableStringify(cachedState));
+    const records = Reflect.get(api, "draftPageRecordCache");
+    const recordHash = sha256Text(stableStringify([...records.values()]));
+    const failedSelection = { ...firstSelection, id: "selection-after-failure" };
+    const failedContext = { ...context, idempotencyKey: "activity-failed-selection" };
+    failingActivityNoteId = activityNoteId;
+    await expect(api.saveQuestionSelection(failedSelection, failedContext)).rejects.toThrow("READWEAVE_ETAPI_503");
+    expect(decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引"))).toEqual(beforeFailure);
+    expect(sha256Text(stableStringify(cachedState))).toBe(cacheHash);
+    expect(sha256Text(stableStringify([...records.values()]))).toBe(recordHash);
+    failingActivityNoteId = "";
+    await expect(api.saveQuestionSelection(failedSelection, failedContext)).resolves.toEqual(failedSelection);
 
     const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     expect(await reopened.listQuestionAttempts("page-1")).toEqual([questionAttempt]);
-    expect(await reopened.listAssessmentAttempts("objective-1")).toEqual([assessmentAttempt]);
-    expect(await reopened.listMastery()).toEqual([mastery]);
+    expect(await reopened.listAssessmentAttempts()).toEqual([assessmentAttempt, legacyAttempt]);
+    expect(await reopened.listMastery()).toEqual([mastery, legacyMastery]);
+    expect(await reopened.getDraftSnapshotByPage("page-1")).toMatchObject({ revision: 1 });
+    expect((await reopened.listCostEntries()).map((entry) => entry.id)).toContain("activity-cost");
     const writesBeforeReplay = remote.requests.filter((item) => item.method !== "GET").length;
     const replay = await reopened.saveQuestionAttemptTransaction({ ...questionAttempt, answer: "不应覆盖" }, assessmentAttempt, () => mastery, attemptContext);
     expect(replay.attempt).toEqual(questionAttempt);
+    expect(await reopened.saveQuestionSelection(failedSelection, failedContext)).toEqual(failedSelection);
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
+  });
+
+  it("logs only numeric activity timing when enabled without changing data or replay writes", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "timing-draft" });
+    const selection = { id: "timing-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" };
+    const previousFlag = process.env.COURSE_OS_READWEAVE_TIMING;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      process.env.COURSE_OS_READWEAVE_TIMING = "0";
+      await api.saveQuestionSelection(selection, { ...context, idempotencyKey: "timing-initialize" });
+      expect(info).not.toHaveBeenCalled();
+      process.env.COURSE_OS_READWEAVE_TIMING = "1";
+      const next = { ...selection, id: "timing-selection-2" };
+      const writeContext = { ...context, idempotencyKey: "timing-write" };
+      await api.saveQuestionSelection(next, writeContext);
+      const mutation = JSON.parse(info.mock.calls.find(([event]) => event === "course_os.readweave_activity_mutation_timing")![1]);
+      const write = JSON.parse(info.mock.calls.find(([event]) => event === "course_os.readweave_activity_state_write_timing")![1]);
+      expect(Object.keys(mutation).sort()).toEqual(["activityWriteMs", "changeMs", "pendingReadWaitMs", "stateReferenceWaitMs", "structuredCloneMs"]);
+      expect(Object.keys(write).sort()).toEqual(["cachedRecordCount", "cachedRecordsMergeMs", "encodeMs", "idempotencyKeyCount", "revisionAndPutMs"]);
+      for (const value of [...Object.values(mutation), ...Object.values(write)]) {
+        expect(typeof value).toBe("number");
+        expect(Number.isFinite(value)).toBe(true);
+        expect(value).toBeGreaterThanOrEqual(0);
+      }
+      expect(write.cachedRecordCount).toBe(1);
+      expect(write.idempotencyKeyCount).toBe(Object.keys(Reflect.get(api, "stateCache").state.idempotency).length);
+      const persisted = remote.contentByTitle("01 Course OS 学习活动索引");
+      expect(decodeReadWeaveStateContent(persisted)).toMatchObject({ questionSelections: [selection, next], questionAttempts: [], attempts: [], mastery: [] });
+      const writes = remote.requests.filter(({ method }) => method !== "GET").length;
+      info.mockImplementation(() => { throw new Error("DIAGNOSTIC_SINK_FAILURE"); });
+      await expect(api.saveQuestionSelection(next, writeContext)).resolves.toEqual(next);
+      expect(remote.contentByTitle("01 Course OS 学习活动索引")).toBe(persisted);
+      expect(remote.requests.filter(({ method }) => method !== "GET")).toHaveLength(writes);
+    } finally {
+      if (previousFlag === undefined) delete process.env.COURSE_OS_READWEAVE_TIMING;
+      else process.env.COURSE_OS_READWEAVE_TIMING = previousFlag;
+      info.mockRestore();
+    }
   });
 
   it("returns an idempotent replay without creating another remote revision or state write", async () => {
