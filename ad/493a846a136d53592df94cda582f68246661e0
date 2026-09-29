@@ -1,0 +1,31 @@
+apps/web/src/question-preview.ts
+  s_e8850ef125fb32::t_940c8de54225c2 24-28
+  s_e8850ef125fb32::t_441e8c7eed0336 1-23
+apps/web/src/question-preview.spec.ts
+  s_e8850ef125fb32::t_2eee828627ded5 3,15-20
+  s_e8850ef125fb32::t_b3f3ae80dd92f1 1-2,4-14,21-22
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_84d8fcbcf41aaa 58-62
+  s_e8850ef125fb32::t_1bbb7492e99f6d 138-139,141-148,175-176,182,186-188,190-191,194-196,199,206,208-210,212,215-217,220,225
+  s_e8850ef125fb32::t_ba8e6ae473422c 251
+  s_e8850ef125fb32::t_687bdcabf7742e 151
+  s_e8850ef125fb32::t_64e14c5802c7e9 248-250
+  s_e8850ef125fb32::t_b6156224c04eab 7,193,214
+  s_e8850ef125fb32::t_906fbd295fde97 137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ad493a846a136d53592df94cda582f68246661e0",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
