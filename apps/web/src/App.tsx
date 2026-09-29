@@ -15,6 +15,7 @@ const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) 
 type MobileMode = "visual" | "lesson" | "practice";
 type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
+export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; generatedReady?: boolean; notice?: string };
 
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -252,21 +253,24 @@ export function App() {
     });
     return () => { active = false; };
   }, [indexedPage?.id, release?.id, release?.lifecycle]);
-  const [candidatePreview, setCandidatePreview] = useState<{ pageId: string; page?: PageLesson; error?: string; generatedReady?: boolean }>();
+  const [candidatePreview, setCandidatePreview] = useState<CandidatePreviewState>();
   const [candidatePreviewReload, setCandidatePreviewReload] = useState(0);
   useEffect(() => {
     if (mode !== "learn" || release?.lifecycle !== "draft_source" || !page) { setCandidatePreview(undefined); return; }
     let active = true;
-    setCandidatePreview({ pageId: page.id });
-    api.draftSnapshot(page.id).then((draft) => {
-      if (!active) return;
-      if (isReadyCandidateSnapshot(draft, release.id, page.id)) {
-        const title = readablePageTitle(draft.page.title);
-        setCandidatePreview({ pageId: page.id, page: title === draft.page.title ? draft.page : { ...draft.page, title }, generatedReady: true });
-      }
-      else setCandidatePreview({ pageId: page.id, error: "这页候选讲解尚未生成完成" });
-    }).catch(() => { if (active) setCandidatePreview({ pageId: page.id, error: "候选讲解暂时无法读取，请重试" }); });
-    return () => { active = false; };
+    const reconcileCandidatePreview = beginCandidatePreviewLoad({
+      releaseId: release.id,
+      pageId: page.id,
+      readSnapshot: () => api.draftSnapshot(page.id),
+      readCurrentDraft: () => api.draft(page.id),
+      isActive: () => active,
+      setPreview: setCandidatePreview
+    });
+    window.addEventListener("focus", reconcileCandidatePreview);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", reconcileCandidatePreview);
+    };
   }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
   const previewRelease = useMemo(() => release
     ? { ...release, pages: release.pages.map((item, index) => {
@@ -559,6 +563,7 @@ export function App() {
         <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className="product-content">
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
+          {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.notice && <p className="empty-inline" role="status">{candidatePreview.notice}</p>}
           {activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {!pageDetailReady && release.lifecycle !== "draft_source" && <WorkspaceLoader />}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -1413,6 +1418,65 @@ export function mergeReleaseIndex(current: CourseRelease[], indexed: CourseRelea
 
 export function isReadyCandidateSnapshot(draft: LessonDraft, releaseId: string, pageId: string): boolean {
   return draft.sourceReleaseId === releaseId && draft.page.id === pageId && draft.status === "ready";
+}
+
+export function beginCandidatePreviewLoad({
+  releaseId,
+  pageId,
+  readSnapshot,
+  readCurrentDraft,
+  isActive,
+  setPreview
+}: {
+  releaseId: string;
+  pageId: string;
+  readSnapshot: () => Promise<LessonDraft>;
+  readCurrentDraft: () => Promise<LessonDraft>;
+  isActive: () => boolean;
+  setPreview: Dispatch<SetStateAction<CandidatePreviewState | undefined>>;
+}): () => void {
+  let snapshotReady = false;
+  let latestRead = 0;
+  const reconcile = () => {
+    if (!snapshotReady || !isActive()) return;
+    const readId = ++latestRead;
+    void readCurrentDraft().then((draft) => {
+      if (!isActive() || readId !== latestRead) return;
+      if (isReadyCandidateSnapshot(draft, releaseId, pageId)) {
+        const title = readablePageTitle(draft.page.title);
+        const updatedPage = title === draft.page.title ? draft.page : { ...draft.page, title };
+        setPreview((current) => current?.pageId === pageId && current.page
+          ? { ...current, page: updatedPage, error: undefined, notice: undefined, generatedReady: true }
+          : current);
+      } else {
+        setPreview((current) => current?.pageId === pageId && current.page
+          ? { ...current, notice: "当前显示的是上次可读讲解；最新候选内容尚未就绪，暂未替换正文" }
+          : current);
+      }
+    }).catch(() => {
+      if (!isActive() || readId !== latestRead) return;
+      setPreview((current) => current?.pageId === pageId && current.page
+        ? { ...current, notice: "当前显示的是上次可读讲解；最新 ReadWeave 内容暂时无法确认" }
+        : current);
+    });
+  };
+
+  setPreview({ pageId });
+  void readSnapshot().then((draft) => {
+    if (!isActive()) return;
+    if (isReadyCandidateSnapshot(draft, releaseId, pageId)) {
+      const title = readablePageTitle(draft.page.title);
+      const snapshotPage = title === draft.page.title ? draft.page : { ...draft.page, title };
+      snapshotReady = true;
+      setPreview({ pageId, page: snapshotPage, generatedReady: true });
+      reconcile();
+    } else {
+      setPreview({ pageId, error: "这页候选讲解尚未生成完成" });
+    }
+  }).catch(() => {
+    if (isActive()) setPreview({ pageId, error: "候选讲解暂时无法读取，请重试" });
+  });
+  return reconcile;
 }
 
 export function defaultRelease(items: CourseRelease[]): CourseRelease | undefined {

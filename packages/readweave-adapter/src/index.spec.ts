@@ -591,7 +591,7 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(readRequests.some((item) => item.path.startsWith("/notes/") && item.path.endsWith("/content") && !item.path.includes("link-") && !item.path.includes("object-"))).toBe(false);
     expect(nativeRequests.every((item) => item.startsWith("GET "))).toBe(true);
   });
-  it("creates the course tree and imports direct block edits as a new revision", async () => {
+  it("keeps snapshots cached while live reads reconcile same-instance v2 edits before cache expiry", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({
       baseUrl: "http://readweave",
@@ -600,28 +600,82 @@ describe("ReadWeave ETAPI adapter", () => {
       publicUrl: "https://readweave.example.com",
       fetchImpl: remote.fetch
     });
-    const pageRelease = releaseWithPage();
-    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
-    const saved = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "etapi-draft-1" });
-    expect(saved.readweaveNoteId).toBeTruthy();
-    expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
-    remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
-    const requestsBeforeSnapshot = remote.requests.length;
-    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
-    const stateWritesBeforeRead = remote.contentWriteCount(stateNoteId);
-    const snapshot = await api.getDraftSnapshotByPage("page-1");
-    expect(snapshot?.revision).toBe(1);
-    expect(remote.requests).toHaveLength(requestsBeforeSnapshot);
-    const writesBeforeRead = remote.requests.filter((item) => item.method !== "GET").length;
-    const reconciled = await api.getDraftByPage("page-1");
-    expect(reconciled?.revision).toBe(2);
-    expect(reconciled?.page.blocks[0]?.markdown).toBe("ReadWeave 中直接完成的逐块修改");
-    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeRead);
-    expect(remote.requests.filter((item) => item.method !== "GET").length - writesBeforeRead).toBeLessThanOrEqual(2);
-    const readsAfterFirstOpen = remote.requests.length;
-    expect((await api.getDraftByPage("page-1"))?.revision).toBe(2);
-    expect(remote.requests).toHaveLength(readsAfterFirstOpen);
-    expect((await api.getSyncStatus()).mode).toBe("etapi");
+    const clock = vi.spyOn(Date, "now");
+    const base = Date.now();
+    clock.mockReturnValue(base);
+    try {
+      const pageRelease = releaseWithPage();
+      const page = pageRelease.pages[0]!;
+      page.lessonFlowVersion = 2;
+      page.lessonSections = [
+        { id: "section-main", kind: "main_content", title: "主要内容", markdown: "原始讲解", items: [{ id: "old-item", text: "旧结构条目", sourceAnchorIds: [] }], sourceAnchorIds: [], atomIds: [] },
+        { id: "section-full", kind: "full_explanation", title: "完整讲解", markdown: "未编辑的完整讲解", sourceAnchorIds: [], atomIds: [] },
+        { id: "section-objectives", kind: "learning_objectives", title: "学习目标", markdown: "未编辑的学习目标", sourceAnchorIds: [], atomIds: [] },
+        { id: "section-bridge", kind: "chapter_bridge", title: "承上启下", markdown: "未编辑的页面桥接", sourceAnchorIds: [], atomIds: [] }
+      ];
+      page.blocks.push({ id: "qa-block", title: "已有 QA", kind: "qa", markdown: "保留的 QA 内容", sourceAnchorIds: [], atomIds: [] });
+      page.questionBank = [{
+        id: "question-1", pageId: "page-1", objectiveId: "objective-1", kind: "comprehension",
+        prompt: "原题目", expectedAnswer: "原答案", explanation: "原解析", sourceAnchorIds: [],
+        status: "approved", version: 1, generatedBy: "test"
+      }];
+      await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+      const draft = draftFor(pageRelease);
+      draft.status = "ready";
+      const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+      const saved = await api.saveDraft(draft, 0, { ...context, idempotencyKey: "etapi-draft-1" }, {
+        sha256: "etapi-draft-image", fileName: "page-001.png", mediaType: "image/png", bytes: image
+      });
+      expect(saved.readweaveNoteId).toBeTruthy();
+      expect(remote.titles()).toEqual(expect.arrayContaining(["Course OS", "02 课程材料", "03 完整讲解", "核心解释"]));
+      const primed = await api.getDraftByPage("page-1");
+      expect(primed).toMatchObject({ revision: 1, status: "ready" });
+      const originalSections = structuredClone(primed!.page.lessonSections!);
+      const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+      const stateWritesBeforeRead = remote.contentWriteCount(stateNoteId);
+      const imageNoteId = remote.noteIdByTitle("page-001.png");
+      const imageWritesBeforeRead = remote.contentWriteCount(imageNoteId);
+
+      remote.editByTitle("核心解释", "ReadWeave 中直接完成的逐块修改");
+      const requestsBeforeSnapshot = remote.requests.length;
+      const snapshot = await api.getDraftSnapshotByPage("page-1");
+      expect(snapshot).toMatchObject({ revision: 1, status: "ready" });
+      expect(snapshot?.page.blocks[0]?.markdown).toBe("原始讲解");
+      expect(remote.requests).toHaveLength(requestsBeforeSnapshot);
+
+      const writesBeforeLiveRead = remote.requests.filter((item) => item.method !== "GET").length;
+      const reconciled = await api.getDraftByPage("page-1");
+      expect(reconciled).toMatchObject({
+        revision: 2,
+        status: "ready",
+        page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "ReadWeave 中直接完成的逐块修改" })]) }
+      });
+      const sections = reconciled!.page.lessonSections!;
+      expect(sections.find((section) => section.id === "section-main")).toMatchObject({ markdown: "ReadWeave 中直接完成的逐块修改", items: [] });
+      for (const sectionId of ["section-full", "section-objectives", "section-bridge"]) {
+        expect(sections.find((section) => section.id === sectionId)).toEqual(originalSections.find((section) => section.id === sectionId));
+      }
+      expect(reconciled!.page.blocks.find((block) => block.id === "qa-block")?.markdown).toBe("保留的 QA 内容");
+      expect(remote.contentByTitle("已有 QA")).toBe("保留的 QA 内容");
+      expect(reconciled!.page.imageUrl).toBe(primed!.page.imageUrl);
+      expect(reconciled!.page.questionBank).toEqual(primed!.page.questionBank);
+      expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeRead);
+      expect(remote.contentWriteCount(imageNoteId)).toBe(imageWritesBeforeRead);
+      expect(remote.requests.filter((item) => item.method !== "GET").length - writesBeforeLiveRead).toBeLessThanOrEqual(2);
+
+      const writesAfterFirstLiveRead = remote.requests.filter((item) => item.method !== "GET").length;
+      const requestsAfterFirstLiveRead = remote.requests.length;
+      const reread = await api.getDraftByPage("page-1");
+      expect(reread).toMatchObject({ revision: 2, status: "ready" });
+      expect(reread!.page.lessonSections).toEqual(reconciled!.page.lessonSections);
+      expect(remote.requests.length).toBeGreaterThan(requestsAfterFirstLiveRead);
+      expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesAfterFirstLiveRead);
+      expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesBeforeRead);
+      expect(remote.contentWriteCount(imageNoteId)).toBe(imageWritesBeforeRead);
+      expect((await api.getSyncStatus()).mode).toBe("etapi");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("starts the draft record lookup while the state snapshot is loading", async () => {
@@ -942,6 +996,35 @@ describe("ReadWeave ETAPI adapter", () => {
     remote.editByTitle("讲解块 1", "ReadWeave 的新内容");
     const reopenedApi = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
     await expect(reopenedApi.getDraftByPage("page-1")).resolves.toMatchObject({ revision: 3, page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "ReadWeave 的新内容" })]) } });
+  });
+
+  it("does not preserve ready or replace a section when the legacy or multi-block mapping is ambiguous", async () => {
+    for (const scenario of ["legacy", "ambiguous"] as const) {
+      const remote = new FakeEtapi();
+      const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+      const pageRelease = releaseWithPage();
+      const page = pageRelease.pages[0]!;
+      if (scenario === "ambiguous") {
+        page.lessonFlowVersion = 2;
+        page.lessonSections = [{ id: "section-main", kind: "main_content", title: "主要内容", markdown: "多个 block 的合并内容", items: [{ id: "retained-item", text: "保留条目", sourceAnchorIds: [] }], sourceAnchorIds: [], atomIds: [] }];
+        page.blocks.push({ id: "block-2", title: "第二个核心解释", kind: "core", markdown: "第二个原始块", sourceAnchorIds: [], atomIds: [] });
+      }
+      const draft = draftFor(pageRelease);
+      draft.status = "ready";
+      await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+      const saved = await api.saveDraft(draft, 0, { ...context, idempotencyKey: `external-block-${scenario}-base` });
+      await api.getDraftByPage("page-1");
+      const originalSection = structuredClone(page.lessonSections?.[0]);
+      remote.editByTitle("核心解释", "外部修改但映射不唯一的块");
+
+      const reconciled = await api.getDraftByPage("page-1");
+      expect(reconciled).toMatchObject({ revision: saved.revision + 1, status: "editing" });
+      if (scenario === "legacy") {
+        expect(reconciled!.page.lessonSections).toBeUndefined();
+      } else {
+        expect(reconciled!.page.lessonSections?.[0]).toEqual(originalSection);
+      }
+    }
   });
 
   it("overlaps two page saves, skips the shared index, and hydrates page snapshots once after restart", async () => {

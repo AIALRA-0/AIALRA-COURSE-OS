@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse } from "./App.js";
+import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -53,7 +53,8 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).toContain("loaded.id !== releaseId");
     expect(directReadEffect).not.toContain("defaultRelease");
     expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
-    expect(source).toContain("isReadyCandidateSnapshot(draft, release.id, page.id)");
+    expect(source).toContain("readSnapshot: () => api.draftSnapshot(page.id)");
+    expect(source).toContain("readCurrentDraft: () => api.draft(page.id)");
   });
 
   it("preserves a detailed requested release when the late index contains a summary or omits it", () => {
@@ -87,6 +88,136 @@ describe("saved lesson navigation", () => {
     expect(isReadyCandidateSnapshot({ ...draft, status: "needs_review" }, "source", "page")).toBe(false);
     expect(isReadyCandidateSnapshot(draft, "other-source", "page")).toBe(false);
     expect(isReadyCandidateSnapshot(draft, "source", "other-page")).toBe(false);
+  });
+});
+
+describe("candidate preview reconciliation", () => {
+  it("shows the ready snapshot before a deferred one-page reconcile completes", async () => {
+    const snapshot = deferred<LessonDraft>();
+    const reconciliation = deferred<LessonDraft>();
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn(() => reconciliation.promise);
+
+    beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => snapshot.promise,
+      readCurrentDraft,
+      isActive: () => true,
+      setPreview
+    });
+    expect(preview).toEqual({ pageId: "page-a" });
+
+    snapshot.resolve(candidateDraft("release-a", "page-a", "Snapshot text"));
+    await flushPromises();
+
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Snapshot text");
+    expect(preview?.generatedReady).toBe(true);
+    expect(readCurrentDraft).toHaveBeenCalledOnce();
+
+    reconciliation.resolve(candidateDraft("release-a", "page-a", "ReadWeave text"));
+    await flushPromises();
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("ReadWeave text");
+  });
+
+  it("reconciles the active page again on focus and uses the returned ready page", async () => {
+    const snapshot = deferred<LessonDraft>();
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn<() => Promise<LessonDraft>>()
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Initial reconcile"))
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Edited in ReadWeave"));
+    const reconcileOnFocus = beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => snapshot.promise,
+      readCurrentDraft,
+      isActive: () => true,
+      setPreview
+    });
+
+    snapshot.resolve(candidateDraft("release-a", "page-a", "Saved snapshot"));
+    await flushPromises();
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Initial reconcile");
+
+    reconcileOnFocus();
+    await flushPromises();
+    expect(readCurrentDraft).toHaveBeenCalledTimes(2);
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Edited in ReadWeave");
+    expect(preview?.page?.quality.publishable).toBe(false);
+
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    expect(source).toContain('window.addEventListener("focus", reconcileCandidatePreview)');
+    expect(source).toContain('window.removeEventListener("focus", reconcileCandidatePreview)');
+  });
+
+  it("ignores a late reconcile result after navigation moves to another page", async () => {
+    const oldSnapshot = deferred<LessonDraft>();
+    const oldReconciliation = deferred<LessonDraft>();
+    const newReconciliation = deferred<LessonDraft>();
+    let currentPageId = "page-old";
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+
+    beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-old",
+      readSnapshot: () => oldSnapshot.promise,
+      readCurrentDraft: () => oldReconciliation.promise,
+      isActive: () => currentPageId === "page-old",
+      setPreview
+    });
+    oldSnapshot.resolve(candidateDraft("release-a", "page-old", "Old snapshot"));
+    await flushPromises();
+
+    currentPageId = "page-new";
+    beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-new",
+      readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-new", "New snapshot")),
+      readCurrentDraft: () => newReconciliation.promise,
+      isActive: () => currentPageId === "page-new",
+      setPreview
+    });
+    await flushPromises();
+    newReconciliation.resolve(candidateDraft("release-a", "page-new", "New current text"));
+    await flushPromises();
+    expect(preview?.pageId).toBe("page-new");
+
+    oldReconciliation.resolve(candidateDraft("release-a", "page-old", "Late old text"));
+    await flushPromises();
+    expect(preview?.pageId).toBe("page-new");
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("New current text");
+  });
+
+  it("keeps the readable snapshot and shows safe feedback when reconcile fails", async () => {
+    const snapshot = deferred<LessonDraft>();
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+
+    beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => snapshot.promise,
+      readCurrentDraft: () => Promise.reject(new Error("ReadWeave unavailable")),
+      isActive: () => true,
+      setPreview
+    });
+    snapshot.resolve(candidateDraft("release-a", "page-a", "Still visible"));
+    await flushPromises();
+
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Still visible");
+    expect(preview?.notice).toContain("暂时无法确认");
+    expect(preview?.notice).not.toContain("已保存");
   });
 });
 
@@ -177,3 +308,30 @@ describe("ReadWeave deep-link click flow", () => {
     expect(loadLink).not.toHaveBeenCalled();
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushPromises() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function candidateDraft(releaseId: string, pageId: string, markdown: string): LessonDraft {
+  const page = {
+    id: pageId,
+    pageNumber: 9,
+    title: "Partitioning",
+    lessonSections: [{ id: `${pageId}:main`, kind: "main_content", title: "正文", markdown, items: [] }],
+    quality: { publishable: false, issues: ["OFFLINE_AUDIT"] }
+  } as unknown as PageLesson;
+  return { sourceReleaseId: releaseId, status: "ready", page } as LessonDraft;
+}

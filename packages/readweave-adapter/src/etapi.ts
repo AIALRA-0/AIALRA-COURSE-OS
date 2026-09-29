@@ -184,6 +184,14 @@ const SECTION_DEFINITIONS = [
   ["quality", "08 质量与成本"]
 ] as const;
 
+const LESSON_SECTION_KIND_BY_SECTION: Partial<Record<SectionKey, string>> = {
+  objectives: "learning_objectives",
+  main: "main_content",
+  prerequisites: "prior_knowledge",
+  explanation: "full_explanation",
+  misconceptions: "misconceptions"
+};
+
 export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   // The authoritative workspace index is large. Writes replace this cache with
   // the committed state immediately, so a one-minute read window keeps local
@@ -730,8 +738,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
-    const cached = this.draftReadCache.get(pageId);
-    if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
     return this.withDraftPageLock(pageId, undefined, async () => {
       const stateReference = await this.readStateReference(true);
       const located = await this.findDraftPageRecord(pageId);
@@ -1594,6 +1600,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!projection) return { draft, changed: false };
     const next = structuredClone(draft);
     let changed = false;
+    const changedBlocks: ExplanationBlock[] = [];
     const remoteBlocks = await Promise.all(next.page.blocks.map(async (block) => {
       const noteId = projection.blockNoteIds[block.id];
       return noteId ? this.getContent(noteId) : undefined;
@@ -1607,13 +1614,33 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (remoteHash !== sha256(block.markdown) && (!pendingBlock || remoteHash !== sha256(pendingBlock.markdown))) {
           block.markdown = remoteMarkdown;
           changed = true;
+          changedBlocks.push(block);
         }
         projection.blockHashes[block.id] = remoteHash;
       }
     }
     if (changed) {
+      let allChangedBlocksHaveUniqueLessonSections = next.page.lessonFlowVersion === 2 && next.page.lessonSections !== undefined;
+      if (allChangedBlocksHaveUniqueLessonSections) {
+        for (const block of changedBlocks) {
+          const sectionKey = this.sectionForBlock(block);
+          const lessonKind = LESSON_SECTION_KIND_BY_SECTION[sectionKey];
+          if (!lessonKind) {
+            allChangedBlocksHaveUniqueLessonSections = false;
+            continue;
+          }
+          const matchingBlocks = next.page.blocks.filter((candidate) => this.sectionForBlock(candidate) === sectionKey);
+          const matchingSections = next.page.lessonSections!.filter((section) => section.kind === lessonKind);
+          if (matchingBlocks.length !== 1 || matchingSections.length !== 1) {
+            allChangedBlocksHaveUniqueLessonSections = false;
+            continue;
+          }
+          matchingSections[0]!.markdown = block.markdown;
+          matchingSections[0]!.items = [];
+        }
+      }
       next.revision += 1;
-      next.status = "editing";
+      if (next.status !== "ready" || !allChangedBlocksHaveUniqueLessonSections) next.status = "editing";
       next.changedBlockIds = next.page.blocks.map((block) => block.id);
       next.contentHash = sha256(JSON.stringify(next.page));
       next.updatedAt = new Date().toISOString();
@@ -1925,7 +1952,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         : "<p>本页尚未建立通过审核的随机题</p>";
     }
     if (section === "qa") return "<p>本页实时问答会作为子笔记自动保存，撤回只改变状态，不删除历史修订</p>";
-    const kind = ({ objectives: "learning_objectives", main: "main_content", prerequisites: "prior_knowledge", explanation: "full_explanation", misconceptions: "misconceptions" } as const)[section];
+    const kind = LESSON_SECTION_KIND_BY_SECTION[section];
+    if (!kind) return "<p>本节内容保存在下方结构化讲解子笔记中</p>";
     const lesson = draft.page.lessonSections?.find((item) => item.kind === kind);
     if (!lesson) return "<p>本节内容保存在下方结构化讲解子笔记中</p>";
     if (lesson.items?.length) return `<ul>${lesson.items.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
