@@ -266,7 +266,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .zoom-group { display: flex; align-items: center; overflow: hidden; border: 1px solid #3b423e; border-radius: 6px; }
 .zoom-group button { min-width: 30px; border: 0; border-radius: 0; }
 .zoom-group output { min-width: 50px; text-align: center; color: #b8c0bb; font-family: "IBM Plex Mono", monospace; font-size: 9px; }
-.slide-frame { min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid #313733; border-radius: 8px; background: #0d100e; touch-action: none; cursor: grab; }
+.slide-frame { position: relative; min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid #313733; border-radius: 8px; background: #0d100e; touch-action: none; cursor: grab; }
+.slide-image-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; color: var(--ink-soft); font-size: 13px; pointer-events: none; }
 .slide-frame.dragging { cursor: grabbing; }
 .slide-frame img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; user-select: none; transition: transform 80ms ease-out; }
 .viewer-help { margin: 0; text-align: center; color: #858f89; font-size: 8px; }

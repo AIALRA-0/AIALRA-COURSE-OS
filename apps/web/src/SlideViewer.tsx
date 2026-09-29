@@ -12,6 +12,7 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
   const valueRef = useRef(value);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | undefined>(undefined);
   const [dragging, setDragging] = useState(false);
+  const [imageStatus, setImageStatus] = useState<{ url: string; state: "ready" | "error" }>();
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState("");
   valueRef.current = value;
@@ -77,11 +78,16 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
         onPointerCancel={pointerUp}
         onDoubleClick={() => onChange({ zoom: 1, panX: 0, panY: 0 })}
       >
+        {imageStatus?.url !== imageUrl && <span className="slide-image-status" role="status">正在载入本页原图</span>}
+        {imageStatus?.url === imageUrl && imageStatus.state === "error" && <span className="slide-image-status" role="alert">原图载入失败，请刷新后重试</span>}
         <img
+          key={imageUrl}
           src={imageUrl}
           alt={`${title} 原始课件截图`}
           draggable={false}
-          style={{ transform: `translate(${value.panX}px, ${value.panY}px) scale(${value.zoom})` }}
+          onLoad={() => setImageStatus({ url: imageUrl, state: "ready" })}
+          onError={() => setImageStatus({ url: imageUrl, state: "error" })}
+          style={{ visibility: imageStatus?.url === imageUrl && imageStatus.state === "ready" ? "visible" : "hidden", transform: `translate(${value.panX}px, ${value.panY}px) scale(${value.zoom})` }}
         />
       </div>
       <p className={`viewer-help ${fullscreenError ? "viewer-error" : ""}`} role={fullscreenError ? "alert" : undefined}>{fullscreenError || "按住 Ctrl 或 Command 滚轮缩放，放大后拖动查看细节"}</p>
