@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import type { CourseRelease, LearningSession } from "@course-os/contracts";
+import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { flushNextSessionPatch, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse } from "./App.js";
+import { defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -39,6 +39,54 @@ describe("saved lesson navigation", () => {
   it("keeps an explicit task link and restores a saved task when there is no lesson route", () => {
     expect(resolveActiveImportId("#release=release-1&page=4&import=linked-import", "old-import")).toBe("linked-import");
     expect(resolveActiveImportId("#mode=learn", "saved-import")).toBe("saved-import");
+  });
+
+  it("starts an explicit release read independently of the index and leaves unknown links on their requested ID", async () => {
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const directReadStart = source.indexOf("api.release(releaseId).then");
+    const directReadEnd = source.indexOf("}, [releaseId]);", directReadStart);
+    const directReadEffect = source.slice(directReadStart, directReadEnd);
+
+    expect(source).toContain("useState(!initialNavigation.current.releaseId)");
+    expect(directReadStart).toBeGreaterThanOrEqual(0);
+    expect(directReadEffect).not.toContain("loading");
+    expect(directReadEffect).toContain("loaded.id !== releaseId");
+    expect(directReadEffect).not.toContain("defaultRelease");
+    expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
+    expect(source).toContain("isReadyCandidateSnapshot(draft, release.id, page.id)");
+  });
+
+  it("preserves a detailed requested release when the late index contains a summary or omits it", () => {
+    const detailed = { id: "requested", pages: [{ id: "requested:1" }, { id: "requested:2" }, { id: "requested:3" }, { id: "requested:4" }] } as unknown as CourseRelease;
+    const indexSummary = { id: "requested", pages: [{ id: "requested:1" }] } as unknown as CourseRelease;
+    const other = { id: "other", pages: [] } as unknown as CourseRelease;
+    const loaded = mergeReleaseIndex([], [detailed], new Set(["requested"]));
+    const lateIndex = mergeReleaseIndex(loaded, [indexSummary, other], new Set(["requested"]));
+
+    expect(lateIndex.find((item) => item.id === "requested")).toBe(detailed);
+    expect(lateIndex.find((item) => item.id === "requested")?.pages[3]?.id).toBe("requested:4");
+    expect(lateIndex.map((item) => item.id)).toEqual(["requested", "other"]);
+
+    const omittedIndex = mergeReleaseIndex(loaded, [other], new Set(["requested"]));
+    expect(omittedIndex.find((item) => item.id === "requested")).toBe(detailed);
+  });
+
+  it("keeps the existing published default when navigation has no requested release", () => {
+    const releases = [
+      { id: "old", lifecycle: "published", version: 1, publishedAt: "2026-01-01T00:00:00.000Z" },
+      { id: "latest", lifecycle: "published", version: 2, publishedAt: "2026-02-01T00:00:00.000Z" },
+      { id: "draft", lifecycle: "draft_source", version: 99, publishedAt: "2026-03-01T00:00:00.000Z" }
+    ] as CourseRelease[];
+    expect(defaultRelease(releases)?.id).toBe("latest");
+    expect(defaultRelease([{ ...releases[2]! }])?.id).toBe("draft");
+  });
+
+  it("treats only the matching ready candidate snapshot as generated", () => {
+    const draft = { sourceReleaseId: "source", page: { id: "page" }, status: "ready" } as unknown as LessonDraft;
+    expect(isReadyCandidateSnapshot(draft, "source", "page")).toBe(true);
+    expect(isReadyCandidateSnapshot({ ...draft, status: "needs_review" }, "source", "page")).toBe(false);
+    expect(isReadyCandidateSnapshot(draft, "other-source", "page")).toBe(false);
+    expect(isReadyCandidateSnapshot(draft, "source", "other-page")).toBe(false);
   });
 });
 

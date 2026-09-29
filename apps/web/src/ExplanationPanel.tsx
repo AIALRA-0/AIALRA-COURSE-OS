@@ -5,7 +5,7 @@ import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
 import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
 
-export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null } }) {
+export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef, generatedReady }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null }; generatedReady?: boolean }) {
   const sections = useMemo(() => normalizeSections(page), [page]);
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
   const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
@@ -51,7 +51,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
-    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${page.quality.publishable ? "pass" : "hold"}`}>{page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
+    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${generatedReady || page.quality.publishable ? "pass" : "hold"}`}>{generatedReady || page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>

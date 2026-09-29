@@ -205,10 +205,11 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
   it("generates a bridge from the previous explanation and current summary", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { input: string; text?: { format?: { name?: string } } };
+      const body = JSON.parse(String(init?.body)) as { input: string; instructions: string; text?: { format?: { name?: string } } };
       expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("bridge-page:bridge");
       expect(body.input).toContain("前页解释了输入");
       expect(body.input).toContain("本页讨论处理规则");
+      expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
       expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",
         output_text: "前页认识了输入，本页接着看处理规则。",
@@ -221,6 +222,31 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       currentSummary: "本页讨论处理规则" });
     expect(result).toMatchObject({ markdown: "前页认识了输入，本页接着看处理规则。", provider: "deepseek",
       usage: { apiEquivalentUsd: 0.001 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts from the current page question when previousTeaching marks a module start", async () => {
+    const firstPageContext = "这是模块“ee680-introduction”的起始页；从课程主题和本页问题自然建立阅读起点";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { input: string; instructions: string };
+      const prompt = JSON.parse(body.input) as { previousTeaching?: string; currentSummary?: string };
+      expect(prompt.previousTeaching).toBe(firstPageContext);
+      expect(prompt.currentSummary).toBe("本页讨论处理规则如何改变输出");
+      expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
+      expect(body.instructions).toContain("本页是模块起始页");
+      expect(body.instructions).toContain("前页内容不可用");
+      expect(body.instructions).toContain("只依据 currentSummary 中的本页内容提出本页正在解决的问题");
+      expect(body.instructions).toContain("不写“上一页讲过”等前页事实");
+      return Response.json({ model: "deepseek-flash", output_text: "本页关注处理规则怎样改变输出。",
+        usage: { input_tokens: 100, output_tokens: 40, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
+    const result = await client.generateBridge({ ...providerInput("bridge-first-page"), pageNumber: 1,
+      previousPageContext: firstPageContext, currentSummary: "本页讨论处理规则如何改变输出" });
+
+    expect(result.markdown).toBe("本页关注处理规则怎样改变输出。");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

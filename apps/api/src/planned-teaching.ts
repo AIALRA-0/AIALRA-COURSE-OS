@@ -28,7 +28,11 @@ export function plannedInstructions(_fields: readonly string[], language = "zh-C
     + (completePolicy ? "\n\n---\n\n" + completePolicy : "");
 }
 
-function repairInstructions(language: string): string {
+function repairInstructions(language: string, fullPackageRepair = false): string {
+  if (fullPackageRepair) {
+    return "当前没有可沿用的有效候选教学包；targetFields 列出了本次必须重新生成的全部最终教学字段。请只根据完整来源生成这些字段，并遵守每个教学栏目的原始职责，只返回符合 schema 的 JSON 字段对象。"
+      + "\n\n" + plannedInstructions([], language);
+  }
   const completePolicy = writingPolicyInstructions(language);
   return "你只修复请求中 targetFields 指定的最终 JSON 字段；其余教学内容已经保存，不得重写或返回。先完整阅读以下格式规则与写作策略，再输出修复字段组成的 JSON 对象。"
     + "\n\n" + writingFormatContract
@@ -650,8 +654,8 @@ export async function writePlannedLesson(
       : initialParsed.raw;
     const repairPrompt = JSON.stringify({
       pageTitle: input.pageTitle,
-      source: input.sourceText.slice(0, questionOnlyRepair ? 4_000 : 8_000),
-      currentOutput: currentFields,
+      source: fullPackageRepair ? input.sourceText : input.sourceText.slice(0, questionOnlyRepair ? 4_000 : 8_000),
+      currentOutput: fullPackageRepair ? {} : currentFields,
       ...(initialCandidate ? {
         mainContentMarkdown: initialCandidate.mainContentMarkdown?.slice(0, questionOnlyRepair ? 1_000 : 2_000),
         fullExplanationMarkdown: initialCandidate.fullExplanationMarkdown?.slice(0, questionOnlyRepair ? 2_000 : 5_000)
@@ -659,12 +663,14 @@ export async function writePlannedLesson(
       targetFields: repairFields,
       machineShapeIssues: initialShapeIssues,
       contentFormatIssues: [],
-      instruction: "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。questions 必须是 2 道理解题和 2 道四选一选择题。"
+      instruction: fullPackageRepair
+        ? "当前没有有效候选教学包；只根据完整来源生成 targetFields 列出的全部最终字段，不假设未提供的内容已经保存。"
+        : "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。questions 必须是 2 道理解题和 2 道四选一选择题。"
     });
     try {
       const repairedRaw = (await run({
         phase: "format_repair",
-        instructions: repairInstructions(input.language),
+        instructions: repairInstructions(input.language, fullPackageRepair),
         prompt: repairPrompt,
         schema: repairSchema,
         maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000

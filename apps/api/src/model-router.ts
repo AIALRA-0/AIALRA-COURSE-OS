@@ -291,7 +291,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   async generateBridge(input: ModelRouterInput & { currentSummary: string }) {
     const response = await this.requestPlannedStage(input, {
       phase: "bridge",
-      instructions: `为当前课件页写一个简短的承上启下段。只回收前页讲解中理解当前页确实需要的一点，再自然指出本页接着解决什么。不重复本页完整讲解，不虚构前页事实。遵守下面完整的写作策略。\n\n${writingPolicyInstructions(input.language)}`,
+      instructions: `为当前课件页写一个简短的承上启下段。previousTeaching 只有明确包含已确认的真实前页讲解时，才可作为前页知识依据；若它明确说明本页是模块起始页、前页内容不可用，或该字段缺失、为空，就只依据 currentSummary 中的本页内容提出本页正在解决的问题，写成简短开篇，不写“上一页讲过”等前页事实，也不补造前页内容。若存在已确认的前页讲解，只回收其中理解本页确实需要的一点，再自然指出本页接着解决什么。不重复本页完整讲解，不虚构前页事实。遵守下面完整的写作策略。\n\n${writingPolicyInstructions(input.language)}`,
       prompt: JSON.stringify({ pageTitle: input.pageTitle, previousTeaching: input.previousPageContext,
         currentSummary: input.currentSummary }),
       maxOutputTokens: 700

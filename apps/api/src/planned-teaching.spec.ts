@@ -8,8 +8,10 @@ import {
   plannedContentIssues,
   plannedFormatIssues,
   plannedInstructions,
+  plannedWritingPrompt,
   planningPrompt,
   projectPlannedOutputToSchema,
+  writingFormatContract,
   writePlannedLesson
 } from "./planned-teaching.js";
 
@@ -429,19 +431,36 @@ describe("planned teaching core writer", () => {
     expect(result.trace.formatWarnings).toBeUndefined();
   });
 
-  it("requests the complete package after an unparseable initial answer", async () => {
+  it("requests the complete package with the original contract and full source after an unparseable answer", async () => {
     const phases: string[] = [];
     const repairFields = Object.keys((teachingPackageSchema as { properties: Record<string, unknown> }).properties);
+    const source = `来源开头\n${"本页完整来源".repeat(3_000)}\n完整来源结束`;
     const complete = teachingPackage();
-    const result = await writePlannedLesson(input(), async request => {
+    const result = await writePlannedLesson({ ...input(), sourceText: source }, async request => {
       phases.push(request.phase);
       if (request.phase === "plan") return "先解释输入";
       if (request.phase === "teaching") return "{malformed initial JSON";
 
-      const repairPrompt = JSON.parse(request.prompt) as { targetFields?: string[] };
+      const repairPrompt = JSON.parse(request.prompt) as {
+        source?: string;
+        currentOutput?: Record<string, unknown>;
+        targetFields?: string[];
+        instruction?: string;
+      };
+      expect(repairPrompt.source).toBe(source);
+      expect(repairPrompt.currentOutput).toEqual({});
       expect(repairPrompt.targetFields).toEqual(repairFields);
+      expect(repairPrompt.instruction).toContain("没有有效候选教学包");
+      expect(repairPrompt.instruction).toContain("全部最终字段");
       expect(Object.keys(request.schema?.properties as Record<string, unknown>)).toEqual(repairFields);
       expect(request.schema).toBe(teachingPackageSchema);
+      expect(request.instructions).toContain(plannedWritingPrompt.trim());
+      expect(request.instructions).toContain(writingFormatContract.trim());
+      expect(request.instructions.split(plannedWritingPrompt.trim()).length - 1).toBe(1);
+      for (const policy of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
+        expect(request.instructions).toContain(policy.trim());
+        expect(request.instructions.split(policy.trim()).length - 1).toBe(1);
+      }
       return complete;
     });
 
@@ -663,22 +682,42 @@ describe("planned teaching core writer", () => {
     });
   });
 
-  it("repairs only the question field while preserving the initial explanation", async () => {
-    const initial = { ...teachingPackage(), questions: [] };
+  it("repairs only the bounded question field and preserves unaffected teaching fields", async () => {
+    const base = teachingPackage();
+    const source = `来源开头\n${"本页来源".repeat(2_500)}\n完整来源结束`;
+    const initial = {
+      ...base,
+      mainContentMarkdown: "既有主要内容".repeat(400),
+      fullExplanationMarkdown: "既有完整讲解".repeat(600),
+      questions: []
+    };
     const completed = teachingPackage();
     const calls: string[] = [];
-    const result = await writePlannedLesson(input(), async request => {
+    const result = await writePlannedLesson({ ...input(), sourceText: source }, async request => {
       calls.push(request.phase);
       if (request.phase === "plan") return "先解释输入";
       if (request.phase === "teaching") return initial;
       expect(Object.keys(request.schema?.properties ?? {})).toEqual(["questions"]);
       expect(request.instructions).not.toContain("一次写出所有主体栏目");
       expect(request.instructions).toContain("先完整阅读以下格式规则与写作策略");
+      expect(request.instructions).toContain("其余教学内容已经保存");
+      const repairPrompt = JSON.parse(request.prompt) as {
+        source?: string;
+        currentOutput?: Record<string, unknown>;
+        mainContentMarkdown?: string;
+        fullExplanationMarkdown?: string;
+      };
+      expect(repairPrompt.source).toBe(source.slice(0, 4_000));
+      expect(Object.keys(repairPrompt.currentOutput ?? {})).toEqual(["questions"]);
+      expect(repairPrompt.currentOutput?.questions).toEqual([]);
+      expect(repairPrompt.mainContentMarkdown).toBe(initial.mainContentMarkdown.slice(0, 1_000));
+      expect(repairPrompt.fullExplanationMarkdown).toBe(initial.fullExplanationMarkdown.slice(0, 2_000));
       return { questions: completed.questions };
     });
     expect(calls).toEqual(["plan", "teaching", "format_repair"]);
     expect(result.content.questions).toHaveLength(4);
-    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
+    expect(result.content.mainContentMarkdown).toBe(initial.mainContentMarkdown);
+    expect(result.content.fullExplanationMarkdown).toBe(initial.fullExplanationMarkdown);
   });
 
   it("merges complementary core fields from the first answer and its only repair", async () => {
