@@ -33,7 +33,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
   useEffect(() => {
     if (!interactiveReady) return;
     let active = true;
-    api.lesson(page.id).then((lesson) => active && setQaRecords(lesson.qaRecords)).catch(() => active && setQaRecords([]));
+    api.pageQuestions(page.id).then((records) => active && setQaRecords(records)).catch(() => active && setQaRecords([]));
     return () => { active = false; };
   }, [interactiveReady, page.id]);
   useEffect(() => {

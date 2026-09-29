@@ -214,6 +214,7 @@ export const api = {
   releases: () => request<CourseRelease[]>("/api/v1/releases?view=index"),
   release: (id: string) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`),
   lesson: (pageId: string) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`),
+  pageQuestions: (pageId: string) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`),
   selfRetellings: (releaseId?: string) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`),
   saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
     method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ answer })

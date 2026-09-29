@@ -6,9 +6,15 @@ import { Icon } from "./Icon.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
+import { BoundedPagePrefetchQueue, ImageResourceCache, settlePagePrefetch } from "./reading-prefetch.js";
 import type { ImportTaskSummary, WebGenerationPlan, WebImportRecord } from "./types.js";
 
-const ExplanationPanel = lazy(() => import("./ExplanationPanel.js").then((module) => ({ default: module.ExplanationPanel })));
+type ExplanationPanelModule = typeof import("./ExplanationPanel.js");
+let explanationPanelLoad: Promise<ExplanationPanelModule> | undefined;
+export function preloadExplanationPanel(): Promise<ExplanationPanelModule> {
+  return explanationPanelLoad ??= import("./ExplanationPanel.js");
+}
+const ExplanationPanel = lazy(() => preloadExplanationPanel().then((module) => ({ default: module.ExplanationPanel })));
 const ReviewWorkspace = lazy(() => import("./ReviewWorkspace.js").then((module) => ({ default: module.ReviewWorkspace })));
 const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) => ({ default: module.StudioWorkspace })));
 
@@ -119,7 +125,10 @@ export function App() {
   const [mode, setMode] = useState<WorkspaceMode>(initialNavigation.current.mode);
   const [session, setSession] = useState<LearningSession>();
   const [pageCache, setPageCache] = useState<Map<string, CachedPageSnapshot>>(() => new Map());
-  const preloadedImages = useRef(new Set<string>());
+  const pageCacheRef = useRef(pageCache);
+  pageCacheRef.current = pageCache;
+  const [imageResources] = useState(() => new ImageResourceCache(8));
+  const pagePrefetchQueue = useRef(new BoundedPagePrefetchQueue(2));
   const lessonRequests = useRef(new Map<string, Promise<Awaited<ReturnType<typeof api.lesson>>>>());
   const candidateSnapshotRequests = useRef(new Map<string, Promise<LessonDraft>>());
   const [view, setView] = useState<ViewState>({ zoom: 1, panX: 0, panY: 0 });
@@ -285,6 +294,10 @@ export function App() {
     void api.reviewMap().then(setReviewMap).catch(() => setReviewMap(undefined));
   }, [mode]);
 
+  useEffect(() => {
+    if (mode === "learn") void preloadExplanationPanel().catch(() => undefined);
+  }, [mode]);
+
   const release = useMemo(() => releases.find((item) => item.id === releaseId), [releaseId, releases]);
   useEffect(() => {
     if (!releaseId || releaseId !== initialNavigation.current.releaseId || detailedReleaseIds.current.has(releaseId)) return;
@@ -311,6 +324,48 @@ export function App() {
   const pageDetailReady = release?.lifecycle === "draft_source" || Boolean(detailedPage);
   const [formalPageError, setFormalPageError] = useState<{ key: string; message: string }>();
   const [formalPageReload, setFormalPageReload] = useState(0);
+  const previousImageScope = useRef(releaseId);
+  useEffect(() => {
+    if (previousImageScope.current && previousImageScope.current !== releaseId) {
+      imageResources.clear();
+      pagePrefetchQueue.current.clearPending();
+    }
+    previousImageScope.current = releaseId;
+  }, [releaseId, imageResources]);
+  useEffect(() => {
+    if (mode !== "learn" || !indexedPage?.imageUrl) return;
+    void imageResources.load(indexedPage.imageUrl, "high").catch(() => undefined);
+  }, [mode, release?.id, indexedPage?.id, indexedPage?.imageUrl, imageResources]);
+  const prefetchPage = useCallback((targetIndex: number, priority = 0) => {
+    if (mode !== "learn" || !release) return;
+    const target = release.pages[targetIndex];
+    if (!target) return;
+    const key = pageSnapshotCacheKey(release.id, target.id);
+    if (pageCacheRef.current.has(key)) {
+      if (target.imageUrl) void imageResources.load(target.imageUrl, priority > 0 ? "high" : "low").catch(() => undefined);
+      return;
+    }
+    void pagePrefetchQueue.current.enqueue(key, async () => {
+      const image = target.imageUrl ? imageResources.load(target.imageUrl, priority > 0 ? "high" : "low").catch(() => undefined) : Promise.resolve(undefined);
+      const snapshot: Promise<LessonDraft | Awaited<ReturnType<typeof api.lesson>>> = release.lifecycle === "draft_source"
+        ? readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, target.id)
+        : readLessonOnce(lessonRequests.current, release.id, target.id);
+      await settlePagePrefetch(snapshot, image, (result) => {
+        let pageSnapshot: PageLesson | undefined;
+        if (release.lifecycle === "draft_source") {
+          const draft = result as unknown as LessonDraft;
+          if (isReadyCandidateSnapshot(draft, release.id, target.id)) {
+            const title = readablePageTitle(draft.page.title);
+            pageSnapshot = title === draft.page.title ? draft.page : { ...draft.page, title };
+          }
+        } else {
+          const lesson = result as unknown as Awaited<ReturnType<typeof api.lesson>>;
+          if (lesson.releaseId === release.id && lesson.page.id === target.id) pageSnapshot = lesson.page;
+        }
+        if (pageSnapshot) setPageCache((current) => rememberPageSnapshot(current, release.id, pageSnapshot));
+      });
+    }, priority).catch(() => undefined);
+  }, [imageResources, mode, release]);
   useEffect(() => {
     if (!release || !indexedPage || release.lifecycle === "draft_source") {
       return;
@@ -319,39 +374,23 @@ export function App() {
     const requestIdentity = { releaseId: release.id, pageId: indexedPage.id };
     const cacheKey = pageSnapshotCacheKey(release.id, indexedPage.id);
     setFormalPageError((current) => current?.key === cacheKey ? undefined : current);
+    if (pageCacheRef.current.has(cacheKey)) return;
     readLessonOnce(lessonRequests.current, release.id, indexedPage.id).then((lesson) => {
       if (!active || !isCurrentPageSnapshot(requestIdentity, activePageIdentity.current, { releaseId: lesson.releaseId, pageId: lesson.page.id })) return;
       setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page));
-      if (lesson.page.imageUrl && !preloadedImages.current.has(lesson.page.imageUrl)) {
-        preloadedImages.current.add(lesson.page.imageUrl);
-        const image = new Image();
-        image.src = lesson.page.imageUrl;
-      }
     }).catch((reason) => {
       if (active) setFormalPageError({ key: cacheKey, message: reason instanceof Error ? reason.message : "无法载入当前课程页面" });
     });
     return () => { active = false; };
   }, [indexedPage?.id, release?.id, release?.lifecycle, formalPageReload]);
   useEffect(() => {
-    if (!release || release.lifecycle === "draft_source" || !indexedPage) return;
+    if (!release || !indexedPage) return;
     const timer = window.setTimeout(() => {
-      const adjacent = [release.pages[pageIndex - 1], release.pages[pageIndex + 1]].filter((item): item is PageLesson => Boolean(item));
-      for (const item of adjacent) {
-        const cacheKey = pageSnapshotCacheKey(release.id, item.id);
-        if (pageCache.has(cacheKey)) continue;
-        void readLessonOnce(lessonRequests.current, release.id, item.id).then((lesson) => {
-          if (lesson.releaseId !== release.id || lesson.page.id !== item.id) return;
-          setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page));
-          if (lesson.page.imageUrl && !preloadedImages.current.has(lesson.page.imageUrl)) {
-            preloadedImages.current.add(lesson.page.imageUrl);
-            const image = new Image();
-            image.src = lesson.page.imageUrl;
-          }
-        }).catch(() => undefined);
-      }
+      prefetchPage(pageIndex + 1);
+      prefetchPage(pageIndex - 1);
     }, 120);
     return () => { window.clearTimeout(timer); };
-  }, [release?.id, release?.lifecycle, indexedPage?.id, pageIndex]);
+  }, [release?.id, indexedPage?.id, pageIndex, prefetchPage]);
   const [candidatePreview, setCandidatePreview] = useState<CandidatePreviewState>();
   const [candidatePreviewReload, setCandidatePreviewReload] = useState(0);
   useEffect(() => {
@@ -362,7 +401,9 @@ export function App() {
     const reconcileCandidatePreview = beginCandidatePreviewLoad({
       releaseId: release.id,
       pageId: page.id,
-      readSnapshot: () => readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id),
+      readSnapshot: () => cached
+        ? Promise.resolve({ sourceReleaseId: release.id, status: "ready", page: cached.page } as LessonDraft)
+        : readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id),
       readCurrentDraft: () => api.draft(page.id),
       isActive: () => active,
       setPreview: setCandidatePreview
@@ -373,38 +414,6 @@ export function App() {
       window.removeEventListener("focus", reconcileCandidatePreview);
     };
   }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
-  useEffect(() => {
-    if (!release || release.lifecycle !== "draft_source" || !candidatePreview?.page || candidatePreview.pageId !== indexedPage?.id) return;
-    const candidatePage = candidatePreview.page;
-    setPageCache((current) => rememberPageSnapshot(current, release.id, candidatePage));
-    if (candidatePage.imageUrl && !preloadedImages.current.has(candidatePage.imageUrl)) {
-      preloadedImages.current.add(candidatePage.imageUrl);
-      const image = new Image();
-      image.src = candidatePage.imageUrl;
-    }
-  }, [release?.id, release?.lifecycle, candidatePreview, indexedPage?.id]);
-  useEffect(() => {
-    if (!release || release.lifecycle !== "draft_source" || !candidatePreview?.page || candidatePreview.pageId !== indexedPage?.id) return;
-    let active = true;
-    const timer = window.setTimeout(() => {
-      const adjacent = [release.pages[pageIndex - 1], release.pages[pageIndex + 1]].filter((item): item is PageLesson => Boolean(item));
-      for (const item of adjacent) {
-        if (pageCache.has(pageSnapshotCacheKey(release.id, item.id))) continue;
-        void readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, item.id).then((draft) => {
-          if (!active || !isReadyCandidateSnapshot(draft, release.id, item.id)) return;
-          const title = readablePageTitle(draft.page.title);
-          const snapshotPage = title === draft.page.title ? draft.page : { ...draft.page, title };
-          setPageCache((current) => rememberPageSnapshot(current, release.id, snapshotPage));
-          if (snapshotPage.imageUrl && !preloadedImages.current.has(snapshotPage.imageUrl)) {
-            preloadedImages.current.add(snapshotPage.imageUrl);
-            const image = new Image();
-            image.src = snapshotPage.imageUrl;
-          }
-        }).catch(() => undefined);
-      }
-    }, 120);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [release?.id, release?.lifecycle, indexedPage?.id, pageIndex, candidatePreview?.pageId, Boolean(candidatePreview?.page)]);
   const previewRelease = useMemo(() => release
     ? { ...release, pages: release.pages.map((item, index) => {
       const source = index === pageIndex
@@ -700,7 +709,7 @@ export function App() {
           {activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status"><div className="loader" /><span>正在载入页面详情</span></div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
-            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : formalPageError?.key === pageSnapshotCacheKey(release.id, page.id) ? formalPageError.message : undefined} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
+            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : formalPageError?.key === pageSnapshotCacheKey(release.id, page.id) ? formalPageError.message : undefined} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>}
         </section>
@@ -744,10 +753,12 @@ function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTask
   </div>;
 }
 
-function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, onRetryContent }: {
+function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, onRetryContent }: {
   release: CourseRelease;
   pageIndex: number;
   setPageIndex: Dispatch<SetStateAction<number>>;
+  onPrefetchPage: (index: number, priority?: number) => void;
+  imageResources: ImageResourceCache;
   session?: LearningSession;
   view: ViewState;
   updateView: (next: ViewState) => void;
@@ -792,7 +803,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
     </nav>
 
     <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""}`}>
-      <div className="visual-column"><SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} /></div>
+      <div className="visual-column"><SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} /></div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
         : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{contentReady ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role="status">{!contentError && <div className="loader" />}<span>{contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
@@ -800,11 +811,11 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, session, view, up
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
       <div className="page-dock-summary">
-        <button data-action="page-previous" disabled={pageIndex === 0} title={pageIndex === 0 ? "已经是第一页" : "打开上一页"} onClick={() => setPageIndex((index) => index - 1)}><Icon name="arrowLeft" />上一页</button>
+        <button data-action="page-previous" disabled={pageIndex === 0} title={pageIndex === 0 ? "已经是第一页" : "打开上一页"} onMouseEnter={() => onPrefetchPage(pageIndex - 1)} onFocus={() => onPrefetchPage(pageIndex - 1)} onPointerDown={() => onPrefetchPage(pageIndex - 1, 20)} onClick={() => setPageIndex((index) => index - 1)}><Icon name="arrowLeft" />上一页</button>
         <button className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起全部页面" : `展开全部 ${release.pages.length} 页`}</small><Icon name={pageDockOpen ? "chevronUp" : "chevronDown"} /></button>
-        <button data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
+        <button data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onMouseEnter={() => onPrefetchPage(pageIndex + 1)} onFocus={() => onPrefetchPage(pageIndex + 1)} onPointerDown={() => onPrefetchPage(pageIndex + 1, 20)} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
       </div>
-      {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>}
+      {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)} onPointerDown={() => onPrefetchPage(index, 20)} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>}
     </footer>
   </div>;
 }

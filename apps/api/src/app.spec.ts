@@ -508,6 +508,22 @@ describe("Course OS API", () => {
     expect(reconciledRead).not.toHaveBeenCalled();
   });
 
+  it("keeps historical questions off the lesson's critical path and reads them only on demand", async () => {
+    const { app, readweave } = await seededApp();
+    const historicalRead = vi.spyOn(readweave, "listQuestions").mockResolvedValue([]);
+    const lesson = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(lesson.body.page.id).toBe("page-1");
+    expect(lesson.body.qaRecords).toEqual([]);
+    expect(historicalRead).not.toHaveBeenCalled();
+    await request(app).get("/api/v1/pages/page-1/lesson?includeQa=1").expect(200);
+    expect(historicalRead).toHaveBeenCalledWith("page-1");
+    historicalRead.mockClear();
+    await request(app).get("/api/v1/pages/page-1/questions").expect(200);
+    expect(historicalRead).toHaveBeenCalledWith("page-1");
+    await request(app).get("/api/v1/pages/page-1/questions").set("X-Workspace-Id", "another-workspace").expect(404);
+    expect(historicalRead).toHaveBeenCalledTimes(1);
+  });
+
   it("serves candidate previews from a saved snapshot while preserving reconciled editor reads", async () => {
     const { app, readweave } = await seededApp();
     const snapshot = await readweave.getDraftByPage("page-1");

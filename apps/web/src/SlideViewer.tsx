@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
+import type { ImageResourceCache } from "./reading-prefetch.js";
 
 export interface ViewState {
   zoom: number;
@@ -6,7 +7,7 @@ export interface ViewState {
   panY: number;
 }
 
-export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: string; title: string; value: ViewState; onChange: (value: ViewState) => void }) {
+export function SlideViewer({ imageUrl, title, value, onChange, imageResources }: { imageUrl: string; title: string; value: ViewState; onChange: (value: ViewState) => void; imageResources?: ImageResourceCache }) {
   const shellRef = useRef<HTMLElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const valueRef = useRef(value);
@@ -16,6 +17,17 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState("");
   valueRef.current = value;
+
+  useEffect(() => {
+    if (!imageResources || !imageUrl) return;
+    let active = true;
+    void imageResources.load(imageUrl, "high").then(() => {
+      if (active) setImageStatus({ url: imageUrl, state: "ready" });
+    }).catch(() => {
+      if (active) setImageStatus({ url: imageUrl, state: "error" });
+    });
+    return () => { active = false; };
+  }, [imageResources, imageUrl]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -85,6 +97,7 @@ export function SlideViewer({ imageUrl, title, value, onChange }: { imageUrl: st
           src={imageUrl}
           alt={`${title} 原始课件截图`}
           draggable={false}
+          fetchPriority={imageResources ? "high" : undefined}
           onLoad={() => setImageStatus({ url: imageUrl, state: "ready" })}
           onError={() => setImageStatus({ url: imageUrl, state: "error" })}
           style={{ visibility: imageStatus?.url === imageUrl && imageStatus.state === "ready" ? "visible" : "hidden", transform: `translate(${value.panX}px, ${value.panY}px) scale(${value.zoom})` }}

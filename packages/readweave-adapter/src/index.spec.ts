@@ -636,25 +636,32 @@ describe("ReadWeave ETAPI adapter", () => {
       pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" };
     const previousFlag = process.env.COURSE_OS_READWEAVE_TIMING;
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const clone = vi.spyOn(globalThis, "structuredClone");
     try {
       process.env.COURSE_OS_READWEAVE_TIMING = "0";
       await api.saveQuestionSelection(selection, { ...context, idempotencyKey: "timing-initialize" });
       expect(info).not.toHaveBeenCalled();
+      clone.mockClear();
       process.env.COURSE_OS_READWEAVE_TIMING = "1";
       const next = { ...selection, id: "timing-selection-2" };
       const writeContext = { ...context, idempotencyKey: "timing-write" };
       await api.saveQuestionSelection(next, writeContext);
       const mutation = JSON.parse(info.mock.calls.find(([event]) => event === "course_os.readweave_activity_mutation_timing")![1]);
       const write = JSON.parse(info.mock.calls.find(([event]) => event === "course_os.readweave_activity_state_write_timing")![1]);
-      expect(Object.keys(mutation).sort()).toEqual(["activityWriteMs", "changeMs", "pendingReadWaitMs", "stateReferenceWaitMs", "structuredCloneMs"]);
-      expect(Object.keys(write).sort()).toEqual(["cachedRecordCount", "cachedRecordsMergeMs", "encodeMs", "idempotencyKeyCount", "revisionAndPutMs"]);
-      for (const value of [...Object.values(mutation), ...Object.values(write)]) {
+      expect(Object.keys(mutation).sort()).toEqual(["activityCloneMs", "activityReadMs", "activityWriteMs", "changeMs", "replay", "totalMs"]);
+      expect(Object.keys(write).sort()).toEqual(["encodeMs", "idempotencyKeyCount", "revisionAndPutMs"]);
+      for (const value of [...Object.entries(mutation).filter(([key]) => key !== "replay").map(([, value]) => value), ...Object.values(write)]) {
         expect(typeof value).toBe("number");
         expect(Number.isFinite(value)).toBe(true);
         expect(value).toBeGreaterThanOrEqual(0);
       }
-      expect(write.cachedRecordCount).toBe(1);
-      expect(write.idempotencyKeyCount).toBe(Object.keys(Reflect.get(api, "stateCache").state.idempotency).length);
+      const clonedActivity = clone.mock.calls.map(([value]) => value as Record<string, unknown>)
+        .find((value) => Array.isArray(value.questionSelections) && Array.isArray(value.questionAttempts)
+          && Array.isArray(value.mastery) && value.schemaVersion === "1.0.0");
+      expect(Object.keys(clonedActivity ?? {}).sort()).toEqual([
+        "attempts", "idempotency", "mastery", "questionAttempts", "questionSelections", "schemaVersion"
+      ]);
+      expect(write.idempotencyKeyCount).toBe(2);
       const persisted = remote.contentByTitle("01 Course OS 学习活动索引");
       expect(decodeReadWeaveStateContent(persisted)).toMatchObject({ questionSelections: [selection, next], questionAttempts: [], attempts: [], mastery: [] });
       const writes = remote.requests.filter(({ method }) => method !== "GET").length;
@@ -665,8 +672,142 @@ describe("ReadWeave ETAPI adapter", () => {
     } finally {
       if (previousFlag === undefined) delete process.env.COURSE_OS_READWEAVE_TIMING;
       else process.env.COURSE_OS_READWEAVE_TIMING = previousFlag;
+      clone.mockRestore();
       info.mockRestore();
     }
+  });
+
+  it("does not let an in-flight course read delay or overwrite a committed activity write", async () => {
+    const remote = new FakeEtapi();
+    let holdCourseRead = false;
+    let releaseCourseRead: (() => void) | undefined;
+    let courseReadStarted: (() => void) | undefined;
+    const courseReadGate = new Promise<void>((resolve) => { releaseCourseRead = resolve; });
+    const started = new Promise<void>((resolve) => { courseReadStarted = resolve; });
+    const api = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/u, "");
+        if (holdCourseRead && (init?.method ?? "GET") === "GET" && path === `/notes/${remote.noteIdByTitle("00 Course OS 结构化索引")}/content`) {
+          holdCourseRead = false;
+          courseReadStarted?.();
+          await courseReadGate;
+        }
+        return remote.fetch(input, init);
+      }
+    });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await api.saveQuestionSelection({ id: "late-read-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" },
+    { ...context, idempotencyKey: "late-read-selection" });
+    Reflect.set(api, "stateCache", undefined);
+    holdCourseRead = true;
+    const fullRead = api.listCourses();
+    await started;
+
+    const attempt = { id: "late-read-attempt", selectionId: "late-read-selection", sessionId: "session-1",
+      courseReleaseId: pageRelease.id, pageId: "page-1", questionId: "question-1", objectiveId: "objective-1",
+      answer: "saved", correct: true, usedHintLevel: 0, attemptedAt: "2026-09-15T00:01:00.000Z" };
+    const assessment = { id: attempt.id, itemId: attempt.questionId, objectiveId: attempt.objectiveId,
+      answer: attempt.answer, correct: true, usedHintLevel: 0, attemptedAt: attempt.attemptedAt };
+    const mastery = { objectiveId: attempt.objectiveId, state: "practicing" as const, unaidedCorrect: true,
+      delayedOrTransferCorrect: false, intervalStep: 1, algorithmVersion: "review-ladder-v1" as const, updatedAt: attempt.attemptedAt };
+    const mutation = api.saveQuestionAttemptTransaction(attempt, assessment, () => mastery,
+      { ...context, idempotencyKey: "late-read-attempt" });
+    const completedWithoutCourseRead = await Promise.race([
+      mutation.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
+    ]);
+    expect(completedWithoutCourseRead).toBe(true);
+    releaseCourseRead?.();
+    await fullRead;
+    expect((await api.listQuestionAttempts("page-1")).map((item) => item.id)).toEqual([attempt.id]);
+    expect(Reflect.get(api, "stateCache")).toBeUndefined();
+  });
+
+  it("returns a cached draft snapshot without cloning or merging the full course state", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const expected = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "snapshot-small-copy" });
+    const merge = vi.spyOn(api as unknown as { mergeDraftPageRecord: (state: unknown, record: unknown) => void }, "mergeDraftPageRecord")
+      .mockImplementation(() => { throw new Error("snapshot should not merge a whole draft record into course state"); });
+    const readsBefore = remote.requests.length;
+
+    await expect(api.getDraftSnapshotByPage("page-1")).resolves.toEqual(expected);
+
+    expect(merge).not.toHaveBeenCalled();
+    expect(remote.requests).toHaveLength(readsBefore);
+  });
+
+  it("reads question attempts from the activity note without reading the course index", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await api.saveQuestionSelection({ id: "activity-read-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" },
+    { ...context, idempotencyKey: "activity-read-selection" });
+    Reflect.set(api, "activityCache", undefined);
+    Reflect.set(api, "stateCache", undefined);
+    const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const before = remote.requests.length;
+
+    await expect(api.listQuestionAttempts("page-1")).resolves.toEqual([]);
+
+    expect(remote.requests.slice(before).map(({ method, path }) => [method, path])).toEqual([
+      ["GET", `/notes/${activityNoteId}/content`]
+    ]);
+  });
+
+  it("reloads after an ambiguous activity PUT and does not duplicate the attempt note on replay", async () => {
+    const remote = new FakeEtapi();
+    let activityNoteId = "";
+    let losePutResponses = false;
+    let lostResponses = 0;
+    const api = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const response = await remote.fetch(input, init);
+        const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+        if (losePutResponses && init?.method === "PUT" && path.endsWith(`/notes/${activityNoteId}/content`) && lostResponses < 3) {
+          lostResponses += 1;
+          return new Response("response lost after commit", { status: 503 });
+        }
+        return response;
+      }
+    });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    await api.saveQuestionSelection({ id: "ambiguous-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" },
+    { ...context, idempotencyKey: "ambiguous-selection" });
+    activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const attempt = { id: "ambiguous-attempt", selectionId: "ambiguous-selection", sessionId: "session-1",
+      courseReleaseId: pageRelease.id, pageId: "page-1", questionId: "question-1", objectiveId: "objective-1",
+      answer: "saved", correct: true, usedHintLevel: 0, attemptedAt: "2026-09-15T00:01:00.000Z" };
+    const assessment = { id: attempt.id, itemId: attempt.questionId, objectiveId: attempt.objectiveId,
+      answer: attempt.answer, correct: true, usedHintLevel: 0, attemptedAt: attempt.attemptedAt };
+    const mastery = { objectiveId: attempt.objectiveId, state: "practicing" as const, unaidedCorrect: true,
+      delayedOrTransferCorrect: false, intervalStep: 1, algorithmVersion: "review-ladder-v1" as const, updatedAt: attempt.attemptedAt };
+    const writeContext = { ...context, idempotencyKey: "ambiguous-attempt" };
+    losePutResponses = true;
+    await expect(api.saveQuestionAttemptTransaction(attempt, assessment, () => mastery, writeContext)).rejects.toThrow("READWEAVE_ETAPI_503");
+    expect(decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引"))).toMatchObject({ questionAttempts: [attempt] });
+    losePutResponses = false;
+
+    await expect(api.saveQuestionAttemptTransaction(attempt, assessment, () => mastery, writeContext)).resolves.toMatchObject({ attempt });
+
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引")) as { questionAttempts: unknown[] }).questionAttempts).toHaveLength(1);
+    expect(remote.countActiveNotesByTitle("作答 · page-1")).toBe(1);
+    const noteCreate = remote.requests.find((request) => request.method === "POST" && request.path.endsWith("/create-note")
+      && request.headers["idempotency-key"] === writeContext.idempotencyKey);
+    expect(noteCreate?.headers).toMatchObject({
+      "idempotency-key": writeContext.idempotencyKey,
+      "x-actor": context.actor,
+      "x-workspace-id": context.workspaceId
+    });
   });
 
   it("returns an idempotent replay without creating another remote revision or state write", async () => {

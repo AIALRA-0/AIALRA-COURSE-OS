@@ -144,6 +144,13 @@ interface EtapiActivityState {
   idempotency: ReadWeaveFileState["idempotency"];
 }
 
+interface EtapiActivityRoutes {
+  activityStateNoteId?: string;
+  releases: Map<string, Pick<CourseRelease, "id" | "courseId">>;
+  reviewNoteIds: Map<string, string>;
+  assessmentNoteIds: Map<string, string>;
+}
+
 interface EtapiCostIndexState {
   schemaVersion: "1.0.0";
   costEntries: GenerationCostEntry[];
@@ -215,6 +222,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: Promise<EtapiState>;
   private stateVersion = 0;
+  private activityCache?: { state: EtapiActivityState; expiresAt: number };
+  private activityReadInFlight?: Promise<EtapiActivityState>;
+  private activityVersion = 0;
+  private activityStateNoteId?: string;
+  private activityRoutes?: EtapiActivityRoutes;
   private readonly draftReadCache = new Map<string, { draft: LessonDraft; expiresAt: number }>();
   private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
   private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
@@ -485,8 +497,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {
     // Attempts live in the activity index; draft page hydration cannot change them.
-    const attempts = (await this.readStateReference()).questionAttempts;
-    return pageId ? attempts.filter((item) => item.pageId === pageId) : attempts;
+    const attempts = (await this.readActivityReference()).questionAttempts;
+    return structuredClone(pageId ? attempts.filter((item) => item.pageId === pageId) : attempts);
   }
 
   async saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection> {
@@ -503,38 +515,30 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt> {
-    return this.mutateActivity(async (state) => {
-      const replay = state.idempotency[context.idempotencyKey];
-      if (replay) return state.questionAttempts.find((item) => item.id === replay.objectId) ?? attempt;
-      const release = state.releases.find((item) => item.id === attempt.courseReleaseId);
-      if (release) {
-        const course = await this.ensureCourseProjection(state, release);
-        const draft = state.drafts.find((item) => item.pageId === attempt.pageId);
-        const projection = draft ? state.projections.drafts[draft.id] : undefined;
-        await this.createNote(projection?.sectionNoteIds.assessment ?? course.reviewNoteId, `作答 · ${attempt.pageId}`, `<pre>${escapeHtml(JSON.stringify(attempt, null, 2))}</pre>`, "text", undefined, {
-          courseOsType: "question_attempt", courseOsObjectId: attempt.id, courseOsPageId: attempt.pageId
-        });
+    let wasReplay = false;
+    const saved = await this.mutateActivity(async (state) => {
+      const replayEntry = state.idempotency[context.idempotencyKey];
+      if (replayEntry) {
+        wasReplay = true;
+        return state.questionAttempts.find((item) => item.id === replayEntry.objectId) ?? attempt;
       }
       state.questionAttempts.push(structuredClone(attempt));
       state.idempotency[context.idempotencyKey] = { kind: "question_attempt", objectId: attempt.id };
       return attempt;
     }, context);
+    await this.writeContext.run(context, () => this.writeQuestionAttemptNote(saved, undefined, undefined, wasReplay));
+    return saved;
   }
 
   async saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult> {
-    return this.mutateActivity(async (state) => {
-      const replay = state.idempotency[context.idempotencyKey];
-      if (replay) return replayQuestionAttemptTransaction(state, replay.objectId);
-      const mastery = reduceMastery(state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId));
-      const release = state.releases.find((item) => item.id === attempt.courseReleaseId);
-      if (release) {
-        const course = await this.ensureCourseProjection(state, release);
-        const draft = state.drafts.find((item) => item.pageId === attempt.pageId);
-        const projection = draft ? state.projections.drafts[draft.id] : undefined;
-        await this.createNote(projection?.sectionNoteIds.assessment ?? course.reviewNoteId, `作答 · ${attempt.pageId}`, `<pre>${escapeHtml(JSON.stringify({ attempt, assessmentAttempt, mastery }, null, 2))}</pre>`, "text", undefined, {
-          courseOsType: "question_attempt_transaction", courseOsObjectId: attempt.id, courseOsPageId: attempt.pageId
-        });
+    let wasReplay = false;
+    const saved = await this.mutateActivity(async (state) => {
+      const replayEntry = state.idempotency[context.idempotencyKey];
+      if (replayEntry) {
+        wasReplay = true;
+        return replayQuestionAttemptTransaction(state, replayEntry.objectId);
       }
+      const mastery = reduceMastery(state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId));
       state.questionAttempts.push(structuredClone(attempt));
       state.attempts.push(structuredClone(assessmentAttempt));
       const masteryIndex = state.mastery.findIndex((item) => item.objectiveId === mastery.objectiveId);
@@ -543,6 +547,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.idempotency[context.idempotencyKey] = { kind: "question_attempt_transaction", objectId: attempt.id };
       return { attempt: structuredClone(attempt), assessmentAttempt: structuredClone(assessmentAttempt), mastery: structuredClone(mastery) };
     }, context);
+    await this.writeContext.run(context, () => this.writeQuestionAttemptNote(saved.attempt, saved.assessmentAttempt, saved.mastery, wasReplay));
+    return saved;
   }
 
   async getReviewPlan(planId: string): Promise<ReviewPlan | undefined> {
@@ -698,12 +704,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listMastery(): Promise<MasteryRecord[]> {
-    return (await this.readState()).mastery;
+    return structuredClone((await this.readActivityReference()).mastery);
   }
 
   async listAssessmentAttempts(objectiveId?: string): Promise<AssessmentAttempt[]> {
-    const attempts = (await this.readState()).attempts;
-    return objectiveId ? attempts.filter((item) => item.objectiveId === objectiveId) : attempts;
+    const attempts = (await this.readActivityReference()).attempts;
+    return structuredClone(objectiveId ? attempts.filter((item) => item.objectiveId === objectiveId) : attempts);
   }
 
   async archiveResearch(archive: ResearchArchive, context: IdempotentWriteContext): Promise<ResearchArchive> {
@@ -764,14 +770,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const cached = this.draftReadCache.get(pageId);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.draft);
     const cachedLocated = this.draftPageRecordCache.get(pageId);
+    if (cachedLocated) {
+      const draft = cachedLocated.record.draft;
+      if (draft.workspaceId !== this.workspaceId) return undefined;
+      return structuredClone(draft);
+    }
     const [stateReference, located] = await Promise.all([
       this.readStateReference(),
-      cachedLocated ?? this.findDraftPageRecord(pageId)
+      this.findDraftPageRecord(pageId)
     ]);
-    const state = structuredClone(stateReference);
-    if (located) this.mergeDraftPageRecord(state, located.record);
-    const draft = state.drafts.find((item) => item.pageId === pageId);
-    return draft ? structuredClone(draft) : undefined;
+    const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === pageId);
+    if (!draft || draft.workspaceId !== this.workspaceId) return undefined;
+    return structuredClone(draft);
   }
 
   async saveDraft(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset): Promise<LessonDraft> {
@@ -2003,7 +2013,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       return this.stateCache.state;
     }
     const state = await this.stateReadInFlight;
-    return this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
+    const current = this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
+    if (this.activityCache) this.applyActivityState(current, this.activityCache.state);
+    return current;
   }
 
   private async readRemoteState(): Promise<EtapiState> {
@@ -2015,14 +2027,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     this.bootstrapStateContent = undefined;
     const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
     const state = normalizeState(parsed, projection);
+    this.cacheActivityRoutes(state);
     const activityStateNoteId = state.projections.activityStateNoteId;
     if (activityStateNoteId) {
-      const activity = decodeReadWeaveStateContent(await this.getContent(activityStateNoteId)) as Partial<EtapiActivityState>;
-      state.questionSelections = activity.questionSelections ?? state.questionSelections;
-      state.questionAttempts = activity.questionAttempts ?? state.questionAttempts;
-      state.attempts = activity.attempts ?? state.attempts;
-      state.mastery = activity.mastery ?? state.mastery;
-      state.idempotency = { ...state.idempotency, ...(activity.idempotency ?? {}) };
+      this.applyActivityState(state, await this.readActivityReference(activityStateNoteId));
     }
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     this.lastReadAt = new Date().toISOString();
@@ -2191,6 +2199,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private cacheDraftPageRecord(located: LocatedDraftPageRecord): void {
     this.draftPageRecordCache.set(located.record.pageId, located);
+    const assessmentNoteId = located.record.projection.sectionNoteIds.assessment;
+    if (assessmentNoteId) this.activityRoutes?.assessmentNoteIds.set(located.record.pageId, assessmentNoteId);
     this.draftPageRecordVersion += 1;
     this.draftPageRecordVersions.set(located.record.pageId, this.draftPageRecordVersion);
   }
@@ -2342,6 +2352,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       // Public reads still clone the values they return.
       this.stateVersion += 1;
       this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      this.cacheActivityRoutes(state);
+      if (state.projections.activityStateNoteId) this.commitActivityState(this.activityState(state));
       phase = "complete";
       succeeded = true;
     } catch (error) {
@@ -2371,6 +2383,150 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
   }
 
+  private activityStateFrom(value: Partial<EtapiActivityState>): EtapiActivityState {
+    return {
+      schemaVersion: "1.0.0",
+      questionSelections: value.questionSelections ?? [],
+      questionAttempts: value.questionAttempts ?? [],
+      attempts: value.attempts ?? [],
+      mastery: value.mastery ?? [],
+      idempotency: Object.fromEntries(Object.entries(value.idempotency ?? {})
+        .filter(([, entry]) => activityIdempotencyKinds.has(entry.kind)))
+    };
+  }
+
+  private applyActivityState(state: EtapiState, activity: EtapiActivityState): void {
+    state.questionSelections = activity.questionSelections;
+    state.questionAttempts = activity.questionAttempts;
+    state.attempts = activity.attempts;
+    state.mastery = activity.mastery;
+    for (const [key, entry] of Object.entries(state.idempotency)) {
+      if (activityIdempotencyKinds.has(entry.kind)) delete state.idempotency[key];
+    }
+    Object.assign(state.idempotency, activity.idempotency);
+  }
+
+  private cacheActivityRoutes(state: Partial<EtapiState>): void {
+    const projection = state.projections;
+    if (!projection) return;
+    if (projection.activityStateNoteId) this.activityStateNoteId = projection.activityStateNoteId;
+    const releases = new Map<string, Pick<CourseRelease, "id" | "courseId">>();
+    for (const release of state.releases ?? []) {
+      releases.set(release.id, { id: release.id, courseId: release.courseId });
+    }
+    const assessmentNoteIds = new Map<string, string>();
+    for (const draft of state.drafts ?? []) {
+      const noteId = projection.drafts[draft.id]?.sectionNoteIds.assessment;
+      if (noteId) assessmentNoteIds.set(draft.pageId, noteId);
+    }
+    for (const [pageId, located] of this.draftPageRecordCache) {
+      const noteId = located.record.projection.sectionNoteIds.assessment;
+      if (noteId) assessmentNoteIds.set(pageId, noteId);
+    }
+    this.activityRoutes = {
+      activityStateNoteId: projection.activityStateNoteId,
+      releases,
+      reviewNoteIds: new Map(Object.entries(projection.courses).map(([courseId, course]) => [courseId, course.reviewNoteId])),
+      assessmentNoteIds
+    };
+  }
+
+  private async readActivityReference(noteId?: string): Promise<EtapiActivityState> {
+    const activityNoteId = noteId ?? await this.findActivityStateNoteId();
+    if (!activityNoteId) {
+      const state = await this.readStateReference();
+      this.cacheActivityRoutes(state);
+      return this.activityState(state);
+    }
+    const now = Date.now();
+    if (this.activityCache && this.activityCache.expiresAt > now) return this.activityCache.state;
+    if (!this.activityReadInFlight) {
+      const versionAtReadStart = this.activityVersion;
+      const read = this.getContent(activityNoteId).then((content) =>
+        this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>));
+      this.activityReadInFlight = read;
+      void read.then((activity) => {
+        if (this.activityReadInFlight === read && this.activityVersion === versionAtReadStart) {
+          this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        }
+      }).catch(() => undefined).finally(() => {
+        if (this.activityReadInFlight === read) this.activityReadInFlight = undefined;
+      });
+    }
+    const activity = await this.activityReadInFlight;
+    return this.activityCache && this.activityCache.expiresAt > Date.now() ? this.activityCache.state : activity;
+  }
+
+  private async findActivityStateNoteId(): Promise<string | undefined> {
+    const known = this.activityStateNoteId ?? this.activityRoutes?.activityStateNoteId ?? this.stateCache?.state.projections.activityStateNoteId;
+    if (known) return known;
+    const query = new URLSearchParams({
+      search: `#courseOsActivityIndex="${this.workspaceId}"`,
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const matches = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results
+      .filter((note) => note.title === "01 Course OS 学习活动索引");
+    if (matches.length !== 1) return undefined;
+    this.activityStateNoteId = matches[0]!.noteId;
+    if (this.activityRoutes) this.activityRoutes.activityStateNoteId = this.activityStateNoteId;
+    return this.activityStateNoteId;
+  }
+
+  private async questionAttemptNoteParent(releaseId: string, pageId: string): Promise<string | undefined> {
+    let routes = this.activityRoutes ?? (await this.ensureWorkspace(), this.activityRoutes);
+    if (!routes?.releases.has(releaseId)) {
+      const state = await this.readStateReference(true);
+      this.cacheActivityRoutes(state);
+      routes = this.activityRoutes;
+    }
+    const release = routes?.releases.get(releaseId);
+    if (!release) return undefined;
+    const courseNoteId = routes?.reviewNoteIds.get(release.courseId);
+    if (!courseNoteId) {
+      const state = await this.readStateReference(true);
+      const fullRelease = state.releases.find((item) => item.id === releaseId);
+      if (!fullRelease) return undefined;
+      const course = await this.ensureCourseProjection(state, fullRelease);
+      this.cacheActivityRoutes(state);
+      return this.activityRoutes?.assessmentNoteIds.get(pageId) ?? course.reviewNoteId;
+    }
+    const pageNoteId = routes?.assessmentNoteIds.get(pageId);
+    if (pageNoteId) return pageNoteId;
+    const state = await this.readStateReference();
+    const draft = state.drafts.find((item) => item.pageId === pageId);
+    const assessmentNoteId = draft ? state.projections.drafts[draft.id]?.sectionNoteIds.assessment : undefined;
+    if (assessmentNoteId) this.activityRoutes?.assessmentNoteIds.set(pageId, assessmentNoteId);
+    return assessmentNoteId ?? courseNoteId;
+  }
+
+  private async writeQuestionAttemptNote(
+    attempt: QuestionAttempt,
+    assessmentAttempt: AssessmentAttempt | undefined,
+    mastery: MasteryRecord | undefined,
+    ensureExisting: boolean
+  ): Promise<void> {
+    const parentNoteId = await this.questionAttemptNoteParent(attempt.courseReleaseId, attempt.pageId);
+    if (!parentNoteId) return;
+    if (ensureExisting) {
+      const query = new URLSearchParams({
+        search: `#courseOsObjectId="${attempt.id}"`,
+        ancestorNoteId: this.config.parentNoteId,
+        ancestorDepth: "lt12",
+        fastSearch: "true"
+      });
+      if ((await this.request<SearchResponse>(`/notes?${query.toString()}`)).results.length > 0) return;
+    }
+    const body = assessmentAttempt && mastery
+      ? { attempt, assessmentAttempt, mastery }
+      : attempt;
+    const kind = assessmentAttempt ? "question_attempt_transaction" : "question_attempt";
+    await this.createNote(parentNoteId, `作答 · ${attempt.pageId}`, `<pre>${escapeHtml(JSON.stringify(body, null, 2))}</pre>`, "text", undefined, {
+      courseOsType: kind, courseOsObjectId: attempt.id, courseOsPageId: attempt.pageId
+    });
+  }
+
   private async initializeActivityState(state: EtapiState): Promise<void> {
     const note = await this.createNote(
       state.projections.courseRootNoteId,
@@ -2392,25 +2548,39 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     try {
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
-      const content = encodeReadWeaveStateContent(this.activityState(state));
+      const activity = this.activityState(state);
+      const content = encodeReadWeaveStateContent(activity);
       const putStartedAt = timingEnabled ? performance.now() : 0;
       await this.putContent(noteId, content);
       const putFinishedAt = timingEnabled ? performance.now() : 0;
       this.lastWriteAt = new Date().toISOString();
-      const mergeStartedAt = timingEnabled ? performance.now() : 0;
-      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
-      const mergeFinishedAt = timingEnabled ? performance.now() : 0;
+      this.commitActivityState(activity);
       this.stateVersion += 1;
-      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_state_write_timing", {
         encodeMs: Math.round(putStartedAt - encodeStartedAt), revisionAndPutMs: Math.round(putFinishedAt - putStartedAt),
-        cachedRecordsMergeMs: Math.round(mergeFinishedAt - mergeStartedAt),
-        cachedRecordCount: this.draftPageRecordCache.size, idempotencyKeyCount: Object.keys(state.idempotency).length
+        idempotencyKeyCount: Object.keys(activity.idempotency).length
       });
     } catch (error) {
       this.invalidateStateCache();
       throw error;
     }
+  }
+
+  private commitActivityState(activity: EtapiActivityState): void {
+    this.activityVersion += 1;
+    this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+    const cache = this.stateCache;
+    if (!cache) return;
+    const state = cache.state;
+    state.questionSelections = structuredClone(activity.questionSelections);
+    state.questionAttempts = structuredClone(activity.questionAttempts);
+    state.attempts = structuredClone(activity.attempts);
+    state.mastery = structuredClone(activity.mastery);
+    for (const [key, entry] of Object.entries(state.idempotency)) {
+      if (activityIdempotencyKinds.has(entry.kind)) delete state.idempotency[key];
+    }
+    Object.assign(state.idempotency, structuredClone(activity.idempotency));
+    cache.expiresAt = Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs;
   }
 
   private async readCostIndex(noteId: string): Promise<EtapiCostIndexState> {
@@ -2422,38 +2592,97 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
   }
 
-  private async mutateActivity<T>(change: (state: EtapiState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
+  private async mutateActivity<T>(change: (state: EtapiActivityState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
     return this.enqueueWrite(async () => {
       const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+      const mutationStartedAt = timingEnabled ? performance.now() : 0;
+      let activityReadMs = 0;
+      let activityCloneMs = 0;
+      let changeMs = 0;
+      let activityWriteMs = 0;
+      let replay = false;
       try {
-        const pendingReadStartedAt = timingEnabled ? performance.now() : 0;
-        const pendingRead = this.stateReadInFlight;
-        if (pendingRead) await pendingRead.catch(() => undefined);
-        const stateReferenceStartedAt = timingEnabled ? performance.now() : 0;
-        const stateReference = await this.readStateReference(true);
-        const cloneStartedAt = timingEnabled ? performance.now() : 0;
-        const state = structuredClone(stateReference);
-        const cloneFinishedAt = timingEnabled ? performance.now() : 0;
-        if (!state.projections.activityStateNoteId) await this.mergeDraftPageRecords(state);
-        const replay = Boolean(state.idempotency[context.idempotencyKey]);
-        const changeStartedAt = timingEnabled ? performance.now() : 0;
-        const result = structuredClone(await change(state));
-        const activityWriteStartedAt = timingEnabled ? performance.now() : 0;
-        if (!replay) {
-          if (state.projections.activityStateNoteId) await this.writeActivityState(state);
-          else await this.initializeActivityState(state);
+        const activityNoteId = await this.findActivityStateNoteId();
+        let result: T;
+        if (activityNoteId) {
+          const readStartedAt = timingEnabled ? performance.now() : 0;
+          const reference = await this.readActivityReference(activityNoteId);
+          if (timingEnabled) activityReadMs = performance.now() - readStartedAt;
+          const cloneStartedAt = timingEnabled ? performance.now() : 0;
+          const activity = structuredClone(reference);
+          if (timingEnabled) activityCloneMs = performance.now() - cloneStartedAt;
+          replay = Boolean(activity.idempotency[context.idempotencyKey]);
+          const changeStartedAt = timingEnabled ? performance.now() : 0;
+          result = structuredClone(await change(activity));
+          if (timingEnabled) changeMs = performance.now() - changeStartedAt;
+          if (!replay) {
+            const writeStartedAt = timingEnabled ? performance.now() : 0;
+            await this.writeActivityIndex(activityNoteId, activity);
+            if (timingEnabled) activityWriteMs = performance.now() - writeStartedAt;
+          }
+        } else {
+          // A legacy workspace has no separate activity note yet. Initialize
+          // it once from the root snapshot, without draft hydration/merging.
+          const readStartedAt = timingEnabled ? performance.now() : 0;
+          const source = await this.readStateReference(true);
+          if (timingEnabled) activityReadMs = performance.now() - readStartedAt;
+          const cloneStartedAt = timingEnabled ? performance.now() : 0;
+          const state = structuredClone(source);
+          if (timingEnabled) activityCloneMs = performance.now() - cloneStartedAt;
+          const activity = this.activityState(state);
+          replay = Boolean(activity.idempotency[context.idempotencyKey]);
+          const changeStartedAt = timingEnabled ? performance.now() : 0;
+          result = structuredClone(await change(activity));
+          if (timingEnabled) changeMs = performance.now() - changeStartedAt;
+          if (!replay) {
+            this.applyActivityState(state, activity);
+            const writeStartedAt = timingEnabled ? performance.now() : 0;
+            await this.initializeActivityState(state);
+            if (timingEnabled) activityWriteMs = performance.now() - writeStartedAt;
+          }
         }
         if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_mutation_timing", {
-          pendingReadWaitMs: Math.round(stateReferenceStartedAt - pendingReadStartedAt), stateReferenceWaitMs: Math.round(cloneStartedAt - stateReferenceStartedAt),
-          structuredCloneMs: Math.round(cloneFinishedAt - cloneStartedAt), changeMs: Math.round(activityWriteStartedAt - changeStartedAt),
-          activityWriteMs: Math.round(performance.now() - activityWriteStartedAt)
+          activityReadMs: Math.round(activityReadMs), activityCloneMs: Math.round(activityCloneMs),
+          changeMs: Math.round(changeMs), activityWriteMs: Math.round(activityWriteMs),
+          totalMs: Math.round(performance.now() - mutationStartedAt), replay
         });
         return result;
       } catch (error) {
-        this.invalidateStateCache();
+        // Activity writes do not mutate the course snapshot. Keep its last
+        // committed value available when the activity index write fails.
         throw error;
       }
     }, context);
+  }
+
+  private async writeActivityIndex(noteId: string, activity: EtapiActivityState): Promise<void> {
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+    const encodeStartedAt = timingEnabled ? performance.now() : 0;
+    const content = encodeReadWeaveStateContent(activity);
+    const putStartedAt = timingEnabled ? performance.now() : 0;
+    try {
+      await this.putContent(noteId, content);
+      this.lastWriteAt = new Date().toISOString();
+      this.commitActivityState(activity);
+      this.stateVersion += 1;
+      if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_state_write_timing", {
+        encodeMs: Math.round(putStartedAt - encodeStartedAt),
+        revisionAndPutMs: Math.round(performance.now() - putStartedAt),
+        idempotencyKeyCount: Object.keys(activity.idempotency).length
+      });
+    } catch (error) {
+      if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_state_write_timing", {
+        encodeMs: Math.round(putStartedAt - encodeStartedAt), revisionAndPutMs: Math.round(performance.now() - putStartedAt),
+        idempotencyKeyCount: Object.keys(activity.idempotency).length, succeeded: false
+      });
+      // ETAPI can commit a PUT and lose its response. Force the next mutation
+      // or readback to reload the authoritative activity index before replay.
+      this.invalidateStateCache();
+      this.activityVersion += 1;
+      this.activityCache = undefined;
+      this.activityReadInFlight = undefined;
+      throw error;
+    }
   }
 
   private async mutate<T>(change: (state: EtapiState) => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
@@ -2556,6 +2785,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
       this.bootstrapStateContent = content;
+      this.cacheActivityRoutes(parsed);
       return parsed.projections;
     }
     const root = await this.createNote(this.config.parentNoteId, "Course OS", "<h2>Course OS</h2><p>课程制作、学习和长期复习的权威知识树</p>", "text", undefined, {
@@ -2577,6 +2807,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const state = normalizeState(seed, projection);
     await this.materializeSeed(state);
     await this.putContent(stateNote.noteId, JSON.stringify(state, null, 2));
+    this.cacheActivityRoutes(state);
     return projection;
   }
 
@@ -2860,7 +3091,7 @@ function renderReadableLessonText(markdown: string): string {
   return output.join("");
 }
 
-function replayQuestionAttemptTransaction(state: ReadWeaveFileState, attemptId: string): QuestionAttemptTransactionResult {
+function replayQuestionAttemptTransaction(state: Pick<EtapiActivityState, "questionAttempts" | "attempts" | "mastery">, attemptId: string): QuestionAttemptTransactionResult {
   const attempt = state.questionAttempts.find((item) => item.id === attemptId);
   const assessmentAttempt = state.attempts.find((item) => item.id === attemptId);
   const mastery = assessmentAttempt && state.mastery.find((item) => item.objectiveId === assessmentAttempt.objectiveId);

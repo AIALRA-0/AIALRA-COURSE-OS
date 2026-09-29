@@ -33,6 +33,38 @@ describe("workspace tree and incremental import UI inputs", () => {
 });
 
 describe("saved lesson navigation", () => {
+  it("starts the same lazy reading-module import on learn entry and shares it with Suspense rendering", async () => {
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    expect(source).toContain("let explanationPanelLoad: Promise<ExplanationPanelModule> | undefined");
+    expect(source).toContain("return explanationPanelLoad ??= import(\"./ExplanationPanel.js\")");
+    expect(source).toContain("const ExplanationPanel = lazy(() => preloadExplanationPanel()");
+    expect(source).toContain('if (mode === "learn") void preloadExplanationPanel().catch(() => undefined)');
+    expect(source).toContain('const ReviewWorkspace = lazy(() => import("./ReviewWorkspace.js")');
+    expect(source).toContain('const StudioWorkspace = lazy(() => import("./StudioWorkspace.js")');
+  });
+
+  it("starts current image loading without waiting for the page lesson and schedules next before previous", async () => {
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    expect(source).toContain('imageResources.load(indexedPage.imageUrl, "high")');
+    const prefetchStart = source.indexOf("const prefetchPage = useCallback");
+    const prefetchEnd = source.indexOf("const previousImageScope", prefetchStart);
+    const prefetch = source.slice(prefetchStart, prefetchEnd);
+    expect(prefetch).toContain("settlePagePrefetch(snapshot, image");
+    expect(source).toContain("new BoundedPagePrefetchQueue(2)");
+    expect(source).toContain("prefetchPage(pageIndex + 1)");
+    expect(source).toContain("prefetchPage(pageIndex - 1)");
+    expect(source).toContain("onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)}");
+  });
+
+  it("keeps the rendered image tied to its URL while using the learn-only decoded image cache", async () => {
+    const source = await readFile(new URL("./SlideViewer.tsx", import.meta.url), "utf8");
+    expect(source).toContain("imageResources?: ImageResourceCache");
+    expect(source).toContain("key={imageUrl}");
+    expect(source).toContain("imageStatus?.url === imageUrl && imageStatus.state === \"ready\"");
+    expect(source).toContain("if (!imageResources || !imageUrl) return");
+    expect(source).toContain("if (active) setImageStatus({ url: imageUrl, state: \"ready\" })");
+  });
+
   it("keeps a bounded page snapshot cache scoped by release and rejects stale response identities", () => {
     const cache = new Map();
     const first = candidateDraft("release-a", "page-a", "First").page;
@@ -90,7 +122,7 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).toContain("loaded.id !== releaseId");
     expect(directReadEffect).not.toContain("defaultRelease");
     expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
-    expect(source).toContain("readSnapshot: () => readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
+    expect(source).toContain(": readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
     expect(source).toContain("readCurrentDraft: () => api.draft(page.id)");
   });
 

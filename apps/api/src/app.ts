@@ -817,13 +817,26 @@ export function createApp(dependencies: AppDependencies): Express {
         : await dependencies.readweave.getDraftByPage(request.params.id);
       const draft = candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined;
       const draftLookupMs = performance.now() - startedAt - sourceLookupMs;
-      const qaRecords = await dependencies.readweave.listQuestions(request.params.id);
+      // A lesson's teaching content must not wait for historical Q&A. The
+      // interactive section reads that small collection when it becomes visible.
+      const qaRecords = request.query.includeQa === "1"
+        ? await dependencies.readweave.listQuestions(request.params.id)
+        : [];
       response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}, qa;dur=${(performance.now() - startedAt - sourceLookupMs - draftLookupMs).toFixed(1)}`);
       response.json({
         releaseId: source.release.id,
         page: draft?.page ?? source.page,
         qaRecords
       });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/pages/:id/questions", async (request, response, next) => {
+    try {
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, request.params.id);
+      if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
+      response.json(await dependencies.readweave.listQuestions(request.params.id));
     } catch (error) { next(error); }
   });
 
@@ -1778,6 +1791,7 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get(/^\/api\/v1\/pages\/[^/]+\/question-attempts$/, async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const pageId = decodeURIComponent(request.path.slice("/api/v1/pages/".length, -"/question-attempts".length));
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const sessionId = asOptionalString(request.query.sessionId);
@@ -1786,9 +1800,12 @@ export function createApp(dependencies: AppDependencies): Express {
       const candidate = cachedLearningSession(workspaceId, sessionId) ?? await dependencies.operations.findLearningSession(sessionId);
       const session = candidate && (candidate.workspaceId ?? workspaceId) === workspaceId ? candidate : undefined;
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      const sessionLookupMs = performance.now() - startedAt;
       const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
       if (!release?.pageIds.includes(pageId)) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
+      const releaseLookupMs = performance.now() - startedAt - sessionLookupMs;
       const attempts = await dependencies.readweave.listQuestionAttempts(pageId);
+      response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, attempts;dur=${(performance.now() - startedAt - sessionLookupMs - releaseLookupMs).toFixed(1)}`);
       response.json(attempts.filter((item) => item.sessionId === sessionId && item.selectionId === selectionId && item.courseReleaseId === release.id));
     } catch (error) { next(error); }
   });
