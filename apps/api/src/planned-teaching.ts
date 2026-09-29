@@ -626,15 +626,18 @@ export async function writePlannedLesson(
       && typeof initialCandidate.fullExplanationMarkdown === "string"
       && !!initialCandidate.fullExplanationMarkdown.trim();
     const onlyQuestionShapeErrors = initialShapeIssues.every(issue => issue.startsWith("result.questions"));
-    const repairFields = validCore && incompleteQuestions && onlyQuestionShapeErrors
-      ? ["questions"] : repairFieldsFor(initialShapeIssues, [], incompleteQuestions);
+    const fullPackageRepair = !!initialParsed.issue || !initialCandidate;
+    const repairFields = fullPackageRepair
+      ? Object.keys(schemaProperties)
+      : validCore && incompleteQuestions && onlyQuestionShapeErrors
+        ? ["questions"] : repairFieldsFor(initialShapeIssues, [], incompleteQuestions);
     const questionOnlyRepair = repairFields.length === 1 && repairFields[0] === "questions";
     trace.repairDiagnostic = {
       initialShapeIssues,
       initialQuestionCount: Array.isArray(initialCandidate?.questions) ? initialCandidate.questions.length : 0,
       targetFields: repairFields
     };
-    const repairSchema = !initialParsed.issue && repairFields.length > 0 ? {
+    const repairSchema = !fullPackageRepair && repairFields.length > 0 ? {
       type: "object",
       properties: Object.fromEntries(repairFields.map(field => [field, field === "questions"
         ? { ...schemaProperties.questions, minItems: 4, maxItems: 4 }

@@ -429,6 +429,29 @@ describe("planned teaching core writer", () => {
     expect(result.trace.formatWarnings).toBeUndefined();
   });
 
+  it("requests the complete package after an unparseable initial answer", async () => {
+    const phases: string[] = [];
+    const repairFields = Object.keys((teachingPackageSchema as { properties: Record<string, unknown> }).properties);
+    const complete = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      phases.push(request.phase);
+      if (request.phase === "plan") return "先解释输入";
+      if (request.phase === "teaching") return "{malformed initial JSON";
+
+      const repairPrompt = JSON.parse(request.prompt) as { targetFields?: string[] };
+      expect(repairPrompt.targetFields).toEqual(repairFields);
+      expect(Object.keys(request.schema?.properties as Record<string, unknown>)).toEqual(repairFields);
+      expect(request.schema).toBe(teachingPackageSchema);
+      return complete;
+    });
+
+    expect(phases).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.mainContentMarkdown).toBe(complete.mainContentMarkdown);
+    expect(result.content.fullExplanationMarkdown).toContain("输入是处理开始时已经具备的信息");
+    expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
+    expect(result.content.questions).toHaveLength(4);
+  });
+
   it("records nonblocking style warnings without spending a model repair call", async () => {
     const calls: string[] = [];
     const formatted = teachingPackage();
