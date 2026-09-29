@@ -91,7 +91,7 @@ function LessonSectionView({ section, number, children }: { section?: LessonSect
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {
-  return <section className="pseudocode-walkthrough"><h4>伪代码逐行讲解</h4><p>先看每一行直接做了什么，再展开查看它读取和修改了哪些状态</p><div className="line-list">{lines.map((line) => <details key={line.id} className="code-line" open={line.lineNumber <= 3}><summary data-action="pseudocode-toggle"><span className="line-number">{line.lineNumber}</span><div className="code-line-heading"><code>{line.code}</code><span className="code-line-label">这一行做什么</span><strong>{teacherSummaryFor(line)}</strong></div></summary><div className="code-line-body"><div className="code-line-state"><div><span>执行前</span><p>{line.preState}</p></div><span className="code-line-arrow" aria-hidden="true">→</span><div><span>执行后</span><p>{line.postState}</p></div></div><dl><div><dt>读取对象</dt><dd>{line.reads.length ? line.reads.join("、") : "不读取运行变量"}</dd></div><div><dt>修改对象</dt><dd>{line.writes.length ? line.writes.join("、") : "不修改运行变量"}</dd></div><div><dt>副作用</dt><dd>{line.sideEffects.length ? line.sideEffects.join("；") : "没有额外副作用"}</dd></div><div><dt>复杂度</dt><dd>{line.complexityRelation}</dd></div></dl></div></details>)}</div></section>;
+  return <section className="pseudocode-walkthrough"><h4>伪代码逐行讲解</h4><p>先看每一行直接做了什么，再展开查看它读取和修改了哪些状态</p><div className="line-list">{lines.map((line) => <details key={line.id} className="code-line" open={line.lineNumber <= 3}><summary data-action="pseudocode-toggle"><span className="line-number">{line.lineNumber}</span><div className="code-line-heading"><code>{line.code}</code><span className="code-line-label">这一行做什么</span><strong><Markdown inline>{teacherSummaryFor(line)}</Markdown></strong></div></summary><div className="code-line-body"><div className="code-line-state"><div><span>执行前</span><p><Markdown inline>{line.preState}</Markdown></p></div><span className="code-line-arrow" aria-hidden="true">→</span><div><span>执行后</span><p><Markdown inline>{line.postState}</Markdown></p></div></div><dl><div><dt>读取对象</dt><dd>{line.reads.length ? <Markdown inline>{line.reads.join("、")}</Markdown> : "不读取运行变量"}</dd></div><div><dt>修改对象</dt><dd>{line.writes.length ? <Markdown inline>{line.writes.join("、")}</Markdown> : "不修改运行变量"}</dd></div><div><dt>副作用</dt><dd>{line.sideEffects.length ? <Markdown inline>{line.sideEffects.join("；")}</Markdown> : "没有额外副作用"}</dd></div><div><dt>复杂度</dt><dd><Markdown inline>{line.complexityRelation}</Markdown></dd></div></dl></div></details>)}</div></section>;
 }
 
 function teacherSummaryFor(line: PseudoCodeLine): string {
@@ -134,9 +134,57 @@ function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePage
 }
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
   const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [feedbackState, setFeedbackState] = useState<Record<string, "correct" | "incorrect" | "unverified" | "error">>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(false); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
-  const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>());
+  const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>()); const selectionRequestSerial = useRef(0);
+  const restoreSavedAnswers = (selected: QuestionSelection, selectedQuestions: QuestionBankItem[], serial: number) => {
+    if (!sessionId) return;
+    void api.questionAttempts(page.id, sessionId, selected.id).then((attempts) => {
+      if (serial !== selectionRequestSerial.current) return;
+      const latest = new Map(attempts.sort((a, b) => a.attemptedAt.localeCompare(b.attemptedAt)).map((item) => [item.questionId, item]));
+      setAnswers((current) => {
+        const next = { ...current };
+        for (const [id, attempt] of latest) if (!next[id]) next[id] = attempt.answer;
+        return next;
+      });
+      setFeedback((current) => {
+        const next = { ...current };
+        for (const item of selectedQuestions) if (latest.has(item.id) && !next[item.id]) next[item.id] = item.explanation;
+        return next;
+      });
+      setFeedbackState((current) => {
+        const next = { ...current };
+        for (const [id, attempt] of latest) if (!next[id]) next[id] = attempt.correct === null ? "unverified" : attempt.correct ? "correct" : "incorrect";
+        return next;
+      });
+    }).catch(() => undefined);
+  };
   useEffect(() => { setAvailable(page.questionBank?.filter((item) => item.status === "approved").length ?? 0); setDraftCount(page.questionBank?.filter((item) => item.status === "draft").length ?? 0); }, [page.id, page.questionBank]);
-  useEffect(() => { if (!sessionId) return; setLoading(true); api.selectQuestions(page.id, sessionId).then((result) => { setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0); }).catch((error) => setFeedback({ load: error instanceof Error ? error.message : "随机问题加载失败" })).finally(() => setLoading(false)); }, [page.id, sessionId]);
+  useEffect(() => {
+    if (!sessionId) return;
+    const serial = ++selectionRequestSerial.current;
+    setLoading(true);
+    setSelection(undefined);
+    setQuestions([]);
+    void api.selectQuestions(page.id, sessionId).then((result) => {
+      if (serial !== selectionRequestSerial.current) return;
+      setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
+      restoreSavedAnswers(result.selection, result.questions, serial);
+    }).catch((error) => { if (serial === selectionRequestSerial.current) setFeedback({ load: error instanceof Error ? error.message : "随机问题加载失败" }); })
+      .finally(() => { if (serial === selectionRequestSerial.current) setLoading(false); });
+    return () => { selectionRequestSerial.current += 1; };
+  }, [page.id, sessionId]);
+  const chooseAnotherPair = async () => {
+    if (!sessionId || loading) return;
+    const serial = ++selectionRequestSerial.current;
+    setLoading(true);
+    try {
+      const result = await api.selectQuestions(page.id, sessionId, crypto.randomUUID());
+      if (serial !== selectionRequestSerial.current) return;
+      setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
+      setAnswers({}); setFeedback({}); setFeedbackState({});
+      restoreSavedAnswers(result.selection, result.questions, serial);
+    } catch (error) { if (serial === selectionRequestSerial.current) setFeedback({ load: error instanceof Error ? error.message : "换题失败" }); }
+    finally { if (serial === selectionRequestSerial.current) setLoading(false); }
+  };
   const submit = async (item: QuestionBankItem) => {
     const answer = answers[item.id]?.trim();
     if (!selection || !sessionId || !answer || pendingRef.current.has(item.id)) return;
@@ -163,7 +211,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
   if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /> <p className="empty-inline">学习会话建立后会抽取 1道理解题和 1道选择题</p></>;
   if (loading) return <p className="empty-inline">正在从 ReadWeave 抽取问题</p>;
   if (!questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || "本页题库尚未达到发布要求，请从制作模式补齐题目"}</p></>;
-  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!answers[item.id]?.trim() || pending} aria-busy={pending} title={!answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div></>;
+  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!answers[item.id]?.trim() || pending} aria-busy={pending} title={!answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : <span>提交并保存记录</span>}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div><button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button></>;
 }
 
 function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {

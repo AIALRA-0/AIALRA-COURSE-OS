@@ -317,6 +317,7 @@ export const api = {
     questionSelectionRequests.set(cacheKey, pending);
     return pending;
   },
+  questionAttempts: (pageId: string, sessionId: string, selectionId: string) => request<QuestionAttempt[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/question-attempts?sessionId=${encodeURIComponent(sessionId)}&selectionId=${encodeURIComponent(selectionId)}`),
   refillQuestions: (pageId: string, baseRevision: number) => request<QuestionRefillResponse>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions:refill`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },

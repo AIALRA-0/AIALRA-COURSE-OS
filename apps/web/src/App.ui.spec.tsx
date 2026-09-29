@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
+import type { ImportTaskSummary } from "./types.js";
+import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageSnapshotCacheKey, isCurrentPageSnapshot, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -32,6 +33,42 @@ describe("workspace tree and incremental import UI inputs", () => {
 });
 
 describe("saved lesson navigation", () => {
+  it("keeps a bounded page snapshot cache scoped by release and rejects stale response identities", () => {
+    const cache = new Map();
+    const first = candidateDraft("release-a", "page-a", "First").page;
+    const refreshed = candidateDraft("release-a", "page-a", "Updated").page;
+    const next = rememberPageSnapshot(cache, "release-a", first, 2);
+    const refreshedCache = rememberPageSnapshot(next, "release-a", refreshed, 2);
+    const boundedCache = rememberPageSnapshot(refreshedCache, "release-a", candidateDraft("release-a", "page-b", "B").page, 2);
+    const evictedCache = rememberPageSnapshot(boundedCache, "release-a", candidateDraft("release-a", "page-c", "C").page, 2);
+
+    expect(cache.size).toBe(0);
+    expect(refreshedCache.get(pageSnapshotCacheKey("release-a", "page-a"))?.contentHash).not.toBe(next.get(pageSnapshotCacheKey("release-a", "page-a"))?.contentHash);
+    expect(evictedCache.size).toBe(2);
+    expect(evictedCache.has(pageSnapshotCacheKey("release-a", "page-a"))).toBe(false);
+    expect(evictedCache.has(pageSnapshotCacheKey("release-b", "page-a"))).toBe(false);
+    expect(isCurrentPageSnapshot({ releaseId: "release-a", pageId: "page-old" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-old" })).toBe(false);
+    expect(isCurrentPageSnapshot({ releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" })).toBe(true);
+  });
+
+  it("marks failed update pages until a later same-version task completes them, even when old pages remain readable", () => {
+    const makePage = (id: string, readable: boolean) => ({
+      id, pageNumber: 1, title: id, imageUrl: "/page.png", anchors: [], atoms: [],
+      blocks: readable ? [{ id: `${id}:core`, kind: "core", markdown: "Readable text", sourceAnchorIds: [], atomIds: [] }] : [],
+      coverageRequirements: [], coverageClaims: [], quality: { highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: readable, issues: [] }
+    }) as unknown as PageLesson;
+    const material = { id: "material-a", pageIds: ["material-a:page:1"], pages: [makePage("material-a:page:1", false)], lifecycle: "draft_source" } as unknown as CourseRelease;
+    const failed = { id: "failed-task", workspaceId: "personal", originalName: "source.pdf", state: "ready", generationState: "failed", createdAt: "2026-01-01T00:00:00Z", materialVersionId: material.id, pageIds: material.pageIds, generationFailedPageIds: [material.pageIds[0]!] } as ImportTaskSummary;
+    const recovered = { id: "recovery-task", workspaceId: "personal", originalName: "source.pdf", state: "ready", generationState: "completed", createdAt: "2026-01-02T00:00:00Z", materialVersionId: material.id, pageIds: material.pageIds, generationCompletedPageIds: [material.pageIds[0]!] } as ImportTaskSummary;
+
+    expect(isUnresolvedTaskFailure(failed, [failed], [material])).toBe(true);
+    expect(isUnresolvedTaskFailure(failed, [failed, recovered], [material])).toBe(false);
+    const readableBase = { ...material, id: "readable-base", lifecycle: "published", pages: [makePage(material.pageIds[0]!, true)] } as unknown as CourseRelease;
+    const candidateWithReadableBase = { ...material, candidateBaseReleaseId: readableBase.id } as CourseRelease;
+    expect(isUnresolvedTaskFailure(failed, [failed], [candidateWithReadableBase, readableBase])).toBe(true);
+    expect(isUnresolvedTaskFailure({ ...failed, materialVersionId: undefined, pageIds: ["unknown-page"] }, [failed], [material])).toBe(false);
+  });
+
   it("lets an explicit lesson link take precedence over a task left in local storage", () => {
     expect(resolveActiveImportId("#mode=learn&release=release-1&page=4", "old-import")).toBeUndefined();
   });
@@ -53,7 +90,7 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).toContain("loaded.id !== releaseId");
     expect(directReadEffect).not.toContain("defaultRelease");
     expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
-    expect(source).toContain("readSnapshot: () => api.draftSnapshot(page.id)");
+    expect(source).toContain("readSnapshot: () => readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
     expect(source).toContain("readCurrentDraft: () => api.draft(page.id)");
   });
 

@@ -200,6 +200,21 @@ async function withVaultCredentialStatus<T extends ModelProviderConfig | SearchP
 
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
+  const learningSessionCache = new Map<string, LearningSession>();
+  const rememberLearningSession = (workspaceId: string, session: LearningSession) => {
+    const key = JSON.stringify([workspaceId, session.id]);
+    learningSessionCache.delete(key);
+    learningSessionCache.set(key, structuredClone(session));
+    if (learningSessionCache.size > 256) learningSessionCache.delete(learningSessionCache.keys().next().value!);
+  };
+  const cachedLearningSession = (workspaceId: string, sessionId: string) => {
+    const key = JSON.stringify([workspaceId, sessionId]);
+    const session = learningSessionCache.get(key);
+    if (!session) return undefined;
+    learningSessionCache.delete(key);
+    learningSessionCache.set(key, session);
+    return structuredClone(session);
+  };
   const credentialVault = dependencies.credentialVault ?? new SecretVault(join(dependencies.dataDir, "settings-secrets.json"));
   dependencies.credentialVault ??= credentialVault;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024, files: 1 } });
@@ -1121,6 +1136,7 @@ export function createApp(dependencies: AppDependencies): Express {
             parentNodeId: item.parentNodeId,
             originalName: item.originalName,
             state: item.state,
+            materialVersionId: item.materialVersionId,
             autoGenerate: item.autoGenerate,
             generationState: plan?.retryOfPlanId ? item.generationState : plan?.state ?? item.generationState,
             pageIds: item.pageIds,
@@ -1603,12 +1619,16 @@ export function createApp(dependencies: AppDependencies): Express {
       const release = await getWorkspaceRelease(dependencies.readweave, releaseId, workspaceId);
       if (!release) return sendError(request, response, 404, "RELEASE_NOT_FOUND", "没有找到要学习的课程版本", false);
       const requestedId = asOptionalString(request.body.sessionId);
-      const existing = requestedId ? await dependencies.operations.findLearningSession(requestedId) : undefined;
+      const existing = requestedId
+        ? cachedLearningSession(workspaceId, requestedId) ?? await dependencies.operations.findLearningSession(requestedId)
+        : undefined;
       if (existing && existing.courseReleaseId === releaseId && (existing.workspaceId ?? workspaceId) === workspaceId) {
+        rememberLearningSession(workspaceId, existing);
         return response.status(200).json(existing);
       }
       const created: LearningSession = { id: randomUUID(), workspaceId, courseReleaseId: releaseId, currentPageId: release.pageIds[0] ?? "", explanationScroll: 0, zoom: 1, panX: 0, panY: 0, updatedAt: new Date().toISOString() };
       const session = await dependencies.operations.createLearningSession(created);
+      rememberLearningSession(workspaceId, session);
       response.status(requestedId ? 200 : 201).json(session);
     } catch (error) { next(error); }
   });
@@ -1621,6 +1641,7 @@ export function createApp(dependencies: AppDependencies): Express {
       for (const key of allowed) if (request.body[key] !== undefined) Object.assign(patch, { [key]: request.body[key] });
       const session = await dependencies.operations.patchLearningSession(request.params.id, workspaceId, patch);
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      rememberLearningSession(workspaceId, session);
       response.json(session);
     } catch (error) { next(error); }
   });
@@ -1654,9 +1675,11 @@ export function createApp(dependencies: AppDependencies): Express {
       const pageId = decodeURIComponent(request.path.slice("/api/v1/pages/".length, -"/questions:select".length));
       const sessionId = String(request.body.sessionId || "");
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const candidateSession = await dependencies.operations.findLearningSession(sessionId);
+      const candidateSession = cachedLearningSession(workspaceId, sessionId)
+        ?? await dependencies.operations.findLearningSession(sessionId);
       const session = candidateSession && (candidateSession.workspaceId ?? workspaceId) === workspaceId ? candidateSession : undefined;
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      rememberLearningSession(workspaceId, session);
       const sessionLookupMs = performance.now() - startedAt;
       const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
       const releaseLookupMs = performance.now() - startedAt - sessionLookupMs;
@@ -1668,11 +1691,13 @@ export function createApp(dependencies: AppDependencies): Express {
       const count = Math.max(1, Math.min(4, Number(request.body.count || 2)));
       const bank = page.questionBank ?? legacyQuestionBank(release, page.id);
       const questions = selectQuestionBank(bank, seed, count);
+      requireIdempotencyKey(request);
+      const selectionKey = `question-selection:${sha256Text(stableStringify({ workspaceId, sessionId: session.id, releaseId: release.id, pageId: page.id, seed, questionIds: questions.map((item) => item.id) }))}`;
       const selection: QuestionSelection = {
         id: randomUUID(), sessionId: session.id, courseReleaseId: release.id, pageId: page.id, seed,
         questionIds: questions.map((item) => item.id), createdAt: new Date().toISOString()
       };
-      const saved = await dependencies.readweave.saveQuestionSelection(selection, writeContext(request, requireIdempotencyKey(request)));
+      const saved = await dependencies.readweave.saveQuestionSelection(selection, writeContext(request, selectionKey));
       response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=${(performance.now() - startedAt - sessionLookupMs - releaseLookupMs - pageLookupMs).toFixed(1)}`);
       response.status(201).json({
         selection: saved,
@@ -1740,6 +1765,23 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!(await getWorkspaceRelease(dependencies.readweave, current.courseReleaseId, workspaceId))) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到属于当前工作区的问答记录", false);
       const saved = await dependencies.readweave.updateQuestion({ ...current, reviewPolicy: policy as "include" | "exclude" }, Number(request.body.baseRevision ?? current.revision), writeContext(request, requireIdempotencyKey(request)));
       response.json(saved);
+    } catch (error) { next(error); }
+  });
+
+  app.get(/^\/api\/v1\/pages\/[^/]+\/question-attempts$/, async (request, response, next) => {
+    try {
+      const pageId = decodeURIComponent(request.path.slice("/api/v1/pages/".length, -"/question-attempts".length));
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const sessionId = asOptionalString(request.query.sessionId);
+      const selectionId = asOptionalString(request.query.selectionId);
+      if (!sessionId || !selectionId) return sendError(request, response, 422, "SELECTION_REQUIRED", "需要指定学习会话和选题记录", false);
+      const candidate = cachedLearningSession(workspaceId, sessionId) ?? await dependencies.operations.findLearningSession(sessionId);
+      const session = candidate && (candidate.workspaceId ?? workspaceId) === workspaceId ? candidate : undefined;
+      if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
+      if (!release?.pageIds.includes(pageId)) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
+      const attempts = await dependencies.readweave.listQuestionAttempts(pageId);
+      response.json(attempts.filter((item) => item.sessionId === sessionId && item.selectionId === selectionId && item.courseReleaseId === release.id));
     } catch (error) { next(error); }
   });
 

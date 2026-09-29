@@ -42,4 +42,28 @@ describe("lesson generation readiness badge", () => {
     expect(unfinished).toContain('class="quality-badge hold">讲解草稿</span>');
     expect(published).toContain('class="quality-badge pass">讲解已生成</span>');
   });
+
+  it("renders pseudocode explanation math while preserving the code line", () => {
+    const lesson = page(true);
+    lesson.atoms = [{
+      kind: "pseudocode_line",
+      id: "line-1",
+      lineNumber: 1,
+      code: "while (n > 0) do",
+      semantic: "每轮处理一个元素",
+      teacherSummary: "每轮减少一个元素，因此为 $O(n)$。",
+      reads: ["$n$"],
+      writes: [],
+      preState: "当前规模为 $n$。",
+      postState: "规模变成 $n-1$。",
+      sideEffects: [],
+      complexityRelation: "$O(n)$"
+    }];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+
+    expect(markup).toContain("<code>while (n &gt; 0) do</code>");
+    expect(markup).toContain("katex");
+    expect(markup).toContain("O(n)");
+    expect(markup).not.toContain("katex-error");
+  });
 });

@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { Markdown, normalizeStandaloneMathBlocks } from "./Markdown.js";
+import { Markdown, normalizeLegacyMathDelimiters, normalizeStandaloneMathBlocks } from "./Markdown.js";
 import { displayMisconception } from "./ExplanationPanel.js";
 
 describe("lesson math rendering", () => {
@@ -67,6 +67,70 @@ describe("lesson math rendering", () => {
     expect(html.match(/<td>/g)).toHaveLength(4);
     expect(html).toContain('class="katex"');
     expect(html).not.toContain("katex-error");
+  });
+
+  it("keeps vertical bars inside inline math from splitting table cells", () => {
+    const html = renderToStaticMarkup(createElement(Markdown, { children: "正文复杂度为 $O(|V|+|E|)$。\n\n| Method | Complexity |\n| --- | --- |\n| Scan | $O(|V|+|E|)$ |\n| Pair search | $O(|A||B|)$ |\n| Matrix | $\\begin{pmatrix}1&0\\\\0&1\\end{pmatrix}$ |" }));
+    expect(html.match(/<tr>/g)).toHaveLength(4);
+    expect(html.match(/<td>/g)).toHaveLength(6);
+    expect(html.match(/class="katex"/g)).toHaveLength(4);
+    expect(html).toContain("katex-html");
+    expect(html).not.toContain("katex-error");
+  });
+
+  it("distinguishes stored Chapter 2 math delimiters from exact corrected candidates", () => {
+    const pairHeader = String.raw`| pair | $$E_x$-$I_x$$ | $$E_y$-$I_y$$ | $c(x,y)$ | gain |
+| --- | --- | --- | --- | --- |
+| (x,y) | 1 | 2 | 3 | 4 |`;
+    const correctedPairHeader = String.raw`| pair | $E_x-I_x$ | $E_y-I_y$ | $c(x,y)$ | gain |
+| --- | --- | --- | --- | --- |
+| (x,y) | 1 | 2 | 3 | 4 |`;
+    const partitionHeader = String.raw`| $$P_A$$ | $$P_B$$ | cutsize | ratio cut |
+| --- | --- | --- | --- |
+| A | B | 3 | 0.5 |`;
+    const correctedPartitionHeader = String.raw`| $P_A$ | $P_B$ | cutsize | ratio cut |
+| --- | --- | --- | --- |
+| A | B | 3 | 0.5 |`;
+    const renderStats = (source: string) => {
+      const html = renderToStaticMarkup(createElement(Markdown, { children: source }));
+      return {
+        rows: html.match(/<tr>/g)?.length ?? 0,
+        headers: html.match(/<th>/g)?.length ?? 0,
+        cells: html.match(/<td>/g)?.length ?? 0,
+        katex: html.match(/class="katex"/g)?.length ?? 0,
+        katexErrors: html.match(/katex-error/g)?.length ?? 0
+      };
+    };
+
+    expect(normalizeLegacyMathDelimiters(pairHeader)).toBe(pairHeader);
+    expect(normalizeLegacyMathDelimiters(partitionHeader)).toBe(partitionHeader);
+    expect(renderStats(pairHeader)).toEqual({ rows: 2, headers: 5, cells: 5, katex: 1, katexErrors: 2 });
+    expect(renderStats(correctedPairHeader)).toEqual({ rows: 2, headers: 5, cells: 5, katex: 3, katexErrors: 0 });
+    expect(renderStats(partitionHeader)).toEqual({ rows: 2, headers: 4, cells: 4, katex: 2, katexErrors: 0 });
+    expect(renderStats(correctedPartitionHeader)).toEqual({ rows: 2, headers: 4, cells: 4, katex: 2, katexErrors: 0 });
+  });
+
+  it("distinguishes literal doubled backslashes from a single TeX inline delimiter in a table cell", () => {
+    const doubledSlash = String.raw`| item | value |
+| --- | --- |
+| sample | \\(g\\) |`;
+    const singleSlash = String.raw`| item | value |
+| --- | --- |
+| sample | \(g\) |`;
+    const renderStats = (source: string) => {
+      const html = renderToStaticMarkup(createElement(Markdown, { children: source }));
+      return {
+        cells: html.match(/<td>/g)?.length ?? 0,
+        katex: html.match(/class="katex"/g)?.length ?? 0,
+        visible: [...html.matchAll(/<td>(.*?)<\/td>/gu)].map((match) => match[1])
+      };
+    };
+
+    expect(renderStats(doubledSlash)).toEqual({ cells: 2, katex: 0, visible: ["sample", "$g$"] });
+    const singleSlashResult = renderStats(singleSlash);
+    expect(singleSlashResult.cells).toBe(2);
+    expect(singleSlashResult.katex).toBe(1);
+    expect(singleSlashResult.visible[1]).toContain("katex");
   });
 
   it("keeps teaching subheadings below the page and section headings", () => {

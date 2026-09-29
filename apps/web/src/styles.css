@@ -1479,10 +1479,19 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .choice-copy .katex { font-size: 1em; }
 
 /* Background tasks live in the tree; the task page occupies the workspace instead of covering it. */
-.tree-task-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
-.tree-task-section.tree-task-nested { margin: 0 0 6px 20px; padding: 0; border: 0; border-left: 1px solid var(--line); }
-.tree-task-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 9px 7px; color: var(--muted); font-size: 11px; font-weight: 700; }
-.tree-task-heading > span:last-child { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--soft); color: var(--faint); text-align: center; font: 10px "IBM Plex Mono", monospace; }
+.tree-task-section { display: grid; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tree-task-group { min-width: 0; }
+.tree-task-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 9px 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.tree-task-count { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--soft); color: var(--faint); text-align: center; font: 10px "IBM Plex Mono", monospace; }
+.tree-task-attention .tree-task-count { background: color-mix(in srgb, var(--red) 10%, var(--panel)); color: var(--red); }
+.tree-task-history, .tree-task-attention { min-width: 0; }
+.tree-task-history > summary, .tree-task-attention > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 9px; border-radius: 6px; color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer; list-style: none; }
+.tree-task-attention > summary { color: var(--red); }
+.tree-task-history > summary::-webkit-details-marker, .tree-task-attention > summary::-webkit-details-marker { display: none; }
+.tree-task-history > summary::before, .tree-task-attention > summary::before { width: 12px; color: var(--faint); content: "›"; font-size: 15px; line-height: 1; }
+.tree-task-history[open] > summary::before, .tree-task-attention[open] > summary::before { content: "⌄"; }
+.tree-task-history > summary:hover, .tree-task-history > summary:focus-visible, .tree-task-attention > summary:hover, .tree-task-attention > summary:focus-visible { background: var(--soft); outline: none; }
+.tree-task-history > .tree-task-list, .tree-task-attention > .tree-task-list { margin-top: 2px; }
 .tree-task-list { display: grid; gap: 3px; }
 .tree-task-row { width: 100%; min-width: 0; min-height: 48px; display: grid; grid-template-columns: 9px minmax(0, 1fr) 14px; align-items: center; gap: 9px; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); text-align: left; cursor: pointer; }
 .tree-task-row:hover, .tree-task-row:focus-visible { border-color: var(--line); background: var(--soft); outline: none; }

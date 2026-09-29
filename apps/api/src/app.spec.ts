@@ -1021,7 +1021,7 @@ describe("Course OS API", () => {
     expect(detail.body).toMatchObject({ generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
     const listing = await request(app).get("/api/v1/imports").expect(200);
     expect(listing.body.find((item: ImportRecord) => item.id === "import-continuation-test"))
-      .toMatchObject({ generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
+      .toMatchObject({ materialVersionId: release.id, generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
     const replay = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
       .set("Idempotency-Key", "partial-snapshot-retry-again").expect(200);
     expect(replay.body.plan.id).toBe(completed.id);
@@ -1106,9 +1106,11 @@ describe("Course OS API", () => {
     const id = created.body.id as string;
     await request(app).patch(`/api/v1/sessions/${id}`)
       .send({ currentPageId: release.pageIds[0], zoom: 1.5, panX: 24 }).expect(200);
+    const sessionLookup = vi.spyOn(operations, "findLearningSession");
     const resumed = await request(app).post("/api/v1/sessions")
       .send({ courseReleaseId: release.id, sessionId: id }).expect(200);
     expect(resumed.body).toMatchObject({ id, zoom: 1.5, panX: 24 });
+    expect(sessionLookup).not.toHaveBeenCalled();
     expect((await operations.read()).sessions.filter(session => session.id === id)).toHaveLength(1);
     await request(app).patch(`/api/v1/sessions/${id}`).set("X-Workspace-Id", "other")
       .send({ zoom: 3 }).expect(404);
@@ -1129,6 +1131,29 @@ describe("Course OS API", () => {
     expect(fullRead).not.toHaveBeenCalled();
   });
 
+  it("reuses the scoped session while preserving question-selection idempotency", async () => {
+    const { app, operations, readweave, release } = await seededApp();
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const sessionLookup = vi.spyOn(operations, "findLearningSession");
+    const saveSelection = vi.spyOn(readweave, "saveQuestionSelection");
+    const select = (seed: string, key: string) => request(app).post("/api/v1/pages/page-1/questions:select")
+      .set("Idempotency-Key", key).send({ sessionId: session.body.id, seed, count: 2 });
+
+    const first = await select("returning-seed", "returning-select-1").expect(201);
+    const returned = await select("returning-seed", "returning-select-after-refresh").expect(201);
+    expect(returned.body.selection.id).toBe(first.body.selection.id);
+    expect(returned.body.questions.map((item: QuestionBankItem) => item.id))
+      .toEqual(first.body.questions.map((item: QuestionBankItem) => item.id));
+    expect(sessionLookup).not.toHaveBeenCalled();
+    expect(saveSelection.mock.calls[0]?.[1].idempotencyKey).toMatch(/^question-selection:/);
+    expect(saveSelection.mock.calls[1]?.[1].idempotencyKey).toBe(saveSelection.mock.calls[0]?.[1].idempotencyKey);
+
+    const changed = await select("explicitly-changed-seed", "returning-select-3").expect(201);
+    expect(changed.body.selection.id).not.toBe(first.body.selection.id);
+    await request(app).post("/api/v1/pages/page-1/questions:select").set("X-Workspace-Id", "other")
+      .set("Idempotency-Key", "returning-select-other").send({ sessionId: session.body.id, seed: "returning-seed", count: 2 }).expect(404);
+  });
+
   it("does not mark a paraphrased free-text answer wrong or change mastery", async () => {
     const { app, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
@@ -1137,6 +1162,9 @@ describe("Course OS API", () => {
     const payload = { selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1", questionId: question.id, answer: "先确认起点，按步骤处理，再看结果", usedHintLevel: 0 };
     const saved = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "free-text-attempt").send(payload).expect(201);
     expect(saved.body).toMatchObject({ attempt: { correct: null }, mastery: null, evaluationState: "unverified" });
+    const restored = await request(app).get(`/api/v1/pages/page-1/question-attempts?sessionId=${session.body.id}&selectionId=${selected.body.selection.id}`).expect(200);
+    expect(restored.body).toMatchObject([{ id: saved.body.attempt.id, answer: payload.answer }]);
+    await request(app).get(`/api/v1/pages/page-1/question-attempts?sessionId=${session.body.id}&selectionId=${selected.body.selection.id}`).set("X-Workspace-Id", "other").expect(404);
     expect(saved.headers["server-timing"]).toMatch(/release;dur=.+save;dur=/);
     await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "free-text-attempt").send(payload).expect(201);
     expect(await readweave.listQuestionAttempts()).toHaveLength(1);

@@ -15,10 +15,10 @@ describe("CourseTree background task entries", () => {
       backgroundTasks: [{ id: "task-running", courseId: "course-1", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running" }],
       onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
     }));
-    expect(markup).toContain('aria-label="课程后台任务"');
-    expect(markup).toContain('class="tree-task-section tree-task-nested"');
+    expect(markup).toContain('aria-label="后台任务"');
+    expect(markup).toContain('class="tree-task-section"');
+    expect(markup.indexOf('</nav>')).toBeLessThan(markup.indexOf('aria-label="后台任务"'));
     expect(markup.indexOf("EE680")).toBeLessThan(markup.indexOf("Lecture.pptx"));
-    expect(markup).not.toContain('aria-label="未归类后台任务"');
   });
   it("renders tasks with their real status class and opens the selected task entry", () => {
     const markup = renderToStaticMarkup(createElement(CourseTree, {
@@ -61,9 +61,42 @@ describe("CourseTree background task entries", () => {
       onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
     }));
     expect(markup).toContain('data-task-id="generation-job:job-1"');
-    expect(markup).toContain('class="tree-task-section tree-task-nested"');
+    expect(markup).toContain('class="tree-task-section"');
     expect(markup).toContain('class="task-state-dot task-state-running"');
     expect(markup.indexOf("EE680")).toBeLessThan(markup.indexOf("生成任务 abc123"));
-    expect(markup).not.toContain('aria-label="未归类后台任务"');
+  });
+
+  it("keeps current progress and failed tasks visible while collapsing completed task history", () => {
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "课程空间", courses: [], rootMaterials: [], updatedAt: "2026-09-22T10:00:00.000Z" },
+      backgroundTasks: [
+        { id: "task-running", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running" },
+        { id: "task-failed", title: "Lecture.pptx", detail: "失败 · 第 3 页 · 上游超时", state: "failed", unresolved: true },
+        { id: "task-recovered", title: "Old attempt.pptx", detail: "失败 · 后续重试已完成", state: "failed", unresolved: false },
+        { id: "task-done", title: "Lecture.pptx", detail: "已完成 · 8/8 页", state: "completed" },
+        { id: "task-cancelled", title: "Old attempt.pptx", detail: "已取消", state: "cancelled" }
+      ],
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+
+    expect(markup).toContain('aria-label="当前任务"');
+    expect(markup).toContain('aria-label="需处理"');
+    expect(markup).toContain('<details class="tree-task-attention" aria-label="需处理">');
+    expect(markup).toContain("失败 · 第 3 页 · 上游超时");
+    expect(markup).toContain('<details class="tree-task-history">');
+    const attentionStart = markup.indexOf('aria-label="需处理"');
+    const historyStart = markup.indexOf('<details class="tree-task-history">');
+    const historyEnd = markup.indexOf("</details>", historyStart);
+    const attentionMarkup = markup.slice(attentionStart, historyStart);
+    const historyMarkup = markup.slice(historyStart, historyEnd);
+    expect(attentionMarkup).toContain('data-task-id="task-failed"');
+    expect(attentionMarkup).not.toContain('data-task-id="task-recovered"');
+    expect(historyMarkup).toContain('data-task-id="task-failed"');
+    expect(historyMarkup).toContain('data-task-id="task-recovered"');
+    expect(historyMarkup).toContain('data-task-id="task-done"');
+    expect(historyMarkup).toContain('data-task-id="task-cancelled"');
+    expect(markup.indexOf('data-task-id="task-running"')).toBeLessThan(historyStart);
+    expect(markup).not.toContain('<details class="tree-task-history" open');
+    expect(markup).not.toContain('<details class="tree-task-attention" aria-label="需处理" open');
   });
 });
