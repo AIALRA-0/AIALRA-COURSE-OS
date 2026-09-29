@@ -87,6 +87,7 @@ export function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [sessionWarning, setSessionWarning] = useState("");
+  const [sessionReadyReleaseId, setSessionReadyReleaseId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const sessionRef = useRef<LearningSession | undefined>(undefined);
   const pendingSessionPatchRef = useRef(new Map<string, Partial<LearningSession>>());
@@ -268,6 +269,7 @@ export function App() {
   useEffect(() => {
     if (!release) return;
     let active = true;
+    setSessionReadyReleaseId(undefined);
     if (sessionRef.current?.courseReleaseId !== release.id) sessionRef.current = undefined;
     setSession((current) => current?.courseReleaseId === release.id ? current : undefined);
     setView({ zoom: 1, panX: 0, panY: 0 });
@@ -282,10 +284,12 @@ export function App() {
       const restoredIndex = release.pages.findIndex((candidate) => candidate.id === created.currentPageId);
       if (!initialNavigation.current.hasExplicitPage && restoredIndex >= 0) setPageIndex(restoredIndex);
       setView({ zoom: created.zoom, panX: created.panX, panY: created.panY });
+      setSessionReadyReleaseId(release.id);
     }).catch((reason) => {
       if (!active) return;
       const detail = reason instanceof Error ? `：${reason.message}` : "";
       setSessionWarning(`学习会话恢复失败${detail}，当前讲解仍可阅读，本次学习位置不会保存`);
+      setSessionReadyReleaseId(release.id);
     });
     return () => { active = false; };
   }, [release?.id]);
@@ -326,6 +330,7 @@ export function App() {
 
   useEffect(() => {
     if (!release || !page) return;
+    if (!initialNavigation.current.hasExplicitPage && sessionReadyReleaseId !== release.id) return;
     const navigation = new URLSearchParams(location.hash.slice(1));
     navigation.set("mode", mode);
     navigation.set("release", release.id);
@@ -335,9 +340,13 @@ export function App() {
       navigation.delete("reviewSession");
     }
     location.hash = navigation.toString();
+  }, [mode, pageIndex, page?.id, release?.id, sessionReadyReleaseId]);
+
+  useEffect(() => {
+    if (!release || !page) return;
     const activeSession = sessionRef.current?.courseReleaseId === release.id ? sessionRef.current : undefined;
     if (activeSession) scheduleSessionPatch(activeSession.id, { currentPageId: page.id });
-  }, [mode, pageIndex, page?.id, release?.id, scheduleSessionPatch]);
+  }, [page?.id, release?.id, scheduleSessionPatch]);
 
   const updateView = useCallback((next: ViewState) => {
     setView(next);
