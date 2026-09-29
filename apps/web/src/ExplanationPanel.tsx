@@ -54,11 +54,9 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${generatedReady || page.quality.publishable ? "pass" : "hold"}`}>{generatedReady || page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
-    {interactiveReady && <>
-      <SelfRetellingPanel release={release} page={page} />
-      <article className="lesson-block random-questions"><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
-      <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>
-    </>}
+    {interactiveReady && <SelfRetellingPanel release={release} page={page} />}
+    <article className="lesson-block random-questions" style={interactiveReady ? undefined : { display: "none" }}><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
+    {interactiveReady && <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>}
   </section>;
 }
 
