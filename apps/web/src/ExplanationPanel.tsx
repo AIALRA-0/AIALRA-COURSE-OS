@@ -12,7 +12,12 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
   const [nativeQuestions, setNativeQuestions] = useState<ReadWeavePageQuestions>({ pageId: page.id, questions: [] });
   const [nativeQuestionsError, setNativeQuestionsError] = useState("");
   const [interactiveReady, setInteractiveReady] = useState(false);
+  const [prepareQuestions, setPrepareQuestions] = useState(false);
   const interactiveMarkerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPrepareQuestions(true), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [page.id]);
   useEffect(() => {
     setInteractiveReady(false);
     const marker = interactiveMarkerRef.current;
@@ -55,7 +60,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <SelfRetellingPanel release={release} page={page} />}
-    <article className="lesson-block random-questions" style={interactiveReady ? undefined : { display: "none" }}><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
+    {(interactiveReady || prepareQuestions) && <article className="lesson-block random-questions" style={interactiveReady ? undefined : { display: "none" }}><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>}
     {interactiveReady && <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>}
   </section>;
 }
@@ -215,7 +220,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
   };
   const bankNotice = available < 4 || draftCount > 0;
   if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /> <p className="empty-inline">学习会话建立后会抽取 1道理解题和 1道选择题</p></>;
-  if (loading) return <p className="empty-inline">正在从 ReadWeave 抽取问题</p>;
+  if (loading) return <p className="empty-inline" role="status">ReadWeave 正在读取本页题库并保存选题，完成后会自动显示两道可作答的问题</p>;
   if (!questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || "本页题库尚未达到发布要求，请从制作模式补齐题目"}</p></>;
   return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!selection || !answers[item.id]?.trim() || pending || answers[item.id]?.trim() === savedAnswers[item.id]} aria-busy={pending} title={!selection ? "正在保存本次选题" : !answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : answers[item.id]?.trim() === savedAnswers[item.id] ? "本题作答已保存" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : answers[item.id]?.trim() === savedAnswers[item.id] ? "已保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div><button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button></>;
 }
