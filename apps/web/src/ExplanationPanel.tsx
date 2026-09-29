@@ -134,6 +134,7 @@ function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePage
 }
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
   const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [feedbackState, setFeedbackState] = useState<Record<string, "correct" | "incorrect" | "unverified" | "error">>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(false); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
+  const [savedAnswers, setSavedAnswers] = useState<Record<string, string>>({});
   const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>()); const selectionRequestSerial = useRef(0);
   const restoreSavedAnswers = (selected: QuestionSelection, selectedQuestions: QuestionBankItem[], serial: number) => {
     if (!sessionId) return;
@@ -143,6 +144,11 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
       setAnswers((current) => {
         const next = { ...current };
         for (const [id, attempt] of latest) if (!next[id]) next[id] = attempt.answer;
+        return next;
+      });
+      setSavedAnswers((current) => {
+        const next = { ...current };
+        for (const [id, attempt] of latest) next[id] = attempt.answer;
         return next;
       });
       setFeedback((current) => {
@@ -164,6 +170,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
     setLoading(true);
     setSelection(undefined);
     setQuestions([]);
+    setSavedAnswers({});
     void api.selectQuestions(page.id, sessionId).then((result) => {
       if (serial !== selectionRequestSerial.current) return;
       setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
@@ -180,7 +187,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
       const result = await api.selectQuestions(page.id, sessionId, crypto.randomUUID());
       if (serial !== selectionRequestSerial.current) return;
       setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
-      setAnswers({}); setFeedback({}); setFeedbackState({});
+      setAnswers({}); setFeedback({}); setFeedbackState({}); setSavedAnswers({});
       restoreSavedAnswers(result.selection, result.questions, serial);
     } catch (error) { if (serial === selectionRequestSerial.current) setFeedback({ load: error instanceof Error ? error.message : "换题失败" }); }
     finally { if (serial === selectionRequestSerial.current) setLoading(false); }
@@ -197,6 +204,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
     try {
       const result = await api.questionAttempt({ selectionId: selection.id, sessionId, courseReleaseId: release.id, pageId: page.id, questionId: item.id, answer, usedHintLevel: 0 }, idempotencyKey);
       idempotencyKeysRef.current.delete(replayKey);
+      setSavedAnswers((current) => ({ ...current, [item.id]: result.attempt.answer }));
       setFeedbackState((current) => ({ ...current, [item.id]: result.evaluationState }));
       setFeedback((current) => ({ ...current, [item.id]: result.feedback }));
     } catch (error) {
@@ -211,7 +219,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
   if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /> <p className="empty-inline">学习会话建立后会抽取 1道理解题和 1道选择题</p></>;
   if (loading) return <p className="empty-inline">正在从 ReadWeave 抽取问题</p>;
   if (!questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || "本页题库尚未达到发布要求，请从制作模式补齐题目"}</p></>;
-  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!answers[item.id]?.trim() || pending} aria-busy={pending} title={!answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : <span>提交并保存记录</span>}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div><button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button></>;
+  return <>{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{questions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!selection || !answers[item.id]?.trim() || pending || answers[item.id]?.trim() === savedAnswers[item.id]} aria-busy={pending} title={!selection ? "正在保存本次选题" : !answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : answers[item.id]?.trim() === savedAnswers[item.id] ? "本题作答已保存" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : answers[item.id]?.trim() === savedAnswers[item.id] ? "已保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div><button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button></>;
 }
 
 function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
