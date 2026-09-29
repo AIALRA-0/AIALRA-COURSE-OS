@@ -6,7 +6,7 @@ import { join } from "node:path";
 import pg from "pg";
 import type { GenerationJob, GenerationPlan, LearningSession, OrderedEvent } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { OperationalStore, PostgresOperationalStore } from "./store.js";
+import { EMPTY, OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 
@@ -78,6 +78,23 @@ describe("OperationalStore learning session mutation", () => {
   });
 });
 
+describe("OperationalStore model settings projection", () => {
+  it("returns only model settings with the established defaults", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-model-settings-"));
+    try {
+      const store = new OperationalStore(join(directory, "operations.json"));
+      const settings = await store.readModelSettings();
+      expect(settings).toEqual({
+        modelProviders: EMPTY.modelProviders,
+        modelRoutePolicy: EMPTY.modelRoutePolicy
+      });
+      expect(Object.keys(settings).sort()).toEqual(["modelProviders", "modelRoutePolicy"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 interface PostgresFixture {
   pool: pg.Pool;
   store: PostgresOperationalStore;
@@ -86,6 +103,66 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("merges one job's legacy events with relational events taking precedence by ID", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    try {
+      await fixture.store.mutateGenerationJob(job.id, (_current, context) => {
+        context.appendEvent("generation.stage.completed", { source: "relational" });
+      });
+      const relationalResult = await fixture.pool.query<{ id: string; occurred_at: Date }>(
+        "SELECT id, occurred_at FROM ordered_events WHERE stream_id = $1", [job.id]
+      );
+      const relational = relationalResult.rows[0]!;
+      const legacyOnlyIdResult = await fixture.pool.query<{ id: string }>(
+        "SELECT nextval(pg_get_serial_sequence('ordered_events', 'id')::regclass)::text AS id"
+      );
+      const occurredAt = new Date(relational.occurred_at).toISOString();
+      const legacyEvents: OrderedEvent[] = [
+        { id: Number(legacyOnlyIdResult.rows[0]!.id), streamId: job.id, type: "generation.stage.started", occurredAt, payload: { source: "legacy-only" } },
+        { id: Number(relational.id), streamId: job.id, type: "generation.stage.started", occurredAt, payload: { source: "legacy-conflict" } }
+      ];
+      await fixture.pool.query(
+        `UPDATE operational_state
+         SET state = jsonb_set(state, '{events}',
+           (CASE WHEN jsonb_typeof(state->'events') = 'array' THEN state->'events' ELSE '[]'::jsonb END) || $1::jsonb)
+         WHERE id = 1`, [JSON.stringify(legacyEvents)]
+      );
+
+      const events = await fixture.store.readGenerationJobEvents(job.id);
+      expect(events).toHaveLength(2);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: legacyEvents[0]!.id, payload: { source: "legacy-only" } }),
+        expect.objectContaining({ id: Number(relational.id), type: "generation.stage.completed", payload: { source: "relational" } })
+      ]));
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
+  it("reads model settings with the same defaults without calling the full-state reader", async () => {
+    const fixture = await startFixture([]);
+    try {
+      await fixture.pool.query(
+        "UPDATE operational_state SET state = state || '{\"modelProviders\":[],\"modelRoutePolicy\":null}'::jsonb WHERE id = 1"
+      );
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+      const query = vi.spyOn((fixture.store as unknown as { pool: pg.Pool }).pool, "query");
+      await expect(fixture.store.readModelSettings()).resolves.toEqual({
+        modelProviders: EMPTY.modelProviders,
+        modelRoutePolicy: EMPTY.modelRoutePolicy
+      });
+      expect(fullRead).not.toHaveBeenCalled();
+      const sql = String(query.mock.calls.at(-1)?.[0]);
+      expect(sql).toContain("state->'modelProviders'");
+      expect(sql).toContain("state->'modelRoutePolicy'");
+      expect(sql).not.toContain("state->'events'");
+      expect(sql).not.toMatch(/\bSELECT\s+state\b/i);
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("reads one plan's jobs and events without loading all operational state", async () => {
     const planId = randomUUID();
     const selectedJob = { ...makeJob(randomUUID()), planId };

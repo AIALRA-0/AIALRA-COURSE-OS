@@ -28,6 +28,7 @@ export interface OperationalState {
 }
 
 export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans">;
+export type ModelSettings = Pick<OperationalState, "modelProviders" | "modelRoutePolicy">;
 
 export interface GenerationPlanDetailRead {
   plan?: GenerationPlan;
@@ -87,6 +88,11 @@ export class OperationalStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(EMPTY);
       throw error;
     }
+  }
+
+  async readModelSettings(): Promise<ModelSettings> {
+    const state = await this.read();
+    return { modelProviders: state.modelProviders, modelRoutePolicy: state.modelRoutePolicy };
   }
 
   /** Read only the fields needed by the task tree and import detail screens. */
@@ -231,6 +237,16 @@ export class PostgresOperationalStore extends OperationalStore {
     }
   }
 
+  override async readModelSettings(): Promise<ModelSettings> {
+    await this.ready;
+    const result = await this.pool.query<Partial<ModelSettings>>(
+      `SELECT state->'modelProviders' AS "modelProviders",
+        state->'modelRoutePolicy' AS "modelRoutePolicy"
+       FROM operational_state WHERE id = 1`
+    );
+    return normalizeModelSettings(result.rows[0]);
+  }
+
   override async readTaskIndex(): Promise<TaskIndex> {
     await this.ready;
     const result = await this.pool.query<TaskIndex & { relationalJobs: GenerationJob[] }>(
@@ -321,11 +337,18 @@ export class PostgresOperationalStore extends OperationalStore {
 
   override async readGenerationJobEvents(jobId: string): Promise<OrderedEvent[]> {
     await this.ready;
-    const result = await this.pool.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
-      "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
-    );
-    return result.rows.map((row) => ({ id: Number(row.id), streamId: row.stream_id, type: row.event_type,
-      occurredAt: new Date(row.occurred_at).toISOString(), payload: row.payload }));
+    const [legacyResult, relationalResult] = await Promise.all([
+      this.pool.query<{ event: OrderedEvent }>(
+        `SELECT entry.event
+         FROM operational_state,
+              jsonb_array_elements(COALESCE(state->'events', '[]'::jsonb)) AS entry(event)
+         WHERE operational_state.id = 1 AND entry.event->>'streamId' = $1`, [jobId]
+      ),
+      this.pool.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+        "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
+      )
+    ]);
+    return mergeOrderedEvents(legacyResult.rows.map(row => row.event), relationalResult.rows);
   }
 
   override async mutate<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
@@ -716,8 +739,7 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     reviewSessions: Array.isArray(value?.reviewSessions) ? value.reviewSessions : [],
     attempts: Array.isArray(value?.attempts) ? value.attempts : [],
     selfRetellings: value?.selfRetellings && typeof value.selfRetellings === "object" && !Array.isArray(value.selfRetellings) ? value.selfRetellings : {},
-    modelProviders: mergeCourseModelProviderDefaults(Array.isArray(value?.modelProviders) ? value.modelProviders : []),
-    modelRoutePolicy: mergeCourseModelRoutePolicyDefaults(value?.modelRoutePolicy),
+    ...normalizeModelSettings(value),
     searchProviders: mergeCourseSearchProviderDefaults(Array.isArray(value?.searchProviders) ? value.searchProviders : []),
     searchRoutePolicy: value?.searchRoutePolicy && Array.isArray(value.searchRoutePolicy.rules)
       ? value.searchRoutePolicy
@@ -725,4 +747,11 @@ function normalizeOperationalState(value: Partial<OperationalState> | undefined)
     events: Array.isArray(value?.events) ? value.events : [],
     idempotency: value?.idempotency && typeof value.idempotency === "object" ? value.idempotency : {}
   } as OperationalState;
+}
+
+function normalizeModelSettings(value: Partial<OperationalState> | undefined): ModelSettings {
+  return {
+    modelProviders: mergeCourseModelProviderDefaults(Array.isArray(value?.modelProviders) ? value.modelProviders : []),
+    modelRoutePolicy: mergeCourseModelRoutePolicyDefaults(value?.modelRoutePolicy)
+  };
 }

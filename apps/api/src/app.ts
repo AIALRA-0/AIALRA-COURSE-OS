@@ -1483,10 +1483,10 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-jobs/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const snapshot = await dependencies.operations.read();
-      const job = snapshot.jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
+      const job = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      response.json({ ...job, latestStageActivity: latestGenerationStageActivity(snapshot.events, job.id) });
+      const events = await dependencies.operations.readGenerationJobEvents(job.id);
+      response.json({ ...job, latestStageActivity: latestGenerationStageActivity(events, job.id) });
     } catch (error) { next(error); }
   });
 
@@ -1628,7 +1628,8 @@ export function createApp(dependencies: AppDependencies): Express {
   app.post("/api/v1/sessions/:id/questions", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const session = (await dependencies.operations.read()).sessions.find((item) => item.id === request.params.id && (item.workspaceId ?? workspaceId) === workspaceId);
+      const candidateSession = await dependencies.operations.findLearningSession(request.params.id);
+      const session = candidateSession && (candidateSession.workspaceId ?? workspaceId) === workspaceId ? candidateSession : undefined;
       if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
       const release = await getWorkspaceRelease(dependencies.readweave, session.courseReleaseId, workspaceId);
       const page = release?.pages.find((item) => item.id === String(request.body.pageId || session.currentPageId));
@@ -2767,7 +2768,7 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
   const vault = dependencies.credentialVault;
   if (!vault) return environmentFallback;
   try {
-    const settings = await dependencies.operations.read();
+    const settings = await dependencies.operations.readModelSettings();
     const providers = settings.modelProviders;
     const configuredProviderIds = new Set(
       (await Promise.all(providers.filter((provider) => provider.enabled).map(async (provider) => {
@@ -2780,7 +2781,7 @@ async function resolveRuntimeModelRouter(dependencies: AppDependencies): Promise
     if (!configuredProviderIds.size) return environmentFallback;
     return providerRouterFromSettings({
       load: async () => {
-        const settings = await dependencies.operations.read();
+        const settings = await dependencies.operations.readModelSettings();
         return {
           providers: settings.modelProviders,
           policy: modelRoutePolicyForRuntime(settings.modelRoutePolicy),

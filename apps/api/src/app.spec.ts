@@ -96,6 +96,12 @@ describe("Course OS API", () => {
       append(job.id, "generation.stage.started", { stage: "unknown", phase: "private-secret" }, "2026-09-22T10:10:00.000Z");
     });
 
+    const taskIndex = await operations.readTaskIndex();
+    const scopedEvents = await operations.readGenerationJobEvents(job.id);
+    vi.spyOn(operations, "readTaskIndex").mockResolvedValue(taskIndex);
+    const eventRead = vi.spyOn(operations, "readGenerationJobEvents").mockResolvedValue(scopedEvents);
+    const fullRead = vi.spyOn(operations, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+
     const detail = await request(app).get(`/api/v1/generation-jobs/${job.id}`).set("X-Workspace-Id", "personal").expect(200);
     expect(detail.body.latestStageActivity).toEqual({
       stage: "teach",
@@ -108,6 +114,8 @@ describe("Course OS API", () => {
     expect(JSON.stringify(detail.body)).not.toContain("private-provider-key");
     expect(JSON.stringify(detail.body)).not.toContain("private generation plan");
     await request(app).get(`/api/v1/generation-jobs/${otherWorkspaceJob.id}`).set("X-Workspace-Id", "personal").expect(404);
+    expect(eventRead).toHaveBeenCalledTimes(1);
+    expect(fullRead).not.toHaveBeenCalled();
   });
   it("attaches sanitized latest stage summaries and ignores historical phases in a plan", async () => {
     const { app, operations, release } = await seededApp();
@@ -1106,6 +1114,21 @@ describe("Course OS API", () => {
       .send({ zoom: 3 }).expect(404);
   });
 
+  it("loads a question session through the scoped lookup and keeps workspace authorization", async () => {
+    const { app, operations, release } = await seededApp();
+    const created = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const sessionLookup = vi.spyOn(operations, "findLearningSession").mockResolvedValue(created.body);
+    const fullRead = vi.spyOn(operations, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+
+    await request(app).post(`/api/v1/sessions/${created.body.id}/questions`).set("X-Workspace-Id", "other")
+      .set("Idempotency-Key", "qa-other-workspace").send({ pageId: "page-1", question: "test" }).expect(404);
+    await request(app).post(`/api/v1/sessions/${created.body.id}/questions`).set("X-Workspace-Id", "personal")
+      .set("Idempotency-Key", "qa-scoped-session").send({ pageId: "page-1", question: "test" }).expect(201);
+
+    expect(sessionLookup).toHaveBeenCalledTimes(2);
+    expect(fullRead).not.toHaveBeenCalled();
+  });
+
   it("does not mark a paraphrased free-text answer wrong or change mastery", async () => {
     const { app, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
@@ -1333,7 +1356,6 @@ describe("Course OS API", () => {
       generateTeachingPackage: vi.fn(async () => testTeachingResult(0))
     };
     const { app, dependencies, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
-    const readJobEvents = vi.spyOn(dependencies.operations, "readGenerationJobEvents");
     const originalSave = readweave.saveDraftWithCost.bind(readweave);
     let saveFailures = 2;
     vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) => {
@@ -1349,12 +1371,21 @@ describe("Course OS API", () => {
       state: "completed", completedPageIds: ["page-1"], failedPageIds: ["page-2"]
     });
     expect(saveFailures).toBe(0);
-    expect(readJobEvents).not.toHaveBeenCalled();
     const completedDraft = await readweave.getDraftByPage("page-1");
 
+    // Check core recovery before retry status polling starts reading events.
+    const readJobEvents = vi.spyOn(dependencies.operations, "readGenerationJobEvents");
+    let notifyRetryModelStarted!: () => void;
+    const retryModelStarted = new Promise<void>(resolve => { notifyRetryModelStarted = resolve; });
+    vi.mocked(modelRouter.generateTeachingPackage).mockImplementation(async () => {
+      notifyRetryModelStarted();
+      return testTeachingResult(0);
+    });
     await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "retry-only-page-2").expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
+    await retryModelStarted;
     expect(readJobEvents).toHaveBeenCalledTimes(1);
+    expect(readJobEvents).toHaveBeenCalledWith(created.body.id);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
 
     expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(3);
     expect(vi.mocked(modelRouter.generateTeachingPackage).mock.calls.map(([input]) => input.pageNumber)).toEqual([1, 2, 2]);
