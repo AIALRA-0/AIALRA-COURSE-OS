@@ -1,0 +1,25 @@
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_ef4befb8d99eeb 2,149,152-155,157,195-199,207
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_5736f39f0b8675 1785,1792
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_ef4befb8d99eeb 1171-1173
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_5736f39f0b8675 320
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1b2933d86221ad0a3b6fbd129ea00869596349f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
