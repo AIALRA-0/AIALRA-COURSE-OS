@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
+import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COURSE_API_VERSION, type CourseRelease, type PageLesson, type ReleaseManifest, type TeachingAtom } from "@course-os/contracts";
 import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
@@ -42,7 +43,11 @@ describe("slim page generation integration", () => {
       billingMode: "metered"
     });
 
+    const understandPage = vi.fn<NonNullable<ModelRouterClient["understandPage"]>>(async (input) => input.pageNumber === 1
+      ? ({ sourceDescription: visualObservation, teachingPlan: "先识别输入，再解释规则与输出", provider: "synthetic-vision", model: "synthetic-vision", usage: { inputTokens: 10, outputTokens: 20, cachedInputTokens: 0, apiEquivalentUsd: 0.0001, durationMs: 1 } })
+      : undefined);
     const modelRouter: ModelRouterClient = {
+      understandPage,
       generateTeachingPackage: async (input) => {
         requestKeys.set(input.idempotencyKey, input.pageNumber);
         pageInputs.set(input.pageNumber, input.sourceText);
@@ -109,6 +114,9 @@ describe("slim page generation integration", () => {
       .send({ title: "Slim generation integration course" })
       .expect(201);
     const release = syntheticRelease(writingPolicy.body.policySnapshotId, course.body.id);
+    const sourceSvg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540"><rect width="960" height="540" fill="#f7f5ef"/><rect x="70" y="190" width="210" height="130" rx="12" fill="#dbeafe" stroke="#1d4ed8" stroke-width="4"/><rect x="375" y="190" width="210" height="130" rx="12" fill="#dcfce7" stroke="#15803d" stroke-width="4"/><rect x="680" y="190" width="210" height="130" rx="12" fill="#fef3c7" stroke="#b45309" stroke-width="4"/><path d="M285 255h75m215 0h75" stroke="#334155" stroke-width="8"/><path d="m348 238 18 17-18 17m222-17 18 17-18 17" fill="none" stroke="#334155" stroke-width="8"/><text x="175" y="260" text-anchor="middle" font-family="Arial" font-size="32" fill="#172033">Input</text><text x="480" y="260" text-anchor="middle" font-family="Arial" font-size="32" fill="#172033">Rule</text><text x="785" y="260" text-anchor="middle" font-family="Arial" font-size="32" fill="#172033">Output</text></svg>');
+    const sourceImage = await dependencies.cas.put(await sharp(sourceSvg).png().toBuffer());
+    release.pages[0]!.imageUrl = `/api/v1/media/${sourceImage.sha256}`;
 
     await readweave.publishRelease(release, syntheticManifest(release), {
       idempotencyKey: "slim-generation-seed",
@@ -132,6 +140,11 @@ describe("slim page generation integration", () => {
 
     expect(completed.state).toBe("completed");
     expect(completed.completedPageIds).toEqual(release.pageIds);
+    expect(understandPage).toHaveBeenCalledTimes(1);
+    expect(understandPage).toHaveBeenCalledWith(expect.objectContaining({
+      pageNumber: 1,
+      sourceImageDataUrl: expect.stringMatching(/^data:image\/jpeg;base64,/)
+    }));
     expect(maxInFlightModelPages).toBeGreaterThanOrEqual(2);
     expect(maxInFlightProviderPages).toBeGreaterThanOrEqual(2);
 
@@ -171,13 +184,15 @@ describe("slim page generation integration", () => {
       expect(draft!.page.quality.generalCoverage).toBe(1);
 
       const phases = phaseCallsByPage.get(page.pageNumber) ?? [];
-      expect(phases).toContain("plan");
+      if (page.pageNumber === 1) expect(phases).not.toContain("plan");
+      else expect(phases).toContain("plan");
       expect(phases).toContain("teaching");
       expect(phases.length).toBeLessThanOrEqual(3);
       expect(phases.filter((phase) => phase === "format_repair").length).toBeLessThanOrEqual(1);
     }
 
-    expect(pageInputs.get(1)).toContain("旧版讲解（供重写参考，不代表原图文字）");
+    expect(pageInputs.get(1)).not.toContain("旧版讲解（供重写参考，不代表原图文字）");
+    expect(pageInputs.get(1)).toContain(visualObservation);
     expect(pageInputs.get(5)).toContain(historicalFooter);
   }, 45_000);
 });

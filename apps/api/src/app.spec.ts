@@ -1335,10 +1335,10 @@ describe("Course OS API", () => {
     const { app, dependencies, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
     const readJobEvents = vi.spyOn(dependencies.operations, "readGenerationJobEvents");
     const originalSave = readweave.saveDraftWithCost.bind(readweave);
-    let failSecondPageOnce = true;
+    let saveFailures = 2;
     vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) => {
-      if (draft.pageId === "page-2" && failSecondPageOnce) {
-        failSecondPageOnce = false;
+      if (draft.pageId === "page-2" && saveFailures > 0) {
+        saveFailures -= 1;
         return Promise.reject(new Error("READWEAVE_ETAPI_503:temporary"));
       }
       return originalSave(draft, revision, context, cost, asset);
@@ -1348,6 +1348,7 @@ describe("Course OS API", () => {
     expect(await waitForJob(app, created.body.id)).toMatchObject({
       state: "completed", completedPageIds: ["page-1"], failedPageIds: ["page-2"]
     });
+    expect(saveFailures).toBe(0);
     expect(readJobEvents).not.toHaveBeenCalled();
     const completedDraft = await readweave.getDraftByPage("page-1");
 
@@ -1478,7 +1479,9 @@ describe("Course OS API", () => {
         ids.push(created.body.id);
       }
       const executions = ids.map((id) => executeGenerationJob(id, dependencies));
-      await vi.waitFor(() => expect(entered).toBe(2));
+      // File-backed fixtures contend with the full suite on Windows; the cap
+      // assertion must measure concurrent entries, not a 1-second disk budget.
+      await vi.waitFor(() => expect(entered).toBe(2), { timeout: 5000 });
       expect(peak).toBe(2);
       releaseTeaching();
       await Promise.all(executions);
@@ -2290,7 +2293,7 @@ function testRelease(): CourseRelease {
       pageNumber: 1,
       title: "原始页面",
       imageUrl: "/page.png",
-      anchors: [],
+      anchors: [{ id: "source-anchor-1", pageId: "page-1", kind: "text", label: "测试原始课件文字", text: "输入经过规则处理得到输出，执行前需要确认输入满足条件，执行后核对输出与目标" }],
       atoms: [],
       blocks: [{ id: "block-1", title: "核心解释", kind: "core", markdown: "原始讲解", sourceAnchorIds: [], atomIds: [] }],
       lessonSections: [

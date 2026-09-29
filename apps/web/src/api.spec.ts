@@ -30,6 +30,27 @@ describe("search settings API", () => {
   });
 });
 
+describe("ReadWeave deep link API", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("looks up the encoded note ID in the active workspace", async () => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), headers: new Headers(init?.headers) });
+      return Response.json({ noteId: "note/one", url: "https://readweave.example/#root/note/one", host: "readweave.example", verified: true });
+    }));
+
+    await expect(api.deepLink("note/one")).resolves.toMatchObject({
+      noteId: "note/one",
+      verified: true,
+      url: "https://readweave.example/#root/note/one"
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/api/v1/readweave/links/note%2Fone");
+    expect(calls[0]?.headers.get("X-Workspace-Id")).toBe("personal");
+  });
+});
+
 describe("generation plan API", () => {
   afterEach(() => vi.unstubAllGlobals());
 

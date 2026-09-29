@@ -1,15 +1,27 @@
 # Third-party notices
 
+## OpenMAIC teaching context and narration
+
+Portions of `apps/api/src/upstream/openmaic-course-context.ts` and
+`config/generation-harness/planned-writing-prompt.md` are adapted from
+THU-MAIC/OpenMAIC commit `1c70e86a13b07ea1ed6a6b160582e2e05aecdb3c`.
+Copyright (c) 2026 THU-MAIC, licensed under the MIT License.
+The complete license is retained in `apps/api/src/upstream/OPENMAIC-LICENSE.txt`.
+Adaptation scope and differences are documented in
+`docs/teaching-upstream-adaptation.md`.
+
 ## agent-human-readable-technical-writing
 
 Course OS includes exact policy snapshots from
 [`AIALRA-0/agent-human-readable-technical-writing`](https://github.com/AIALRA-0/agent-human-readable-technical-writing)
-at commit `789f90c2ac3dae6ab8b89c7751751c1d7687ff65`
+at commit `d4d4b11d6122c0f538186b2f5553f7cce7eb2480`
 
 Included files:
 
+- `config/generation-harness/policy-skill.md`
 - `config/generation-harness/policy-format-rules.md`
 - `config/generation-harness/policy-explanation-framework.md`
+- `config/generation-harness/policy-formula-explanation.md`
 
 MIT License
 

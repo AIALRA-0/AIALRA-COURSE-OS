@@ -61,7 +61,8 @@ import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConnection, providerRouterFromSettings, teachingPackageSchema, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
-import { buildGenerationSourceText, preparePageForGeneration } from "./page-source.js";
+import { buildGenerationCourseContext, buildGenerationSourceText, preparePageForGeneration } from "./page-source.js";
+import { readCodeLayoutHint } from "./source-layout.js";
 import { previousLessonContext } from "./teaching-plan.js";
 import { planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
@@ -3239,19 +3240,26 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await assertGenerationFence(jobId, fenceToken, dependencies);
       await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies);
       let sourceText = buildGenerationSourceText(page);
+      const courseContext = buildGenerationCourseContext(release.pages, page.id);
       let previousPageContext: string | undefined;
       let teachingPlan: string | undefined;
       let sourceDescription: string | undefined;
       let visionSpentUsd = 0;
       const sourceStartedAt = Date.now();
       const sourceImageDataUrl = await originalPageDataUrl(page, dependencies);
+      let layoutHint = "";
+      if (sourceImageDataUrl) {
+        const layoutStartedAt = Date.now();
+        layoutHint = await readCodeLayoutHint(sourceImageDataUrl);
+        timings.sourceLayoutMs = Date.now() - layoutStartedAt;
+      }
       timings.sourceReadMs = Date.now() - sourceStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, { sourceImage: Boolean(sourceImageDataUrl), sourceCharacters: sourceText.length });
       if (sourceImageDataUrl && pageModelRouter.understandPage) {
         await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies, { activity: "visual_understanding" });
         const understandingStartedAt = Date.now();
         const understood = await pageModelRouter.understandPage({ pageTitle: page.title, pageNumber: page.pageNumber,
-          sourceText, sourceImageDataUrl, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
+          sourceText: layoutHint ? `${sourceText}\n\n${layoutHint}` : sourceText, courseContext, sourceImageDataUrl, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
           language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
           idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:understand:v1`,
           maxCostUsd: currentJob.budgetUsd - currentJob.spentUsd });
@@ -3276,13 +3284,12 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           await appendGenerationStageEvent(jobId, page.id, "extract", "skipped", dependencies, { activity: "visual_understanding", reason: "vision_route_unavailable" });
         }
       }
-      if (!teachingPlan && !page.anchors.some(anchor => Boolean(anchor.text?.trim()))
-        && !(page.quality.publishable && page.blocks.some(block => Boolean(block.markdown?.trim())))) {
+      if (!sourceDescription && !page.anchors.some(anchor => Boolean(anchor.text?.trim()))) {
         throw new Error("PAGE_SOURCE_NOT_READABLE");
       }
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = currentJob.budgetUsd - currentJob.spentUsd - visionSpentUsd;
-      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v16`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, courseContext, sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v16`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         onTeachingPhase: async (phase, state, usage) => {
           if (state === "started") phaseStartedAt.set(phase, Date.now());
           const wallDurationMs = state === "completed" && phaseStartedAt.has(phase)
@@ -3351,14 +3358,29 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const sourceAsset = !existing && release.lifecycle === "draft_source" && release.candidateBaseReleaseId
         ? await candidateSourceAsset(page, dependencies)
         : undefined;
-      let saved = bundledCost
-        ? await dependencies.readweave.saveDraftWithCost!(draft, existing?.revision ?? 0, draftWriteContext, cost, sourceAsset)
-        : await dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, draftWriteContext, sourceAsset);
+      const saveDraft = () => bundledCost
+        ? dependencies.readweave.saveDraftWithCost!(draft, existing?.revision ?? 0, draftWriteContext, cost, sourceAsset)
+        : dependencies.readweave.saveDraft(draft, existing?.revision ?? 0, draftWriteContext, sourceAsset);
+      let saved: LessonDraft;
+      try {
+        saved = await saveDraft();
+      } catch (error) {
+        if (!isTransientReadWeaveFailure(error)) throw error;
+        await assertGenerationFence(jobId, fenceToken, dependencies);
+        saved = await saveDraft();
+      }
       timings.draftWriteMs = Date.now() - saveDraftStartedAt;
       if (bundledCost) finalizedCostPersisted = true;
       persistenceStage = "read_back";
       const readBackStartedAt = Date.now();
-      const readBack = await dependencies.readweave.getDraftByPage(page.id);
+      let readBack: LessonDraft | undefined;
+      try {
+        readBack = await dependencies.readweave.getDraftByPage(page.id);
+      } catch (error) {
+        if (!isTransientReadWeaveFailure(error)) throw error;
+        await assertGenerationFence(jobId, fenceToken, dependencies);
+        readBack = await dependencies.readweave.getDraftByPage(page.id);
+      }
       if (!readBack || readBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_DRAFT_READBACK_MISMATCH");
       timings.draftReadBackMs = Date.now() - readBackStartedAt;
       const readableAt = new Date().toISOString();
@@ -4133,6 +4155,11 @@ export function safeReadWeaveFailureKind(error: unknown): string {
   const code = /^(READWEAVE_[A-Z0-9_]+)/u.exec(message)?.[1];
   if (code) return code.toLowerCase();
   return "unknown";
+}
+
+function isTransientReadWeaveFailure(error: unknown): boolean {
+  const kind = safeReadWeaveFailureKind(error);
+  return kind === "http_429" || /^http_5\d\d$/u.test(kind) || kind === "network" || kind === "timeout";
 }
 
 function isAllowedProviderBaseUrl(value: string): boolean {

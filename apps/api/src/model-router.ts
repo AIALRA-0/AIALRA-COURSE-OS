@@ -60,6 +60,8 @@ export interface ModelRouterInput {
   pageTitle: string;
   pageNumber: number;
   sourceText: string;
+  /** Course outline and adjacent source, separate from authoritative page input. */
+  courseContext?: string;
   previousPageContext?: string;
   teachingPlan?: string;
   resolvePreviousPageContext?: () => Promise<{ context?: string; fingerprint?: string }>;
@@ -272,11 +274,11 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       emptyUsage(Date.now()), this.connection.providerId);
     const response = await this.requestPlannedStage(input, {
       phase: "page_understanding",
-      instructions: "看清这一页课件，再为第一次接触本页知识的读者安排简短教学顺序。先忠实转写可见内容：列表逐项保留；普通短表写明行列标题和可读数值；公式保留变量和关系。密集数值表或矩阵只说明行列含义，并最多选两个能同时按行标签、列标签和交叉位置核实的例值；不要枚举整行、整列或大量单元格。选出的每个例值还要核对对称位置或相邻标签，不能把相邻行、列的数字移过来；不能完成核对就不要写具体数值。计算必须包含所选范围内每个可见数值，无法逐个确认时不计算具体总和。代码和伪代码按可见顺序转写；未定义的辅助函数只保留名称和调用位置，不在教学顺序中替它规定内部算法、收益公式或提交规则，候选比较值也不自动等于实际操作收益。图中标签与箭头只有在能够沿唯一且清楚的线段准确追到两端对象时才写出对应关系。边相互交叉、标签邻近多条线或端点不清时，只描述结构和可见数字，不把数字绑定到某条边；没有单位或所计对象的数字保留原文，不推定含义。不要根据提取文字的换行猜测项目数或表格值。只根据图片和辅助提取文字描述实际可见对象及关系；旧版讲解仅供参考，不能当作原图事实。图与辅助文字冲突时按图描述，不在教学输入里讨论识别差异；无法看清的局部标明不确定，不补成确定数字。页码、页眉、页脚和纯排版元素不转写到教学输入。输出两个自然语言小段，分别以“页面内容：”和“教学顺序：”开头；不输出 JSON、来源编号或覆盖账本。",
+      instructions: "你是课件阅读助手。看原图，并把本页可见的教学内容准确转写给只读文字的讲解模型。保留标题、正文、完整公式、条件、表格的行列与单位、代码及可见注释、图例、箭头和对象关系；按对象的自然结构组织，不按排版换行创建知识义务。表格或矩阵用带行名和列名的 Markdown 表格转写，逐格对准列名，保留每个零的位置，不省略或移动单元格；不遗漏清楚可读的数据，不猜填模糊单元格。若提供原图代码位置参考，用实测横向位置核对缩进层级，OCR错读的字仍按原图辨认，不能按后续语句在上一句之后就假设它仍嵌套其中。代码用围栏块保留原图的逐行缩进、对齐和注释；它们决定循环与条件的作用域，不移动语句、不按算法常识改写结构；代码后明确尾部各语句在哪个循环内、在哪个循环外，不以“随后执行”代替作用域。图中连接、标签归属或文字不能确认时，就近标明不确定，不从专业常识补成原图事实。连接线交叉、数字紧邻多条边或端点无法唯一追踪时，只保留可见标签与整体结构，不分配具体边权；未识别到的连接不等于不存在，不据此宣称图与表矛盾或完全一致。辅助提取文字供定位，原图优先；邻页背景不是当前图中的内容。省略页码、页眉、页脚、版权和装饰；不要把它们放进页面内容或教学顺序。最后给最多六行的简短教学顺序，只安排讲解，不代替来源。输出两个自然语言部分，以“页面内容：”和“教学顺序：”开头，不输出 JSON、编号证据或覆盖账本。",
       prompt: JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
-        extractedText: input.sourceText.slice(0, 16_000) }),
+        extractedText: input.sourceText, courseContext: input.courseContext }),
       image: input.sourceImageDataUrl,
-      maxOutputTokens: 2_200
+      maxOutputTokens: 3_200
     }, input.maxCostUsd ?? 0.06);
     const value = typeof response.content === "string" ? response.content.trim() : String(response.content ?? "").trim();
     if (!value) throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_MISSING", response.model, response.usage, response.provider);
@@ -714,9 +716,12 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
     if (!input.sourceImageDataUrl) return undefined;
     const { providers: savedProviders, policy, credential } = await this.source.load();
     const providers = withCurrentDeepSeekModels(savedProviders);
-    const routes = Array.isArray(policy.routes) ? policy.routes.filter(route => route.enabled) : policy.rules
+    const configuredRoutes = Array.isArray(policy.routes) ? policy.routes.filter(route => route.enabled) : policy.rules
       .filter(rule => rule.enabled && rule.stage === "extract")
       .map(rule => ({ providerId: rule.providerId, modelId: rule.modelId }));
+    const extract = policy.rules.find(rule => rule.enabled && rule.stage === "extract");
+    const routes = [...(extract ? [extract] : []), ...configuredRoutes]
+      .filter((route, index, all) => all.findIndex(other => other.providerId === route.providerId && other.modelId === route.modelId) === index);
     for (const route of routes) {
       const provider = providers.find(candidate => candidate.id === route.providerId && candidate.enabled);
       const model = provider?.models.find(candidate => candidate.id === route.modelId && candidate.supportsVision);

@@ -56,6 +56,23 @@ function input(): ModelRouterInput {
 describe("planned teaching core writer", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("keeps full page source, shared background, and the plan separate in both requests", async () => {
+    const source = "本页来源".repeat(5000);
+    const context = "邻页背景：另一个定义";
+    const calls: Array<Parameters<Parameters<typeof writePlannedLesson>[1]>[0]> = [];
+    await writePlannedLesson({ ...input(), sourceText: source, courseContext: context }, async request => {
+      calls.push(request);
+      return request.phase === "plan" ? "先解释本页对象" : teachingPackage();
+    });
+    for (const request of calls) {
+      const sent = JSON.parse(request.prompt);
+      expect(sent.source).toBe(source);
+      expect(sent.courseContext).toBe(context);
+    }
+    expect(JSON.parse(calls[1]!.prompt).teachingPlan).toBe("先解释本页对象");
+    expect(calls.map(request => request.phase)).toEqual(["plan", "teaching"]);
+  });
+
   it("makes exactly one freeform plan call and one full TeachingPackage call", async () => {
     const calls: Array<Parameters<Parameters<typeof writePlannedLesson>[1]>[0]> = [];
     const content = teachingPackage();
@@ -71,7 +88,7 @@ describe("planned teaching core writer", () => {
     expect(calls[1]?.schema).toBe(teachingPackageSchema);
     expect(calls[1]?.instructions).toContain("chapterBridgeMarkdown 必须是空字符串");
     expect(calls[1]?.instructions).toContain("无法自行核对原图");
-    expect(calls[1]?.instructions).toContain("候选分数不自动等于实际操作收益");
+    expect(calls[1]?.instructions).toContain("来源仅用于比较的表达式必须称为候选评分，不能定义成执行之后的真实收益");
     expect(calls[1]?.instructions).toContain("主要内容只列三至六条简短结论");
     expect(calls[1]?.prompt).toContain("仅用于安排讲解顺序，不是事实来源");
     expect(result.trace).toMatchObject({
@@ -700,7 +717,7 @@ describe("planned teaching core writer", () => {
     const malformed = { priorKnowledge: ["输入：缺少可核验的英文名称"] } as Partial<TeachingPackage>;
     expect(plannedFormatIssues(malformed)).toContain("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
     const instructions = plannedInstructions(["fullExplanationMarkdown", "coverageEvidence"]);
-    expect(instructions).toContain("一次写出所有主体栏目");
+    expect(instructions).toContain("一次输出整个主体教学包");
     expect(instructions).toContain("FMT-001");
     for (const policy of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
       expect(instructions).toContain(policy.trim());

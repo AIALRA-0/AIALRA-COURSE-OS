@@ -23,12 +23,12 @@ describe("generation harness", () => {
   });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.0", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.1", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/planned-teaching.ts")).toBe(true);
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "policy-skill.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "packages/quality/src/presentation.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "policy-skill.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "policy-skill.md")?.sha256).toBe("c0a8122648c926e06d6a43d27e9097f48e818fce17e19ab8429151ffc4d6d457");
     expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("d834bf4624dbf0fb850a63ae35061864122afe090ce16e51a9845506af35a563");
@@ -178,17 +178,17 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("requests high detail for one chat-completions page image and limits matrix transcription", async () => {
+  it("requests high detail and retains readable matrix data and full extracted source", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string | Array<{ type: string; image_url?: { detail?: string } }> }> };
       const instructions = body.messages[0]?.content;
       expect(typeof instructions).toBe("string");
-      expect(instructions).toContain("密集数值表或矩阵只说明行列含义");
-      expect(instructions).toContain("最多选两个能同时按行标签、列标签和交叉位置核实的例值");
-      expect(instructions).toContain("不能完成核对就不要写具体数值");
-      expect(instructions).toContain("候选比较值也不自动等于实际操作收益");
-      expect(instructions).toContain("边相互交叉、标签邻近多条线或端点不清时");
-      expect(instructions).toContain("没有单位或所计对象的数字保留原文");
+      expect(instructions).toContain("不遗漏清楚可读的数据");
+      expect(instructions).toContain("不猜填模糊单元格");
+      const textPart = (body.messages[1]?.content as Array<{ type: string; text?: string }>).find(part => part.type === "text");
+      const sent = JSON.parse(textPart!.text!);
+      expect(sent.extractedText).toBe("完整来源".repeat(5000));
+      expect(sent.courseContext).toBe("课程背景");
       const imagePart = (body.messages[1]?.content as Array<{ type: string; image_url?: { detail?: string } }>).find(part => part.type === "image_url");
       expect(imagePart?.image_url?.detail).toBe("high");
       return Response.json({ choices: [{ message: { content: "页面内容：矩阵中已核实的代表值见相应行列。\n教学顺序：先说明矩阵含义。" } }], usage: { prompt_tokens: 100, completion_tokens: 50 } });
@@ -196,7 +196,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new HttpProviderTeachingClient({ providerId: "opencode-go", baseUrl: "https://opencode.test", apiKey: "synthetic-example-token",
       model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true });
-    const result = await client.understandPage(providerInput("matrix-page-understanding", true));
+    const result = await client.understandPage({ ...providerInput("matrix-page-understanding", true), sourceText: "完整来源".repeat(5000), courseContext: "课程背景" });
     expect(result?.sourceDescription).toContain("矩阵中已核实");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

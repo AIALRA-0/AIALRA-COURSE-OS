@@ -12,6 +12,7 @@ RUN pnpm -r build
 
 FROM node:24-bookworm-slim AS runtime
 RUN corepack enable
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app /app
 CMD ["sh", "-c", "pnpm --filter @course-os/${COURSE_OS_APP} start"]

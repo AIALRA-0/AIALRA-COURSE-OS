@@ -47,7 +47,7 @@ export function currentGenerationHarness(): GenerationHarnessSnapshot {
     .map((name) => ({ path: name, sha256: generationHarnessFileSha256(readHarnessFile(name)) }));
   // Content semantics are pinned; runtime orchestration can change without
   // invalidating work already in progress.
-  for (const name of ["generation-harness.ts", "model-router.ts", "model-usage-meter.ts", "pricing.ts", "planned-teaching.ts"]) {
+  for (const name of ["generation-harness.ts", "model-router.ts", "model-usage-meter.ts", "pricing.ts", "planned-teaching.ts", "page-source.ts", "source-layout.ts", "upstream/openmaic-course-context.ts"]) {
     files.push({ path: `apps/api/src/${name}`, sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, name))) });
   }
   files.push({ path: "packages/quality/src/presentation.ts", sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/presentation.ts"))) });

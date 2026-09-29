@@ -86,27 +86,29 @@ export function App() {
   const [textAction, setTextAction] = useState<TreeTextAction>();
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
+  const [sessionWarning, setSessionWarning] = useState("");
   const [loading, setLoading] = useState(true);
   const sessionRef = useRef<LearningSession | undefined>(undefined);
-  const pendingSessionPatchRef = useRef<Partial<LearningSession>>({});
+  const pendingSessionPatchRef = useRef(new Map<string, Partial<LearningSession>>());
   const sessionWriteTimerRef = useRef<number | undefined>(undefined);
   const sessionWriteInFlightRef = useRef(false);
 
   useEffect(() => { sessionRef.current = session; }, [session]);
 
   const flushSessionWrites = useCallback(() => {
-    if (sessionWriteInFlightRef.current) return;
-    const activeSession = sessionRef.current;
-    const patch = pendingSessionPatchRef.current;
-    if (!activeSession || Object.keys(patch).length === 0) return;
-    pendingSessionPatchRef.current = {};
+    if (sessionWriteInFlightRef.current || pendingSessionPatchRef.current.size === 0) return;
     sessionWriteInFlightRef.current = true;
-    void api.updateSession(activeSession.id, patch).then((updated) => {
-      sessionRef.current = updated;
-      setSession(updated);
-    }).catch(() => undefined).finally(() => {
+    void flushNextSessionPatch(
+      pendingSessionPatchRef.current,
+      (sessionId, patch) => api.updateSession(sessionId, patch),
+      () => sessionRef.current?.id,
+      (updated) => {
+        sessionRef.current = updated;
+        setSession((current) => current?.id === updated.id ? updated : current);
+      }
+    ).catch(() => undefined).finally(() => {
       sessionWriteInFlightRef.current = false;
-      if (Object.keys(pendingSessionPatchRef.current).length > 0 && sessionWriteTimerRef.current === undefined) {
+      if (pendingSessionPatchRef.current.size > 0 && sessionWriteTimerRef.current === undefined) {
         sessionWriteTimerRef.current = window.setTimeout(() => {
           sessionWriteTimerRef.current = undefined;
           flushSessionWrites();
@@ -115,8 +117,10 @@ export function App() {
     });
   }, []);
 
-  const scheduleSessionPatch = useCallback((patch: Partial<LearningSession>) => {
-    Object.assign(pendingSessionPatchRef.current, patch);
+  const scheduleSessionPatch = useCallback((sessionId: string, patch: Partial<LearningSession>) => {
+    const pending = pendingSessionPatchRef.current.get(sessionId) || {};
+    Object.assign(pending, patch);
+    pendingSessionPatchRef.current.set(sessionId, pending);
     if (sessionWriteTimerRef.current !== undefined) return;
     sessionWriteTimerRef.current = window.setTimeout(() => {
       sessionWriteTimerRef.current = undefined;
@@ -263,16 +267,27 @@ export function App() {
 
   useEffect(() => {
     if (!release) return;
+    let active = true;
+    if (sessionRef.current?.courseReleaseId !== release.id) sessionRef.current = undefined;
+    setSession((current) => current?.courseReleaseId === release.id ? current : undefined);
+    setView({ zoom: 1, panX: 0, panY: 0 });
+    setSessionWarning("");
     setPageIndex((index) => Math.min(release.pages.length - 1, Math.max(0, index)));
     const savedSession = localStorage.getItem(`course-os-session:${release.id}`) || undefined;
     api.createSession(release.id, savedSession).then((created) => {
+      if (!active) return;
       setSession(created);
       sessionRef.current = created;
       localStorage.setItem(`course-os-session:${release.id}`, created.id);
       const restoredIndex = release.pages.findIndex((candidate) => candidate.id === created.currentPageId);
       if (!initialNavigation.current.hasExplicitPage && restoredIndex >= 0) setPageIndex(restoredIndex);
       setView({ zoom: created.zoom, panX: created.panX, panY: created.panY });
-    }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法恢复学习位置"));
+    }).catch((reason) => {
+      if (!active) return;
+      const detail = reason instanceof Error ? `：${reason.message}` : "";
+      setSessionWarning(`学习会话恢复失败${detail}，当前讲解仍可阅读，本次学习位置不会保存`);
+    });
+    return () => { active = false; };
   }, [release?.id]);
 
   useEffect(() => {
@@ -321,13 +336,13 @@ export function App() {
     }
     location.hash = navigation.toString();
     const activeSession = sessionRef.current?.courseReleaseId === release.id ? sessionRef.current : undefined;
-    if (activeSession) scheduleSessionPatch({ currentPageId: page.id });
+    if (activeSession) scheduleSessionPatch(activeSession.id, { currentPageId: page.id });
   }, [mode, pageIndex, page?.id, release?.id, scheduleSessionPatch]);
 
   const updateView = useCallback((next: ViewState) => {
     setView(next);
     const activeSession = sessionRef.current?.courseReleaseId === release?.id ? sessionRef.current : undefined;
-    if (activeSession) scheduleSessionPatch(next);
+    if (activeSession) scheduleSessionPatch(activeSession.id, next);
   }, [release?.id, scheduleSessionPatch]);
 
   const selectPage = (nextReleaseId: string, pageId: string) => {
@@ -471,7 +486,14 @@ export function App() {
       if (node.pageId && node.releaseId) { selectPage(node.releaseId, node.pageId); setMode("studio"); }
       else openTreeNode(node, "studio");
     },
-    openReadWeave: (node) => { if (node.readweaveNoteId) void runTreeAction(async () => { const link = await api.deepLink(node.readweaveNoteId!); if (!link.verified) throw new Error("这个 ReadWeave 目标尚未验证"); window.open(link.url, "_blank", "noopener,noreferrer"); }, "已打开 ReadWeave 精细笔记"); },
+    openReadWeave: (node) => {
+      if (node.readweaveNoteId) void runTreeAction(
+        () => openVerifiedReadWeaveDeepLink(node.readweaveNoteId!),
+        "已打开 ReadWeave 精细笔记",
+        "正在验证 ReadWeave 精细笔记…",
+        false
+      );
+    },
     history: (node) => setHistoryNode(node),
     properties: (node) => void runTreeAction(async () => { const properties = await api.treeNodeProperties(node.id); setToast(`${properties.title} · 修订 ${properties.revision} · ${properties.syncState === "connected" ? "已同步" : "未同步"}`); }, "节点属性已读取"),
     openTrash: () => setUtilityPanel("trash")
@@ -515,6 +537,7 @@ export function App() {
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
         <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className="product-content">
+          {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
           {activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {!pageDetailReady && release.lifecycle !== "draft_source" && <WorkspaceLoader />}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -1313,9 +1336,49 @@ function readNavigationHash(): { releaseId: string; pageIndex: number; hasExplic
   };
 }
 
+export function resolveActiveImportId(hashValue: string, savedImportId?: string | null): string | undefined {
+  const hash = new URLSearchParams(hashValue.startsWith("#") ? hashValue.slice(1) : hashValue);
+  const importId = hash.get("import");
+  if (importId) return importId;
+  if (hash.has("release") || hash.has("page")) return undefined;
+  return savedImportId || undefined;
+}
+
+export async function flushNextSessionPatch(
+  pendingPatches: Map<string, Partial<LearningSession>>,
+  updateSession: (sessionId: string, patch: Partial<LearningSession>) => Promise<LearningSession>,
+  getCurrentSessionId: () => string | undefined,
+  onCurrentSessionUpdated: (updated: LearningSession) => void
+): Promise<boolean> {
+  const next = pendingPatches.entries().next();
+  if (next.done) return false;
+  const [sessionId, patch] = next.value;
+  pendingPatches.delete(sessionId);
+  const updated = await updateSession(sessionId, patch);
+  if (getCurrentSessionId() === sessionId) onCurrentSessionUpdated(updated);
+  return true;
+}
+
 function readActiveImportId(): string | undefined {
-  const hash = new URLSearchParams(location.hash.slice(1));
-  return hash.get("import") || localStorage.getItem("course-os-active-import") || undefined;
+  return resolveActiveImportId(location.hash, localStorage.getItem("course-os-active-import"));
+}
+
+export async function openVerifiedReadWeaveDeepLink(
+  noteId: string,
+  openWindow: () => Window | null = () => window.open("about:blank", "_blank"),
+  loadLink: (id: string) => Promise<{ url: string; verified: boolean }> = api.deepLink
+): Promise<void> {
+  const popup = openWindow();
+  if (!popup) throw new Error("浏览器阻止打开 ReadWeave 新窗口");
+  popup.opener = null;
+  try {
+    const link = await loadLink(noteId);
+    if (!link.verified) throw new Error("这个 ReadWeave 目标尚未验证");
+    popup.location.replace(link.url);
+  } catch (reason) {
+    popup.close();
+    throw reason;
+  }
 }
 
 function defaultRelease(items: CourseRelease[]): CourseRelease | undefined {
