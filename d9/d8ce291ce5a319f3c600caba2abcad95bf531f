@@ -1,0 +1,21 @@
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_2be6979037b540 269-270
+apps/web/src/SlideViewer.tsx
+  s_e8850ef125fb32::t_2be6979037b540 15,81-82,84,88-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d9d8ce291ce5a319f3c600caba2abcad95bf531f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
