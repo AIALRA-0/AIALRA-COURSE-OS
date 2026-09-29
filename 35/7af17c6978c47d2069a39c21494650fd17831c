@@ -1,0 +1,86 @@
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_fc2d15c1fc94ed 14,31,33
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_fc3cf326914b22 1694-1695,1700
+  s_e8850ef125fb32::t_ef6b852b731876 1771-1787
+  s_e8850ef125fb32::t_7ca5276941a43b 1622-1624
+  s_e8850ef125fb32::t_63abf16104da43 1139
+  s_e8850ef125fb32::t_837212fcd9b505 203-217,1626,1631,1644,1678-1679,1682
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_4564b2e5b0a9a5 1135-1142,1144-1147,1150-1156
+  s_e8850ef125fb32::t_49b9e57589e7cb 1109,1113,1134
+  s_e8850ef125fb32::t_fc3cf326914b22 1143,1148-1149
+  s_e8850ef125fb32::t_b75d18075ff81f 1024
+  s_e8850ef125fb32::t_678984655d9551 1165-1167
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_9a1559748d4e17 1
+  s_e8850ef125fb32::t_9dc3d4b57f43df 6,195
+  s_e8850ef125fb32::t_8247f4f4fd6f6b 152-153,157,159
+  s_e8850ef125fb32::t_b9e2424d3e7bee 192-194,197,199,204-210,215-223
+  s_e8850ef125fb32::t_5be63f3d5977ed 54-55,155,158,189,191,198
+  s_e8850ef125fb32::t_1ae76711c08843 211-212,214
+  s_e8850ef125fb32::t_694c13cb1f34a4 200-203
+  s_e8850ef125fb32::t_65175566d1be8a 196
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_9a1559748d4e17 18-19,64
+  s_e8850ef125fb32::t_7fdf8cced9d8c5 20
+  s_e8850ef125fb32::t_f7656500b9e6ed 74-75,87,90,92-93,95
+  s_e8850ef125fb32::t_1fd442a3c63df0 84,100
+  s_e8850ef125fb32::t_62c65902d828c8 68-73,76-83,85-86,88-89,91,94,96-99
+  s_e8850ef125fb32::t_eea364e71d4aa6 67
+apps/web/src/Markdown.tsx
+  s_e8850ef125fb32::t_feed959802f061 22-71,73,77
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_65527fa8a227f5 137,161-169,171-183,185-187,214
+  s_e8850ef125fb32::t_55d394869321f6 138-159,170,184
+  s_e8850ef125fb32::t_feed959802f061 94
+apps/web/src/Markdown.spec.tsx
+  s_e8850ef125fb32::t_e163607efb25ac 74
+  s_e8850ef125fb32::t_dc26ec09c61251 72,77-80
+  s_e8850ef125fb32::t_3591b4c95656f6 122-126,129-133
+  s_e8850ef125fb32::t_6ac9e0bcfbbe7e 4,81-82,84-88,90-91,93-94,101,103-105,107-121,127-128
+  s_e8850ef125fb32::t_513a1b11f786d5 73,75-76
+  s_e8850ef125fb32::t_05dcf607a79a9a 106
+  s_e8850ef125fb32::t_86873f34c59a18 83,89,95-100,102,134-135
+  s_e8850ef125fb32::t_93e407784a275d 92
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_ef6b852b731876 320
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_60ebc7f01217e2 737,752-754,788
+  s_e8850ef125fb32::t_8b326b6e2b51c5 19-41,121-122,297-299,302,309-311,314-319,321
+  s_e8850ef125fb32::t_63abf16104da43 95-97,100
+  s_e8850ef125fb32::t_657207b84bc580 1588
+  s_e8850ef125fb32::t_9985a13edec923 42-50,123,303,312,324,332,343-344,397
+  s_e8850ef125fb32::t_2626eea88518ed 51-58,124,355,383
+  s_e8850ef125fb32::t_e5754d280f3831 350-351
+  s_e8850ef125fb32::t_75635702b67e2e 691,693
+  s_e8850ef125fb32::t_dc7f4ac4cd0d53 148,296,313,325-331,333-342,366-382,384-396
+  s_e8850ef125fb32::t_f00cad7ac4879e 93-94,98-99,101-105,548
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_1bb0e0f910926f 1482-1486
+  s_e8850ef125fb32::t_bd2475b4293622 1487-1494
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_d44c2a8727e793 93
+  s_e8850ef125fb32::t_483c38044abb9a 4
+  s_e8850ef125fb32::t_9a1559748d4e17 54,68
+  s_e8850ef125fb32::t_3292716716e816 43,47-49
+  s_e8850ef125fb32::t_2911fb9577bda6 5,36-42,44-46,50-53,55-67,69-71
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_dc26ec09c61251 45-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "357af17c6978c47d2069a39c21494650fd17831c",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
