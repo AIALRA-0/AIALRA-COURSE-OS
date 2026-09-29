@@ -1,0 +1,24 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_56b6d09f074a08 248,974,1336-1339
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_da5803d75bafa3 121
+  s_e8850ef125fb32::t_47caafc664726c 392,394-398
+  s_e8850ef125fb32::t_8b508db7b38b4d 143,244,246,249,393,399-435
+  s_e8850ef125fb32::t_b4155d7333a64a 207-213,215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bfd69d003705e3b56cfd3c5d10d686bf2b3bdf1a",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
