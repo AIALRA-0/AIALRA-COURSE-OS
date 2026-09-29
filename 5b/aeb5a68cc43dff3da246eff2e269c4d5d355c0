@@ -1,0 +1,20 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_27a47983e94323 90,272,287,292,333
+  s_e8850ef125fb32::t_d0a14781ae421b 343-346,349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5baeb5a68cc43dff3da246eff2e269c4d5d355c0",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
