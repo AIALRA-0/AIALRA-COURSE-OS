@@ -1,0 +1,23 @@
+apps/api/src/source-layout.ts
+  s_e8850ef125fb32::t_9437587c0a6395 20,22-29
+apps/api/src/source-layout.spec.ts
+  s_e8850ef125fb32::t_4fb4947d7ce739 49-60
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_244b37e4406d30 277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "30e39e131815c69f7afbe828edfdbce11babf18a",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
