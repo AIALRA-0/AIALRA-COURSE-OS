@@ -15,6 +15,11 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
   const [interactiveReady, setInteractiveReady] = useState(false);
   const interactiveMarkerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!sessionId || (page.questionBank?.filter((item) => item.status === "approved").length ?? 0) < 4) return;
+    // This page is already open. Reuse the same request when the learner reaches its questions.
+    void api.selectQuestions(page.id, sessionId).catch(() => undefined);
+  }, [page.id, page.questionBank, sessionId]);
+  useEffect(() => {
     setInteractiveReady(false);
     const marker = interactiveMarkerRef.current;
     if (!marker || typeof IntersectionObserver === "undefined") {
