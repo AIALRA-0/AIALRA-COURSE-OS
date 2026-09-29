@@ -1421,7 +1421,7 @@ describe("Course OS API", () => {
     expect(session.body.courseReleaseId).toBe(release.id);
   });
 
-  it("selects and grades only ready candidate draft questions, with idempotent replay", async () => {
+  it("selects and grades current ready candidate snapshots without live reconciliation, with idempotent replay", async () => {
     const { app, readweave } = await seededApp();
     const candidate = testRelease();
     candidate.id = "candidate-questions-v2";
@@ -1433,6 +1433,9 @@ describe("Course OS API", () => {
       idempotencyKey: "candidate-questions-source", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-source"
     });
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: candidate.id }).expect(201);
+    const snapshotRead = vi.fn(readweave.getDraftByPage.bind(readweave));
+    (readweave as ReadWeaveCourseApi).getDraftSnapshotByPage = snapshotRead;
+    const liveRead = vi.spyOn(readweave, "getDraftByPage").mockRejectedValue(new Error("SLOW_BLOCK_RECONCILIATION"));
     const selectionUrl = "/api/v1/pages/candidate-page-1/questions:select";
     await request(app).post(selectionUrl).set("Idempotency-Key", "candidate-not-ready").send({ sessionId: session.body.id, count: 2 }).expect(409);
 
@@ -1458,6 +1461,35 @@ describe("Course OS API", () => {
     expect(replayed.body.attempt.id).toBe(saved.body.attempt.id);
     expect(await readweave.listQuestionAttempts()).toHaveLength(1);
     expect(await readweave.listAssessmentAttempts()).toHaveLength(1);
+
+    const readyDraft = (await snapshotRead("candidate-page-1"))!;
+    const saveSelection = vi.spyOn(readweave, "saveQuestionSelection");
+    for (const [field, value] of [
+      ["workspaceId", "other-workspace"], ["courseId", "other-course"],
+      ["sourceReleaseId", "other-source"], ["status", "needs_review"]
+    ] as const) {
+      snapshotRead.mockResolvedValueOnce({ ...readyDraft, [field]: value });
+      await request(app).post(selectionUrl).set("Idempotency-Key", `candidate-reject-${field}`)
+        .send({ sessionId: session.body.id, count: 2 }).expect(409);
+      snapshotRead.mockResolvedValueOnce({ ...readyDraft, [field]: value });
+      await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", `candidate-attempt-reject-${field}`)
+        .send(payload).expect(409);
+    }
+    expect(saveSelection).not.toHaveBeenCalled();
+    expect(await readweave.listQuestionAttempts()).toHaveLength(1);
+
+    const updatedQuestion = { ...draftQuestions[0]!, id: "candidate-updated-question", expectedAnswer: "updated answer" };
+    await readweave.saveDraft({ ...readyDraft, page: { ...readyDraft.page, questionBank: [updatedQuestion] } }, readyDraft.revision,
+      { idempotencyKey: "candidate-questions-update", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-update" });
+    const updatedSelection = await request(app).post(selectionUrl).set("Idempotency-Key", "candidate-select-updated")
+      .send({ sessionId: session.body.id, seed: "updated-seed", count: 1 }).expect(201);
+    expect(updatedSelection.body.available).toBe(1);
+    expect(updatedSelection.body.questions).toEqual([updatedQuestion]);
+    const updatedAttempt = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt-updated")
+      .send({ ...payload, selectionId: updatedSelection.body.selection.id, questionId: updatedQuestion.id, answer: updatedQuestion.expectedAnswer }).expect(201);
+    expect(updatedAttempt.body.attempt.correct).toBe(true);
+    expect(snapshotRead).toHaveBeenCalledWith("candidate-page-1");
+    expect(liveRead).not.toHaveBeenCalled();
   });
 
   it("lets only one concurrent dispatcher claim and execute a queued page job", async () => {

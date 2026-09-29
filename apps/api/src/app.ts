@@ -2694,7 +2694,9 @@ function standaloneGenerationTaskRecord(job: GenerationJob, relatedImport?: Impo
 async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: CourseRelease, pageId: string, workspaceId: string): Promise<CourseRelease["pages"][number] | undefined> {
   const sourcePage = release.pages.find((page) => page.id === pageId);
   if (!sourcePage || release.lifecycle !== "draft_source") return sourcePage;
-  const draft = await readweave.getDraftByPage(pageId);
+  const draft = readweave.getDraftSnapshotByPage
+    ? await readweave.getDraftSnapshotByPage(pageId)
+    : await readweave.getDraftByPage(pageId);
   return draft?.sourceReleaseId === release.id && draft.workspaceId === workspaceId && draft.courseId === release.courseId
     && draft.status === "ready" ? draft.page : undefined;
 }
