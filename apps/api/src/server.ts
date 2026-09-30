@@ -166,6 +166,21 @@ export async function startApiServer(): Promise<void> {
     if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {
       await dependencies.operations.whenReady();
     }
+    // Populate the existing directory cache before accepting the first reader.
+    // A slow/unavailable ETAPI must still leave settings and API routes usable.
+    if (process.env.READWEAVE_MODE === "etapi") {
+      let warmupDeadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          readweave.listReleaseIndexes(),
+          new Promise<void>((resolveWarmup) => { warmupDeadline = setTimeout(resolveWarmup, 10_000); })
+        ]);
+      } catch {
+        process.stderr.write("Course directory startup read deferred; API remains available\n");
+      } finally {
+        if (warmupDeadline) clearTimeout(warmupDeadline);
+      }
+    }
     const app = createApp(dependencies);
     registerSelfRetellingRoutes(app, dependencies);
     registerEtapiSettingsRoutes(app, dependencies, etapiSettings);
