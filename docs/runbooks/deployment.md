@@ -62,6 +62,11 @@ loopback or transparent-tunnel checks. Do not cancel sessions or answer writes
 to make a learning-flow check pass. Keep the existing PostgreSQL single-writer
 lock and retain the previous image/Compose configuration for rollback.
 
+The runtime image carries the package-manager cache from the build stage and
+disables runtime Corepack downloads. Check `pnpm --version` with container
+networking disabled before activation, so API startup cannot wait on the package
+registry even though application network access remains available.
+
 Build both images from the exact public commit and tag them `2.4.0-<short-sha>`. Put those tags in the private environment file, then apply Compose. API, web, worker, and converter must switch together.
 
 Keep the prior Compose file and images until internal health, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass.

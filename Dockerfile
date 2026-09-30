@@ -12,6 +12,8 @@ RUN pnpm -r build
 
 FROM node:24-bookworm-slim AS runtime
 RUN corepack enable
+COPY --from=build /root/.cache/node/corepack /root/.cache/node/corepack
+ENV COREPACK_ENABLE_NETWORK=0
 RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app /app
