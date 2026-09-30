@@ -1,0 +1,23 @@
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_33a71265adf518 27-34
+  s_e8850ef125fb32::t_92e6ae928e7032 300
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_e156fc352cd0b4 1097,1371
+  s_e8850ef125fb32::t_ec3d29d789db84 133-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a9e9cdb950e46ddb31cc1ab04df5eda3e8f4d430",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
