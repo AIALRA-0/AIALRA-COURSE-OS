@@ -2459,6 +2459,7 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("GENERATION_RETRY_STATE_INVALID") || raw.includes("GENERATION_RETRY_HAS_NO_FAILED_PAGES")) return { status: 409, code: "GENERATION_RETRY_NOT_ALLOWED", message: "当前生成任务没有可重试的失败页面", retryable: false };
   if (raw.includes("GENERATION_PLAN_BUSY")) return { status: 409, code: "GENERATION_PLAN_BUSY", message: "这个生成计划还有其他任务运行，请等待当前批次结束后再重试", retryable: true };
   if (raw.includes("WRITING_POLICY_SNAPSHOT_CHANGED") || raw.includes("WRITING_POLICY_VALIDATION_FAILED")) return { status: 409, code: "WRITING_POLICY_SNAPSHOT_CHANGED", message: "当前写作策略已经变化或未通过验证，请重新建立生成计划", retryable: false };
+  if (/^READWEAVE_(?:ETAPI|HTTP)_(?:401|403)(?::|$)/u.test(raw)) return { status: 403, code: "ACCESS_DENIED", message: "当前课程阅读权限已失效", retryable: false };
   if (raw.startsWith("READWEAVE_ETAPI_") || raw.startsWith("READWEAVE_HTTP_") || raw.includes("READWEAVE_UNAVAILABLE")) return { status: 503, code: "READWEAVE_UNAVAILABLE", message: "ReadWeave 暂时不可访问，这项操作尚未保存，请稍后重试", retryable: true };
   if (raw.includes("NOT_FOUND")) return { status: 404, code: "RESOURCE_NOT_FOUND", message: "没有找到请求的课程内容，请重新载入后再试", retryable: false };
   if (raw.includes("PERMANENT_DELETE_UNSUPPORTED")) return { status: 409, code: "PERMANENT_DELETE_UNSUPPORTED", message: "当前 ReadWeave 不支持安全永久删除，这条记录会继续保留在回收站", retryable: false };

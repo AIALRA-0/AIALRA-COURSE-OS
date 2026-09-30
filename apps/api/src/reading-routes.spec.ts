@@ -73,6 +73,41 @@ async function harness() {
 }
 
 describe("replica-backed reading routes", () => {
+  it.each(["READWEAVE_ETAPI_401", "READWEAVE_ETAPI_403", "READWEAVE_HTTP_401", "READWEAVE_HTTP_403"])(
+    "reports %s as terminal access denial on the first confirmation and blocks previously readable copies",
+    async (upstreamCode) => {
+      const { app, authority, reading } = await harness();
+      await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a")
+        .set("X-Workspace-Id", "personal").expect(200);
+      vi.spyOn(authority, "getDraftByPage").mockRejectedValue(new Error(`${upstreamCode}: source access denied`));
+
+      const denied = await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a&confirm=1")
+        .set("X-Workspace-Id", "personal").expect(403);
+      expect(denied.body.error).toMatchObject({ code: "ACCESS_DENIED", retryable: false });
+      expect(reading.status()).toMatchObject({ accessDenied: true, ready: false });
+      for (const path of [
+        "/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a",
+        "/api/v1/pages/page-a/lesson?releaseId=release-a",
+        "/api/v1/releases?view=index"
+      ]) {
+        const blocked = await request(app).get(path).set("X-Workspace-Id", "personal").expect(403);
+        expect(blocked.body.error).toMatchObject({ code: "ACCESS_DENIED", retryable: false });
+      }
+    }
+  );
+
+  it("keeps confirmed copies readable after a temporary source failure", async () => {
+    const { app, authority, reading, draft } = await harness();
+    vi.spyOn(authority, "getDraftByPage").mockRejectedValue(new Error("READWEAVE_ETAPI_503: temporary outage"));
+    const failed = await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a&confirm=1")
+      .set("X-Workspace-Id", "personal").expect(503);
+    expect(failed.body.error).toMatchObject({ code: "READWEAVE_UNAVAILABLE", retryable: true });
+    expect(reading.status()).toMatchObject({ accessDenied: false, ready: true, synchronization: "degraded" });
+    const local = await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a")
+      .set("X-Workspace-Id", "personal").expect(200);
+    expect(local.body).toMatchObject({ contentHash: draft.contentHash, sourceReleaseId: draft.sourceReleaseId });
+  });
+
   it("serves replica release indexes as equivalent gzip and identity JSON without authority reads", async () => {
     const { app, authority } = await harness();
     const listReleaseIndexes = vi.spyOn(authority, "listReleaseIndexes").mockRejectedValue(new Error("REMOTE_INDEX_READ_MUST_NOT_RUN"));

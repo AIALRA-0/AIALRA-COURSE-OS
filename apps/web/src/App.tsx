@@ -21,7 +21,7 @@ const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) 
 type MobileMode = "visual" | "lesson" | "practice";
 type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
-export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; generatedReady?: boolean; notice?: string };
+export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; terminal?: boolean; generatedReady?: boolean; notice?: string };
 export type CachedPageSnapshot = { releaseId: string; page: PageLesson; contentHash: string };
 export interface SharedReadRequest<T> {
   promise: Promise<T>;
@@ -60,6 +60,133 @@ export function pageSnapshotResponseState(requested: { releaseId: string; pageId
   if (requested.releaseId !== active.releaseId || requested.pageId !== active.pageId) return "stale";
   if (response.releaseId !== requested.releaseId || response.pageId !== requested.pageId) return "mismatch";
   return "match";
+}
+
+const TERMINAL_PAGE_READ_CODES = new Set([
+  "ACCESS_DENIED", "AUTHENTICATION_REQUIRED", "AUTH_REQUIRED", "FORBIDDEN", "UNAUTHORIZED",
+  "RELEASE_NOT_FOUND", "PAGE_NOT_FOUND", "RESOURCE_NOT_FOUND"
+]);
+
+export function isAuthorizationPageReadError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const apiError = error as { code?: unknown; status?: unknown };
+  return apiError.status === 401 || apiError.status === 403
+    || typeof apiError.code === "string" && ["ACCESS_DENIED", "AUTHENTICATION_REQUIRED", "AUTH_REQUIRED", "FORBIDDEN", "UNAUTHORIZED"].includes(apiError.code);
+}
+
+export function isTerminalPageReadError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const apiError = error as { code?: unknown; status?: unknown };
+  return isAuthorizationPageReadError(error) || apiError.status === 404
+    || typeof apiError.code === "string" && TERMINAL_PAGE_READ_CODES.has(apiError.code);
+}
+
+function pageReadErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "当前页面暂时无法读取";
+}
+
+export function candidatePreviewAfterReadFailure(
+  current: CandidatePreviewState | undefined,
+  pageId: string,
+  error: unknown
+): CandidatePreviewState {
+  const detail = pageReadErrorMessage(error);
+  if (isTerminalPageReadError(error)) return { pageId, error: `当前候选页已不可访问：${detail}`, terminal: true };
+  if (current?.pageId === pageId && current.terminal) return current;
+  return current?.pageId === pageId && current.page
+    ? { ...current, error: undefined, terminal: false, notice: `当前显示的是上次可读讲解；最新 ReadWeave 内容读取失败：${detail}` }
+    : { pageId, error: detail };
+}
+
+export function formalPageAfterReadFailure(
+  currentPage: PageLesson | undefined,
+  error: unknown
+): { page?: PageLesson; error: string; terminal: boolean } {
+  const terminal = isTerminalPageReadError(error);
+  return {
+    ...(terminal ? {} : currentPage ? { page: currentPage } : {}),
+    error: pageReadErrorMessage(error),
+    terminal
+  };
+}
+
+export function pageCacheAfterReadFailure(
+  cache: Map<string, CachedPageSnapshot>,
+  releaseId: string,
+  pageId: string,
+  error: unknown
+): Map<string, CachedPageSnapshot> {
+  if (!isTerminalPageReadError(error)) return cache;
+  const next = new Map(cache);
+  if (isAuthorizationPageReadError(error)) next.clear();
+  else next.delete(pageSnapshotCacheKey(releaseId, pageId));
+  return next;
+}
+
+export function pageCacheAfterPrefetch(
+  cache: Map<string, CachedPageSnapshot>,
+  releaseId: string,
+  page: PageLesson,
+  capturedEpoch: number,
+  currentEpoch: number
+): Map<string, CachedPageSnapshot> {
+  return capturedEpoch === currentEpoch ? rememberPageSnapshot(cache, releaseId, page) : cache;
+}
+
+type FormalLessonRead = Awaited<ReturnType<typeof api.lesson>>;
+
+export function beginFormalPageLoad({
+  releaseId,
+  pageId,
+  hasCachedPage,
+  readPage,
+  isActive,
+  onPage,
+  onError
+}: {
+  releaseId: string;
+  pageId: string;
+  hasCachedPage: () => boolean;
+  readPage: () => SharedReadLease<FormalLessonRead>;
+  isActive: () => boolean;
+  onPage: (lesson: FormalLessonRead) => void;
+  onError: (error: unknown) => void;
+}): { loadInitial: () => void; onFocus: () => void; cancel: () => void } {
+  let latestRead = 0;
+  let currentRead: SharedReadLease<FormalLessonRead> | undefined;
+  let disposed = false;
+  const load = (force: boolean) => {
+    if (disposed || !isActive() || (!force && hasCachedPage())) return;
+    currentRead?.release();
+    const readId = ++latestRead;
+    const lessonRead = readPage();
+    currentRead = lessonRead;
+    void lessonRead.promise.then((lesson) => {
+      if (disposed || !isActive() || readId !== latestRead) return;
+      const state = pageSnapshotResponseState(
+        { releaseId, pageId },
+        { releaseId, pageId },
+        { releaseId: lesson.releaseId, pageId: lesson.page.id }
+      );
+      if (state === "match") onPage(lesson);
+      else onError(new Error(`当前页读取返回了不匹配的课程版本或页面 ID（版本 ${lesson.releaseId}，页面 ${lesson.page.id}），请重试`));
+    }).catch((error: unknown) => {
+      if (!disposed && isActive() && readId === latestRead) onError(error);
+    }).finally(() => {
+      lessonRead.release();
+      if (currentRead === lessonRead) currentRead = undefined;
+    });
+  };
+  return {
+    loadInitial: () => load(false),
+    onFocus: () => load(true),
+    cancel: () => {
+      disposed = true;
+      latestRead += 1;
+      currentRead?.release();
+      currentRead = undefined;
+    }
+  };
 }
 
 export function readOnce<T>(inFlight: Map<string, SharedReadRequest<T>>, key: string, read: (signal: AbortSignal) => Promise<T>): SharedReadLease<T> {
@@ -171,6 +298,7 @@ export function App() {
   const [pageCache, setPageCache] = useState<Map<string, CachedPageSnapshot>>(() => new Map());
   const pageCacheRef = useRef(pageCache);
   pageCacheRef.current = pageCache;
+  const pageCacheInvalidationEpoch = useRef(0);
   const [imageResources] = useState(() => new ImageResourceCache(8));
   const pagePrefetchQueue = useRef(new BoundedPagePrefetchQueue(2));
   const lessonRequests = useRef(new Map<string, SharedReadRequest<Awaited<ReturnType<typeof api.lesson>>>>());
@@ -371,7 +499,7 @@ export function App() {
     : undefined;
   const page = detailedPage ?? indexedPage;
   const pageDetailReady = release?.lifecycle === "draft_source" || Boolean(detailedPage);
-  const [formalPageError, setFormalPageError] = useState<{ key: string; message: string }>();
+  const [formalPageError, setFormalPageError] = useState<{ key: string; message: string; terminal?: boolean }>();
   const [formalPageReload, setFormalPageReload] = useState(0);
   const currentPageCacheKey = release && indexedPage ? pageSnapshotCacheKey(release.id, indexedPage.id) : "";
   const currentFormalPageError = formalPageError?.key === currentPageCacheKey ? formalPageError : undefined;
@@ -396,7 +524,9 @@ export function App() {
       if (target.imageUrl) void imageResources.load(target.imageUrl, priority > 0 ? "high" : "low").catch(() => undefined);
       return;
     }
+    const capturedCacheEpoch = pageCacheInvalidationEpoch.current;
     void pagePrefetchQueue.current.enqueue(key, async () => {
+      if (capturedCacheEpoch !== pageCacheInvalidationEpoch.current) return;
       const image = target.imageUrl ? imageResources.load(target.imageUrl, priority > 0 ? "high" : "low").catch(() => undefined) : Promise.resolve(undefined);
       const snapshotRead: SharedReadLease<LessonDraft | Awaited<ReturnType<typeof api.lesson>>> = release.lifecycle === "draft_source"
         ? readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, target.id)
@@ -414,7 +544,9 @@ export function App() {
             const lesson = result as unknown as Awaited<ReturnType<typeof api.lesson>>;
             if (lesson.releaseId === release.id && lesson.page.id === target.id) pageSnapshot = lesson.page;
           }
-          if (pageSnapshot) setPageCache((current) => rememberPageSnapshot(current, release.id, pageSnapshot));
+          if (pageSnapshot) setPageCache((current) => pageCacheAfterPrefetch(
+            current, release.id, pageSnapshot!, capturedCacheEpoch, pageCacheInvalidationEpoch.current
+          ));
         });
       } finally {
         snapshotRead.release();
@@ -428,22 +560,36 @@ export function App() {
     let active = true;
     const requestIdentity = { releaseId: release.id, pageId: indexedPage.id };
     const cacheKey = pageSnapshotCacheKey(release.id, indexedPage.id);
-    setFormalPageError((current) => current?.key === cacheKey ? undefined : current);
-    if (pageCacheRef.current.has(cacheKey)) return;
-    const lessonRead = readLessonOnce(lessonRequests.current, release.id, indexedPage.id);
-    void lessonRead.promise.then((lesson) => {
-      if (!active) return;
-      const responseState = pageSnapshotResponseState(requestIdentity, activePageIdentity.current, { releaseId: lesson.releaseId, pageId: lesson.page.id });
-      if (responseState === "stale") return;
-      if (responseState === "mismatch") {
-        setFormalPageError({ key: cacheKey, message: `当前页读取返回了不匹配的课程版本或页面 ID（版本 ${lesson.releaseId}，页面 ${lesson.page.id}），请重试` });
-        return;
+    setFormalPageError((current) => current?.key === cacheKey && !current.terminal ? undefined : current);
+    const formalRead = beginFormalPageLoad({
+      releaseId: release.id,
+      pageId: indexedPage.id,
+      hasCachedPage: () => pageCacheRef.current.has(cacheKey),
+      // Recheck only this confirmed leaf through the local API; authority revocation is reflected by the runtime refresh gate.
+      readPage: () => readLessonOnce(lessonRequests.current, release.id, indexedPage.id),
+      isActive: () => active && pageSnapshotResponseState(requestIdentity, activePageIdentity.current, requestIdentity) === "match",
+      onPage: (lesson) => {
+        setFormalPageError((current) => current?.key === cacheKey ? undefined : current);
+        setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page));
+      },
+      onError: (reason) => {
+        const failure = formalPageAfterReadFailure(pageCacheRef.current.get(cacheKey)?.page, reason);
+        if (failure.terminal) {
+          pageCacheInvalidationEpoch.current += 1;
+          setPageCache((current) => pageCacheAfterReadFailure(current, release.id, indexedPage.id, reason));
+        }
+        setFormalPageError((current) => current?.key === cacheKey && current.terminal && !failure.terminal
+          ? current
+          : { key: cacheKey, message: failure.error, terminal: failure.terminal });
       }
-      setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page));
-    }).catch((reason) => {
-      if (active) setFormalPageError({ key: cacheKey, message: reason instanceof Error ? reason.message : "无法载入当前课程页面" });
-    }).finally(lessonRead.release);
-    return () => { active = false; lessonRead.release(); };
+    });
+    formalRead.loadInitial();
+    window.addEventListener("focus", formalRead.onFocus);
+    return () => {
+      active = false;
+      formalRead.cancel();
+      window.removeEventListener("focus", formalRead.onFocus);
+    };
   }, [indexedPage?.id, release?.id, release?.lifecycle, formalPageReload]);
   useEffect(() => {
     if (!release || !indexedPage) return;
@@ -471,7 +617,11 @@ export function App() {
       },
       readCurrentDraft: (signal, confirm) => api.draftSnapshot(page.id, { signal, releaseId: release.id, confirm }),
       isActive: () => active,
-      setPreview: setCandidatePreview
+      setPreview: setCandidatePreview,
+      onTerminalError: (reason) => {
+        pageCacheInvalidationEpoch.current += 1;
+        setPageCache((current) => pageCacheAfterReadFailure(current, release.id, page.id, reason));
+      }
     });
     window.addEventListener("focus", reconcileCandidatePreview);
     return () => {
@@ -812,7 +962,7 @@ export function App() {
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
           {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.notice && <p className="empty-inline" role="status">{candidatePreview.notice}</p>}
           {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
+            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
           </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -859,7 +1009,7 @@ function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTask
   </div>;
 }
 
-function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, onRetryContent }: {
+function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, contentTerminalError = false, onRetryContent }: {
   release: CourseRelease;
   pageIndex: number;
   setPageIndex: Dispatch<SetStateAction<number>>;
@@ -878,9 +1028,11 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   generatedReady?: boolean;
   contentReady?: boolean;
   contentError?: string;
+  contentTerminalError?: boolean;
   onRetryContent?: () => void;
 }) {
   const page = release.pages[pageIndex]!;
+  const canShowContent = contentReady && !contentTerminalError;
   const lessonColumnRef = useRef<HTMLDivElement>(null);
   const lessonStripRef = useRef<HTMLElement>(null);
 
@@ -909,10 +1061,12 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
     </nav>
 
     <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""}`}>
-      <div className="visual-column"><SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} /></div>
+      <div className="visual-column">{contentTerminalError
+        ? <div className="empty-inline" role="alert">{contentError || "当前页面已无权访问或已删除"}</div>
+        : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{contentReady ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role="status">{!contentError && <div className="loader" />}<span>{contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && <div className="loader" />}<span>{contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
@@ -1714,7 +1868,8 @@ export function beginCandidatePreviewLoad({
   readSnapshot,
   readCurrentDraft,
   isActive,
-  setPreview
+  setPreview,
+  onTerminalError
 }: {
   releaseId: string;
   pageId: string;
@@ -1722,6 +1877,7 @@ export function beginCandidatePreviewLoad({
   readCurrentDraft: (signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>;
   isActive: () => boolean;
   setPreview: Dispatch<SetStateAction<CandidatePreviewState | undefined>>;
+  onTerminalError?: (error: unknown) => void;
 }): CandidatePreviewReconcile {
   let snapshotReady = false;
   let latestRead = 0;
@@ -1745,29 +1901,30 @@ export function beginCandidatePreviewLoad({
       } else if (draft.status === "ready") {
         const title = readablePageTitle(draft.page.title);
         const updatedPage = title === draft.page.title ? draft.page : { ...draft.page, title };
-        setPreview((current) => current?.pageId === pageId && current.page
-          ? { ...current, page: updatedPage, error: undefined, notice: undefined, generatedReady: true }
+        setPreview((current) => current?.pageId === pageId
+          ? { ...current, page: updatedPage, error: undefined, terminal: false, notice: undefined, generatedReady: true }
           : current);
       } else {
         setPreview((current) => current?.pageId === pageId && current.page
           ? { ...current, notice: "当前显示的是上次可读讲解；最新候选内容尚未生成，暂未替换正文" }
-          : current);
+          : { pageId, error: "这页候选讲解尚未生成完成" });
       }
     }).catch((reason: unknown) => {
       if (!isActive() || readId !== latestRead) return;
-      const detail = reason instanceof Error && reason.message ? reason.message : "最新 ReadWeave 内容暂时无法确认";
-      setPreview((current) => current?.pageId === pageId && current.page
-        ? { ...current, notice: `当前显示的是上次可读讲解；最新 ReadWeave 内容读取失败：${detail}` }
-        : current);
+      if (isTerminalPageReadError(reason)) onTerminalError?.(reason);
+      setPreview((current) => candidatePreviewAfterReadFailure(current, pageId, reason));
     }).finally(() => {
       if (currentDraftController === controller) currentDraftController = undefined;
     });
   };
 
-  setPreview((current) => current?.pageId === pageId && current.page ? current : { pageId });
-  const reportSnapshotProblem = (message: string) => setPreview((current) => current?.pageId === pageId && current.page
-    ? { ...current, error: undefined, notice: `当前显示的是上次可读讲解；${message}，暂未替换正文` }
-    : { pageId, error: message });
+  setPreview((current) => current?.pageId === pageId && (current.page || current.terminal) ? current : { pageId });
+  const reportSnapshotProblem = (message: string) => setPreview((current) => {
+    if (current?.pageId === pageId && current.terminal) return current;
+    return current?.pageId === pageId && current.page
+      ? { ...current, error: undefined, notice: `当前显示的是上次可读讲解；${message}，暂未替换正文` }
+      : { pageId, error: message };
+  });
   void readSnapshot().then((draft) => {
     if (!isActive()) return;
     const identityMismatch = candidateSnapshotIdentityMismatch(draft, releaseId, pageId);
@@ -1783,7 +1940,13 @@ export function beginCandidatePreviewLoad({
       reportSnapshotProblem("这页候选讲解尚未生成完成");
     }
   }).catch((reason: unknown) => {
-    if (isActive()) reportSnapshotProblem(reason instanceof Error && reason.message ? reason.message : "候选讲解暂时无法读取，请重试");
+    if (!isActive()) return;
+    if (isTerminalPageReadError(reason)) {
+      onTerminalError?.(reason);
+      setPreview((current) => candidatePreviewAfterReadFailure(current, pageId, reason));
+    } else {
+      reportSnapshotProblem(reason instanceof Error && reason.message ? reason.message : "候选讲解暂时无法读取，请重试");
+    }
   });
   return Object.assign(reconcile, {
     cancel: () => {

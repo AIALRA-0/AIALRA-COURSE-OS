@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { ApiRequestError } from "./api.js";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
+import { beginCandidatePreviewLoad, beginFormalPageLoad, candidatePreviewAfterReadFailure, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -76,6 +77,10 @@ describe("saved lesson navigation", () => {
 
     expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
     expect(appSource).toContain("imageResources={imageResources} rightCollapsed={rightCollapsed}");
+    expect(appSource).toContain("<div className=\"visual-column\">{contentTerminalError\n        ? <div className=\"empty-inline\" role=\"alert\">");
+    expect(appSource).toContain(": <SlideViewer imageUrl={page.imageUrl}");
+    expect(appSource).toContain("const canShowContent = contentReady && !contentTerminalError;");
+    expect(appSource).toContain("{canShowContent ? <Suspense");
     expect(studioSource).toContain("imageResources: ImageResourceCache;");
     expect(studioSource).toContain("<SlideViewer imageUrl={workingPage.imageUrl} title={workingPage.title} value={view} onChange={setView} imageResources={imageResources} />");
   });
@@ -184,7 +189,7 @@ describe("saved lesson navigation", () => {
     expect(source).toContain("api.workspaceTree(undefined, { signal })");
     expect(source).toContain("setReleaseIndexError(reason instanceof Error ? reason.message : \"无法读取课程列表\")");
     expect(source).toContain("setTreeError(reason instanceof Error ? reason.message : \"无法读取课程目录\")");
-    expect(source).toContain("setFormalPageError({ key: cacheKey, message: reason instanceof Error ? reason.message : \"无法载入当前课程页面\" })");
+    expect(source).toContain("formalPageAfterReadFailure(pageCacheRef.current.get(cacheKey)?.page, reason)");
   });
 
   it("preserves a detailed requested release when the late index contains a summary or omits it", () => {
@@ -368,7 +373,7 @@ describe("candidate preview reconciliation", () => {
       releaseId: "release-a",
       pageId: "page-a",
       readSnapshot: () => snapshot.promise,
-      readCurrentDraft: () => Promise.reject(new Error("GET /drafts/page-a: 401 Unauthorized (request id req-candidate-401)")),
+      readCurrentDraft: () => Promise.reject(new ApiRequestError("Network temporarily unavailable (request id req-candidate-read)", "NETWORK_ERROR", 0, true)),
       isActive: () => true,
       setPreview
     });
@@ -376,7 +381,7 @@ describe("candidate preview reconciliation", () => {
     await flushPromises();
 
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Still visible");
-    expect(preview?.notice).toContain("401 Unauthorized (request id req-candidate-401)");
+    expect(preview?.notice).toContain("Network temporarily unavailable (request id req-candidate-read)");
     expect(preview?.notice).toContain("上次可读讲解");
   });
 
@@ -401,6 +406,216 @@ describe("candidate preview reconciliation", () => {
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Last readable lesson");
     expect(preview?.notice).toContain("身份错配");
     expect(preview?.notice).toContain("上次可读讲解");
+  });
+
+  it("keeps cached candidate text only for transient read failures and clears it for terminal API errors", () => {
+    const page = candidateDraft("release-a", "page-a", "Confirmed readable text").page;
+    const cached = { pageId: "page-a", page, generatedReady: true } satisfies CandidatePreviewState;
+    const temporary = candidatePreviewAfterReadFailure(cached, "page-a", new ApiRequestError("network unavailable", "NETWORK_ERROR", 0, true));
+    expect(temporary.page).toBe(page);
+    expect(temporary.notice).toContain("network unavailable");
+    expect(temporary.error).toBeUndefined();
+
+    for (const error of [
+      new ApiRequestError("permission revoked", "ACCESS_DENIED", 403, false),
+      new ApiRequestError("authentication required", "AUTHENTICATION_REQUIRED", 401, false),
+      new ApiRequestError("release deleted", "RELEASE_NOT_FOUND", 404, false),
+      new ApiRequestError("page deleted", "PAGE_NOT_FOUND", 404, false),
+      new ApiRequestError("not found", "HTTP_ERROR", 404, false)
+    ]) {
+      expect(isTerminalPageReadError(error)).toBe(true);
+      expect(candidatePreviewAfterReadFailure(cached, "page-a", error)).toMatchObject({ pageId: "page-a", error: expect.any(String) });
+      expect(candidatePreviewAfterReadFailure(cached, "page-a", error).page).toBeUndefined();
+    }
+  });
+
+  it("clears every cached page on authorization denial and only the missing page on confirmed deletion", () => {
+    const pageA = candidateDraft("release-a", "page-a", "Restricted A").page;
+    const pageB = candidateDraft("release-a", "page-b", "Restricted B").page;
+    let cache = rememberPageSnapshot(new Map(), "release-a", pageA);
+    cache = rememberPageSnapshot(cache, "release-a", pageB);
+
+    const denied = pageCacheAfterReadFailure(cache, "release-a", "page-a", new ApiRequestError("revoked", "ACCESS_DENIED", 403, false));
+    expect(denied.size).toBe(0);
+
+    const deleted = pageCacheAfterReadFailure(cache, "release-a", "page-a", new ApiRequestError("deleted", "PAGE_NOT_FOUND", 404, false));
+    expect(deleted.has(pageSnapshotCacheKey("release-a", "page-a"))).toBe(false);
+    expect(deleted.has(pageSnapshotCacheKey("release-a", "page-b"))).toBe(true);
+
+    const temporary = pageCacheAfterReadFailure(cache, "release-a", "page-a", new ApiRequestError("timeout", "REQUEST_TIMEOUT", 408, true));
+    expect(temporary).toBe(cache);
+  });
+
+  it("rejects a queued prefetch commit after terminal cache invalidation", () => {
+    const pageA = candidateDraft("release-a", "page-a", "Restricted A").page;
+    const pageB = candidateDraft("release-a", "page-b", "Restricted B").page;
+    const cache = rememberPageSnapshot(rememberPageSnapshot(new Map(), "release-a", pageA), "release-a", pageB);
+    const invalidated = pageCacheAfterReadFailure(cache, "release-a", "page-a", new ApiRequestError("revoked", "ACCESS_DENIED", 403, false));
+    const staleCommit = pageCacheAfterPrefetch(invalidated, "release-a", pageB, 7, 8);
+    const validCommit = pageCacheAfterPrefetch(invalidated, "release-a", pageB, 8, 8);
+
+    expect(invalidated.size).toBe(0);
+    expect(staleCommit.size).toBe(0);
+    expect(validCommit.get(pageSnapshotCacheKey("release-a", "page-b"))?.page.id).toBe("page-b");
+  });
+
+  it("does not let a late candidate read restore text after a newer terminal denial", async () => {
+    const snapshot = deferred<LessonDraft>();
+    const lateRead = deferred<LessonDraft>();
+    const denial = deferred<LessonDraft>();
+    let preview: CandidatePreviewState | undefined;
+    let cache = rememberPageSnapshot(new Map(), "release-a", candidateDraft("release-a", "page-a", "Cached text").page);
+    cache = rememberPageSnapshot(cache, "release-a", candidateDraft("release-a", "page-b", "Other cached text").page);
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => snapshot.promise,
+      readCurrentDraft: vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+        .mockReturnValueOnce(lateRead.promise)
+        .mockReturnValueOnce(denial.promise),
+      isActive: () => true,
+      setPreview,
+      onTerminalError: (error) => { cache = pageCacheAfterReadFailure(cache, "release-a", "page-a", error); }
+    });
+    snapshot.resolve(candidateDraft("release-a", "page-a", "Cached text"));
+    await flushPromises();
+    reconcile(new Event("focus"));
+    denial.reject(new ApiRequestError("permission revoked", "ACCESS_DENIED", 403, false));
+    await flushPromises();
+    expect(preview?.page).toBeUndefined();
+    expect(preview?.error).toContain("permission revoked");
+    expect(cache.size).toBe(0);
+
+    lateRead.resolve(candidateDraft("release-a", "page-a", "Late stale text"));
+    await flushPromises();
+    expect(preview?.page).toBeUndefined();
+    expect(preview?.error).toContain("permission revoked");
+  });
+
+  it("clears terminal state when a later candidate reconciliation succeeds", async () => {
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+      .mockRejectedValueOnce(new ApiRequestError("permission revoked", "ACCESS_DENIED", 403, false))
+      .mockRejectedValueOnce(new ApiRequestError("temporary timeout", "READ_TIMEOUT", 504, true))
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Restored lesson"));
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-a", "Initial snapshot")),
+      readCurrentDraft,
+      isActive: () => true,
+      setPreview
+    });
+    await flushPromises();
+    expect(preview).toMatchObject({ terminal: true, error: expect.any(String) });
+    expect(preview?.page).toBeUndefined();
+
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(preview).toMatchObject({ terminal: true, error: expect.stringContaining("permission revoked") });
+    expect(preview?.page).toBeUndefined();
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(preview).toMatchObject({ terminal: false, generatedReady: true, notice: undefined, error: undefined });
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Restored lesson");
+    reconcile.cancel();
+  });
+
+  it("keeps a confirmed terminal denial while a manual snapshot retry fails temporarily", async () => {
+    let preview: CandidatePreviewState | undefined = { pageId: "page-a", terminal: true, error: "permission revoked" };
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a", pageId: "page-a",
+      readSnapshot: () => Promise.reject(new ApiRequestError("temporary timeout", "READ_TIMEOUT", 504, true)),
+      readCurrentDraft: vi.fn(), isActive: () => true,
+      setPreview: (next) => { preview = typeof next === "function" ? next(preview) : next; }
+    });
+    expect(preview).toMatchObject({ terminal: true, error: "permission revoked" });
+    await flushPromises();
+    expect(preview).toMatchObject({ terminal: true, error: "permission revoked" });
+    expect(preview?.page).toBeUndefined();
+    reconcile.cancel();
+  });
+});
+
+describe("formal page focus reconciliation", () => {
+  it("does not reread a cached page initially, then reads its confirmed leaf on focus and classifies the result", async () => {
+    const currentPage = candidateDraft("release-a", "page-a", "Cached formal page").page;
+    const denied = deferred<{ releaseId: string; page: PageLesson; qaRecords: [] }>();
+    const readPage = vi.fn<() => SharedReadLease<{ releaseId: string; page: PageLesson; qaRecords: [] }>>(() => ({
+      promise: denied.promise,
+      release: vi.fn()
+    }));
+    let failure: ReturnType<typeof formalPageAfterReadFailure> | undefined;
+    const formal = beginFormalPageLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      hasCachedPage: () => true,
+      readPage,
+      isActive: () => true,
+      onPage: vi.fn(),
+      onError: (error) => { failure = formalPageAfterReadFailure(currentPage, error); }
+    });
+
+    formal.loadInitial();
+    expect(readPage).not.toHaveBeenCalled();
+    formal.onFocus();
+    expect(readPage).toHaveBeenCalledOnce();
+    denied.reject(new ApiRequestError("page access revoked", "ACCESS_DENIED", 403, false));
+    await flushPromises();
+    expect(failure).toMatchObject({ terminal: true, error: "page access revoked" });
+    expect(failure?.page).toBeUndefined();
+    formal.cancel();
+
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    expect(source).toContain("formalRead.loadInitial();");
+    expect(source).toContain('window.addEventListener("focus", formalRead.onFocus)');
+    expect(source).toContain("if (failure.terminal) {\n          pageCacheInvalidationEpoch.current += 1;");
+    expect(source).toContain("readPage: () => readLessonOnce(lessonRequests.current, release.id, indexedPage.id)");
+  });
+
+  it("does not let a late formal page response restore content after a terminal focus result", async () => {
+    const older = deferred<{ releaseId: string; page: PageLesson; qaRecords: [] }>();
+    const latest = deferred<{ releaseId: string; page: PageLesson; qaRecords: [] }>();
+    const leases = [older, latest];
+    let visiblePage: PageLesson | undefined = candidateDraft("release-a", "page-a", "Cached page").page;
+    let visibleError = "";
+    const formal = beginFormalPageLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      hasCachedPage: () => true,
+      readPage: () => ({ promise: leases.shift()!.promise, release: vi.fn() }),
+      isActive: () => true,
+      onPage: (lesson) => { visiblePage = lesson.page; visibleError = ""; },
+      onError: (error) => {
+        const failure = formalPageAfterReadFailure(visiblePage, error);
+        visiblePage = failure.page;
+        visibleError = failure.error;
+      }
+    });
+
+    formal.onFocus();
+    formal.onFocus();
+    latest.reject(new ApiRequestError("page deleted", "PAGE_NOT_FOUND", 404, false));
+    await flushPromises();
+    expect(visiblePage).toBeUndefined();
+    expect(visibleError).toContain("page deleted");
+    older.resolve({ releaseId: "release-a", page: candidateDraft("release-a", "page-a", "Late stale page").page, qaRecords: [] });
+    await flushPromises();
+    expect(visiblePage).toBeUndefined();
+    expect(visibleError).toContain("page deleted");
+    formal.cancel();
+  });
+
+  it("keeps a cached formal page on a temporary focus read failure", () => {
+    const page = candidateDraft("release-a", "page-a", "Cached formal page").page;
+    expect(formalPageAfterReadFailure(page, new ApiRequestError("read timed out", "REQUEST_TIMEOUT", 408, true)))
+      .toMatchObject({ page, error: "read timed out", terminal: false });
   });
 });
 
