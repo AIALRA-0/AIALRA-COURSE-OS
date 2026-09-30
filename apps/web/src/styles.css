@@ -130,11 +130,12 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-row.selected .tree-kind { color: var(--brand); }
 .tree-copy { min-width: 0; display: grid; gap: 1px; }
 .tree-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
-.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
-.status-published { background: var(--green); }
-.status-draft, .status-syncing { background: var(--blue); }
-.status-needs_review { background: var(--amber); }
-.status-conflict { background: var(--red); }
+.status-dot { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; font-size: 8px; line-height: 1; color: var(--faint); }
+.status-dot svg { width: 11px; height: 11px; flex: 0 0 11px; }
+.status-published { color: var(--green); }
+.status-draft, .status-syncing { color: var(--blue); }
+.status-needs_review { color: var(--amber); }
+.status-conflict { color: var(--red); }
 .tree-empty { height: 160px; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--faint); font-size: 11px; }
 .sidebar-footer { height: var(--workspace-footer-height); min-height: var(--workspace-footer-height); display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 9px; padding: 0 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .workspace-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: var(--brand-soft); color: var(--brand-ink); font-weight: 700; font-size: 11px; }
@@ -1093,7 +1094,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   min-height: 38px;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: 18px 22px minmax(0, 1fr) 8px;
+  grid-template-columns: 18px 22px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 5px;
   padding: 0 2px 0 0;
@@ -1367,7 +1368,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 @media (max-width: 900px) {
   .sidebar-heading-actions { gap: 4px; }
   .tree-row-actions { opacity: 1; }
-  .tree-main-button { grid-template-columns: 18px 22px minmax(0, 1fr) 7px; }
+  .tree-main-button { grid-template-columns: 18px 22px minmax(0, 1fr) max-content; }
   .explanation-panel { padding: 24px 17px 78px; font-size: calc(16px * var(--course-font-scale)); }
   .lesson-header h2 { font-size: 25px; }
   .lesson-section-title h3 { font-size: 20px; }

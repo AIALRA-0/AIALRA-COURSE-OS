@@ -24,6 +24,14 @@ export interface CourseTreeActions {
 
 type TreeMenuState = { node: CourseTreeNode; x: number; y: number };
 
+const treeStatusPresentation = {
+  published: { icon: "check", label: "已发布", visibleLabel: "发布" },
+  draft: { icon: "document", label: "草稿", visibleLabel: "草稿" },
+  syncing: { icon: "history", label: "正在同步", visibleLabel: "同步" },
+  needs_review: { icon: "review", label: "需要审核", visibleLabel: "待审" },
+  conflict: { icon: "warning", label: "存在冲突", visibleLabel: "冲突" }
+} as const;
+
 export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], onSelectTask, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
@@ -289,7 +297,7 @@ function TreeNode({ node, allNodes, depth, expanded, selectedPageId, focusedNode
         <span className={`tree-chevron ${hasChildren ? "" : "empty"}`} aria-hidden="true"><Icon name={open ? "chevronDown" : "chevronRight"} /></span>
         <span className={`tree-kind kind-${node.kind}`}><Icon name={node.kind === "course" ? "book" : node.kind === "trash" ? "trash" : node.kind === "material" ? "layers" : node.kind === "section" ? "folder" : node.kind === "module" ? "layers" : node.kind === "release" ? "publish" : "document"} /></span>
         <span className="tree-copy"><strong>{node.title}</strong></span>
-        {node.status && <span className={`status-dot status-${node.status}`} title={node.status} />}
+        {node.status && <span className={`status-dot status-${node.status}`} role="img" aria-label={`状态：${treeStatusPresentation[node.status].label}`} title={treeStatusPresentation[node.status].label}><Icon name={treeStatusPresentation[node.status].icon} /><span>{treeStatusPresentation[node.status].visibleLabel}</span></span>}
       </button>
       {actions && <button className="tree-row-actions" data-action="tree-open-actions" onClick={(event) => onOpenMenu(node, event)} onFocus={() => onFocus(node.id)} aria-label={`打开 ${node.title} 的操作菜单`} aria-haspopup="menu" title="更多操作"><span aria-hidden="true">…</span></button>}
     </div>
