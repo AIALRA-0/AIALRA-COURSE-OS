@@ -1,0 +1,21 @@
+Dockerfile
+  s_e8850ef125fb32::t_a6576b84b70150 15-16
+docs/runbooks/deployment.md
+  s_e8850ef125fb32::t_a6576b84b70150 65-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06543039fbb4c966eda2f5040db47cdd0bc75efd",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
