@@ -775,11 +775,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (draft.workspaceId !== this.workspaceId) return undefined;
       return structuredClone(draft);
     }
-    const [stateReference, located] = await Promise.all([
-      this.readStateReference(false, false),
-      this.findDraftPageRecord(pageId)
-    ]);
-    const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === pageId);
+    const located = await this.findDraftPageRecord(pageId);
+    const draft = located?.record.draft
+      ?? (await this.readStateReference(false, false)).drafts.find((item) => item.pageId === pageId);
     if (!draft || draft.workspaceId !== this.workspaceId) return undefined;
     return structuredClone(draft);
   }
