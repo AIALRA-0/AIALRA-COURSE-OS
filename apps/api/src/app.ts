@@ -2738,7 +2738,15 @@ async function findWorkspacePageSource(readweave: ReadWeaveCourseApi, workspaceI
     const page = release?.pages.find((item) => item.id === pageId);
     if (release && page) return { release, page };
   }
-  return findPageSource(await listWorkspaceReleases(readweave, workspaceId), pageId);
+  // Imported IDs do not embed the release ID. Locate their owner in the
+  // lightweight index instead of cloning every saved lesson for one page.
+  const { indexes } = await listWorkspaceReleaseIndexes(readweave, workspaceId);
+  const owner = [...indexes].sort((a, b) => b.version - a.version)
+    .find((release) => release.pages.some((page) => page.id === pageId));
+  if (!owner) return undefined;
+  const release = await getWorkspaceRelease(readweave, owner.id, workspaceId);
+  const page = release?.pages.find((item) => item.id === pageId);
+  return release && page ? { release, page } : undefined;
 }
 
 function formalWorkspaceCourses(courses: CourseProject[], workspaceId: string): CourseProject[] {

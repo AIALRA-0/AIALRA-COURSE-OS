@@ -172,6 +172,13 @@ interface LocatedDraftPageRecord {
   record: EtapiDraftPageRecord;
 }
 
+interface DraftPageReadContext {
+  costEntries: GenerationCostEntry[];
+  conflicts: CourseConflict[];
+  idempotency: ReadWeaveFileState["idempotency"];
+  projections: Pick<ProjectionIndex, "stateNoteId"> & { drafts: Record<string, DraftProjection> };
+}
+
 // The API process is single-writer in production. Adapter instances can still
 // overlap briefly when ETAPI settings are replaced, so their page locks share
 // this process-wide map.
@@ -210,7 +217,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;
   private bootstrapPromise?: Promise<ProjectionIndex>;
-  private bootstrapStateContent?: string;
+  private bootstrapStateSnapshot?: Partial<EtapiState>;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly draftPageRecordCache = new Map<string, LocatedDraftPageRecord>();
   private readonly draftPageRecordVersions = new Map<string, number>();
@@ -746,24 +753,55 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async getDraftByPage(pageId: string): Promise<LessonDraft | undefined> {
     return this.withDraftPageLock(pageId, undefined, async () => {
-      const stateReference = await this.readStateReference(true);
+      const stateReference = await this.readStateReference(true, false);
       const located = await this.findDraftPageRecord(pageId);
-      if (!located && !stateReference.drafts.some((item) => item.pageId === pageId)) return undefined;
-      const state = structuredClone(stateReference);
-      if (located) this.mergeDraftPageRecord(state, located.record);
-      const draft = state.drafts.find((item) => item.pageId === pageId);
+      const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === pageId);
       if (!draft) return undefined;
+      const state = this.createDraftPageReadContext(stateReference, draft, located?.record);
       const reconciled = await this.reconcileDraft(state, draft);
       if (reconciled.changed) {
         const projection = state.projections.drafts[reconciled.draft.id];
         if (projection) {
           const record = this.makeDraftPageRecord(state, reconciled.draft, projection, located?.record);
-          await this.writeDraftPageRecord(record, located?.noteId, state);
+          await this.writeDraftPageRecord(record, located?.noteId, stateReference);
         }
       }
       this.draftReadCache.set(pageId, { draft: structuredClone(reconciled.draft), expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs });
       return reconciled.draft;
     });
+  }
+
+  private createDraftPageReadContext(
+    state: EtapiState,
+    draft: LessonDraft,
+    record?: EtapiDraftPageRecord
+  ): DraftPageReadContext {
+    const costEntries = mergeCostEntries(
+      state.costEntries.filter((entry) => entry.pageId === draft.pageId),
+      record?.costEntries
+    );
+    const costIds = new Set(costEntries.map((entry) => entry.id));
+    const conflictsById = new Map(state.conflicts
+      .filter((item) => item.objectId === draft.pageId)
+      .map((item) => [item.id, item]));
+    for (const conflict of record?.conflicts ?? []) conflictsById.set(conflict.id, conflict);
+    const conflictIds = new Set(conflictsById.keys());
+    const legacyIdempotency = Object.fromEntries(Object.entries(state.idempotency).filter(([, value]) =>
+      (value.kind === "draft" && value.objectId === draft.id) ||
+      (value.kind === "cost_entry" && costIds.has(value.objectId)) ||
+      (value.kind === "conflict" && conflictIds.has(value.objectId))
+    ));
+    const projection = record?.projection ?? state.projections.drafts[draft.id];
+
+    return {
+      costEntries: structuredClone(costEntries),
+      conflicts: structuredClone([...conflictsById.values()]),
+      idempotency: structuredClone({ ...legacyIdempotency, ...(record?.idempotency ?? {}) }),
+      projections: {
+        stateNoteId: state.projections.stateNoteId,
+        drafts: projection ? { [draft.id]: structuredClone(projection) } : {}
+      }
+    };
   }
 
   async getDraftSnapshotByPage(pageId: string): Promise<LessonDraft | undefined> {
@@ -1618,7 +1656,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     });
   }
 
-  private async reconcileDraft(state: EtapiState, draft: LessonDraft, pendingDraft?: LessonDraft): Promise<{ draft: LessonDraft; changed: boolean }> {
+  private async reconcileDraft(state: Pick<DraftPageReadContext, "projections">, draft: LessonDraft, pendingDraft?: LessonDraft): Promise<{ draft: LessonDraft; changed: boolean }> {
     const projection = state.projections.drafts[draft.id];
     if (!projection) return { draft, changed: false };
     const next = structuredClone(draft);
@@ -2040,9 +2078,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // Bootstrap already downloaded this immutable snapshot to locate the
     // projection notes. Reuse it for the first read instead of fetching the
     // same large index a second time during a cold API start.
-    const content = this.bootstrapStateContent ?? await this.getContent(projection.stateNoteId);
-    this.bootstrapStateContent = undefined;
-    const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
+    let parsed = this.bootstrapStateSnapshot;
+    if (!parsed) parsed = decodeReadWeaveStateContent(await this.getContent(projection.stateNoteId)) as Partial<EtapiState>;
+    this.bootstrapStateSnapshot = undefined;
     const state = normalizeState(parsed, projection);
     this.cacheActivityRoutes(state);
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
@@ -2244,7 +2282,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private makeDraftPageRecord(
-    state: EtapiState,
+    state: DraftPageReadContext,
     draft: LessonDraft,
     projection: DraftProjection,
     previous?: EtapiDraftPageRecord
@@ -2797,7 +2835,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const content = await this.getContent(existing.noteId);
       const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
-      this.bootstrapStateContent = content;
+      this.bootstrapStateSnapshot = parsed;
       this.cacheActivityRoutes(parsed);
       return parsed.projections;
     }

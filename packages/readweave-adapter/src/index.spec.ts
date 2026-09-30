@@ -36,10 +36,31 @@ it("uses the bootstrap index download for the first cold state read", async () =
   const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
   await original.listCourses();
   const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  const sentinel = "bootstrap parsed snapshot reuse marker";
+  const state = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+    researchArchives?: unknown[];
+    [key: string]: unknown;
+  };
+  state.researchArchives = [{ id: "large-bootstrap-snapshot", title: sentinel, content: "archive detail ".repeat(100_000) }];
+  const encoded = encodeReadWeaveStateContent(state);
+  expect(encoded.startsWith("COURSE_OS_BR_STATE_V1:")).toBe(true);
+  remote.editByTitle("00 Course OS 结构化索引", encoded);
+
+  const nativeParse = JSON.parse;
+  let snapshotParses = 0;
+  const parseSpy = vi.spyOn(JSON, "parse").mockImplementation(((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text.includes(sentinel)) snapshotParses += 1;
+    return nativeParse(text, reviver);
+  }) as typeof JSON.parse);
   const before = remote.requests.length;
   const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
-  await reopened.listCourses();
-  expect(remote.requests.slice(before).filter((item) => item.method === "GET" && item.path.endsWith(`/notes/${stateNoteId}/content`))).toHaveLength(1);
+  try {
+    await reopened.listCourses();
+    expect(remote.requests.slice(before).filter((item) => item.method === "GET" && item.path.endsWith(`/notes/${stateNoteId}/content`))).toHaveLength(1);
+    expect(snapshotParses).toBe(1);
+  } finally {
+    parseSpy.mockRestore();
+  }
 });
 
 it("aborts a stalled GET body and allows a later cold state read", async () => {
@@ -1055,6 +1076,74 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(reopened.getDraftSnapshotByPage("page-1")).resolves.toMatchObject({ pageId: "page-1", revision: 1 });
     expect(recordLookups).toBe(1);
     expect(stateReads).toBe(0);
+  });
+
+  it("reconciles one external page edit without a redundant full-state clone and keeps page metadata", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const cost = costEntryFor(pageRelease, "page-1-reconcile-cost");
+    const saved = await writer.saveDraftWithCost(draftFor(pageRelease), 0, { ...context, idempotencyKey: "page-1-reconcile-save" }, cost);
+    const stale = structuredClone(saved);
+    stale.page.blocks[0]!.markdown = "stale local change";
+    await expect(writer.saveDraft(stale, 0, { ...context, idempotencyKey: "page-1-reconcile-conflict" }))
+      .rejects.toThrow("READWEAVE_REVISION_CONFLICT:");
+
+    const index = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      drafts: LessonDraft[];
+      costEntries: GenerationCostEntry[];
+      conflicts: Array<{ id: string; objectId: string; status: string }>;
+      idempotency: Record<string, { kind: string; objectId: string }>;
+      researchArchives: unknown[];
+      [key: string]: unknown;
+    };
+    index.drafts.push(...Array.from({ length: 24 }, (_, i) => ({
+      ...structuredClone(saved), id: `unrelated-draft-${i}`, pageId: `unrelated-page-${i}`
+    })));
+    index.costEntries.push(...Array.from({ length: 96 }, (_, i) => ({
+      ...cost, id: `unrelated-cost-${i}`, pageId: `unrelated-page-${i}`
+    })));
+    index.conflicts.push(...Array.from({ length: 48 }, (_, i) => ({ id: `unrelated-conflict-${i}`, objectId: `unrelated-page-${i}`, status: "open" })));
+    for (let i = 0; i < 512; i += 1) index.idempotency[`unrelated-key-${i}`] = { kind: "attempt", objectId: `unrelated-attempt-${i}` };
+    index.researchArchives = [{ id: "large-unrelated-archive", title: "unrelated", content: "unrelated archived content ".repeat(80_000) }];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(index));
+    remote.editByTitle("核心解释", "ReadWeave 外部编辑后的内容");
+
+    const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const nativeClone = globalThis.structuredClone;
+    let wholeStateClones = 0;
+    const cloneSpy = vi.spyOn(globalThis, "structuredClone").mockImplementation(((value: unknown, options?: StructuredSerializeOptions) => {
+      if (value && typeof value === "object" && "projections" in value && "drafts" in value && "courses" in value) wholeStateClones += 1;
+      return nativeClone(value, options);
+    }) as typeof structuredClone);
+    try {
+      await expect(reader.getDraftByPage("page-1")).resolves.toMatchObject({
+        revision: saved.revision + 1,
+        page: { blocks: [expect.objectContaining({ id: "block-1", markdown: "ReadWeave 外部编辑后的内容" })] }
+      });
+      // The single full clone is the existing post-write cache update; live
+      // reconciliation itself must not add another workspace-wide clone.
+      expect(wholeStateClones).toBe(1);
+    } finally {
+      cloneSpy.mockRestore();
+    }
+
+    const pageRecord = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+      costEntries: GenerationCostEntry[];
+      conflicts: Array<{ id: string; objectId: string; status: string }>;
+      idempotency: Record<string, { kind: string; objectId: string }>;
+    };
+    expect(pageRecord.costEntries).toEqual([cost]);
+    expect(pageRecord.conflicts).toHaveLength(1);
+    expect(pageRecord.conflicts[0]).toMatchObject({ objectId: "page-1", status: "open" });
+    expect(Object.values(pageRecord.idempotency)).toContainEqual({ kind: "draft", objectId: saved.id });
+    expect(Object.values(pageRecord.idempotency)).toContainEqual({ kind: "cost_entry", objectId: cost.id });
+    const cachedDrafts = await reader.listDrafts();
+    expect(cachedDrafts).toHaveLength(25);
+    expect(cachedDrafts.find((item) => item.pageId === "page-1")).toMatchObject({ revision: saved.revision + 1 });
+    expect(await reader.listCostEntries()).toHaveLength(97);
+    expect(await reader.listConflicts()).toHaveLength(49);
   });
 
   it("stores a generated draft and its cost in one idempotent ReadWeave mutation", async () => {

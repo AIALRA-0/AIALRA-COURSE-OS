@@ -2148,6 +2148,17 @@ describe("Course OS API", () => {
     await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/draft?view=snapshot`).expect(200);
   });
 
+  it("locates imported page sources without copying unrelated full releases", async () => {
+    const { app, readweave, release } = await seededApp();
+    const scan = vi.spyOn(readweave, "listReleases").mockRejectedValue(new Error("FULL_LESSON_SCAN_FORBIDDEN"));
+    const ownerRead = vi.spyOn(readweave, "getRelease");
+    const snapshot = await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/draft?view=snapshot`).expect(200);
+    expect(snapshot.body.pageId).toBe(release.pages[0]!.id);
+    expect(scan).not.toHaveBeenCalled();
+    expect(ownerRead).toHaveBeenCalledWith(release.id);
+    await request(app).get("/api/v1/pages/missing-import-page/draft?view=snapshot").expect(404);
+  });
+
   it("adds passive Server-Timing phases to release indexes, draft snapshots, media reads and release details", async () => {
     const { app, dependencies, release } = await seededApp();
 
