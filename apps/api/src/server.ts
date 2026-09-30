@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import pg from "pg";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import { createApp, createDefaultDependencies, resumeIncompleteImports, resumeIncompleteJobs } from "./app.js";
+import { buildReadingTree, createApp, createDefaultDependencies, resumeIncompleteImports, resumeIncompleteJobs } from "./app.js";
+import { ReadingRuntime, observeReadingWrites } from "./reading-runtime.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
 import { EtapiSettingsRuntime, registerEtapiSettingsRoutes } from "./etapi-settings-routes.js";
 import { SecretVault } from "./secret-vault.js";
@@ -102,6 +103,7 @@ export async function startApiServer(): Promise<void> {
   let writerLock: ApiWriterLock | undefined;
   let closeOperations: (() => Promise<void>) | undefined;
   let server: Server | undefined;
+  let reading: ReadingRuntime | undefined;
   try {
     writerLock = await acquireProductionApiWriterLock(process.env.NODE_ENV, process.env.DATABASE_URL, error => {
       process.stderr.write(`Course OS API writer lock connection lost; terminating to preserve single-writer safety: ${error.message}\n`);
@@ -162,24 +164,20 @@ export async function startApiServer(): Promise<void> {
       closeOperations = () => operations.close();
     }
     dependencies.credentialVault = credentialVault;
-    etapiSettings.bind(adapter => { dependencies.readweave = adapter; });
+    await etapiSettings.bind(async adapter => {
+      reading?.close();
+      const identity = etapiSettings.readingIdentity();
+      const replacement = new ReadingRuntime(join(dataDir, "confirmed-reading", identity), adapter,
+        process.env.COURSE_OS_WORKSPACE_ID || "personal", identity, buildReadingTree);
+      // Fail closed immediately when a configured authority/credential changes.
+      dependencies.reading = replacement;
+      dependencies.readweave = observeReadingWrites(adapter, replacement);
+      await replacement.initialize();
+      reading = replacement;
+      replacement.start();
+    });
     if ("whenReady" in dependencies.operations && typeof dependencies.operations.whenReady === "function") {
       await dependencies.operations.whenReady();
-    }
-    // Populate the existing directory cache before accepting the first reader.
-    // A slow/unavailable ETAPI must still leave settings and API routes usable.
-    if (process.env.READWEAVE_MODE === "etapi") {
-      let warmupDeadline: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          readweave.listReleaseIndexes(),
-          new Promise<void>((resolveWarmup) => { warmupDeadline = setTimeout(resolveWarmup, 10_000); })
-        ]);
-      } catch {
-        process.stderr.write("Course directory startup read deferred; API remains available\n");
-      } finally {
-        if (warmupDeadline) clearTimeout(warmupDeadline);
-      }
     }
     const app = createApp(dependencies);
     registerSelfRetellingRoutes(app, dependencies);
@@ -197,7 +195,7 @@ export async function startApiServer(): Promise<void> {
       listeningServer.once("listening", handleListening);
       listeningServer.once("error", handleError);
     });
-    process.stdout.write(`Course OS API ready at http://${host}:${port}\n`);
+    process.stdout.write(`Course OS API listening at http://${host}:${port}; reading ${reading?.status().ready ? "ready" : "not ready"}\n`);
     void resumeIncompleteImports(dependencies);
     void resumeIncompleteJobs(dependencies);
 
@@ -205,6 +203,7 @@ export async function startApiServer(): Promise<void> {
     const shutdown = (): Promise<void> => {
       if (shutdownPromise) return shutdownPromise;
       shutdownPromise = (async () => {
+        reading?.close();
         let shutdownError: unknown;
         try {
           await closeHttpServer(server!);
@@ -237,6 +236,7 @@ export async function startApiServer(): Promise<void> {
       });
     }
   } catch (error) {
+    reading?.close();
     if (server?.listening) await closeHttpServer(server).catch(() => undefined);
     await closeOperations?.().catch(() => undefined);
     await writerLock?.release().catch(() => undefined);

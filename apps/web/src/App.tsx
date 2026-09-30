@@ -90,11 +90,11 @@ export function readOnce<T>(inFlight: Map<string, SharedReadRequest<T>>, key: st
 }
 
 function readLessonOnce(inFlight: Map<string, SharedReadRequest<Awaited<ReturnType<typeof api.lesson>>>>, releaseId: string, pageId: string) {
-  return readOnce(inFlight, pageSnapshotCacheKey(releaseId, pageId), (signal) => api.lesson(pageId, { signal }));
+  return readOnce(inFlight, pageSnapshotCacheKey(releaseId, pageId), (signal) => api.lesson(pageId, { signal, releaseId }));
 }
 
 function readCandidateSnapshotOnce(inFlight: Map<string, SharedReadRequest<LessonDraft>>, releaseId: string, pageId: string) {
-  return readOnce(inFlight, pageSnapshotCacheKey(releaseId, pageId), (signal) => api.draftSnapshot(pageId, { signal }));
+  return readOnce(inFlight, pageSnapshotCacheKey(releaseId, pageId), (signal) => api.draftSnapshot(pageId, { signal, releaseId }));
 }
 
 const SIDEBAR_MIN_WIDTH = 220;
@@ -469,7 +469,7 @@ export function App() {
         snapshotRead = readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id);
         return snapshotRead.promise;
       },
-      readCurrentDraft: (signal) => api.draft(page.id, { signal }),
+      readCurrentDraft: (signal, confirm) => api.draftSnapshot(page.id, { signal, releaseId: release.id, confirm }),
       isActive: () => active,
       setPreview: setCandidatePreview
     });
@@ -515,15 +515,7 @@ export function App() {
   }, [secondaryReadsStarted, activeImportId, refreshMetadata]);
   useEffect(() => {
     if (!secondaryReadsStarted) return;
-    let metadataRetryTimer = 0;
-    let metadataActive = true;
-    const loadMetadata = () => {
-      void refreshMetadata().catch(() => {
-        if (metadataActive) metadataRetryTimer = window.setTimeout(loadMetadata, 5000);
-      });
-    };
-    loadMetadata();
-    return () => { metadataActive = false; window.clearTimeout(metadataRetryTimer); };
+    void refreshMetadata().catch(() => undefined);
   }, [secondaryReadsStarted, refreshMetadata]);
   const previewRelease = useMemo(() => release
     ? { ...release, pages: release.pages.map((item, index) => {
@@ -969,7 +961,7 @@ function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSel
     <section className="utility-dialog" role="dialog" aria-modal="true" aria-label={panelTitle(panel)}>
       <header><div><span className="section-kicker">COURSE OS</span><h2>{panelTitle(panel)}</h2></div><button className="icon-button" data-action="close-utility-panel" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
       {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input data-action="search-pages" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程、材料、页面或页码" /></label><div className="search-results">{results.map(({ release, page }) => <button key={`${release.id}:${page.id}`} data-action="search-open-page" onClick={() => { onSelectPage(release.id, page.id); onClose(); }}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline">没有找到匹配页面</p>}</div></div>}
-      {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}{syncFeedback && <p className={`sync-feedback ${syncFeedback.kind}`} role={syncFeedback.kind === "error" ? "alert" : "status"} aria-live="polite"><Icon name={syncFeedback.kind === "error" ? "warning" : syncFeedback.kind === "success" ? "check" : "sparkles"} />{syncFeedback.text}</p>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={() => void refreshSync()}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
+      {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>最近内容确认</dt><dd>{sync?.lastReadAt ? new Date(sync.lastReadAt).toLocaleString() : "尚未确认"}</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}{syncFeedback && <p className={`sync-feedback ${syncFeedback.kind}`} role={syncFeedback.kind === "error" ? "alert" : "status"} aria-live="polite"><Icon name={syncFeedback.kind === "error" ? "warning" : syncFeedback.kind === "success" ? "check" : "sparkles"} />{syncFeedback.text}</p>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={() => void refreshSync()}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
       {panel === "settings" && <SettingsPanel theme={theme} onTheme={onTheme} sync={sync} onOpenTrash={onOpenTrash} />}
       {panel === "trash" && <TrashPanel onRefresh={onRefresh} />}
       {panel === "account" && <div className="utility-content account-panel"><span className="account-avatar">A</span><h3>Personal workspace</h3><p>当前课程内容由 ReadWeave 统一保存，身份验证由 Authentik 管理</p><a className="primary-button" href="/_aialra_auth/logout">退出登录</a></div>}
@@ -1714,7 +1706,7 @@ function candidateSnapshotIdentityMismatch(draft: LessonDraft, releaseId: string
     : undefined;
 }
 
-export type CandidatePreviewReconcile = (() => void) & { cancel: () => void };
+export type CandidatePreviewReconcile = ((event?: Event) => void) & { cancel: () => void };
 
 export function beginCandidatePreviewLoad({
   releaseId,
@@ -1727,7 +1719,7 @@ export function beginCandidatePreviewLoad({
   releaseId: string;
   pageId: string;
   readSnapshot: () => Promise<LessonDraft>;
-  readCurrentDraft: (signal: AbortSignal) => Promise<LessonDraft>;
+  readCurrentDraft: (signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>;
   isActive: () => boolean;
   setPreview: Dispatch<SetStateAction<CandidatePreviewState | undefined>>;
 }): CandidatePreviewReconcile {
@@ -1735,13 +1727,15 @@ export function beginCandidatePreviewLoad({
   let latestRead = 0;
   let currentDraftController: AbortController | undefined;
   let disposed = false;
-  const reconcile = () => {
+  const reconcile = (event?: Event) => {
     if (disposed || !snapshotReady || !isActive()) return;
     currentDraftController?.abort();
     const controller = new AbortController();
     currentDraftController = controller;
     const readId = ++latestRead;
-    void readCurrentDraft(controller.signal).then((draft) => {
+    // Initial reads use confirmed copies; returning from ReadWeave explicitly
+    // requests an authority confirmation without hiding the readable page.
+    void readCurrentDraft(controller.signal, event?.type === "focus").then((draft) => {
       if (!isActive() || readId !== latestRead) return;
       const identityMismatch = candidateSnapshotIdentityMismatch(draft, releaseId, pageId);
       if (identityMismatch) {

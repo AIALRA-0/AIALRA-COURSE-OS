@@ -29,6 +29,39 @@ The promotion command creates missing releases and drafts only. It stops on a sa
 
 ## Build and switch
 
+### Confirmed reading copies
+
+The normal catalog and lesson routes read a persistent, private directory under
+`COURSE_OS_DATA_DIR/confirmed-reading`. ReadWeave remains the content authority;
+these copies are never written back to it. Retain this directory across API
+restarts and include it in the existing data-volume backup.
+
+Before first activation, use the same private environment, mounted credentials,
+settings vault, and data volume as the API to confirm existing authority data:
+
+```sh
+node --import tsx scripts/materialize-reading.ts
+```
+
+This is an operator action, not a startup job. It atomically activates confirmed
+catalog/page copies and does not generate teaching content. Later acknowledged
+content writes update their copies; bounded background refresh reconciles
+metadata and native edits. A failed refresh retains confirmed readable content,
+but an explicit authority denial stops reading. Credential or authority changes
+select a new namespace and require confirmation before that namespace is ready.
+
+`/healthz` checks process liveness. `/readyz` separately checks whether a trusted
+reading catalog is available; `/api/v1/reading/status` reports its last confirmation
+and synchronization condition. No-data installations are not reading-ready even
+when settings and liveness work. A source outage can leave reading ready with
+degraded synchronization; it never means an unacknowledged answer was saved.
+
+Before switching production, verify readiness, an actual catalog, and an existing
+single-page lesson. Keep public authenticated browser acceptance separate from
+loopback or transparent-tunnel checks. Do not cancel sessions or answer writes
+to make a learning-flow check pass. Keep the existing PostgreSQL single-writer
+lock and retain the previous image/Compose configuration for rollback.
+
 Build both images from the exact public commit and tag them `2.4.0-<short-sha>`. Put those tags in the private environment file, then apply Compose. API, web, worker, and converter must switch together.
 
 Keep the prior Compose file and images until internal health, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass.

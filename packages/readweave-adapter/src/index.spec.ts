@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
-import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy } from "./index.js";
+import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy, withReadBudget } from "./index.js";
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
 import { EMPTY_STATE } from "./index.js";
 import { sha256Text, stableStringify } from "@course-os/domain";
@@ -103,6 +103,293 @@ it("aborts a stalled GET body and allows a later cold state read", async () => {
   await expect(reader.listCourses()).resolves.toEqual([]);
   expect(bodyRequests).toBe(4);
 }, 10_000);
+
+it("spends one read deadline across retries, backoff, and a stalled body", async () => {
+  const remote = new FakeEtapi();
+  let attempts = 0;
+  let bodyAbortEvents = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === "/etapi/notes/root" && (init?.method ?? "GET") === "GET") {
+      attempts += 1;
+      if (attempts === 1) return new Response("temporarily unavailable", { status: 503 });
+      let bodyController: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+          controller.enqueue(new TextEncoder().encode("pending body"));
+        }
+      });
+      const signal = init?.signal ?? undefined;
+      signal?.addEventListener("abort", () => {
+        bodyAbortEvents += 1;
+        bodyController.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+      }, { once: true });
+      return new Response(body, { status: 200 });
+    }
+    return remote.fetch(input, init);
+  };
+  const api = new EtapiReadWeaveCourseApi({
+    baseUrl: "http://readweave", token: "secret", parentNoteId: "root", requestTimeoutMs: 1_000, fetchImpl
+  });
+  const startedAt = performance.now();
+
+  await expect(withReadBudget({ timeoutMs: 80 }, () => api.verifyConnection())).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+
+  expect(attempts).toBe(2);
+  expect(bodyAbortEvents).toBe(1);
+  expect(performance.now() - startedAt).toBeLessThan(500);
+});
+
+it("lets another state-read consumer finish after the first consumer deadline expires", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let contentRequests = 0;
+  let abortEvents = 0;
+  let releaseResponse: (() => void) | undefined;
+  let announceFetchStarted!: () => void;
+  const fetchStarted = new Promise<void>((resolve) => { announceFetchStarted = resolve; });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      contentRequests += 1;
+      const signal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve, reject) => {
+        const onAbort = () => {
+          abortEvents += 1;
+          reject(signal?.reason ?? new DOMException("aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        releaseResponse = () => {
+          signal?.removeEventListener("abort", onAbort);
+          void remote.fetch(input, init).then(resolve, reject);
+        };
+        announceFetchStarted();
+      });
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+  const first = withReadBudget({ timeoutMs: 100 }, () => reader.listCourses());
+  await fetchStarted;
+  const second = withReadBudget({ timeoutMs: 1_500 }, () => reader.listCourses());
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  await expect(first).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  expect(abortEvents).toBe(0);
+  releaseResponse?.();
+  await expect(second).resolves.toEqual([]);
+  expect(contentRequests).toBe(1);
+});
+
+it("keeps a cold bootstrap shared while one state-read consumer cancels", async () => {
+  const remote = new FakeEtapi();
+  let bootstrapSearches = 0;
+  let abortEvents = 0;
+  let releaseSearch: (() => void) | undefined;
+  let announceSearchStarted!: () => void;
+  const searchStarted = new Promise<void>((resolve) => { announceSearchStarted = resolve; });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === "/etapi/notes" && url.searchParams.get("search") === "#courseOsIndex=personal") {
+      bootstrapSearches += 1;
+      const signal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve, reject) => {
+        const onAbort = () => {
+          abortEvents += 1;
+          reject(signal?.reason ?? new DOMException("aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        releaseSearch = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(Response.json({ results: [] }));
+        };
+        announceSearchStarted();
+      });
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+  const firstController = new AbortController();
+  const first = withReadBudget({ signal: firstController.signal }, () => reader.listCourses());
+  await searchStarted;
+  const second = withReadBudget({ timeoutMs: 1_500 }, () => reader.listCourses());
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  firstController.abort();
+  await expect(first).rejects.toThrow("READ_CANCELLED");
+  expect(abortEvents).toBe(0);
+  releaseSearch?.();
+  await expect(second).resolves.toEqual([]);
+  expect(bootstrapSearches).toBe(1);
+  expect(remote.titles()).toContain("Course OS");
+});
+
+it("lets a write finish when it joins a bootstrap started by a short read scope", async () => {
+  const remote = new FakeEtapi();
+  await new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch }).listCourses();
+  let bootstrapSearches = 0;
+  let abortEvents = 0;
+  let releaseSearch: (() => void) | undefined;
+  let announceSearchStarted!: () => void;
+  const searchStarted = new Promise<void>((resolve) => { announceSearchStarted = resolve; });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === "/etapi/notes" && url.searchParams.get("search") === "#courseOsIndex=personal") {
+      bootstrapSearches += 1;
+      const signal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve, reject) => {
+        const onAbort = () => {
+          abortEvents += 1;
+          reject(signal?.reason ?? new DOMException("aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        releaseSearch = () => {
+          signal?.removeEventListener("abort", onAbort);
+          void remote.fetch(input, init).then(resolve, reject);
+        };
+        announceSearchStarted();
+      });
+    }
+    return remote.fetch(input, init);
+  };
+  const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+  const read = withReadBudget({ timeoutMs: 500 }, () => api.getDraftSnapshotByPage("missing-page"));
+  await searchStarted;
+  const course: CourseProject = {
+    id: "write-joins-short-bootstrap",
+    workspaceId: "personal",
+    title: "写入加入短读范围",
+    status: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const write = api.createCourse(course, { ...context, idempotencyKey: "write-joins-short-bootstrap" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  await expect(read).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  expect(abortEvents).toBe(0);
+  releaseSearch?.();
+  await expect(write).resolves.toMatchObject({ id: course.id });
+  expect(bootstrapSearches).toBe(1);
+  expect(remote.countActiveNotesByTitle(course.title)).toBe(1);
+});
+
+it("clears an expired shared state read so a later request can recover", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let bodyRequests = 0;
+  let bodyAbortEvents = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      bodyRequests += 1;
+      if (bodyRequests === 1) {
+        let bodyController: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            bodyController = controller;
+            controller.enqueue(new TextEncoder().encode("{"));
+          }
+        });
+        const signal = init?.signal ?? undefined;
+        signal?.addEventListener("abort", () => {
+          bodyAbortEvents += 1;
+          bodyController.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+        }, { once: true });
+        return new Response(body, { status: 200 });
+      }
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+
+  await expect(withReadBudget({ timeoutMs: 60 }, () => reader.listCourses())).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await expect(withReadBudget({ timeoutMs: 1_000 }, () => reader.listCourses())).resolves.toEqual([]);
+
+  expect(bodyRequests).toBe(2);
+  expect(bodyAbortEvents).toBe(1);
+});
+
+it("does not let a late state-read completion overwrite the newer cache", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  const staleContent = remote.contentByTitle("00 Course OS 结构化索引");
+  const freshCourse: CourseProject = {
+    id: "fresh-after-timeout",
+    workspaceId: "personal",
+    title: "超时后读取的新状态",
+    status: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const freshState = decodeReadWeaveStateContent(staleContent) as { courses: CourseProject[]; [key: string]: unknown };
+  freshState.courses = [freshCourse];
+  const freshContent = encodeReadWeaveStateContent(freshState);
+  let contentRequests = 0;
+  let abortEvents = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      contentRequests += 1;
+      if (contentRequests === 1) {
+        const signal = init?.signal ?? undefined;
+        signal?.addEventListener("abort", () => { abortEvents += 1; }, { once: true });
+        await new Promise<void>((resolve) => setTimeout(resolve, 180));
+        return new Response(staleContent, { status: 200 });
+      }
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+
+  await expect(withReadBudget({ timeoutMs: 60 }, () => reader.listCourses())).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  expect(abortEvents).toBe(1);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  remote.editByTitle("00 Course OS 结构化索引", freshContent);
+  await expect(withReadBudget({ timeoutMs: 1_000 }, () => reader.listCourses())).resolves.toEqual([freshCourse]);
+  await new Promise<void>((resolve) => setTimeout(resolve, 180));
+  await expect(reader.listCourses()).resolves.toEqual([freshCourse]);
+  expect(contentRequests).toBe(2);
+});
+
+it("keeps write-side GET retry and idempotency behavior outside read budgets", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let stateReads = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      stateReads += 1;
+      if (stateReads < 3) return new Response("temporarily unavailable", { status: 503 });
+    }
+    return remote.fetch(input, init);
+  };
+  const writer = new EtapiReadWeaveCourseApi({
+    baseUrl: "http://readweave", token: "secret", parentNoteId: "root", requestTimeoutMs: 1_000, fetchImpl
+  });
+  const course: CourseProject = {
+    id: "write-read-retry-course",
+    workspaceId: "personal",
+    title: "写入重试验证",
+    status: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  await expect(writer.createCourse(course, { ...context, idempotencyKey: "write-read-retry" })).resolves.toMatchObject({ id: course.id });
+  expect(stateReads).toBe(3);
+  expect(remote.requests.some((request) => request.method === "POST" && request.headers["idempotency-key"] === "write-read-retry")).toBe(true);
+});
 
 it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
   const openCode = defaultModelProviders().find((item) => item.id === "opencode-go");

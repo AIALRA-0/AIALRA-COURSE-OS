@@ -177,7 +177,7 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).toContain("api.release(releaseId, { signal })");
     expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
     expect(source).toContain("snapshotRead = readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
-    expect(source).toContain("readCurrentDraft: (signal) => api.draft(page.id, { signal })");
+    expect(source).toContain("readCurrentDraft: (signal, confirm) => api.draftSnapshot(page.id, { signal, releaseId: release.id, confirm })");
     expect(source).toContain("release-index-retry");
     expect(source).toContain("workspace-tree-retry");
     expect(source).toContain("api.releases({ signal })");
@@ -287,7 +287,7 @@ describe("candidate preview reconciliation", () => {
     const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
       preview = typeof next === "function" ? next(preview) : next;
     };
-    const readCurrentDraft = vi.fn<() => Promise<LessonDraft>>()
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
       .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Initial reconcile"))
       .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Edited in ReadWeave"));
     const reconcileOnFocus = beginCandidatePreviewLoad({
@@ -302,10 +302,12 @@ describe("candidate preview reconciliation", () => {
     snapshot.resolve(candidateDraft("release-a", "page-a", "Saved snapshot"));
     await flushPromises();
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Initial reconcile");
+    expect(readCurrentDraft.mock.calls[0]?.[1]).toBe(false);
 
-    reconcileOnFocus();
+    reconcileOnFocus(new Event("focus"));
     await flushPromises();
     expect(readCurrentDraft).toHaveBeenCalledTimes(2);
+    expect(readCurrentDraft.mock.calls[1]?.[1]).toBe(true);
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Edited in ReadWeave");
     expect(preview?.page?.quality.publishable).toBe(false);
 

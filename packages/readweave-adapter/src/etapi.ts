@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
-import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from "node:zlib";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
+import { assertReadBudgetActive, currentReadBudget, readBudgetAbortError, withIndependentReadBudget, type ReadBudget } from "./read-budget.js";
+import { decodeReadWeaveStateContent, decodeReadWeaveStateContentAsync } from "./state-decoder.js";
 import type {
   AssessmentAttempt,
   CredentialStatus,
@@ -43,14 +45,7 @@ export function encodeReadWeaveStateContent(state: unknown): string {
   return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
 }
 
-export function decodeReadWeaveStateContent(content: string): unknown {
-  if (!content.startsWith(stateCodecPrefix)) return JSON.parse(content);
-  const encoded = /^COURSE_OS_BR_STATE_V1:([a-f0-9]{64}):([A-Za-z0-9+/]+={0,2})$/u.exec(content);
-  if (!encoded) throw new Error("READWEAVE_STATE_CODEC_INVALID");
-  const plain = brotliDecompressSync(Buffer.from(encoded[2]!, "base64"), { maxOutputLength: 512_000_000 }).toString("utf8");
-  if (createHash("sha256").update(plain).digest("hex") !== encoded[1]) throw new Error("READWEAVE_STATE_CODEC_HASH_MISMATCH");
-  return JSON.parse(plain);
-}
+export { decodeReadWeaveStateContent } from "./state-decoder.js";
 
 export interface EtapiReadWeaveConfig {
   baseUrl: string;
@@ -179,12 +174,145 @@ interface DraftPageReadContext {
   projections: Pick<ProjectionIndex, "stateNoteId"> & { drafts: Record<string, DraftProjection> };
 }
 
+interface BootstrapResult {
+  projection: ProjectionIndex;
+  stateSnapshot?: Partial<EtapiState>;
+  routeState?: Partial<EtapiState>;
+}
+
+interface SharedRead<T> {
+  promise: Promise<T>;
+  controller: AbortController;
+  consumers: number;
+  settled: boolean;
+  independent: boolean;
+  ownerDeadline?: number;
+  maximumDeadline?: number;
+  ownerTimer?: ReturnType<typeof setTimeout>;
+}
+
 // The API process is single-writer in production. Adapter instances can still
 // overlap briefly when ETAPI settings are replaced, so their page locks share
 // this process-wide map.
 const draftPageWriteChains = new Map<string, Promise<void>>();
 
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
+const defaultSharedReadBudgetMs = 8_000;
+const maximumSharedReadBudgetMs = 180_000;
+
+function createSharedRead<T>(
+  work: (markIndependent: () => void) => Promise<T>,
+  options: { budgeted?: boolean; independent?: boolean } = {}
+): SharedRead<T> {
+  const controller = new AbortController();
+  const budgeted = options.budgeted ?? true;
+  const startedAt = Date.now();
+  const maximumDeadline = budgeted ? startedAt + maximumSharedReadBudgetMs : undefined;
+  const callerDeadline = budgeted ? currentReadBudget()?.deadline : undefined;
+  const shared: SharedRead<T> = {
+    promise: Promise.resolve(undefined as T),
+    controller,
+    consumers: 0,
+    settled: false,
+    independent: options.independent ?? false,
+    ...(maximumDeadline === undefined ? {} : {
+      maximumDeadline,
+      ownerDeadline: Math.min(maximumDeadline, callerDeadline ?? startedAt + defaultSharedReadBudgetMs)
+    })
+  };
+  const run = () => work(() => {
+    shared.independent = true;
+    if (shared.maximumDeadline !== undefined && shared.ownerDeadline !== shared.maximumDeadline) {
+      shared.ownerDeadline = shared.maximumDeadline;
+      scheduleSharedReadDeadline(shared);
+    }
+  });
+  if (shared.ownerDeadline !== undefined) scheduleSharedReadDeadline(shared);
+  shared.promise = budgeted
+    ? withIndependentReadBudget({ signal: controller.signal, deadline: maximumDeadline }, run)
+    : Promise.resolve().then(run);
+  void shared.promise.then(
+    () => { shared.settled = true; clearSharedReadDeadline(shared); },
+    () => { shared.settled = true; clearSharedReadDeadline(shared); }
+  );
+  return shared;
+}
+
+function joinSharedRead<T>(
+  shared: SharedRead<T>,
+  budget?: ReadBudget,
+  options: { writeOwner?: boolean } = {}
+): Promise<T> {
+  if (options.writeOwner && !shared.settled && shared.maximumDeadline !== undefined) {
+    // A write may reuse a read that began under a short caller scope. The
+    // write becomes the owner of that shared lookup, so the reader's deadline
+    // must not abort the GETs needed to complete the write.
+    shared.independent = true;
+    shared.ownerDeadline = shared.maximumDeadline;
+    scheduleSharedReadDeadline(shared);
+  }
+  const signal = budget?.signal;
+  if (signal?.aborted) {
+    if (shared.consumers === 0 && !shared.settled && !shared.independent) {
+      shared.controller.abort(readBudgetAbortError(signal, budget?.deadline));
+    }
+    return Promise.reject(readBudgetAbortError(signal, budget?.deadline));
+  }
+  extendSharedReadDeadline(shared, budget?.deadline);
+  shared.consumers += 1;
+
+  return new Promise<T>((resolve, reject) => {
+    let detached = false;
+    const detach = () => {
+      if (detached) return;
+      detached = true;
+      signal?.removeEventListener("abort", onAbort);
+      shared.consumers -= 1;
+      if (shared.consumers === 0 && !shared.settled && !shared.independent) {
+        shared.controller.abort(signal ? readBudgetAbortError(signal, budget?.deadline) : new Error("READ_CANCELLED"));
+      }
+    };
+    const onAbort = () => {
+      const error = readBudgetAbortError(signal!, budget?.deadline);
+      detach();
+      reject(error);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    shared.promise.then(
+      (value) => { detach(); resolve(value); },
+      (error: unknown) => { detach(); reject(error); }
+    );
+  });
+}
+
+function extendSharedReadDeadline<T>(shared: SharedRead<T>, consumerDeadline?: number): void {
+  if (consumerDeadline === undefined || shared.maximumDeadline === undefined) return;
+  const nextDeadline = Math.min(shared.maximumDeadline, consumerDeadline);
+  if (shared.ownerDeadline === undefined || nextDeadline > shared.ownerDeadline) {
+    shared.ownerDeadline = nextDeadline;
+    scheduleSharedReadDeadline(shared);
+  }
+}
+
+function scheduleSharedReadDeadline<T>(shared: SharedRead<T>): void {
+  if (shared.ownerTimer !== undefined) clearTimeout(shared.ownerTimer);
+  if (shared.ownerDeadline === undefined || shared.settled || shared.controller.signal.aborted) return;
+  const remaining = shared.ownerDeadline - Date.now();
+  if (remaining <= 0) {
+    shared.controller.abort(new Error("READ_DEADLINE_EXCEEDED"));
+    return;
+  }
+  shared.ownerTimer = setTimeout(() => scheduleSharedReadDeadline(shared), Math.min(remaining, 2_147_483_647));
+}
+
+function clearSharedReadDeadline<T>(shared: SharedRead<T>): void {
+  if (shared.ownerTimer !== undefined) clearTimeout(shared.ownerTimer);
+  shared.ownerTimer = undefined;
+}
 
 const SECTION_DEFINITIONS = [
   ["source", "00 来源与原始截图"],
@@ -216,27 +344,27 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
   private readonly requestTimeoutMs: number;
-  private bootstrapPromise?: Promise<ProjectionIndex>;
-  private bootstrapStateSnapshot?: Partial<EtapiState>;
+  private bootstrapInFlight?: SharedRead<BootstrapResult>;
+  private bootstrapCache?: BootstrapResult;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly draftPageRecordCache = new Map<string, LocatedDraftPageRecord>();
   private readonly draftPageRecordVersions = new Map<string, number>();
   private draftPageRecordVersion = 0;
   private draftPageRecordsHydrated = false;
-  private draftPageRecordsHydration?: Promise<void>;
+  private draftPageRecordsHydration?: SharedRead<void>;
   private readonly costNoteEnsures = new Map<string, Promise<void>>();
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private stateCache?: { state: EtapiState; expiresAt: number };
-  private stateReadInFlight?: Promise<EtapiState>;
+  private stateReadInFlight?: SharedRead<EtapiState>;
   private stateVersion = 0;
   private activityCache?: { state: EtapiActivityState; expiresAt: number };
-  private activityReadInFlight?: Promise<EtapiActivityState>;
+  private activityReadInFlight?: SharedRead<EtapiActivityState>;
   private activityVersion = 0;
   private activityStateNoteId?: string;
   private activityRoutes?: EtapiActivityRoutes;
   private readonly draftReadCache = new Map<string, { draft: LessonDraft; expiresAt: number }>();
   private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
-  private nativeLinksInFlight?: Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
+  private nativeLinksInFlight?: SharedRead<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
   private lastReadAt?: string;
   private lastWriteAt?: string;
 
@@ -481,25 +609,34 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async readNativeLinks(): Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]> {
     if (this.nativeLinksCache && this.nativeLinksCache.expiresAt > Date.now()) return this.nativeLinksCache.links;
-    if (this.nativeLinksInFlight) return this.nativeLinksInFlight;
-    this.nativeLinksInFlight = (async () => {
-      const root = await this.getNote("_readweaveLinks");
-      const ids = root.childNoteIds ?? [];
-      const links: NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"] = [];
-      for (let index = 0; index < ids.length; index += 8) {
-        const batch = await Promise.all(ids.slice(index, index + 8).map(async (id) => {
-          try {
-            const value = JSON.parse(await this.getContent(id)) as Record<string, unknown>;
-            if (value.linkId !== id || typeof value.articleId !== "string" || typeof value.objectId !== "string") return undefined;
-            return value as typeof links[number];
-          } catch { return undefined; }
-        }));
-        links.push(...batch.filter((item): item is typeof links[number] => !!item));
-      }
-      this.nativeLinksCache = { links, expiresAt: Date.now() + 15_000 };
-      return links;
-    })();
-    try { return await this.nativeLinksInFlight; } finally { this.nativeLinksInFlight = undefined; }
+    const isWrite = Boolean(this.writeContext.getStore());
+    if (!this.nativeLinksInFlight) {
+      const read = createSharedRead(async () => {
+        const root = await this.getNote("_readweaveLinks");
+        const ids = root.childNoteIds ?? [];
+        const links: NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"] = [];
+        for (let index = 0; index < ids.length; index += 8) {
+          const batch = await Promise.all(ids.slice(index, index + 8).map(async (id) => {
+            try {
+              const value = JSON.parse(await this.getContent(id)) as Record<string, unknown>;
+              if (value.linkId !== id || typeof value.articleId !== "string" || typeof value.objectId !== "string") return undefined;
+              return value as typeof links[number];
+            } catch { return undefined; }
+          }));
+          links.push(...batch.filter((item): item is typeof links[number] => !!item));
+        }
+        return links;
+      }, { budgeted: !isWrite, independent: isWrite });
+      this.nativeLinksInFlight = read;
+      void read.promise.then((links) => {
+        if (this.nativeLinksInFlight === read) this.nativeLinksCache = { links, expiresAt: Date.now() + 15_000 };
+      }).catch(() => undefined).finally(() => {
+        if (this.nativeLinksInFlight === read) this.nativeLinksInFlight = undefined;
+      });
+    }
+    const pendingRead = this.nativeLinksInFlight;
+    if (!pendingRead) throw new Error("READWEAVE_NATIVE_LINKS_READ_MISSING");
+    return joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
   }
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {
@@ -2053,38 +2190,52 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
     const now = Date.now();
     if (this.stateCache && this.stateCache.expiresAt > now) return withActivity(this.stateCache.state);
+
+    if (this.writeContext.getStore()) {
+      const versionAtReadStart = this.stateVersion;
+      const state = await this.readRemoteState();
+      if (this.stateVersion === versionAtReadStart) {
+        this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        this.cacheActivityRoutes(state);
+        this.lastReadAt = new Date().toISOString();
+      }
+      return withActivity(state);
+    }
+
     if (!this.stateReadInFlight) {
       const versionAtReadStart = this.stateVersion;
-      const read = this.readRemoteState();
+      const read = createSharedRead(() => this.readRemoteState());
       this.stateReadInFlight = read;
-      void read.then((state) => {
+      void read.promise.then((state) => {
         if (this.stateReadInFlight === read && this.stateVersion === versionAtReadStart) {
           this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+          this.cacheActivityRoutes(state);
+          this.lastReadAt = new Date().toISOString();
         }
       }).catch(() => undefined).finally(() => {
         if (this.stateReadInFlight === read) this.stateReadInFlight = undefined;
       });
     }
+    const pendingRead = this.stateReadInFlight;
+    if (!pendingRead) throw new Error("READWEAVE_STATE_READ_MISSING");
     if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
       return withActivity(this.stateCache.state);
     }
-    const state = await this.stateReadInFlight;
+    const state = await joinSharedRead(pendingRead, currentReadBudget());
     const current = this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
     return withActivity(current);
   }
 
   private async readRemoteState(): Promise<EtapiState> {
-    const projection = await this.ensureWorkspace();
+    const bootstrap = await this.ensureWorkspaceResult();
     // Bootstrap already downloaded this immutable snapshot to locate the
     // projection notes. Reuse it for the first read instead of fetching the
     // same large index a second time during a cold API start.
-    let parsed = this.bootstrapStateSnapshot;
-    if (!parsed) parsed = decodeReadWeaveStateContent(await this.getContent(projection.stateNoteId)) as Partial<EtapiState>;
-    this.bootstrapStateSnapshot = undefined;
-    const state = normalizeState(parsed, projection);
-    this.cacheActivityRoutes(state);
+    let parsed = bootstrap.stateSnapshot;
+    if (parsed) bootstrap.stateSnapshot = undefined;
+    if (!parsed) parsed = await decodeReadWeaveStateContentAsync(await this.getContent(bootstrap.projection.stateNoteId)) as Partial<EtapiState>;
+    const state = normalizeState(parsed, bootstrap.projection);
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
-    this.lastReadAt = new Date().toISOString();
     return state;
   }
 
@@ -2095,18 +2246,21 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async hydrateDraftPageRecords(): Promise<void> {
     if (this.draftPageRecordsHydrated) return;
+    const isWrite = Boolean(this.writeContext.getStore());
     if (!this.draftPageRecordsHydration) {
-      const hydration = this.readDraftPageRecords().then(() => {
-        this.draftPageRecordsHydrated = true;
-      });
+      const hydration = createSharedRead(async () => {
+        await this.readDraftPageRecords();
+      }, { budgeted: !isWrite, independent: isWrite });
       this.draftPageRecordsHydration = hydration;
-      void hydration.catch(() => {
-        if (this.draftPageRecordsHydration === hydration) this.draftPageRecordsHydration = undefined;
-      }).finally(() => {
+      void hydration.promise.then(() => {
+        if (this.draftPageRecordsHydration === hydration) this.draftPageRecordsHydrated = true;
+      }).catch(() => undefined).finally(() => {
         if (this.draftPageRecordsHydration === hydration) this.draftPageRecordsHydration = undefined;
       });
     }
-    await this.draftPageRecordsHydration;
+    const pendingRead = this.draftPageRecordsHydration;
+    if (!pendingRead) throw new Error("READWEAVE_DRAFT_PAGE_HYDRATION_MISSING");
+    await joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
   }
 
   private async readDraftPageRecords(pageId?: string): Promise<LocatedDraftPageRecord[]> {
@@ -2491,12 +2645,25 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const now = Date.now();
     if (this.activityCache && this.activityCache.expiresAt > now) return this.activityCache.state;
+
+    if (this.writeContext.getStore()) {
+      const versionAtReadStart = this.activityVersion;
+      const content = await this.getContent(activityNoteId);
+      const activity = this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>);
+      if (this.activityVersion === versionAtReadStart) {
+        this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+      }
+      return activity;
+    }
+
     if (!this.activityReadInFlight) {
       const versionAtReadStart = this.activityVersion;
-      const read = this.getContent(activityNoteId).then((content) =>
-        this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>));
+      const read = createSharedRead(async () => {
+        const content = await this.getContent(activityNoteId);
+        return this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>);
+      });
       this.activityReadInFlight = read;
-      void read.then((activity) => {
+      void read.promise.then((activity) => {
         if (this.activityReadInFlight === read && this.activityVersion === versionAtReadStart) {
           this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
         }
@@ -2504,7 +2671,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (this.activityReadInFlight === read) this.activityReadInFlight = undefined;
       });
     }
-    const activity = await this.activityReadInFlight;
+    const pendingRead = this.activityReadInFlight;
+    if (!pendingRead) throw new Error("READWEAVE_ACTIVITY_READ_MISSING");
+    const activity = await joinSharedRead(pendingRead, currentReadBudget());
     return this.activityCache && this.activityCache.expiresAt > Date.now() ? this.activityCache.state : activity;
   }
 
@@ -2740,7 +2909,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.enqueueWrite(async () => {
       try {
         const pendingRead = this.stateReadInFlight;
-        if (pendingRead) await pendingRead.catch(() => undefined);
+        if (pendingRead) await pendingRead.promise.catch(() => undefined);
         // The API process is the only writer of the Course OS state note. Most
         // write routes have already loaded this snapshot to check workspace
         // ownership and revisions, so downloading the same multi-megabyte note
@@ -2811,18 +2980,41 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async ensureWorkspace(): Promise<ProjectionIndex> {
-    if (!this.bootstrapPromise) {
-      this.bootstrapPromise = this.bootstrap().catch(error => {
-        // A transient ETAPI failure must not pin every later read to the
-        // rejected bootstrap promise after ReadWeave recovers.
-        this.bootstrapPromise = undefined;
-        throw error;
-      });
-    }
-    return this.bootstrapPromise;
+    return (await this.ensureWorkspaceResult()).projection;
   }
 
-  private async bootstrap(): Promise<ProjectionIndex> {
+  private async ensureWorkspaceResult(): Promise<BootstrapResult> {
+    if (this.bootstrapCache) return this.bootstrapCache;
+    if (!this.bootstrapInFlight) {
+      const isWrite = Boolean(this.writeContext.getStore());
+      const read = createSharedRead(
+        (markIndependent) => this.bootstrap(isWrite ? undefined : markIndependent),
+        { budgeted: !isWrite, independent: isWrite }
+      );
+      this.bootstrapInFlight = read;
+      void read.promise.then((result) => {
+        if (this.bootstrapInFlight === read) {
+          this.commitBootstrapResult(result);
+          this.bootstrapCache = result;
+        }
+      }).catch(() => undefined).finally(() => {
+        if (this.bootstrapInFlight === read) this.bootstrapInFlight = undefined;
+      });
+    }
+    const pendingRead = this.bootstrapInFlight;
+    if (!pendingRead) throw new Error("READWEAVE_BOOTSTRAP_MISSING");
+    const isWrite = Boolean(this.writeContext.getStore());
+    const budget = isWrite ? undefined : currentReadBudget();
+    return joinSharedRead(pendingRead, budget, { writeOwner: isWrite });
+  }
+
+  private commitBootstrapResult(result: BootstrapResult): void {
+    const routeState = result.routeState ?? result.stateSnapshot;
+    if (routeState) this.cacheActivityRoutes(routeState);
+    result.routeState = undefined;
+  }
+
+  private async bootstrap(markIndependent?: () => void): Promise<BootstrapResult> {
     const query = new URLSearchParams({
       search: `#courseOsIndex=${this.workspaceId}`,
       ancestorNoteId: this.config.parentNoteId,
@@ -2833,12 +3025,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const existing = search.results[0];
     if (existing) {
       const content = await this.getContent(existing.noteId);
-      const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiState>;
+      const parsed = await decodeReadWeaveStateContentAsync(content) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
-      this.bootstrapStateSnapshot = parsed;
-      this.cacheActivityRoutes(parsed);
-      return parsed.projections;
+      return { projection: parsed.projections, stateSnapshot: parsed };
     }
+    // Initial workspace materialization creates remote notes. Once the empty
+    // workspace is confirmed, let this bounded bootstrap finish independently
+    // so a disconnect cannot strand a half-created workspace.
+    markIndependent?.();
     const root = await this.createNote(this.config.parentNoteId, "Course OS", "<h2>Course OS</h2><p>课程制作、学习和长期复习的权威知识树</p>", "text", undefined, {
       courseOsType: "workspace",
       courseOsWorkspaceId: this.workspaceId
@@ -2858,8 +3052,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const state = normalizeState(seed, projection);
     await this.materializeSeed(state);
     await this.putContent(stateNote.noteId, JSON.stringify(state, null, 2));
-    this.cacheActivityRoutes(state);
-    return projection;
+    return { projection, routeState: state };
   }
 
   private async materializeSeed(state: EtapiState): Promise<void> {
@@ -3005,6 +3198,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const base = this.config.baseUrl.replace(/\/$/, "");
     const input = `${base}/etapi${path}`;
     const method = (init?.method ?? "GET").toUpperCase();
+    const budget = method === "GET" && !writeContext ? currentReadBudget() : undefined;
+    if (budget) return this.rawWithReadBudget(input, init, headers, method, budget);
+    return this.rawWithLegacyRetry(input, init, headers, method);
+  }
+
+  private async rawWithLegacyRetry(input: string, init: RequestInit | undefined, headers: Headers, method: string): Promise<Response> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const controller = new AbortController();
@@ -3030,6 +3229,82 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         clearTimeout(timeout);
       }
       await delayForRetry(attempt);
+    }
+    throw new Error(`READWEAVE_ETAPI_NETWORK:${lastError instanceof Error ? lastError.message : "REQUEST_FAILED"}`);
+  }
+
+  private async rawWithReadBudget(
+    input: string,
+    init: RequestInit | undefined,
+    headers: Headers,
+    method: string,
+    budget: ReadBudget
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assertReadBudgetActive(budget);
+      const controller = new AbortController();
+      let requestTimedOut = false;
+      const remaining = budget.deadline === undefined ? Number.POSITIVE_INFINITY : budget.deadline - Date.now();
+      if (remaining <= 0) throw readBudgetAbortError(budget.signal, budget.deadline);
+      const sources = [
+        { signal: budget.signal, isBudget: true },
+        ...(init?.signal ? [{ signal: init.signal, isBudget: false }] : [])
+      ];
+      const uniqueSources = [...new Map(sources.map((source) => [source.signal, source])).values()];
+      const listeners = uniqueSources.map(({ signal, isBudget }) => {
+        const abort = () => controller.abort(isBudget
+          ? readBudgetAbortError(signal, budget.deadline)
+          : new Error("READ_CANCELLED"));
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+        return { signal, abort };
+      });
+      const attemptLimit = Math.min(this.requestTimeoutMs, remaining);
+      const deadlineOwnsAttempt = remaining <= this.requestTimeoutMs;
+      const timeout = setTimeout(() => {
+        requestTimedOut = !deadlineOwnsAttempt;
+        controller.abort(new Error(deadlineOwnsAttempt ? "READ_DEADLINE_EXCEEDED" : "READWEAVE_REQUEST_TIMEOUT"));
+      }, attemptLimit);
+
+      try {
+        if (controller.signal.aborted) throw controller.signal.reason;
+        const response = await this.fetchImpl(input, { ...init, headers, signal: controller.signal });
+        if (response.ok) {
+          if (method !== "GET") return response;
+          const body = await response.arrayBuffer();
+          assertReadBudgetActive(budget);
+          return new Response(body.byteLength > 0 ? body : null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        }
+        if (!shouldRetryHttpStatus(response.status) || attempt === 2) {
+          throw new Error(`READWEAVE_ETAPI_${response.status}:${await response.text()}`);
+        }
+        await response.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        if (budget.signal.aborted) throw readBudgetAbortError(budget.signal, budget.deadline);
+        if (init?.signal?.aborted) throw new Error("READ_CANCELLED");
+        if (budget.deadline !== undefined && Date.now() >= budget.deadline) {
+          throw readBudgetAbortError(budget.signal, budget.deadline);
+        }
+        if (controller.signal.reason instanceof Error && controller.signal.reason.message === "READ_DEADLINE_EXCEEDED") {
+          throw controller.signal.reason;
+        }
+        lastError = error;
+        const message = error instanceof Error ? error.message : "REQUEST_FAILED";
+        if (message.startsWith("READWEAVE_ETAPI_") && !message.startsWith("READWEAVE_ETAPI_NETWORK")) throw error;
+        if (attempt === 2) throw new Error(`READWEAVE_ETAPI_NETWORK:${message}`);
+      } finally {
+        clearTimeout(timeout);
+        for (const { signal, abort } of listeners) signal.removeEventListener("abort", abort);
+      }
+      if (requestTimedOut && budget.deadline !== undefined && Date.now() >= budget.deadline) {
+        throw readBudgetAbortError(budget.signal, budget.deadline);
+      }
+      await delayForReadRetry(attempt, budget, init?.signal ?? undefined);
     }
     throw new Error(`READWEAVE_ETAPI_NETWORK:${lastError instanceof Error ? lastError.message : "REQUEST_FAILED"}`);
   }
@@ -3087,6 +3362,51 @@ function shouldRetryHttpStatus(status: number): boolean {
 
 async function delayForRetry(attempt: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+}
+
+async function delayForReadRetry(attempt: number, budget: ReadBudget, requestSignal?: AbortSignal): Promise<void> {
+  assertReadBudgetActive(budget);
+  if (requestSignal?.aborted) throw new Error("READ_CANCELLED");
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      budget.signal.removeEventListener("abort", onBudgetAbort);
+      requestSignal?.removeEventListener("abort", onRequestAbort);
+    };
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      complete();
+    };
+    const onBudgetAbort = () => finish(() => reject(readBudgetAbortError(budget.signal, budget.deadline)));
+    const onRequestAbort = () => finish(() => reject(new Error("READ_CANCELLED")));
+    const onDelayComplete = () => {
+      try {
+        assertReadBudgetActive(budget);
+        if (requestSignal?.aborted) throw new Error("READ_CANCELLED");
+        finish(resolve);
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    };
+
+    budget.signal.addEventListener("abort", onBudgetAbort, { once: true });
+    requestSignal?.addEventListener("abort", onRequestAbort, { once: true });
+    if (budget.signal.aborted) {
+      onBudgetAbort();
+      return;
+    }
+    if (requestSignal?.aborted) {
+      onRequestAbort();
+      return;
+    }
+    const retryMs = 10 * (attempt + 1);
+    const remaining = budget.deadline === undefined ? retryMs : Math.max(0, budget.deadline - Date.now());
+    timer = setTimeout(onDelayComplete, Math.min(retryMs, remaining));
+  });
 }
 
 function treePath(state: EtapiState, nodeId: string): string[] {

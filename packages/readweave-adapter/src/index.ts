@@ -990,6 +990,8 @@ function fileCourseNoteId(courseId: string): string { return `file-readweave:cou
 function fileMaterialNoteId(materialId: string): string { return `file-readweave:material:${materialId}`; }
 
 export { EtapiReadWeaveCourseApi, type EtapiReadWeaveConfig } from "./etapi.js";
+export { currentReadBudget, withIndependentReadBudget, withReadBudget } from "./read-budget.js";
+export type { ReadBudget, ReadBudgetOptions } from "./read-budget.js";
 
 export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly fetchImpl: typeof fetch;

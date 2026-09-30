@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Express, Request, Response } from "express";
@@ -44,7 +44,7 @@ export class EtapiSettingsRuntime {
   private currentToken?: string;
   private secretRef?: string;
   private enabled = false;
-  private applyAdapter?: (adapter: ReadWeaveCourseApi) => void;
+  private applyAdapter?: (adapter: ReadWeaveCourseApi) => void | Promise<void>;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly settingsPath: string;
 
@@ -93,9 +93,18 @@ export class EtapiSettingsRuntime {
     return this.adapter;
   }
 
-  bind(applyAdapter: (adapter: ReadWeaveCourseApi) => void): void {
+  async bind(applyAdapter: (adapter: ReadWeaveCourseApi) => void | Promise<void>): Promise<void> {
     this.applyAdapter = applyAdapter;
-    applyAdapter(this.adapter);
+    await applyAdapter(this.adapter);
+  }
+
+  /** Namespaces confirmed copies by authority and credential without exposing either. */
+  readingIdentity(): string {
+    return createHash("sha256").update(JSON.stringify({
+      workspaceId: this.options.workspaceId, enabled: this.enabled,
+      baseUrl: this.current?.baseUrl, parentNoteId: this.current?.parentNoteId,
+      token: this.currentToken, mode: process.env.READWEAVE_MODE ?? "file"
+    })).digest("hex");
   }
 
   snapshot(): EtapiSettingsSnapshot {
@@ -144,7 +153,7 @@ export class EtapiSettingsRuntime {
     this.current = input;
     this.enabled = enabled;
     this.adapter = candidate ?? this.options.fallbackAdapter();
-    this.applyAdapter?.(this.adapter);
+    await this.applyAdapter?.(this.adapter);
     if (oldSecretRef && oldSecretRef !== nextSecretRef) await this.options.vault.delete(oldSecretRef).catch(() => undefined);
     return this.snapshot();
   }
@@ -169,7 +178,7 @@ export class EtapiSettingsRuntime {
     this.current = undefined;
     this.enabled = false;
     this.adapter = fallback;
-    this.applyAdapter?.(fallback);
+    await this.applyAdapter?.(fallback);
     if (oldSecretRef) await this.options.vault.delete(oldSecretRef).catch(() => undefined);
     return this.snapshot();
   }

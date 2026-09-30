@@ -5,14 +5,36 @@ import type { AppDependencies } from "./app.js";
 const recordKey = (workspaceId: string, releaseId: string, pageId: string) => JSON.stringify([workspaceId, releaseId, pageId]);
 
 function problem(response: Response, status: number, code: string, message: string) {
-  return response.status(status).json({ error: { code, message, retryable: status >= 500 } });
+  return response.status(status).json({ error: { code, message, retryable: status >= 500 || code === "PAGE_NOT_READY" } });
 }
 
-async function ownedPage(dependencies: AppDependencies, workspaceId: string, releaseId: string, pageId: string): Promise<CourseRelease | undefined> {
+async function ownedPage(dependencies: AppDependencies, workspaceId: string, releaseId: string, pageId: string): Promise<boolean> {
+  if (dependencies.reading) {
+    dependencies.reading.assertAccess();
+    if (!dependencies.reading.status().ready) throw new Error("READING_NOT_READY");
+    const release = await dependencies.reading.replica.getReleaseIndex(workspaceId, releaseId);
+    if (!release?.pageIds.includes(pageId)) return false;
+    const source = await dependencies.reading.replica.getPageSource(workspaceId, pageId, releaseId);
+    if (!source || (release.lifecycle === "draft_source" && (source.draft?.workspaceId !== workspaceId
+      || source.draft.courseId !== release.courseId || source.draft.sourceReleaseId !== releaseId
+      || source.draft.pageId !== pageId || source.draft.status !== "ready"))) throw new Error("PAGE_NOT_READY");
+    return true;
+  }
   const release = await dependencies.readweave.getRelease(releaseId);
-  if (!release?.pageIds.includes(pageId)) return undefined;
+  if (!release?.pageIds.includes(pageId)) return false;
   const courses = await dependencies.readweave.listCourses();
-  return courses.some(course => course.id === release.courseId && course.workspaceId === workspaceId) ? release : undefined;
+  return courses.some(course => course.id === release.courseId && course.workspaceId === workspaceId);
+}
+
+function readFailure(response: Response, error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : "";
+  if (raw.includes("READ_DEADLINE_EXCEEDED")) { problem(response, 504, "READ_DEADLINE_EXCEEDED", "读取超过时限，请稍后重试"); return true; }
+  if (raw.includes("READ_CANCELLED")) { problem(response, 499, "CANCELLED", "读取已取消"); return true; }
+  if (raw.includes("READING_NOT_READY")) { problem(response, 503, "READING_NOT_READY", "课程阅读数据正在准备，请稍后重试"); return true; }
+  if (raw.includes("READING_ACCESS_DENIED") || raw.includes("ACCESS_DENIED")) { problem(response, 403, "ACCESS_DENIED", "当前课程阅读权限已失效"); return true; }
+  if (raw.includes("PAGE_NOT_READY")) { problem(response, 409, "PAGE_NOT_READY", "这页讲解尚未准备完成，请稍后重试"); return true; }
+  if (raw.includes("READING_CORRUPT") || raw.includes("READING_AUTHORITY_MISMATCH")) { problem(response, 503, "READING_CORRUPT", "课程阅读副本校验失败，请等待同步恢复"); return true; }
+  return false;
 }
 
 function headers(request: Request, response: Response): { workspaceId: string; idempotencyKey: string } | undefined {
@@ -67,6 +89,7 @@ export function registerSelfRetellingRoutes(app: Express, dependencies: AppDepen
       response.json(result);
     } catch (error) {
       if ((error as Error).message === "IDEMPOTENCY_CONFLICT") return problem(response, 409, "IDEMPOTENCY_CONFLICT", "本次提交编号已被其他操作使用");
+      if (readFailure(response, error)) return;
       problem(response, 503, "RETELLING_SAVE_FAILED", "自我重述尚未保存，请重试");
     }
   });
@@ -99,6 +122,7 @@ export function registerSelfRetellingRoutes(app: Express, dependencies: AppDepen
       response.json(updated);
     } catch (error) {
       if ((error as Error).message === "IDEMPOTENCY_CONFLICT") return problem(response, 409, "IDEMPOTENCY_CONFLICT", "本次提交编号已被其他操作使用");
+      if (readFailure(response, error)) return;
       problem(response, 503, "REVIEW_SAVE_FAILED", "复习结果尚未保存，请重试");
     }
   });

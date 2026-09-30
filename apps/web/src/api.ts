@@ -49,6 +49,8 @@ export type ReadWeaveEtapiSettingsUpdate = Partial<Pick<ReadWeaveEtapiSettings, 
 export type ModelProviderCreate = Pick<ModelProviderConfig, "id" | "displayName" | "baseUrl" | "enabled" | "models">;
 export interface ApiRequestOptions {
   signal?: AbortSignal;
+  releaseId?: string;
+  confirm?: boolean;
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -330,7 +332,7 @@ export const api = {
   }),
   releases: (options?: ApiRequestOptions) => request<CourseRelease[]>("/api/v1/releases?view=index", { signal: options?.signal }),
   release: (id: string, options?: ApiRequestOptions) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`, { signal: options?.signal }),
-  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`, { signal: options?.signal }),
+  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson${options?.releaseId ? `?releaseId=${encodeURIComponent(options.releaseId)}` : ""}`, { signal: options?.signal }),
   pageQuestions: (pageId: string, options?: ApiRequestOptions) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`, { signal: options?.signal }),
   selfRetellings: (releaseId?: string, options?: ApiRequestOptions) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`, { signal: options?.signal }),
   saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
@@ -341,7 +343,7 @@ export const api = {
   }),
   readweaveQuestions: (pageId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`, { signal: options?.signal }),
   draft: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`, { signal: options?.signal }),
-  draftSnapshot: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot`, { signal: options?.signal }),
+  draftSnapshot: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot${options?.releaseId ? `&releaseId=${encodeURIComponent(options.releaseId)}` : ""}${options?.confirm ? "&confirm=1" : ""}`, { signal: options?.signal }),
   saveDraft: (draft: LessonDraft, page: LessonDraft["page"], changedBlockIds: string[]) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(draft.pageId)}/draft`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
