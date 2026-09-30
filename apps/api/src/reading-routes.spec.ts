@@ -1,6 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, LessonDraft, PageLesson } from "@course-os/contracts";
@@ -71,6 +73,56 @@ async function harness() {
 }
 
 describe("replica-backed reading routes", () => {
+  it("serves replica release indexes as equivalent gzip and identity JSON without authority reads", async () => {
+    const { app, authority } = await harness();
+    const listReleaseIndexes = vi.spyOn(authority, "listReleaseIndexes").mockRejectedValue(new Error("REMOTE_INDEX_READ_MUST_NOT_RUN"));
+    const listReleases = vi.spyOn(authority, "listReleases").mockRejectedValue(new Error("REMOTE_RELEASE_READ_MUST_NOT_RUN"));
+    const listCourses = vi.spyOn(authority, "listCourses").mockRejectedValue(new Error("REMOTE_COURSE_READ_MUST_NOT_RUN"));
+    const server = app.listen(0);
+    try {
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("TEST_SERVER_ADDRESS_UNAVAILABLE");
+      const getIndexes = (acceptEncoding: string) => new Promise<{
+        headers: import("node:http").IncomingHttpHeaders;
+        body: Buffer;
+      }>((resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/api/v1/releases?view=index",
+          headers: { "Accept-Encoding": acceptEncoding, "X-Workspace-Id": "personal" }
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      const plain = await getIndexes("identity");
+      const compressed = await getIndexes("gzip");
+      const plainJson = JSON.parse(plain.body.toString("utf8"));
+      const compressedJson = JSON.parse(gunzipSync(compressed.body).toString("utf8"));
+      expect(compressedJson).toEqual(plainJson);
+      expect(plain.headers["content-encoding"]).toBeUndefined();
+      expect(compressed.headers["content-encoding"]).toBe("gzip");
+      for (const headers of [plain.headers, compressed.headers]) {
+        const vary = (headers.vary ?? "").split(",").map((value) => value.trim().toLowerCase());
+        expect(vary).toContain("accept-encoding");
+        expect(vary).toContain("x-workspace-id");
+        expect(headers["cache-control"]).toBe("private, no-store");
+      }
+      expect(listReleaseIndexes).not.toHaveBeenCalled();
+      expect(listReleases).not.toHaveBeenCalled();
+      expect(listCourses).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("serves an exact local snapshot and reconciles only after local workspace/release/page authorization", async () => {
     const { app, authority, reading, draft } = await harness();
     const getDraftByPage = vi.spyOn(authority, "getDraftByPage").mockRejectedValue(new Error("REMOTE_READ_MUST_NOT_RUN"));

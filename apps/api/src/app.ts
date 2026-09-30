@@ -988,7 +988,17 @@ export function createApp(dependencies: AppDependencies): Express {
       if (dependencies.reading) {
         const workspaceId = request.header("X-Workspace-Id") || "personal";
         response.setHeader("X-Reading-Source", "confirmed-replica");
-        return response.json(await dependencies.reading.replica.listIndexes(workspaceId, asOptionalString(request.query.course_id)));
+        response.vary("Accept-Encoding");
+        response.vary("X-Workspace-Id");
+        response.setHeader("Cache-Control", "private, no-store");
+        const indexes = await dependencies.reading.replica.listIndexes(workspaceId, asOptionalString(request.query.course_id));
+        let responseBody: string | Buffer = jsonResponseBody(response, indexes);
+        if (acceptsGzip(request.header("Accept-Encoding"))) {
+          responseBody = await gzipAsync(Buffer.from(responseBody, "utf8"));
+          response.set("Content-Encoding", "gzip");
+        }
+        response.type("json").send(responseBody);
+        return;
       }
       if (request.query.view === "index") {
         response.vary("Accept-Encoding");
