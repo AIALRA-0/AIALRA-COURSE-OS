@@ -8,7 +8,10 @@ export interface ImageResource {
   priority: ImagePriority;
   promise: Promise<HTMLImageElement>;
   error?: unknown;
+  cancel?: () => void;
 }
+
+const IMAGE_LOAD_TIMEOUT_MS = 10_000;
 
 /** Keeps only a small set of decoded images and shares concurrent requests by URL. */
 export class ImageResourceCache {
@@ -45,8 +48,11 @@ export class ImageResourceCache {
     const image = new Image();
     if ("fetchPriority" in image) image.fetchPriority = priority;
     const resource: ImageResource = { url, image, state: "loading", priority, promise: Promise.resolve(image) };
-    resource.promise = this.loadAndDecode(image, url).then(() => {
+    const load = this.loadAndDecode(image, url);
+    resource.cancel = load.cancel;
+    resource.promise = load.promise.then(() => {
       resource.state = "ready";
+      resource.cancel = undefined;
       if (this.resources.get(url) === resource) {
         this.touch(url, resource);
         this.trimSettled();
@@ -55,6 +61,7 @@ export class ImageResourceCache {
     }).catch((error: unknown) => {
       resource.state = "error";
       resource.error = error;
+      resource.cancel = undefined;
       if (this.resources.get(url) === resource) this.resources.delete(url);
       throw error;
     });
@@ -65,20 +72,66 @@ export class ImageResourceCache {
     return resource.promise;
   }
 
-  clear(): void {
-    this.resources.clear();
+  retry(url: string, priority: ImagePriority = "high"): Promise<HTMLImageElement> {
+    const existing = this.resources.get(url);
+    if (existing?.state === "loading") return existing.promise;
+    if (existing && this.resources.get(url) === existing) this.resources.delete(url);
+    return this.load(url, priority);
   }
 
-  private loadAndDecode(image: HTMLImageElement, url: string): Promise<void> {
-    const loaded = new Promise<void>((resolve, reject) => {
-      image.addEventListener("load", () => resolve(), { once: true });
-      image.addEventListener("error", () => reject(new Error(`Unable to load image: ${url}`)), { once: true });
-    });
-    image.src = url;
-    if (typeof image.decode === "function") {
-      return Promise.all([loaded, image.decode()]).then(() => undefined);
+  clear(): void {
+    for (const [url, resource] of this.resources) {
+      if (resource.state !== "loading") continue;
+      resource.cancel?.();
+      if (this.resources.get(url) === resource) this.resources.delete(url);
     }
-    return loaded;
+  }
+
+  private loadAndDecode(image: HTMLImageElement, url: string): { promise: Promise<void>; cancel: () => void } {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let resolveLoad!: () => void;
+    let rejectLoad!: (error: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    });
+
+    const cleanup = () => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      image.removeEventListener("load", onLoad);
+      image.removeEventListener("error", onError);
+    };
+    const settle = (error?: unknown, abortSource = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (abortSource) image.removeAttribute("src");
+      if (error !== undefined) rejectLoad(error);
+      else resolveLoad();
+    };
+    const onLoad = () => {
+      if (typeof image.decode !== "function") {
+        settle();
+        return;
+      }
+      try {
+        void image.decode().then(() => settle(), (error: unknown) => settle(error));
+      } catch (error) {
+        settle(error);
+      }
+    };
+    const onError = () => settle(new Error(`Unable to load image: ${url}`));
+
+    image.addEventListener("load", onLoad);
+    image.addEventListener("error", onError);
+    timeout = setTimeout(() => settle(new Error(`Timed out loading image: ${url}`), true), IMAGE_LOAD_TIMEOUT_MS);
+    image.src = url;
+
+    return {
+      promise,
+      cancel: () => settle(new Error(`Cancelled loading image: ${url}`), true)
+    };
   }
 
   private touch(url: string, resource: ImageResource): void {

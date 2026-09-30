@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
-import type { ImportTaskState } from "./import-progress.js";
+import { importTaskStateLabel, type ImportTaskState } from "./import-progress.js";
 
 export type CourseTreeTask = { id: string; courseId?: string; parentNodeId?: string; title: string; detail: string; state: ImportTaskState; unresolved?: boolean };
 
@@ -220,18 +220,25 @@ function TaskGroup({ title, tasks, selectedTaskId, onSelectTask }: {
 function TaskList({ tasks, selectedTaskId, onSelectTask }: {
   tasks: CourseTreeTask[]; selectedTaskId?: string; onSelectTask?: (taskId: string) => void;
 }) {
-  return <div className="tree-task-list">{tasks.map((task) => <button
-          type="button"
-          className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
-          data-action="tree-open-task"
-          data-task-id={task.id}
-          data-task-state={task.state}
-          key={task.id}
-          onClick={() => onSelectTask?.(task.id)}
-          aria-current={selectedTaskId === task.id ? "page" : undefined}
-          aria-label={`${task.title}，${task.detail}`}
-          title={`${task.title} · ${task.detail}`}
-        ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small>{task.detail}</small></span><Icon name="chevronRight" /></button>)}</div>
+  return <div className="tree-task-list">{tasks.map((task) => {
+    const stateLabel = importTaskStateLabel(task.state);
+    const detail = task.detail.trim().startsWith(stateLabel)
+      ? task.detail.trim().slice(stateLabel.length).replace(/^\s*(?:[·:：—-]\s*)?/, "").trim()
+      : task.detail;
+    const summary = detail ? `${stateLabel} · ${detail}` : stateLabel;
+    return <button
+      type="button"
+      className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
+      data-action="tree-open-task"
+      data-task-id={task.id}
+      data-task-state={task.state}
+      key={task.id}
+      onClick={() => onSelectTask?.(task.id)}
+      aria-current={selectedTaskId === task.id ? "page" : undefined}
+      aria-label={`${task.title}，${summary}`}
+      title={`${task.title} · ${summary}`}
+    ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small><span className={`task-state-label task-state-${task.state}`}>{stateLabel}</span><span>{detail}</span></small></span><Icon name="chevronRight" /></button>;
+  })}</div>;
 }
 
 function TreeNode({ node, allNodes, depth, expanded, selectedPageId, focusedNodeId, onFocus, onToggle, onSelectPage, onOpenMenu, forceOpen, actions, draggingNodeId, pointerDraggingNodeId, dropTargetId, onDragStart, onPointerDragStart, onDragOver, onDrop, onDragEnd }: {

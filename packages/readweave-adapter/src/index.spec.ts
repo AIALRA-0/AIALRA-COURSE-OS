@@ -42,6 +42,47 @@ it("uses the bootstrap index download for the first cold state read", async () =
   expect(remote.requests.slice(before).filter((item) => item.method === "GET" && item.path.endsWith(`/notes/${stateNoteId}/content`))).toHaveLength(1);
 });
 
+it("aborts a stalled GET body and allows a later cold state read", async () => {
+  const remote = new FakeEtapi();
+  const original = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  await original.listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let bodyRequests = 0;
+  let abortEvents = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      bodyRequests += 1;
+      if (bodyRequests <= 3) {
+        let bodyController: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            bodyController = controller;
+            controller.enqueue(new TextEncoder().encode("{"));
+          }
+        });
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => {
+          abortEvents += 1;
+          bodyController.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+        }, { once: true });
+        return new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({
+    baseUrl: "http://readweave", token: "secret", parentNoteId: "root", requestTimeoutMs: 1_000, fetchImpl
+  });
+
+  await expect(reader.listCourses()).rejects.toThrow("READWEAVE_ETAPI_NETWORK:");
+  expect(bodyRequests).toBe(3);
+  expect(abortEvents).toBe(3);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await expect(reader.listCourses()).resolves.toEqual([]);
+  expect(bodyRequests).toBe(4);
+}, 10_000);
+
 it("defaults to the current DeepSeek visual route without hidden fallbacks", () => {
   const openCode = defaultModelProviders().find((item) => item.id === "opencode-go");
   expect(openCode?.models.find((model) => model.id === "gpt-5.6-luna")).toMatchObject({ protocol: "responses", supportsVision: true, supportsJsonSchema: true, billingMode: "subscription_quota" });
@@ -761,7 +802,7 @@ describe("ReadWeave ETAPI adapter", () => {
     ]);
   });
 
-  it("opens a course while an unrelated activity index read is stalled", async () => {
+  it("lists course, tree, and trash data without waiting for the activity index", async () => {
     const remote = new FakeEtapi();
     const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
     const pageRelease = releaseWithPage();
@@ -786,12 +827,14 @@ describe("ReadWeave ETAPI adapter", () => {
       }
     });
     try {
-      const [indexes, release] = await Promise.race([
-        Promise.all([reader.listReleaseIndexes(), reader.getRelease(pageRelease.id)]),
-        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("course read waited for activity")), 1000))
+      const [indexes, release, trash, treeNodes] = await Promise.race([
+        Promise.all([reader.listReleaseIndexes(), reader.getRelease(pageRelease.id), reader.listTrash(), reader.listTreeNodes()]),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("non-activity read waited for activity")), 1000))
       ]);
       expect(indexes.map((item) => item.id)).toContain(pageRelease.id);
       expect(release?.id).toBe(pageRelease.id);
+      expect(trash).toEqual([]);
+      expect(treeNodes.length).toBeGreaterThan(0);
       const attempts = reader.listQuestionAttempts("page-1");
       await activityStarted;
       releaseActivityRead();
@@ -1733,7 +1776,33 @@ describe("ReadWeave ETAPI adapter", () => {
       updatedAt: new Date().toISOString()
     };
     await api.createCourse(secondCourse, { ...context, idempotencyKey: "second-course" });
-    const moved = await api.updateTreeNode(initial!.id, { parentId: secondCourse.id }, initial!.revision ?? 0, { ...context, idempotencyKey: "move-to-second-course" });
+    const moveSourceBranchId = remote.branchIdForNote(initial!.readweaveNoteId!);
+    const moveContext = { ...context, idempotencyKey: "move-to-second-course" };
+    remote.failBranchDeleteCount = 1;
+    const firstMoveRequestsStart = remote.requests.length;
+    await expect(api.updateTreeNode(initial!.id, { parentId: secondCourse.id }, initial!.revision ?? 0, moveContext)).rejects.toThrow("READWEAVE_ETAPI_400");
+    const firstMoveRequests = remote.requests.slice(firstMoveRequestsStart);
+    const firstMovePost = firstMoveRequests.find((request) => request.method === "POST" && request.path === "/branches"
+      && JSON.parse(request.body ?? "{}").noteId === initial!.readweaveNoteId);
+    expect(firstMovePost).toBeDefined();
+    const targetParentNoteId = JSON.parse(firstMovePost!.body ?? "{}").parentNoteId as string;
+    const targetBranchId = remote.branchIdForParent(initial!.readweaveNoteId!, targetParentNoteId);
+    expect(targetBranchId).toBeDefined();
+    expect(remote.branchIdsForNote(initial!.readweaveNoteId!)).toHaveLength(2);
+    expect(remote.branchIdsForNote(initial!.readweaveNoteId!)).toEqual(expect.arrayContaining([moveSourceBranchId, targetBranchId]));
+
+    const replayRequestsStart = remote.requests.length;
+    const moved = await api.updateTreeNode(initial!.id, { parentId: secondCourse.id }, initial!.revision ?? 0, moveContext);
+    const replayRequests = remote.requests.slice(replayRequestsStart);
+    const retryMovePostIndex = replayRequests.findIndex((request) => request.method === "POST" && request.path === "/branches"
+      && JSON.parse(request.body ?? "{}").noteId === initial!.readweaveNoteId
+      && JSON.parse(request.body ?? "{}").parentNoteId === targetParentNoteId);
+    const retryMoveDeleteIndex = replayRequests.findIndex((request) => request.method === "DELETE" && request.path === `/branches/${moveSourceBranchId}`);
+    expect(retryMovePostIndex).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(replayRequests[retryMovePostIndex]!.body ?? "{}")).not.toHaveProperty("notePosition");
+    expect(retryMoveDeleteIndex).toBeGreaterThan(retryMovePostIndex);
+    expect(remote.branchIdForParent(initial!.readweaveNoteId!, targetParentNoteId)).toBe(targetBranchId);
+    expect(remote.branchIdsForNote(initial!.readweaveNoteId!)).toEqual([targetBranchId]);
     expect(moved.parentId).toBe(secondCourse.id);
     expect(remote.parentTitleOf(moved.readweaveNoteId!)).toBe("02 课程材料");
 
@@ -1741,7 +1810,20 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(rootMaterial.parentId).toBeUndefined();
     expect(remote.parentTitleOf(rootMaterial.readweaveNoteId!)).toBe("00 工作区根材料");
 
+    const sourceBranchId = remote.branchIdForNote(rootMaterial.readweaveNoteId!);
+    const trashRequestsStart = remote.requests.length;
     const trashed = await api.trashTreeNode(rootMaterial.id, { ...context, idempotencyKey: "trash-root-material" });
+    const trashRequests = remote.requests.slice(trashRequestsStart);
+    const createTrashBranchIndex = trashRequests.findIndex((request) => request.method === "POST" && request.path === "/branches"
+      && JSON.parse(request.body ?? "{}").noteId === rootMaterial.readweaveNoteId);
+    const deleteSourceBranchIndex = trashRequests.findIndex((request) => request.method === "DELETE" && request.path === `/branches/${sourceBranchId}`);
+    expect(createTrashBranchIndex).toBeGreaterThanOrEqual(0);
+    expect(deleteSourceBranchIndex).toBeGreaterThan(createTrashBranchIndex);
+    expect(JSON.parse(trashRequests[createTrashBranchIndex]!.body ?? "{}")).toMatchObject({
+      noteId: rootMaterial.readweaveNoteId,
+      parentNoteId: remote.noteIdForTitle("回收站")
+    });
+    expect(trashRequests.some((request) => request.method === "PUT" && request.path.includes("/move-to/"))).toBe(false);
     expect(remote.parentTitleOf(trashed.readweaveNoteId!)).toBe("回收站");
     expect((await api.listTreeNodes()).some((node) => node.id === rootMaterial.id)).toBe(false);
 
@@ -1927,14 +2009,15 @@ function draftFor(pageRelease: CourseRelease, pageId = pageRelease.pages[0]!.id)
 
 class FakeEtapi {
   private sequence = 0;
-  readonly requests: Array<{ path: string; method: string; headers: Record<string, string> }> = [];
+  failBranchDeleteCount = 0;
+  readonly requests: Array<{ path: string; method: string; headers: Record<string, string>; body?: string }> = [];
   private readonly notes = new Map<string, { title: string; content: string; labels: Record<string, string>; type: string; mime: string; parentBranchIds: string[]; deleted: boolean }>([["root", { title: "root", content: "", labels: {}, type: "text", mime: "text/html", parentBranchIds: [], deleted: false }]]);
-  private readonly branches = new Map<string, { branchId: string; noteId: string; parentNoteId: string; notePosition: number }>();
+  private readonly branches = new Map<string, { branchId: string; noteId: string; parentNoteId: string; notePosition: number; prefix?: string; isExpanded?: boolean }>();
 
   readonly fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const path = url.pathname.replace(/^\/etapi/, "");
-    this.requests.push({ path, method: init?.method ?? "GET", headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+    this.requests.push({ path, method: init?.method ?? "GET", headers: Object.fromEntries(new Headers(init?.headers).entries()), body: typeof init?.body === "string" ? init.body : undefined });
     if (path === "/notes" && (init?.method ?? "GET") === "GET") {
       const query = url.searchParams.get("search") ?? "";
       const match = /^#([^=]+)=(.*)$/.exec(query);
@@ -2007,21 +2090,38 @@ class FakeEtapi {
       return branch ? Response.json(branch) : new Response("not found", { status: 404 });
     }
     if (path === "/branches" && init?.method === "POST") {
-      const body = JSON.parse(String(init.body)) as { noteId: string; parentNoteId: string; notePosition?: number };
-      const branchId = `branch${++this.sequence}`;
-      const branch = { branchId, noteId: body.noteId, parentNoteId: body.parentNoteId, notePosition: body.notePosition ?? 10 };
+      const body = JSON.parse(String(init.body)) as { noteId: string; parentNoteId: string; notePosition?: number; prefix?: string; isExpanded?: boolean };
+      const existing = [...this.branches.values()].find((branch) => branch.noteId === body.noteId && branch.parentNoteId === body.parentNoteId);
+      const branchId = existing?.branchId ?? `branch${++this.sequence}`;
+      const siblingPositions = [...this.branches.values()].filter((branch) => branch.parentNoteId === body.parentNoteId && branch.branchId !== branchId).map((branch) => branch.notePosition);
+      const branch = {
+        branchId,
+        noteId: body.noteId,
+        parentNoteId: body.parentNoteId,
+        notePosition: body.notePosition ?? (siblingPositions.length ? Math.max(...siblingPositions) + 10 : 10),
+        prefix: body.prefix ?? "",
+        isExpanded: body.isExpanded ?? false
+      };
       this.branches.set(branchId, branch);
       const note = this.notes.get(body.noteId);
       if (note && !note.parentBranchIds.includes(branchId)) note.parentBranchIds.push(branchId);
-      return Response.json(branch, { status: 201 });
+      return Response.json(branch, { status: existing ? 200 : 201 });
     }
-    const moveMatch = /^\/branches\/([^/]+)\/move-to\/([^/]+)$/.exec(path);
-    if (moveMatch && init?.method === "PUT") {
-      const branch = this.branches.get(moveMatch[1]!);
-      const parent = this.branches.get(moveMatch[2]!);
-      if (!branch || !parent) return new Response("not found", { status: 404 });
-      branch.parentNoteId = parent.noteId;
-      return Response.json({ success: true });
+    const deleteBranchMatch = /^\/branches\/([^/]+)$/.exec(path);
+    if (deleteBranchMatch && init?.method === "DELETE") {
+      if (this.failBranchDeleteCount > 0) {
+        this.failBranchDeleteCount -= 1;
+        return new Response("simulated branch delete failure", { status: 400 });
+      }
+      const branch = this.branches.get(deleteBranchMatch[1]!);
+      if (!branch) return new Response(null, { status: 204 });
+      this.branches.delete(branch.branchId);
+      const note = this.notes.get(branch.noteId);
+      if (note) {
+        note.parentBranchIds = note.parentBranchIds.filter((branchId) => branchId !== branch.branchId);
+        if (note.parentBranchIds.length === 0) note.deleted = true;
+      }
+      return new Response(null, { status: 204 });
     }
     const contentMatch = /^\/notes\/([^/]+)\/content$/.exec(path);
     if (contentMatch && (init?.method ?? "GET") === "GET") {
@@ -2047,6 +2147,18 @@ class FakeEtapi {
     const branchId = note?.parentBranchIds.find((candidate) => this.branches.has(candidate));
     if (!branchId) throw new Error(`missing branch for ${noteId}`);
     return branchId;
+  }
+
+  branchIdForParent(noteId: string, parentNoteId: string): string | undefined {
+    return [...this.branches.values()].find((branch) => branch.noteId === noteId && branch.parentNoteId === parentNoteId)?.branchId;
+  }
+
+  branchIdsForNote(noteId: string): string[] {
+    return [...this.branches.values()].filter((branch) => branch.noteId === noteId).map((branch) => branch.branchId);
+  }
+
+  noteIdForTitle(title: string): string | undefined {
+    return [...this.notes.entries()].find(([, note]) => note.title === title)?.[0];
   }
 
   removeBranch(branchId: string | undefined): void {

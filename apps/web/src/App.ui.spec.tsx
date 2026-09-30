@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageSnapshotCacheKey, isCurrentPageSnapshot, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
+import { beginCandidatePreviewLoad, defaultRelease, flushNextSessionPatch, isReadyCandidateSnapshot, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -47,9 +47,11 @@ describe("saved lesson navigation", () => {
     const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     expect(source).toContain('imageResources.load(indexedPage.imageUrl, "high")');
     const prefetchStart = source.indexOf("const prefetchPage = useCallback");
-    const prefetchEnd = source.indexOf("const previousImageScope", prefetchStart);
+    const prefetchEnd = source.indexOf("useEffect(() => {\n    if (!release || !indexedPage || release.lifecycle", prefetchStart);
     const prefetch = source.slice(prefetchStart, prefetchEnd);
-    expect(prefetch).toContain("settlePagePrefetch(snapshot, image");
+    expect(prefetch).toContain("settlePagePrefetch(snapshotRead.promise, image");
+    expect(prefetch).toContain("finally {");
+    expect(prefetch).toContain("snapshotRead.release()");
     expect(source).toContain("new BoundedPagePrefetchQueue(2)");
     expect(source).toContain("prefetchPage(pageIndex + 1)");
     expect(source).toContain("prefetchPage(pageIndex - 1)");
@@ -59,10 +61,23 @@ describe("saved lesson navigation", () => {
   it("keeps the rendered image tied to its URL while using the learn-only decoded image cache", async () => {
     const source = await readFile(new URL("./SlideViewer.tsx", import.meta.url), "utf8");
     expect(source).toContain("imageResources?: ImageResourceCache");
-    expect(source).toContain("key={imageUrl}");
-    expect(source).toContain("imageStatus?.url === imageUrl && imageStatus.state === \"ready\"");
+    expect(source).toContain("key={`${imageUrl}:${imageAttempt}`}");
+    expect(source).toContain("currentImageStatus?.state === \"ready\" ? imageUrl : undefined");
+    expect(source).toContain("src={imageSource}");
     expect(source).toContain("if (!imageResources || !imageUrl) return");
-    expect(source).toContain("if (active) setImageStatus({ url: imageUrl, state: \"ready\" })");
+    expect(source).toContain('data-action="slide-image-retry"');
+    expect(source).toContain('style={{ pointerEvents: "auto" }}');
+    expect(source).not.toContain("原图载入失败。");
+  });
+
+  it("shows formal page read failures with same-page retry and shares the image cache with Studio", async () => {
+    const appSource = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const studioSource = await readFile(new URL("./StudioWorkspace.tsx", import.meta.url), "utf8");
+
+    expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
+    expect(appSource).toContain("imageResources={imageResources} rightCollapsed={rightCollapsed}");
+    expect(studioSource).toContain("imageResources: ImageResourceCache;");
+    expect(studioSource).toContain("<SlideViewer imageUrl={workingPage.imageUrl} title={workingPage.title} value={view} onChange={setView} imageResources={imageResources} />");
   });
 
   it("keeps a bounded page snapshot cache scoped by release and rejects stale response identities", () => {
@@ -81,6 +96,44 @@ describe("saved lesson navigation", () => {
     expect(evictedCache.has(pageSnapshotCacheKey("release-b", "page-a"))).toBe(false);
     expect(isCurrentPageSnapshot({ releaseId: "release-a", pageId: "page-old" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-old" })).toBe(false);
     expect(isCurrentPageSnapshot({ releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" })).toBe(true);
+    expect(pageSnapshotResponseState({ releaseId: "release-a", pageId: "page-old" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-old" })).toBe("stale");
+    expect(pageSnapshotResponseState({ releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-b", pageId: "page-new" })).toBe("mismatch");
+    expect(pageSnapshotResponseState({ releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" }, { releaseId: "release-a", pageId: "page-new" })).toBe("match");
+  });
+
+  it("cleans up only its own pending read and permits a retry after failure", async () => {
+    const requests = new Map();
+    const older = deferred<string>();
+    const replacement = deferred<string>();
+    const key = pageSnapshotCacheKey("release-a", "page-a");
+    let oldSignal: AbortSignal | undefined;
+    let readCount = 0;
+    const oldRequest = readOnce(requests, key, (signal) => { readCount += 1; oldSignal = signal; return older.promise; });
+    const foregroundReader = readOnce(requests, key, () => { readCount += 1; return older.promise; });
+    expect(foregroundReader.promise).toBe(oldRequest.promise);
+    await Promise.resolve();
+    expect(readCount).toBe(1);
+
+    oldRequest.release();
+    expect(oldSignal?.aborted).toBe(false);
+    foregroundReader.release();
+    expect(oldSignal?.aborted).toBe(true);
+
+    const currentRequest = readOnce(requests, key, () => replacement.promise);
+    older.resolve("old result");
+    await expect(oldRequest.promise).resolves.toBe("old result");
+    expect(requests.get(key)?.promise).toBe(currentRequest.promise);
+
+    replacement.resolve("current result");
+    await expect(currentRequest.promise).resolves.toBe("current result");
+    expect(requests.has(key)).toBe(false);
+
+    const failedRequest = readOnce(requests, key, () => Promise.reject(new Error("temporary read failure")));
+    await expect(failedRequest.promise).rejects.toThrow("temporary read failure");
+    failedRequest.release();
+    const retriedRequest = readOnce(requests, key, () => Promise.resolve("retried result"));
+    await expect(retriedRequest.promise).resolves.toBe("retried result");
+    retriedRequest.release();
   });
 
   it("marks failed update pages until a later same-version task completes them, even when old pages remain readable", () => {
@@ -112,8 +165,8 @@ describe("saved lesson navigation", () => {
 
   it("starts an explicit release read independently of the index and leaves unknown links on their requested ID", async () => {
     const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-    const directReadStart = source.indexOf("api.release(releaseId).then");
-    const directReadEnd = source.indexOf("}, [releaseId]);", directReadStart);
+    const directReadStart = source.indexOf("readOnce(releaseRequests.current, releaseId");
+    const directReadEnd = source.indexOf("}, [releaseId, explicitReleaseReload]);", directReadStart);
     const directReadEffect = source.slice(directReadStart, directReadEnd);
 
     expect(source).toContain("useState(!initialNavigation.current.releaseId)");
@@ -121,9 +174,17 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).not.toContain("loading");
     expect(directReadEffect).toContain("loaded.id !== releaseId");
     expect(directReadEffect).not.toContain("defaultRelease");
+    expect(directReadEffect).toContain("api.release(releaseId, { signal })");
     expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
-    expect(source).toContain(": readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
-    expect(source).toContain("readCurrentDraft: () => api.draft(page.id)");
+    expect(source).toContain("snapshotRead = readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
+    expect(source).toContain("readCurrentDraft: (signal) => api.draft(page.id, { signal })");
+    expect(source).toContain("release-index-retry");
+    expect(source).toContain("workspace-tree-retry");
+    expect(source).toContain("api.releases({ signal })");
+    expect(source).toContain("api.workspaceTree(undefined, { signal })");
+    expect(source).toContain("setReleaseIndexError(reason instanceof Error ? reason.message : \"无法读取课程列表\")");
+    expect(source).toContain("setTreeError(reason instanceof Error ? reason.message : \"无法读取课程目录\")");
+    expect(source).toContain("setFormalPageError({ key: cacheKey, message: reason instanceof Error ? reason.message : \"无法载入当前课程页面\" })");
   });
 
   it("preserves a detailed requested release when the late index contains a summary or omits it", () => {
@@ -152,11 +213,39 @@ describe("saved lesson navigation", () => {
   });
 
   it("treats only the matching ready candidate snapshot as generated", () => {
-    const draft = { sourceReleaseId: "source", page: { id: "page" }, status: "ready" } as unknown as LessonDraft;
+    const draft = { sourceReleaseId: "source", pageId: "page", page: { id: "page" }, status: "ready" } as unknown as LessonDraft;
     expect(isReadyCandidateSnapshot(draft, "source", "page")).toBe(true);
     expect(isReadyCandidateSnapshot({ ...draft, status: "needs_review" }, "source", "page")).toBe(false);
     expect(isReadyCandidateSnapshot(draft, "other-source", "page")).toBe(false);
     expect(isReadyCandidateSnapshot(draft, "source", "other-page")).toBe(false);
+    expect(isReadyCandidateSnapshot({ ...draft, pageId: "other-page" }, "source", "page")).toBe(false);
+  });
+
+  it("surfaces candidate snapshot identity mismatches as errors", async () => {
+    const valid = candidateDraft("release-a", "page-a", "Cached lesson");
+    const mismatches = [
+      { ...valid, sourceReleaseId: "release-b" },
+      { ...valid, pageId: "page-b" },
+      { ...valid, page: { ...valid.page, id: "page-b" } }
+    ];
+
+    for (const draft of mismatches) {
+      let preview: CandidatePreviewState | undefined;
+      const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+        preview = typeof next === "function" ? next(preview) : next;
+      };
+      beginCandidatePreviewLoad({
+        releaseId: "release-a",
+        pageId: "page-a",
+        readSnapshot: () => Promise.resolve(draft),
+        readCurrentDraft: vi.fn(() => Promise.resolve(valid)),
+        isActive: () => true,
+        setPreview
+      });
+      await flushPromises();
+      expect(preview?.error).toContain("身份错配");
+      expect(preview?.error).not.toContain("尚未生成");
+    }
   });
 });
 
@@ -266,7 +355,7 @@ describe("candidate preview reconciliation", () => {
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("New current text");
   });
 
-  it("keeps the readable snapshot and shows safe feedback when reconcile fails", async () => {
+  it("keeps the readable snapshot and preserves the API reason when reconcile fails", async () => {
     const snapshot = deferred<LessonDraft>();
     let preview: CandidatePreviewState | undefined;
     const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
@@ -277,7 +366,7 @@ describe("candidate preview reconciliation", () => {
       releaseId: "release-a",
       pageId: "page-a",
       readSnapshot: () => snapshot.promise,
-      readCurrentDraft: () => Promise.reject(new Error("ReadWeave unavailable")),
+      readCurrentDraft: () => Promise.reject(new Error("GET /drafts/page-a: 401 Unauthorized (request id req-candidate-401)")),
       isActive: () => true,
       setPreview
     });
@@ -285,8 +374,31 @@ describe("candidate preview reconciliation", () => {
     await flushPromises();
 
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Still visible");
-    expect(preview?.notice).toContain("暂时无法确认");
-    expect(preview?.notice).not.toContain("已保存");
+    expect(preview?.notice).toContain("401 Unauthorized (request id req-candidate-401)");
+    expect(preview?.notice).toContain("上次可读讲解");
+  });
+
+  it("keeps a cached candidate page when the current draft has a mismatched identity", async () => {
+    const snapshot = candidateDraft("release-a", "page-a", "Last readable lesson");
+    const mismatchedCurrent = { ...candidateDraft("release-a", "page-b", "Wrong page"), pageId: "page-b" };
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+
+    beginCandidatePreviewLoad({
+      releaseId: "release-a",
+      pageId: "page-a",
+      readSnapshot: () => Promise.resolve(snapshot),
+      readCurrentDraft: () => Promise.resolve(mismatchedCurrent),
+      isActive: () => true,
+      setPreview
+    });
+    await flushPromises();
+
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Last readable lesson");
+    expect(preview?.notice).toContain("身份错配");
+    expect(preview?.notice).toContain("上次可读讲解");
   });
 });
 
@@ -402,5 +514,5 @@ function candidateDraft(releaseId: string, pageId: string, markdown: string): Le
     lessonSections: [{ id: `${pageId}:main`, kind: "main_content", title: "正文", markdown, items: [] }],
     quality: { publishable: false, issues: ["OFFLINE_AUDIT"] }
   } as unknown as PageLesson;
-  return { sourceReleaseId: releaseId, status: "ready", page } as LessonDraft;
+  return { sourceReleaseId: releaseId, pageId, status: "ready", page } as LessonDraft;
 }

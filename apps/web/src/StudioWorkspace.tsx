@@ -3,6 +3,7 @@ import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, 
 import { api } from "./api.js";
 import { Icon } from "./Icon.js";
 import { Markdown } from "./Markdown.js";
+import type { ImageResourceCache } from "./reading-prefetch.js";
 import { SlideViewer } from "./SlideViewer.js";
 
 const BLOCK_LABELS: Record<ExplanationBlock["kind"], string> = {
@@ -17,10 +18,11 @@ const BLOCK_LABELS: Record<ExplanationBlock["kind"], string> = {
   source_status: "来源状态"
 };
 
-export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleRight, onPublished, onChanged }: {
+export function StudioWorkspace({ release, page, sync, imageResources, rightCollapsed, onToggleRight, onPublished, onChanged }: {
   release: CourseRelease;
   page: PageLesson;
   sync?: ReadWeaveSyncStatus;
+  imageResources: ImageResourceCache;
   rightCollapsed: boolean;
   onToggleRight: () => void;
   onPublished: (release: CourseRelease) => void;
@@ -183,7 +185,7 @@ export function StudioWorkspace({ release, page, sync, rightCollapsed, onToggleR
         <main className="studio-canvas">
           <section className="source-stage">
             <div className="section-heading"><div><span className="section-kicker">SOURCE PAGE</span><h2>原始材料</h2></div><span className="source-meta">第 {page.pageNumber} 页 · {workingPage.anchors.length} 个来源锚点</span></div>
-            <div className="studio-slide"><SlideViewer imageUrl={workingPage.imageUrl} title={workingPage.title} value={view} onChange={setView} /></div>
+            <div className="studio-slide"><SlideViewer imageUrl={workingPage.imageUrl} title={workingPage.title} value={view} onChange={setView} imageResources={imageResources} /></div>
           </section>
 
           <section className="lesson-editor">

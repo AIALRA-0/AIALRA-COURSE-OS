@@ -45,6 +45,10 @@ describe("CourseTree background task entries", () => {
     expect(markup).toContain('class="task-state-dot task-state-queued"');
     expect(markup).toContain('class="task-state-dot task-state-failed"');
     expect(markup).toContain('class="task-state-dot task-state-cancelled"');
+    expect(markup).toContain('<span class="task-state-label task-state-running">正在处理</span>');
+    expect(markup).toContain('<span class="task-state-label task-state-completed">已完成</span>');
+    expect(markup).toContain('<span class="task-state-label task-state-failed">失败</span>');
+    expect(markup).toContain('aria-label="Lecture.pptx，正在处理 · 2/8 页"');
     expect(markup).toContain('aria-current="page"');
     expect(markup).toContain("Lecture.pptx");
     expect(markup).toContain("2/8 页");

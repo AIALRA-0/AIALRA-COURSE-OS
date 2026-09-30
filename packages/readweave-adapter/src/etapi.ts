@@ -1169,7 +1169,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listTrash(): Promise<TrashRecord[]> {
-    return structuredClone((await this.readStateReference()).trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId));
+    return structuredClone((await this.readStateReference(false, false)).trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId));
   }
 
   async restoreTrash(trashId: string, context: IdempotentWriteContext, options: { restoreMode?: "original" | "root" } = {}): Promise<CourseTreeNode> {
@@ -1497,11 +1497,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.updateModuleProjectionAfterMove(state, node.id, targetCourseId, created.branchId, noteId);
       return;
     }
-    if (sourceBranchId !== targetBranchId) {
-      await this.moveBranch(sourceBranchId, targetBranchId);
-      const movedBranchId = await this.findBranchId(noteId, targetNoteId);
-      this.updateModuleProjectionAfterMove(state, node.id, targetCourseId, movedBranchId || sourceBranchId, noteId);
-    }
+    const movedBranchId = await this.moveBranch(sourceBranchId, targetNoteId);
+    this.updateModuleProjectionAfterMove(state, node.id, targetCourseId, movedBranchId, noteId);
   }
 
   private updateModuleProjectionAfterMove(state: EtapiState, nodeId: string, targetCourseId: string | undefined, branchId: string, noteId: string): void {
@@ -1539,8 +1536,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const created = await this.createBranch(noteId, targetNoteId);
       return created.branchId;
     }
-    if (source !== targetBranchId) await this.moveBranch(source, targetBranchId);
-    return source;
+    return this.moveBranch(source, targetNoteId);
   }
 
   private async resolveSourceBranch(noteId: string, cachedBranchId?: string): Promise<string | undefined> {
@@ -1578,17 +1574,32 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.request<EtapiBranch>(`/branches/${encodeURIComponent(branchId)}`);
   }
 
-  private async createBranch(noteId: string, parentNoteId: string): Promise<EtapiBranch> {
+  private async createBranch(
+    noteId: string,
+    parentNoteId: string,
+    properties: Partial<Pick<EtapiBranch, "notePosition" | "prefix" | "isExpanded">> = { notePosition: 10, prefix: "", isExpanded: false }
+  ): Promise<EtapiBranch> {
     return this.request<EtapiBranch>("/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ noteId, parentNoteId, notePosition: 10, prefix: "", isExpanded: false })
+      body: JSON.stringify({ noteId, parentNoteId, ...properties })
     });
   }
 
-  private async moveBranch(branchId: string, parentBranchId: string): Promise<void> {
-    const result = await this.request<{ success?: boolean }>(`/branches/${encodeURIComponent(branchId)}/move-to/${encodeURIComponent(parentBranchId)}`, { method: "PUT" });
-    if (result.success === false) throw new Error("READWEAVE_TREE_MOVE_REJECTED");
+  private async moveBranch(branchId: string, parentNoteId: string): Promise<string> {
+    const source = await this.getBranch(branchId);
+    if (source.parentNoteId === parentNoteId) return source.branchId;
+
+    // ETAPI models moves as a new parent/child branch plus deletion of the old branch.
+    // Create first so deleting the old branch cannot delete the note as its last branch.
+    const moved = await this.createBranch(source.noteId, parentNoteId, {
+      prefix: source.prefix ?? "",
+      isExpanded: source.isExpanded ?? false
+    });
+    if (moved.branchId !== source.branchId) {
+      await this.raw(`/branches/${encodeURIComponent(source.branchId)}`, { method: "DELETE" });
+    }
+    return moved.branchId;
   }
 
   private async patchNoteTitle(noteId: string, title: string): Promise<void> {
@@ -2955,13 +2966,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const base = this.config.baseUrl.replace(/\/$/, "");
     const input = `${base}/etapi${path}`;
+    const method = (init?.method ?? "GET").toUpperCase();
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
       try {
         const response = await this.fetchImpl(input, { ...init, headers, signal: controller.signal });
-        if (response.ok) return response;
+        if (response.ok) {
+          if (method !== "GET") return response;
+          const body = await response.arrayBuffer();
+          return new Response(body.byteLength > 0 ? body : null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        }
         if (!shouldRetryHttpStatus(response.status) || attempt === 2) throw new Error(`READWEAVE_ETAPI_${response.status}:${await response.text()}`);
       } catch (error) {
         lastError = error;

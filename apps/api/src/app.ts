@@ -793,13 +793,24 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const pageId = request.params.id;
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const snapshotView = request.query.view === "snapshot";
+      const startedAt = snapshotView ? performance.now() : 0;
       const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, pageId);
-      if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
+      const sourceLookupMs = snapshotView ? performance.now() - startedAt : 0;
+      if (!source) {
+        if (snapshotView) response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=0.0`);
+        return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
+      }
       // Learning previews only need the saved teaching snapshot. Editing still
       // uses the reconciled read so external ReadWeave changes remain visible.
-      const saved = request.query.view === "snapshot" && dependencies.readweave.getDraftSnapshotByPage
+      const draftStartedAt = snapshotView ? performance.now() : 0;
+      const saved = snapshotView && dependencies.readweave.getDraftSnapshotByPage
         ? await dependencies.readweave.getDraftSnapshotByPage(pageId)
         : await dependencies.readweave.getDraftByPage(pageId);
+      if (snapshotView) {
+        const draftLookupMs = performance.now() - draftStartedAt;
+        response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}`);
+      }
       if (saved && saved.workspaceId === workspaceId && saved.courseId === source.release.courseId) return response.json(saved);
       response.json(createVirtualDraft(source.release, source.page, workspaceId));
     } catch (error) { next(error); }
@@ -918,13 +929,28 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       if (request.query.view === "index") {
         response.vary("Accept-Encoding");
-        const indexes = await listWorkspaceReleaseIndexes(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id));
+        const indexResult = await listWorkspaceReleaseIndexes(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id));
+        const { indexes, timing } = indexResult;
+        const serializeStartedAt = performance.now();
+        let responseBody: string | Buffer = jsonResponseBody(response, indexes);
+        const serializeMs = performance.now() - serializeStartedAt;
+        let gzipMs: number | undefined;
         if (acceptsGzip(request.header("Accept-Encoding"))) {
-          const compressed = await gzipAsync(Buffer.from(jsonResponseBody(response, indexes), "utf8"));
-          response.type("json").set("Content-Encoding", "gzip").send(compressed);
-        } else {
-          response.json(indexes);
+          const gzipStartedAt = performance.now();
+          responseBody = await gzipAsync(Buffer.from(responseBody, "utf8"));
+          gzipMs = performance.now() - gzipStartedAt;
+          response.set("Content-Encoding", "gzip");
         }
+        const serverTimings = [
+          `index;dur=${timing.indexMs.toFixed(1)}`,
+          `source-course;dur=${timing.sourceCourseMs.toFixed(1)}`,
+          `trash;dur=${timing.trashMs.toFixed(1)}`,
+          `filter;dur=${timing.filterMs.toFixed(1)}`,
+          `serialize;dur=${serializeMs.toFixed(1)}`
+        ];
+        if (gzipMs !== undefined) serverTimings.push(`gzip;dur=${gzipMs.toFixed(1)}`);
+        response.setHeader("Server-Timing", serverTimings.join(", "));
+        response.type("json").send(responseBody);
         return;
       }
       response.json(await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal", asOptionalString(request.query.course_id)));
@@ -989,7 +1015,9 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/releases/:id", async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const release = await getWorkspaceRelease(dependencies.readweave, request.params.id, request.header("X-Workspace-Id") || "personal");
+      response.setHeader("Server-Timing", `release;dur=${(performance.now() - startedAt).toFixed(1)}`);
       if (!release) return sendError(request, response, 404, "RELEASE_NOT_FOUND", "没有找到这个课程发布版本", false);
       response.json(release);
     } catch (error) { next(error); }
@@ -1007,7 +1035,9 @@ export function createApp(dependencies: AppDependencies): Express {
 
   app.get("/api/v1/media/:sha256", async (request, response, next) => {
     try {
+      const startedAt = performance.now();
       const bytes = await dependencies.cas.get(request.params.sha256);
+      response.setHeader("Server-Timing", `cas;dur=${(performance.now() - startedAt).toFixed(1)}`);
       const prefix = bytes.subarray(0, 256).toString("utf8").trimStart();
       response.setHeader("Content-Type", prefix.startsWith("<svg") ? "image/svg+xml" : "image/png");
       response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
@@ -2716,25 +2746,73 @@ function formalWorkspaceCourses(courses: CourseProject[], workspaceId: string): 
 }
 
 async function listWorkspaceReleases(readweave: ReadWeaveCourseApi, workspaceId: string, courseId?: string): Promise<CourseRelease[]> {
-  const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
+  const [allCourses, releases, trash] = await Promise.all([
+    readweave.listCourses(),
+    readweave.listReleases(courseId),
+    readweave.listTrash()
+  ]);
+  const courses = formalWorkspaceCourses(allCourses, workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
-  const releases = await readweave.listReleases(courseId);
-  return releases.filter((release) => courseIds.has(release.courseId) && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
+  const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trash, workspaceId);
+  return releases.filter((release) => courseIds.has(release.courseId)
+    && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
+    && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
 }
 
-async function listWorkspaceReleaseIndexes(readweave: ReadWeaveCourseApi, workspaceId: string, courseId?: string): Promise<CourseReleaseIndex[]> {
-  const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
+async function listWorkspaceReleaseIndexes(readweave: ReadWeaveCourseApi, workspaceId: string, courseId?: string): Promise<{
+  indexes: CourseReleaseIndex[];
+  timing: { indexMs: number; sourceCourseMs: number; trashMs: number; filterMs: number };
+}> {
+  // These elapsed durations overlap because the reads run concurrently. `trash` measures listTrash(), not an isolated root-fetch phase.
+  const [courseRead, indexRead, trashRead] = await Promise.all([
+    timeApiRead(() => readweave.listCourses()),
+    timeApiRead(() => readweave.listReleaseIndexes(courseId)),
+    timeApiRead(() => readweave.listTrash())
+  ]);
+  const filterStartedAt = performance.now();
+  const courses = formalWorkspaceCourses(courseRead.value, workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
-  const releases = await readweave.listReleaseIndexes(courseId);
-  return releases.filter((release) => courseIds.has(release.courseId) && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
+  const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trashRead.value, workspaceId);
+  const indexes = indexRead.value.filter((release) => courseIds.has(release.courseId)
+    && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
+    && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
+  const filterMs = performance.now() - filterStartedAt;
+  return {
+    indexes,
+    timing: {
+      indexMs: indexRead.durationMs,
+      sourceCourseMs: courseRead.durationMs,
+      trashMs: trashRead.durationMs,
+      filterMs
+    }
+  };
+}
+
+async function timeApiRead<T>(read: () => Promise<T>): Promise<{ value: T; durationMs: number }> {
+  const startedAt = performance.now();
+  const value = await read();
+  return { value, durationMs: performance.now() - startedAt };
 }
 
 async function getWorkspaceRelease(readweave: ReadWeaveCourseApi, releaseId: string, workspaceId: string): Promise<CourseRelease | undefined> {
   const release = await readweave.getRelease(releaseId);
   if (!release) return undefined;
-  const courses = formalWorkspaceCourses(await readweave.listCourses(), workspaceId);
+  const [allCourses, trash] = await Promise.all([readweave.listCourses(), readweave.listTrash()]);
+  const courses = formalWorkspaceCourses(allCourses, workspaceId);
+  const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trash, workspaceId);
   return courses.some((course) => course.id === release.courseId)
+    && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
     && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`) ? release : undefined;
+}
+
+function workspaceTrashedMaterialNodeIds(trash: TrashRecord[], workspaceId: string): Set<string> {
+  return new Set(trash
+    .filter((record) => record.workspaceId === workspaceId && record.nodeKind === "material" && record.restoreAvailable)
+    .map((record) => record.nodeId));
+}
+
+function stableMaterialNodeId(courseId: string, moduleId: string): string {
+  return `material:${courseId}:${moduleId}`;
 }
 
 function standaloneGenerationTaskRecord(job: GenerationJob, relatedImport?: ImportRecord, detailed = false) {

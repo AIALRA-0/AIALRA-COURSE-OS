@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BoundedPagePrefetchQueue, ImageResourceCache, settlePagePrefetch } from "./reading-prefetch.js";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("bounded image resources", () => {
   it("shares an in-flight load, decodes once, and retains a successful image", async () => {
@@ -89,6 +92,70 @@ describe("bounded image resources", () => {
     expect(cache.size).toBe(2);
     expect(cache.get("/broken.png")).toBeUndefined();
   });
+
+  it("times out a hung image load, removes listeners, and allows a fresh retry", async () => {
+    vi.useFakeTimers();
+    const images: FakeImage[] = [];
+    vi.stubGlobal("Image", class extends FakeImage { constructor() { super(); images.push(this); } });
+    const cache = new ImageResourceCache(2);
+    const first = cache.load("/slow.png");
+    const firstResource = cache.get("/slow.png")!;
+    const firstFailure = expect(first).rejects.toThrow("Timed out loading image");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await firstFailure;
+    expect(cache.get("/slow.png")).toBeUndefined();
+    expect(firstResource.state).toBe("error");
+    expect(images[0]!.src).toBe("");
+    images[0]!.finish();
+    expect(firstResource.state).toBe("error");
+    expect(images[0]!.decode).not.toHaveBeenCalled();
+
+    const retry = cache.load("/slow.png");
+    expect(images).toHaveLength(2);
+    images[1]!.finish();
+    await expect(retry).resolves.toBe(images[1]);
+  });
+
+  it("applies the same deadline to image decoding", async () => {
+    vi.useFakeTimers();
+    const images: FakeImage[] = [];
+    vi.stubGlobal("Image", class extends FakeImage { constructor() { super(); images.push(this); } });
+    const cache = new ImageResourceCache(2);
+    const decode = deferred<void>();
+    const pending = cache.load("/slow-decode.png");
+    images[0]!.decode.mockReturnValue(decode.promise);
+    images[0]!.finish();
+    const failure = expect(pending).rejects.toThrow("Timed out loading image");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failure;
+    expect(cache.get("/slow-decode.png")).toBeUndefined();
+    expect(images[0]!.decode).toHaveBeenCalledOnce();
+    expect(images[0]!.src).toBe("");
+  });
+
+  it("cancels pending downloads on clear while retaining decoded images", async () => {
+    const images: FakeImage[] = [];
+    vi.stubGlobal("Image", class extends FakeImage { constructor() { super(); images.push(this); } });
+    const cache = new ImageResourceCache(2);
+    const ready = cache.load("/ready.png");
+    images[0]!.finish();
+    await ready;
+    const pending = cache.load("/pending.png");
+    const pendingResource = cache.get("/pending.png")!;
+    const failure = expect(pending).rejects.toThrow("Cancelled loading image");
+
+    cache.clear();
+    await failure;
+    expect(images[1]!.src).toBe("");
+    expect(pendingResource.state).toBe("error");
+    images[1]!.finish();
+    expect(pendingResource.state).toBe("error");
+    expect(cache.get("/pending.png")).toBeUndefined();
+    expect(cache.get("/ready.png")?.state).toBe("ready");
+    expect(cache.get("/ready.png")?.promise).toBe(ready);
+  });
 });
 
 describe("bounded page prefetch", () => {
@@ -158,6 +225,38 @@ describe("bounded page prefetch", () => {
     completions.get("neighbor")!();
     await Promise.all([current, intended, neighbor]);
   });
+
+  it("releases both prefetch slots after the snapshot and image deadlines", async () => {
+    vi.useFakeTimers();
+    const images: FakeImage[] = [];
+    vi.stubGlobal("Image", class extends FakeImage { constructor() { super(); images.push(this); } });
+    const cache = new ImageResourceCache(4);
+    const queue = new BoundedPagePrefetchQueue(2);
+    const started: string[] = [];
+    const work = (key: string) => queue.enqueue(key, async () => {
+      started.push(key);
+      const snapshot = started.length <= 2
+        ? new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("GET deadline")), 10_000))
+        : Promise.resolve();
+      const image = cache.load(`/${key}.png`).catch(() => undefined);
+      await settlePagePrefetch(snapshot, image, () => undefined);
+    });
+
+    const first = work("page-1");
+    const second = work("page-2");
+    const third = work("page-3");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual(["page-1", "page-2"]);
+    expect(images).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual(["page-1", "page-2", "page-3"]);
+    images[2]!.finish();
+    await Promise.all([first, second, third]);
+  });
 });
 
 class FakeImage extends EventTarget {
@@ -165,6 +264,7 @@ class FakeImage extends EventTarget {
   fetchPriority = "auto";
   decode = vi.fn(() => Promise.resolve());
 
+  removeAttribute(name: string) { if (name === "src") this.src = ""; }
   finish() { this.dispatchEvent(new Event("load")); }
   fail() { this.dispatchEvent(new Event("error")); }
 }

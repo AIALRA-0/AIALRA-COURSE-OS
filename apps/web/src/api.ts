@@ -47,9 +47,13 @@ export interface ReadWeaveEtapiSettings {
 
 export type ReadWeaveEtapiSettingsUpdate = Partial<Pick<ReadWeaveEtapiSettings, "enabled" | "baseUrl" | "parentNoteId" | "publicUrl">> & { token?: string };
 export type ModelProviderCreate = Pick<ModelProviderConfig, "id" | "displayName" | "baseUrl" | "enabled" | "models">;
+export interface ApiRequestOptions {
+  signal?: AbortSignal;
+}
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const WORKSPACE_ID = "personal";
+const READ_REQUEST_TIMEOUT_MS = 10_000;
 
 export class ApiRequestError extends Error {
   constructor(
@@ -57,7 +61,8 @@ export class ApiRequestError extends Error {
     public readonly code = "HTTP_ERROR",
     public readonly status = 500,
     public readonly retryable = false,
-    public readonly details?: unknown
+    public readonly details?: unknown,
+    public readonly requestId?: string
   ) {
     super(message);
     this.name = "ApiRequestError";
@@ -85,31 +90,143 @@ type QuestionRefillResponse = {
 
 const questionSelectionRequests = new Map<string, Promise<QuestionSelectionResponse>>();
 
+type ApiProblem = {
+  error?: {
+    message?: string;
+    code?: string;
+    retryable?: boolean;
+    details?: unknown;
+    requestId?: string;
+  };
+  requestId?: string;
+};
+
+function asProblem(value: unknown): ApiProblem | undefined {
+  return value && typeof value === "object" ? value as ApiProblem : undefined;
+}
+
+function isHtmlResponse(contentType: string, body: string): boolean {
+  return contentType.toLowerCase().includes("text/html") || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body);
+}
+
+function isLoginPage(contentType: string, body: string): boolean {
+  return isHtmlResponse(contentType, body) && /\b(?:sign\s*in|log\s*in|login|password|session\s+expired|authenticate)\b/i.test(body);
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The request was aborted.", "AbortError");
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || "GET").toUpperCase();
+  const isReadRequest = ["GET", "HEAD", "OPTIONS"].includes(method);
+  const requestIdValue = requestId();
   const headers = new Headers(init?.headers);
-  headers.set("X-Request-Id", requestId());
+  headers.set("X-Request-Id", requestIdValue);
   headers.set("X-Workspace-Id", WORKSPACE_ID);
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers.set("X-Actor", "personal-user");
     headers.set("X-Schema-Version", "2.4.0");
   }
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers
-  });
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({ error: { message: response.statusText } }));
-    throw new ApiRequestError(
-      problem.error?.message || `HTTP ${response.status}`,
-      problem.error?.code || "HTTP_ERROR",
-      response.status,
-      Boolean(problem.error?.retryable),
-      problem.error?.details
-    );
+  const externalSignal = isReadRequest ? init?.signal : undefined;
+  const controller = isReadRequest ? new AbortController() : undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let forwardAbort: (() => void) | undefined;
+
+  if (controller && externalSignal?.aborted) throw abortReason(externalSignal);
+  if (controller && externalSignal) {
+    forwardAbort = () => controller.abort(abortReason(externalSignal));
+    externalSignal.addEventListener("abort", forwardAbort, { once: true });
   }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  if (controller) {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("The read request timed out.", "TimeoutError"));
+    }, READ_REQUEST_TIMEOUT_MS);
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers,
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (controller?.signal.aborted) throw abortReason(controller.signal);
+
+    if (response.status === 204) return undefined as T;
+    const body = await response.text();
+    if (controller?.signal.aborted) throw abortReason(controller.signal);
+
+    let payload: unknown;
+    if (body.length > 0) {
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        payload = undefined;
+      }
+    }
+    const problem = asProblem(payload);
+    const errorRequestId = response.headers.get("x-request-id")
+      || problem?.error?.requestId
+      || problem?.requestId
+      || requestIdValue;
+
+    if (!response.ok) {
+      const statusCode = response.status === 401 ? "UNAUTHORIZED" : response.status === 403 ? "FORBIDDEN" : "HTTP_ERROR";
+      const statusMessage = response.status === 401
+        ? "登录状态已失效，请重新登录"
+        : response.status === 403
+          ? "当前账号无权访问此内容"
+          : `HTTP ${response.status}`;
+      throw new ApiRequestError(
+        response.status === 401 || response.status === 403 ? statusMessage : problem?.error?.message || statusMessage,
+        problem?.error?.code || statusCode,
+        response.status,
+        Boolean(problem?.error?.retryable),
+        problem?.error?.details,
+        errorRequestId
+      );
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (isLoginPage(contentType, body)) {
+      throw new ApiRequestError(
+        "接口返回了登录页面，登录状态可能已失效，请重新登录",
+        "AUTH_REQUIRED",
+        response.status,
+        false,
+        undefined,
+        errorRequestId
+      );
+    }
+    if (payload === undefined) {
+      if (isHtmlResponse(contentType, body)) {
+        throw new ApiRequestError("接口返回了 HTML 页面，暂时无法读取内容", "INVALID_RESPONSE", response.status, false, undefined, errorRequestId);
+      }
+      throw new ApiRequestError("接口返回的数据格式无效", "INVALID_RESPONSE", response.status, false, undefined, errorRequestId);
+    }
+    return payload as T;
+  } catch (error) {
+    if (timedOut) {
+      throw new ApiRequestError(
+        "读取超时（10 秒），请手动重试",
+        "REQUEST_TIMEOUT",
+        408,
+        true,
+        undefined,
+        requestIdValue
+      );
+    }
+    if (externalSignal?.aborted) throw abortReason(externalSignal);
+    if (error instanceof TypeError) {
+      throw new ApiRequestError("网络连接失败，请检查网络后重试", "NETWORK_ERROR", 0, true, undefined, requestIdValue);
+    }
+    throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (externalSignal && forwardAbort) externalSignal.removeEventListener("abort", forwardAbort);
+  }
 }
 
 export const api = {
@@ -118,7 +235,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ title, description })
   }),
-  workspaceTree: (workspaceId = WORKSPACE_ID) => request<WorkspaceTree>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tree?view=library`),
+  workspaceTree: (workspaceId = WORKSPACE_ID, options?: ApiRequestOptions) => request<WorkspaceTree>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tree?view=library`, { signal: options?.signal }),
   createModule: (courseId: string, title: string, description?: string) => request<CourseTreeNode>("/api/v1/modules", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -129,8 +246,8 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ ...patch, expectedRevision: node.revision ?? 0 })
   }),
-  treeNodeProperties: (nodeId: string) => request<import("@course-os/contracts").TreeNodeProperties>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/properties`),
-  treeNodeVersions: (nodeId: string) => request<CourseRelease[]>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/versions`),
+  treeNodeProperties: (nodeId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").TreeNodeProperties>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/properties`, { signal: options?.signal }),
+  treeNodeVersions: (nodeId: string, options?: ApiRequestOptions) => request<CourseRelease[]>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/versions`, { signal: options?.signal }),
   duplicateTreeNode: (node: CourseTreeNode) => request<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:duplicate`, {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
@@ -139,7 +256,7 @@ export const api = {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
-  trash: () => request<TrashRecord[]>("/api/v1/trash"),
+  trash: (options?: ApiRequestOptions) => request<TrashRecord[]>("/api/v1/trash", { signal: options?.signal }),
   restoreTrash: (item: TrashRecord, restoreMode: "original" | "root" = "original") => request<CourseTreeNode>(`/api/v1/trash/${encodeURIComponent(item.id)}:restore`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -149,14 +266,14 @@ export const api = {
     method: "DELETE",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
-  deepLink: (noteId: string) => request<ReadWeaveDeepLink>(`/api/v1/readweave/links/${encodeURIComponent(noteId)}`),
-  settings: () => request<WorkspaceSettings>("/api/v1/settings"),
+  deepLink: (noteId: string, options?: ApiRequestOptions) => request<ReadWeaveDeepLink>(`/api/v1/readweave/links/${encodeURIComponent(noteId)}`, { signal: options?.signal }),
+  settings: (options?: ApiRequestOptions) => request<WorkspaceSettings>("/api/v1/settings", { signal: options?.signal }),
   saveSettings: (settings: WorkspaceSettings) => request<WorkspaceSettings>("/api/v1/settings", {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(settings)
   }),
-  modelProviders: () => request<ModelProviderConfig[]>("/api/v1/model-providers"),
+  modelProviders: (options?: ApiRequestOptions) => request<ModelProviderConfig[]>("/api/v1/model-providers", { signal: options?.signal }),
   createModelProvider: (provider: ModelProviderCreate) => request<ModelProviderConfig>("/api/v1/model-providers", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -177,7 +294,7 @@ export const api = {
     body: JSON.stringify({ secret })
   }),
   testProvider: (providerId: string) => request<ModelProviderConfig>(`/api/v1/model-providers/${encodeURIComponent(providerId)}:test`, { method: "POST" }),
-  searchProviders: () => request<SearchProviderConfig[]>("/api/v1/search-providers"),
+  searchProviders: (options?: ApiRequestOptions) => request<SearchProviderConfig[]>("/api/v1/search-providers", { signal: options?.signal }),
   updateSearchProvider: (providerId: string, patch: { baseUrl?: string; endpoint?: string; enabled?: boolean; maxResults?: number }) => request<SearchProviderConfig>(`/api/v1/search-providers/${encodeURIComponent(providerId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -189,19 +306,19 @@ export const api = {
     body: JSON.stringify({ secret })
   }),
   testSearchProvider: (providerId: string) => request<SearchProviderConfig>(`/api/v1/search-providers/${encodeURIComponent(providerId)}:test`, { method: "POST" }),
-  searchRoutePolicy: () => request<SearchRoutePolicy>("/api/v1/search-route-policy"),
+  searchRoutePolicy: (options?: ApiRequestOptions) => request<SearchRoutePolicy>("/api/v1/search-route-policy", { signal: options?.signal }),
   saveSearchRoutePolicy: (policy: SearchRoutePolicy) => request<SearchRoutePolicy>("/api/v1/search-route-policy", {
     method: "PUT",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(policy)
   }),
-  modelRoutePolicy: () => request<ModelRoutePolicy>("/api/v1/model-route-policy"),
+  modelRoutePolicy: (options?: ApiRequestOptions) => request<ModelRoutePolicy>("/api/v1/model-route-policy", { signal: options?.signal }),
   saveModelRoutePolicy: (policy: ModelRoutePolicy) => request<ModelRoutePolicy>("/api/v1/model-route-policy", {
     method: "PUT",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(policy)
   }),
-  readweaveEtapiSettings: () => request<ReadWeaveEtapiSettings>("/api/v1/readweave/etapi-settings"),
+  readweaveEtapiSettings: (options?: ApiRequestOptions) => request<ReadWeaveEtapiSettings>("/api/v1/readweave/etapi-settings", { signal: options?.signal }),
   updateReadweaveEtapiSettings: (settings: ReadWeaveEtapiSettingsUpdate) => request<ReadWeaveEtapiSettings>("/api/v1/readweave/etapi-settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -211,28 +328,28 @@ export const api = {
     method: "DELETE",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
-  releases: () => request<CourseRelease[]>("/api/v1/releases?view=index"),
-  release: (id: string) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`),
-  lesson: (pageId: string) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`),
-  pageQuestions: (pageId: string) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`),
-  selfRetellings: (releaseId?: string) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`),
+  releases: (options?: ApiRequestOptions) => request<CourseRelease[]>("/api/v1/releases?view=index", { signal: options?.signal }),
+  release: (id: string, options?: ApiRequestOptions) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`, { signal: options?.signal }),
+  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson`, { signal: options?.signal }),
+  pageQuestions: (pageId: string, options?: ApiRequestOptions) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`, { signal: options?.signal }),
+  selfRetellings: (releaseId?: string, options?: ApiRequestOptions) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`, { signal: options?.signal }),
   saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
     method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ answer })
   }),
   reviewSelfRetelling: (releaseId: string, pageId: string, result: "again" | "remembered") => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}/review`, {
     method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ result })
   }),
-  readweaveQuestions: (pageId: string) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`),
-  draft: (pageId: string) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`),
-  draftSnapshot: (pageId: string) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot`),
+  readweaveQuestions: (pageId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`, { signal: options?.signal }),
+  draft: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`, { signal: options?.signal }),
+  draftSnapshot: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot`, { signal: options?.signal }),
   saveDraft: (draft: LessonDraft, page: LessonDraft["page"], changedBlockIds: string[]) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(draft.pageId)}/draft`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseRevision: draft.revision, page, changedBlockIds })
   }),
   validateDraft: (pageId: string) => request<QualityValidationResult>(`/api/v1/pages/${encodeURIComponent(pageId)}:validate`, { method: "POST" }),
-  syncStatus: () => request<ReadWeaveSyncStatus>("/api/v1/sync/status"),
-  conflicts: () => request<CourseConflict[]>("/api/v1/conflicts"),
+  syncStatus: (options?: ApiRequestOptions) => request<ReadWeaveSyncStatus>("/api/v1/sync/status", { signal: options?.signal }),
+  conflicts: (options?: ApiRequestOptions) => request<CourseConflict[]>("/api/v1/conflicts", { signal: options?.signal }),
   resolveConflict: (conflictId: string, resolution: "local" | "remote" | "merged", mergedContent?: string) => request<CourseConflict>(`/api/v1/conflicts/${encodeURIComponent(conflictId)}:resolve`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -256,29 +373,29 @@ export const api = {
     body.append("autoGenerate", String(options.autoGenerate !== false));
     return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
   },
-  importTasks: () => request<ImportTaskSummary[]>("/api/v1/imports"),
-  importRecord: (importId: string) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`),
+  importTasks: (options?: ApiRequestOptions) => request<ImportTaskSummary[]>("/api/v1/imports", { signal: options?.signal }),
+  importRecord: (importId: string, options?: ApiRequestOptions) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`, { signal: options?.signal }),
   createGenerationJob: (materialVersionId: string, pageIds: string[], budgetUsd: number) => request<GenerationJob>("/api/v1/generation-jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd })
   }),
-  generationJob: (jobId: string) => request<GenerationJob>(`/api/v1/generation-jobs/${encodeURIComponent(jobId)}`),
+  generationJob: (jobId: string, options?: ApiRequestOptions) => request<GenerationJob>(`/api/v1/generation-jobs/${encodeURIComponent(jobId)}`, { signal: options?.signal }),
   createGenerationPlan: (materialVersionId: string, pageIds: string[], budgetUsd: number, options: { qualityMode?: string; language?: string; sourceImportId?: string; holdForReview?: boolean } = {}) => request<{ plan: GenerationPlan; currentJob?: GenerationJob }>("/api/v1/generation-plans", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ materialVersionId, pageIds, budgetUsd, ...options })
   }),
-  generationPlan: (planId: string) => request<{ plan: WebGenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`),
+  generationPlan: (planId: string, options?: ApiRequestOptions) => request<{ plan: WebGenerationPlan; currentJob?: GenerationJob; activeJobs?: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}`, { signal: options?.signal }),
   retryGenerationPlanFailed: (planId: string) => request<{ plan: WebGenerationPlan; jobs: GenerationJob[] }>(`/api/v1/generation-plans/${encodeURIComponent(planId)}:retry-failed`, {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
-  writingPolicy: () => request<WritingPolicyCurrent>("/api/v1/writing-policy/current"),
-  generationHarness: () => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current"),
-  costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}) => {
+  writingPolicy: (options?: ApiRequestOptions) => request<WritingPolicyCurrent>("/api/v1/writing-policy/current", { signal: options?.signal }),
+  generationHarness: (options?: ApiRequestOptions) => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current", { signal: options?.signal }),
+  costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}, options?: ApiRequestOptions) => {
     const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])));
-    return request<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }>(`/api/v1/costs${query.size ? `?${query}` : ""}`);
+    return request<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }>(`/api/v1/costs${query.size ? `?${query}` : ""}`, { signal: options?.signal });
   },
   createSession: (courseReleaseId: string, sessionId?: string) => request<LearningSession>("/api/v1/sessions", {
     method: "POST",
@@ -318,7 +435,7 @@ export const api = {
     questionSelectionRequests.set(cacheKey, pending);
     return pending;
   },
-  questionAttempts: (pageId: string, sessionId: string, selectionId: string) => request<QuestionAttempt[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/question-attempts?sessionId=${encodeURIComponent(sessionId)}&selectionId=${encodeURIComponent(selectionId)}`),
+  questionAttempts: (pageId: string, sessionId: string, selectionId: string, options?: ApiRequestOptions) => request<QuestionAttempt[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/question-attempts?sessionId=${encodeURIComponent(sessionId)}&selectionId=${encodeURIComponent(selectionId)}`, { signal: options?.signal }),
   refillQuestions: (pageId: string, baseRevision: number) => request<QuestionRefillResponse>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions:refill`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -334,14 +451,14 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(payload)
   }),
-  reviewQueue: () => request<MasteryRecord[]>("/api/v1/review-queue"),
-  reviewMap: () => request<ReviewMap>("/api/v1/review-map"),
+  reviewQueue: (options?: ApiRequestOptions) => request<MasteryRecord[]>("/api/v1/review-queue", { signal: options?.signal }),
+  reviewMap: (options?: ApiRequestOptions) => request<ReviewMap>("/api/v1/review-map", { signal: options?.signal }),
   createReviewPlan: (payload: { source: "due" | "manual"; objectiveIds: string[]; seed?: string; budgetUsd?: number }) => request<{ plan: ReviewPlan }>("/api/v1/review-plans", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(payload)
   }),
-  reviewPlan: (id: string) => request<{ plan: ReviewPlan }>(`/api/v1/review-plans/${encodeURIComponent(id)}`),
+  reviewPlan: (id: string, options?: ApiRequestOptions) => request<{ plan: ReviewPlan }>(`/api/v1/review-plans/${encodeURIComponent(id)}`, { signal: options?.signal }),
   retryReviewPlan: (id: string) => request<{ plan: ReviewPlan }>(`/api/v1/review-plans/${encodeURIComponent(id)}:retry`, {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
@@ -354,13 +471,13 @@ export const api = {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() }
   }),
-  currentReviewSession: () => request<ReviewSessionResponse>("/api/v1/review-sessions/current"),
+  currentReviewSession: (options?: ApiRequestOptions) => request<ReviewSessionResponse>("/api/v1/review-sessions/current", { signal: options?.signal }),
   createReviewSession: (payload: { source: "due" | "manual"; objectiveIds?: string[]; count?: number; seed?: string }) => request<ReviewSessionResponse>("/api/v1/review-sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(payload)
   }),
-  reviewSession: (id: string) => request<ReviewSessionResponse>(`/api/v1/review-sessions/${encodeURIComponent(id)}`),
+  reviewSession: (id: string, options?: ApiRequestOptions) => request<ReviewSessionResponse>(`/api/v1/review-sessions/${encodeURIComponent(id)}`, { signal: options?.signal }),
   reviewSessionAttempt: (id: string, payload: { answer: string; usedHintLevel: number; questionId?: string }) => request<ReviewAttemptResult & { session: ReviewSession; question?: QuestionBankItem }>(`/api/v1/review-sessions/${encodeURIComponent(id)}/attempts`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },

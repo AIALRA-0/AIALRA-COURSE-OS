@@ -13,7 +13,15 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
   const valueRef = useRef(value);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | undefined>(undefined);
   const [dragging, setDragging] = useState(false);
-  const [imageStatus, setImageStatus] = useState<{ url: string; state: "ready" | "error" }>();
+  const [imageStatus, setImageStatus] = useState<{ url: string; attempt: number; state: "loading" | "ready" | "error" }>();
+  const [imageAttemptVersion, setImageAttemptVersion] = useState(0);
+  const imageAttemptRef = useRef({ url: imageUrl, attempt: 0 });
+  if (imageAttemptRef.current.url !== imageUrl) imageAttemptRef.current = { url: imageUrl, attempt: 0 };
+  const imageAttempt = imageAttemptRef.current.attempt;
+  const currentImageStatus = imageStatus?.url === imageUrl && imageStatus.attempt === imageAttempt ? imageStatus : undefined;
+  const imageSource = imageResources
+    ? currentImageStatus?.state === "ready" ? imageUrl : undefined
+    : currentImageStatus?.state === "error" ? undefined : imageUrl;
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState("");
   valueRef.current = value;
@@ -21,13 +29,16 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
   useEffect(() => {
     if (!imageResources || !imageUrl) return;
     let active = true;
-    void imageResources.load(imageUrl, "high").then(() => {
-      if (active) setImageStatus({ url: imageUrl, state: "ready" });
+    const attempt = imageAttempt;
+    setImageStatus({ url: imageUrl, attempt, state: "loading" });
+    const pending = attempt > 0 ? imageResources.retry(imageUrl, "high") : imageResources.load(imageUrl, "high");
+    void pending.then(() => {
+      if (active) setImageStatus((current) => current?.url === imageUrl && current.attempt === attempt ? { url: imageUrl, attempt, state: "ready" } : current);
     }).catch(() => {
-      if (active) setImageStatus({ url: imageUrl, state: "error" });
+      if (active) setImageStatus((current) => current?.url === imageUrl && current.attempt === attempt ? { url: imageUrl, attempt, state: "error" } : current);
     });
     return () => { active = false; };
-  }, [imageResources, imageUrl]);
+  }, [imageResources, imageUrl, imageAttempt, imageAttemptVersion]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -54,6 +65,7 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
   }, []);
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest("button")) return;
     if (valueRef.current.zoom <= 1) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = { x: event.clientX, y: event.clientY, panX: valueRef.current.panX, panY: valueRef.current.panY };
@@ -68,6 +80,11 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
     setFullscreenError("");
     const operation = document.fullscreenElement ? document.exitFullscreen() : shellRef.current?.requestFullscreen();
     if (operation) void operation.catch(() => setFullscreenError("浏览器没有授予全屏权限，请允许当前页面进入全屏后重试"));
+  };
+  const retryImage = () => {
+    imageAttemptRef.current = { url: imageUrl, attempt: imageAttempt + 1 };
+    setImageStatus({ url: imageUrl, attempt: imageAttempt + 1, state: "loading" });
+    setImageAttemptVersion((current) => current + 1);
   };
 
   return (
@@ -90,17 +107,17 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
         onPointerCancel={pointerUp}
         onDoubleClick={() => onChange({ zoom: 1, panX: 0, panY: 0 })}
       >
-        {imageStatus?.url !== imageUrl && <span className="slide-image-status" role="status">正在载入本页原图</span>}
-        {imageStatus?.url === imageUrl && imageStatus.state === "error" && <span className="slide-image-status" role="alert">原图载入失败，请刷新后重试</span>}
+        {(!currentImageStatus || currentImageStatus.state === "loading") && <span className="slide-image-status" role="status">正在载入本页原图</span>}
+        {currentImageStatus?.state === "error" && <span className="slide-image-status" role="alert">原图载入失败<button type="button" data-action="slide-image-retry" onClick={retryImage} style={{ pointerEvents: "auto" }}>重试原图</button></span>}
         <img
-          key={imageUrl}
-          src={imageUrl}
+          key={`${imageUrl}:${imageAttempt}`}
+          src={imageSource}
           alt={`${title} 原始课件截图`}
           draggable={false}
           fetchPriority={imageResources ? "high" : undefined}
-          onLoad={() => setImageStatus({ url: imageUrl, state: "ready" })}
-          onError={() => setImageStatus({ url: imageUrl, state: "error" })}
-          style={{ visibility: imageStatus?.url === imageUrl && imageStatus.state === "ready" ? "visible" : "hidden", transform: `translate(${value.panX}px, ${value.panY}px) scale(${value.zoom})` }}
+          onLoad={() => setImageStatus((current) => current && (current.url !== imageUrl || current.attempt !== imageAttempt) ? current : { url: imageUrl, attempt: imageAttempt, state: "ready" })}
+          onError={() => setImageStatus((current) => current && (current.url !== imageUrl || current.attempt !== imageAttempt) ? current : { url: imageUrl, attempt: imageAttempt, state: "error" })}
+          style={{ visibility: currentImageStatus?.state === "ready" ? "visible" : "hidden", transform: `translate(${value.panX}px, ${value.panY}px) scale(${value.zoom})` }}
         />
       </div>
       <p className={`viewer-help ${fullscreenError ? "viewer-error" : ""}`} role={fullscreenError ? "alert" : undefined}>{fullscreenError || "按住 Ctrl 或 Command 滚轮缩放，放大后拖动查看细节"}</p>

@@ -482,7 +482,7 @@ describe("Course OS API", () => {
         req.end();
       });
 
-      const plain = await getIndex();
+      const plain = await getIndex("identity");
       const compressed = await getIndex("gzip");
       const refused = await getIndex("gzip;q=0");
       const varyTokens = (plain.headers.vary ?? "").split(",").map((token) => token.trim().toLowerCase());
@@ -491,6 +491,9 @@ describe("Course OS API", () => {
       expect(refused.headers["content-encoding"]).toBeUndefined();
       expect(compressed.headers["content-encoding"]).toBe("gzip");
       expect((compressed.headers.vary ?? "").toLowerCase()).toContain("accept-encoding");
+      expect(plain.headers["server-timing"]).toMatch(/serialize;dur=[\d.]+/);
+      expect(plain.headers["server-timing"]).not.toMatch(/gzip;dur=/);
+      expect(compressed.headers["server-timing"]).toMatch(/gzip;dur=[\d.]+/);
       expect(await gunzipAsync(compressed.body)).toEqual(plain.body);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -2087,6 +2090,88 @@ describe("Course OS API", () => {
       expect(response.body.error).toMatchObject({ code: "TREE_NODE_STALE" });
       expect(response.body.error.message).not.toContain("READWEAVE_TREE_NODE_NOT_FOUND");
     });
+  });
+
+  it("hides a trashed material from release indexes and old page links until it is restored", async () => {
+    const seedRelease = testRelease();
+    const linkedPage = replaceTestIds(structuredClone(seedRelease.pages[0]!), "page-1", `${seedRelease.id}:page:1`);
+    linkedPage.pageNumber = 2;
+    seedRelease.pages.push(linkedPage);
+    seedRelease.pageIds.push(linkedPage.id);
+    const { app, release, readweave } = await seededApp(undefined, seedRelease);
+    const otherRelease = structuredClone(release);
+    otherRelease.id = "test-release-other-material";
+    otherRelease.moduleId = "module-other";
+    otherRelease.moduleTitle = "有效材料";
+    otherRelease.pages = otherRelease.pages.map((page) => replaceTestIds(page, page.id, `${page.id}-other`));
+    otherRelease.pageIds = otherRelease.pages.map((page) => page.id);
+    await readweave.publishRelease(otherRelease, testManifest(otherRelease.id), {
+      idempotencyKey: "publish-other-material",
+      actor: "test",
+      workspaceId: "personal",
+      schemaVersion: "2.4.0",
+      requestId: "publish-other-material"
+    });
+
+    const initialTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    const material = initialTree.body.courses[0].children.find((node: { currentReleaseId: string }) => node.currentReleaseId === release.id);
+    expect(material).toMatchObject({ id: `material:${release.courseId}:${release.moduleId}`, kind: "material" });
+    const initialIndex = await request(app).get("/api/v1/releases?view=index").expect(200);
+    expect(initialIndex.body.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([release.id, otherRelease.id]));
+
+    const trashed = await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}:trash`)
+      .set("Idempotency-Key", "trash-indexed-material")
+      .expect(201);
+    expect(trashed.body).toMatchObject({ nodeId: material.id, nodeKind: "material", restoreAvailable: true });
+
+    const hiddenIndex = await request(app).get("/api/v1/releases?view=index").expect(200);
+    expect(hiddenIndex.body.map((item: { id: string }) => item.id)).toEqual([otherRelease.id]);
+    const hiddenReleases = await request(app).get("/api/v1/releases").expect(200);
+    expect(hiddenReleases.body.map((item: { id: string }) => item.id)).toEqual([otherRelease.id]);
+    await request(app).get(`/api/v1/releases/${release.id}`).expect(404);
+    await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/lesson`).expect(404);
+    await request(app).get(`/api/v1/pages/${release.pages[1]!.id}/lesson`).expect(404);
+    await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/draft?view=snapshot`).expect(404);
+    await request(app).get(`/api/v1/releases/${otherRelease.id}`).expect(200);
+    await request(app).get(`/api/v1/pages/${otherRelease.pages[0]!.id}/lesson`).expect(200);
+    await request(app).get(`/api/v1/pages/${otherRelease.pages[0]!.id}/draft?view=snapshot`).expect(200);
+
+    await request(app).post(`/api/v1/trash/${encodeURIComponent(trashed.body.id)}:restore`)
+      .set("Idempotency-Key", "restore-indexed-material")
+      .send({ restoreMode: "original" })
+      .expect(200);
+    const restoredIndex = await request(app).get("/api/v1/releases?view=index").expect(200);
+    expect(restoredIndex.body.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([release.id, otherRelease.id]));
+    await request(app).get(`/api/v1/releases/${release.id}`).expect(200);
+    await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/lesson`).expect(200);
+    await request(app).get(`/api/v1/pages/${release.pages[1]!.id}/lesson`).expect(200);
+    await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/draft?view=snapshot`).expect(200);
+  });
+
+  it("adds passive Server-Timing phases to release indexes, draft snapshots, media reads and release details", async () => {
+    const { app, dependencies, release } = await seededApp();
+
+    const index = await request(app).get("/api/v1/releases?view=index").set("Accept-Encoding", "identity").expect(200);
+    expect(index.headers["server-timing"]).toMatch(/index;dur=[\d.]+/);
+    expect(index.headers["server-timing"]).toMatch(/source-course;dur=[\d.]+/);
+    expect(index.headers["server-timing"]).toMatch(/trash;dur=[\d.]+/);
+    expect(index.headers["server-timing"]).toMatch(/filter;dur=[\d.]+/);
+    expect(index.headers["server-timing"]).toMatch(/serialize;dur=[\d.]+/);
+    expect(index.body.map((item: { id: string }) => item.id)).toContain(release.id);
+
+    const snapshot = await request(app).get(`/api/v1/pages/${release.pages[0]!.id}/draft?view=snapshot`).expect(200);
+    expect(snapshot.headers["server-timing"]).toMatch(/source;dur=[\d.]+/);
+    expect(snapshot.headers["server-timing"]).toMatch(/draft;dur=[\d.]+/);
+
+    const mediaBytes = Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
+    const mediaRecord = await dependencies.cas.put(mediaBytes);
+    const media = await request(app).get(`/api/v1/media/${mediaRecord.sha256}`).expect(200);
+    expect(media.headers["server-timing"]).toMatch(/cas;dur=[\d.]+/);
+    expect(media.body).toEqual(mediaBytes);
+
+    const detail = await request(app).get(`/api/v1/releases/${release.id}`).expect(200);
+    expect(detail.headers["server-timing"]).toMatch(/release;dur=[\d.]+/);
+    expect(detail.body.id).toBe(release.id);
   });
 
   it("builds a current-release mastery map and replays review attempts idempotently", async () => {
