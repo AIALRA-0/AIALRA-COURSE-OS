@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, LessonDraft, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
-import { CourseTree, type CourseTreeActions, type CourseTreeTask } from "./CourseTree.js";
+import { CourseTree, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
@@ -23,7 +23,7 @@ type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
 export type CandidateReadUnavailable = "not_generated" | "not_ready";
 export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; terminal?: boolean; generatedReady?: boolean; notice?: string; unavailable?: CandidateReadUnavailable };
-export type CachedPageSnapshot = { releaseId: string; page: PageLesson; contentHash: string };
+export type CachedPageSnapshot = { releaseId: string; page: PageLesson; contentHash: string; unpublishedDraftRevision?: number };
 export interface SharedReadRequest<T> {
   promise: Promise<T>;
   controller: AbortController;
@@ -41,12 +41,12 @@ export function pageSnapshotCacheKey(releaseId: string, pageId: string): string 
   return `${releaseId}\u0000${pageId}`;
 }
 
-export function rememberPageSnapshot(cache: Map<string, CachedPageSnapshot>, releaseId: string, page: PageLesson, limit = PAGE_CACHE_LIMIT): Map<string, CachedPageSnapshot> {
+export function rememberPageSnapshot(cache: Map<string, CachedPageSnapshot>, releaseId: string, page: PageLesson, limit = PAGE_CACHE_LIMIT, unpublishedDraftRevision?: number): Map<string, CachedPageSnapshot> {
   const next = new Map(cache);
   const key = pageSnapshotCacheKey(releaseId, page.id);
   const contentHash = JSON.stringify(page);
   next.delete(key);
-  next.set(key, { releaseId, page, contentHash });
+  next.set(key, { releaseId, page, contentHash, unpublishedDraftRevision });
   while (next.size > limit) next.delete(next.keys().next().value!);
   return next;
 }
@@ -187,9 +187,10 @@ export function pageCacheAfterPrefetch(
   releaseId: string,
   page: PageLesson,
   capturedEpoch: number,
-  currentEpoch: number
+  currentEpoch: number,
+  unpublishedDraftRevision?: number
 ): Map<string, CachedPageSnapshot> {
-  return capturedEpoch === currentEpoch ? rememberPageSnapshot(cache, releaseId, page) : cache;
+  return capturedEpoch === currentEpoch ? rememberPageSnapshot(cache, releaseId, page, PAGE_CACHE_LIMIT, unpublishedDraftRevision) : cache;
 }
 
 type FormalLessonRead = Awaited<ReturnType<typeof api.lesson>>;
@@ -612,6 +613,7 @@ export function App() {
       try {
         await settlePagePrefetch(snapshotRead.promise, image, (result) => {
           let pageSnapshot: PageLesson | undefined;
+          let unpublishedDraftRevision: number | undefined;
           if (release.lifecycle === "draft_source") {
             const draft = result as unknown as LessonDraft;
             if (isReadyCandidateSnapshot(draft, release.id, target.id)) {
@@ -620,10 +622,10 @@ export function App() {
             }
           } else {
             const lesson = result as unknown as Awaited<ReturnType<typeof api.lesson>>;
-            if (lesson.releaseId === release.id && lesson.page.id === target.id) pageSnapshot = lesson.page;
+            if (lesson.releaseId === release.id && lesson.page.id === target.id) { pageSnapshot = lesson.page; unpublishedDraftRevision = lesson.unpublishedDraftRevision; }
           }
           if (pageSnapshot) setPageCache((current) => pageCacheAfterPrefetch(
-            current, release.id, pageSnapshot!, capturedCacheEpoch, pageCacheInvalidationEpoch.current
+            current, release.id, pageSnapshot!, capturedCacheEpoch, pageCacheInvalidationEpoch.current, unpublishedDraftRevision
           ));
         });
       } finally {
@@ -648,7 +650,7 @@ export function App() {
       isActive: () => active && pageSnapshotResponseState(requestIdentity, activePageIdentity.current, requestIdentity) === "match",
       onPage: (lesson) => {
         setFormalPageError((current) => current?.key === cacheKey ? undefined : current);
-        setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page));
+        setPageCache((current) => rememberPageSnapshot(current, release.id, lesson.page, PAGE_CACHE_LIMIT, lesson.unpublishedDraftRevision));
       },
       onError: (reason) => {
         const failure = formalPageAfterReadFailure(pageCacheRef.current.get(cacheKey)?.page, reason);
@@ -824,6 +826,7 @@ export function App() {
     navigation.set("mode", mode);
     navigation.set("release", release.id);
     navigation.set("page", String(pageIndex + 1));
+    localStorage.setItem(`course-os-last-page:${release.id}`, page.id);
     if (mode !== "review") {
       navigation.delete("reviewPlan");
       navigation.delete("reviewSession");
@@ -936,8 +939,17 @@ export function App() {
   };
 
   const shellStyle = { "--course-sidebar": `${sidebarWidth}px` } as CSSProperties;
+  const searchMaterials = useMemo<CourseTreeSearchMaterial[]>(() => {
+    const byId = new Map(releases.map(item => [item.id, item]));
+    return flattenTree([...(tree?.courses ?? []), ...(tree?.rootMaterials ?? [])]).flatMap(({ node }) => {
+      if (node.kind !== "material" || node.archived || node.visibility === "archived") return [];
+      const current = byId.get(node.currentReleaseId || node.releaseId || "");
+      return current ? [{ materialNodeId: node.id, releaseId: current.id, version: current.version,
+        lifecycle: current.lifecycle, pages: current.pages.map(({ id, pageNumber, title }) => ({ id, pageNumber, title })) }] : [];
+    });
+  }, [tree, releases]);
 
-  const openTreeNode = (node: CourseTreeNode, nextMode: "learn" | "studio") => {
+  const openTreeNode = (node: CourseTreeNode, nextMode: "learn" | "studio", restoreReadingPosition = false) => {
     const candidateRelease = [node.currentReleaseId, node.releaseId]
       .filter((id): id is string => Boolean(id))
       .map((id) => releases.find((item) => item.id === id))
@@ -946,7 +958,9 @@ export function App() {
         ? [...releases].filter((item) => item.courseId === node.id && item.lifecycle !== "draft_source").sort(compareReleaseRecency)[0]
           ?? [...releases].filter((item) => item.courseId === node.id).sort(compareReleaseRecency)[0]
         : undefined);
-    const candidatePage = candidateRelease?.pages[0];
+    const savedPageId = candidateRelease && restoreReadingPosition
+      ? localStorage.getItem(`course-os-last-page:${candidateRelease.id}`) : undefined;
+    const candidatePage = candidateRelease?.pages.find(item => item.id === savedPageId) ?? candidateRelease?.pages[0];
     if (!candidateRelease || !candidatePage) {
       setToast("这个材料还没有可读取的页面");
       return;
@@ -983,7 +997,7 @@ export function App() {
     trash: (node) => {
       if (window.confirm(`确定把“${node.title}”移入回收站吗`)) void runTreeAction(() => api.trashTreeNode(node).then(() => undefined), "已移入回收站");
     },
-    openMaterial: (node) => openTreeNode(node, "learn"),
+    openMaterial: (node, options) => openTreeNode(node, "learn", options?.restoreReadingPosition ?? true),
     openStudio: (node) => {
       if (node.pageId && node.releaseId) { selectPage(node.releaseId, node.pageId); setMode("studio"); }
       else openTreeNode(node, "studio");
@@ -1006,8 +1020,8 @@ export function App() {
   if (!release || !page) return <div className="product-shell" style={shellStyle}>
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
-       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
-      <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
+       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
+      <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
@@ -1039,12 +1053,12 @@ export function App() {
 
       <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
-        <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
+        <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
           {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.page && candidatePreview.notice && candidatePreview.generatedReady !== false && <p className="empty-inline" role="status">{candidatePreview.notice}{candidatePreview.unavailable && <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={() => setMode("studio")}>进入制作模式</button>}</p>}
           {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
+            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} unpublishedDraftRevision={pageCache.get(pageSnapshotCacheKey(release.id, page.id))?.unpublishedDraftRevision} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
           </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -1053,7 +1067,7 @@ export function App() {
         </section>
       </div>
 
-      <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
+      <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
        {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
        {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
@@ -1069,8 +1083,9 @@ function ModeButton({ actionId, active, icon, label, onClick }: { actionId: stri
   return <button className={active ? "active" : ""} data-action={actionId} onClick={onClick}><Icon name={icon} />{label}</button>;
 }
 
-function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTasks, onSelectTask, actions, open, onClose, onSelectPage, onImport, onCreateCourse, onSettings }: {
+function MobileTreeDrawer({ tree, searchMaterials, selectedPageId, selectedTaskId, backgroundTasks, onSelectTask, actions, open, onClose, onSelectPage, onImport, onCreateCourse, onSettings }: {
   tree?: WorkspaceTree;
+  searchMaterials: CourseTreeSearchMaterial[];
   selectedPageId?: string;
   selectedTaskId?: string;
   backgroundTasks: CourseTreeTask[];
@@ -1086,12 +1101,12 @@ function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTask
   if (!open) return null;
   return <div className="mobile-tree-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="mobile-tree-drawer" role="dialog" aria-modal="true" aria-label="课程项目树" onMouseDown={(event) => event.stopPropagation()}>
-      <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} selectedPageId={selectedPageId} collapsed={false} onCollapse={onClose} onSelectPage={onSelectPage} onImport={onImport} onCreateCourse={onCreateCourse} onSettings={onSettings} actions={actions} />
+      <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} selectedPageId={selectedPageId} collapsed={false} onCollapse={onClose} onSelectPage={onSelectPage} onImport={onImport} onCreateCourse={onCreateCourse} onSettings={onSettings} actions={actions} />
     </div>
   </div>;
 }
 
-function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, contentNotice, contentReviewRequired = false, contentUnavailable = false, contentTerminalError = false, onRetryContent }: {
+function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, unpublishedDraftRevision, generatedReady, contentReady = true, contentError, contentNotice, contentReviewRequired = false, contentUnavailable = false, contentTerminalError = false, onRetryContent }: {
   release: CourseRelease;
   pageIndex: number;
   setPageIndex: Dispatch<SetStateAction<number>>;
@@ -1107,6 +1122,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   rightCollapsed: boolean;
   onToggleRight: () => void;
   onEnterStudio: () => void;
+  unpublishedDraftRevision?: number;
   generatedReady?: boolean;
   contentReady?: boolean;
   contentError?: string;
@@ -1151,7 +1167,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
         : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>

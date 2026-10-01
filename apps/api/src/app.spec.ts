@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import type { CourseProject, CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import type { CourseProject, CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, LessonDraft, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, buildReadingTree, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -204,7 +204,7 @@ describe("Course OS API", () => {
     expect(response.body.currentJob.latestStageActivity).toEqual(response.body.activeJobs[0].latestStageActivity);
     expect(response.body.progress).toMatchObject({
       core: { completed: 1, total: 3 },
-      crossPage: { completed: 1, total: 2 },
+      crossPage: { completed: 1, total: 3 },
       repairCount: 1,
       concurrency: { running: 2, limit: 2 },
       provider: "test-provider",
@@ -510,6 +510,56 @@ describe("Course OS API", () => {
     await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
     expect(fastRead).toHaveBeenCalledWith("page-1");
     expect(reconciledRead).not.toHaveBeenCalled();
+  });
+
+  it("previews only the exact ready formal draft and keeps selected-question answers immutable", async () => {
+    const { app, readweave, release } = await seededApp();
+    const page = structuredClone(release.pages[0]!);
+    page.blocks[0]!.markdown = "UNPUBLISHED FORMAL PREVIEW";
+    page.questionBank = page.questionBank!.map((item) => ({
+      ...item,
+      prompt: `FORMAL PREVIEW: ${item.prompt}`,
+      version: item.version + 1,
+      ...(item.kind === "comprehension" ? { expectedAnswer: "formal preview answer v1" } : {})
+    }));
+    const draft = await readweave.saveDraft({
+      id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+      sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page,
+      changedBlockIds: page.blocks.map((block) => block.id), contentHash: "formal-preview-ready", updatedAt: new Date().toISOString()
+    }, 0, { idempotencyKey: "formal-preview-ready", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "formal-preview-ready" });
+
+    const draftRead = vi.spyOn(readweave, "getDraftByPage");
+    draftRead.mockResolvedValueOnce({ ...draft, sourceReleaseId: "wrong-release" });
+    const wrongRelease = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(wrongRelease.body.page).toEqual(release.pages[0]);
+    expect(wrongRelease.body).not.toHaveProperty("unpublishedDraftRevision");
+    draftRead.mockResolvedValueOnce({ ...draft, status: "needs_review" });
+    const wrongStatus = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(wrongStatus.body.page).toEqual(release.pages[0]);
+    expect(wrongStatus.body).not.toHaveProperty("unpublishedDraftRevision");
+
+    const lesson = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(lesson.body).toMatchObject({ page, unpublishedDraftRevision: draft.revision });
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const selected = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "formal-preview-select")
+      .send({ sessionId: session.body.id, seed: "formal-preview", count: 2 }).expect(201);
+    expect(selected.body.questions.every((item: QuestionBankItem) => item.prompt.startsWith("FORMAL PREVIEW:"))).toBe(true);
+    expect(selected.body.selection.questionSnapshots).toEqual(selected.body.questions);
+    const selectedShortAnswer = selected.body.questions.find((item: QuestionBankItem) => item.kind === "comprehension") as QuestionBankItem;
+    expect(selectedShortAnswer.expectedAnswer).toBe("formal preview answer v1");
+
+    const updatedPage = {
+      ...draft.page,
+      questionBank: draft.page.questionBank!.map((item) => item.kind === "comprehension"
+        ? { ...item, expectedAnswer: "formal preview answer v2", version: item.version + 1 }
+        : item)
+    };
+    await readweave.saveDraft({ ...draft, page: updatedPage, contentHash: "formal-preview-updated" }, draft.revision,
+      { idempotencyKey: "formal-preview-update", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "formal-preview-update" });
+    const attempted = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "formal-preview-attempt")
+      .send({ selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1",
+        questionId: selectedShortAnswer.id, answer: selectedShortAnswer.expectedAnswer, usedHintLevel: 0 }).expect(201);
+    expect(attempted.body.attempt).toMatchObject({ correct: true, questionVersion: selectedShortAnswer.version });
   });
 
   it("keeps historical questions off the lesson's critical path and reads them only on demand", async () => {
@@ -892,7 +942,7 @@ describe("Course OS API", () => {
     expect(running.body.activeJobs).toHaveLength(3);
     expect(running.body.progress).toMatchObject({
       core: { completed: 0, total: 3 },
-      crossPage: { completed: 0, total: 2 },
+      crossPage: { completed: 0, total: 3 },
       concurrency: { running: 0, limit: 20 },
       costUsd: 0
     });
@@ -1189,6 +1239,58 @@ describe("Course OS API", () => {
       .set("Idempotency-Key", "returning-select-other").send({ sessionId: session.body.id, seed: "returning-seed", count: 2 }).expect(404);
   });
 
+  it("selects variable-sized stable batches, avoids previously used questions, and permits a genuinely empty bank", async () => {
+    const variableRelease = testRelease();
+    variableRelease.pages[0]!.questionBank!.push({ ...variableRelease.pages[0]!.questionBank![0]!, id: "q-c-3", prompt: "第三个简答问题" });
+    const { app, readweave, release } = await seededApp(undefined, variableRelease);
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const select = (body: Record<string, unknown>, key: string) => request(app).post("/api/v1/pages/page-1/questions:select")
+      .set("Idempotency-Key", key).send({ sessionId: session.body.id, ...body });
+
+    const defaultBatch = await select({ seed: "dynamic-batch" }, "dynamic-default").expect(201);
+    expect(defaultBatch.body.selection.count).toBe(3);
+    expect(defaultBatch.body.questions).toHaveLength(3);
+    expect(defaultBatch.body.questions.map((item: QuestionBankItem) => item.kind)).toEqual(["multiple_choice", "multiple_choice", "comprehension"]);
+    expect(defaultBatch.body.selection.questionSnapshots).toEqual(defaultBatch.body.questions);
+
+    const refreshed = await select({ seed: "dynamic-batch" }, "dynamic-refreshed").expect(201);
+    expect(refreshed.body.selection.id).toBe(defaultBatch.body.selection.id);
+    expect(refreshed.body.questions).toEqual(defaultBatch.body.questions);
+    const sameSeedDifferentCount = await select({ seed: "dynamic-batch", count: 2 }, "dynamic-count-changed").expect(201);
+    expect(sameSeedDifferentCount.body.selection.id).not.toBe(defaultBatch.body.selection.id);
+    expect(sameSeedDifferentCount.body.selection.count).toBe(2);
+    expect(sameSeedDifferentCount.body.questions).toHaveLength(2);
+    expect(sameSeedDifferentCount.body.questions.some((item: QuestionBankItem) => defaultBatch.body.selection.questionIds.includes(item.id))).toBe(false);
+
+    const nextBatch = await select({ seed: "dynamic-batch-2", count: 5 }, "dynamic-next").expect(201);
+    expect(nextBatch.body.selection.count).toBe(5);
+    expect(nextBatch.body.questions).toEqual([]);
+
+    const exhausted = await select({ seed: "dynamic-exhausted", count: 3 }, "dynamic-exhausted").expect(201);
+    expect(exhausted.body.available).toBe(5);
+    expect(exhausted.body.questions).toEqual([]);
+    expect(await readweave.listQuestionAttempts()).toHaveLength(0);
+
+    const restartedForPractice = await select({ seed: "dynamic-restart", count: 3, allowRepeat: true }, "dynamic-restart").expect(201);
+    expect(restartedForPractice.body.questions).toHaveLength(3);
+
+    const secondSession = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const fiveQuestionBatch = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "dynamic-five")
+      .send({ sessionId: secondSession.body.id, seed: "dynamic-five", count: 5 }).expect(201);
+    expect(fiveQuestionBatch.body.questions).toHaveLength(5);
+
+    await select({ seed: "invalid-count", count: 1 }, "dynamic-invalid").expect(422);
+
+    const emptyRelease = testRelease();
+    emptyRelease.id = "empty-question-bank-release";
+    emptyRelease.pages[0]!.questionBank = [];
+    const empty = await seededApp(undefined, emptyRelease);
+    const emptySession = await request(empty.app).post("/api/v1/sessions").send({ courseReleaseId: empty.release.id }).expect(201);
+    const noQuestions = await request(empty.app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "empty-bank-select")
+      .send({ sessionId: emptySession.body.id, seed: "empty-bank" }).expect(201);
+    expect(noQuestions.body).toMatchObject({ available: 0, questions: [], selection: { count: 3, questionIds: [], questionSnapshots: [] } });
+  });
+
   it("does not mark a paraphrased free-text answer wrong or change mastery", async () => {
     const { app, readweave, release } = await seededApp();
     const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
@@ -1229,7 +1331,7 @@ describe("Course OS API", () => {
     const first = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "select-1").send({ sessionId: session.body.id, seed: "fixed-seed", count: 2 }).expect(201);
     const second = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "select-2").send({ sessionId: session.body.id, seed: "fixed-seed", count: 2 }).expect(201);
     expect(second.body.questions.map((item: { id: string }) => item.id)).toEqual(first.body.questions.map((item: { id: string }) => item.id));
-    expect(first.body.questions.map((item: { kind: string }) => item.kind)).toEqual(["comprehension", "multiple_choice"]);
+    expect(first.body.questions.map((item: { kind: string }) => item.kind)).toEqual(["multiple_choice", "comprehension"]);
     const question = first.body.questions[0];
     const attemptPayload = { selectionId: first.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1", questionId: question.id, answer: question.expectedAnswer, usedHintLevel: 0 };
     const savedAttempt = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "attempt-1").send(attemptPayload).expect(201);
@@ -1485,7 +1587,7 @@ describe("Course OS API", () => {
   });
 
   it("selects and grades current ready candidate snapshots without live reconciliation, with idempotent replay", async () => {
-    const { app, readweave } = await seededApp();
+    const { app, dependencies, readweave } = await seededApp();
     const candidate = testRelease();
     candidate.id = "candidate-questions-v2";
     candidate.lifecycle = "draft_source";
@@ -1519,7 +1621,7 @@ describe("Course OS API", () => {
     const payload = { selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: candidate.id,
       pageId: "candidate-page-1", questionId: question.id, answer: question.expectedAnswer, usedHintLevel: 0 };
     const saved = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt").send(payload).expect(201);
-    expect(saved.body.attempt.correct).toBe(true);
+    expect(saved.body.attempt).toMatchObject({ correct: true, questionVersion: question.version });
     const replayed = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt").send(payload).expect(201);
     expect(replayed.body.attempt.id).toBe(saved.body.attempt.id);
     expect(await readweave.listQuestionAttempts()).toHaveLength(1);
@@ -1544,8 +1646,13 @@ describe("Course OS API", () => {
     const updatedQuestion = { ...draftQuestions[0]!, id: "candidate-updated-question", expectedAnswer: "updated answer" };
     await readweave.saveDraft({ ...readyDraft, page: { ...readyDraft.page, questionBank: [updatedQuestion] } }, readyDraft.revision,
       { idempotencyKey: "candidate-questions-update", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "candidate-questions-update" });
+    const restartedWithOldBatch = createApp(dependencies);
+    const restoredSelection = await request(restartedWithOldBatch).post(selectionUrl).set("Idempotency-Key", "candidate-select-old-after-restart")
+      .send({ sessionId: session.body.id, seed: "candidate-seed", count: 2 }).expect(201);
+    expect(restoredSelection.body.selection.id).toBe(selected.body.selection.id);
+    expect(restoredSelection.body.questions).toEqual(selected.body.questions);
     const updatedSelection = await request(app).post(selectionUrl).set("Idempotency-Key", "candidate-select-updated")
-      .send({ sessionId: session.body.id, seed: "updated-seed", count: 1 }).expect(201);
+      .send({ sessionId: session.body.id, seed: "updated-seed", count: 2 }).expect(201);
     expect(updatedSelection.body.available).toBe(1);
     expect(updatedSelection.body.questions).toEqual([updatedQuestion]);
     const updatedAttempt = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "candidate-attempt-updated")
@@ -1695,12 +1802,16 @@ describe("Course OS API", () => {
     }
   });
 
-  it("delivers the core page when the optional bridge request fails", async () => {
+  it("keeps the readable body but records an incomplete page when bridge generation fails", async () => {
     let bridgeCalls = 0;
+    let coreCalls = 0;
+    let bridgeAvailable = false;
     const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => testTeachingResult(0.001),
+      generateTeachingPackage: async () => { coreCalls += 1; return testTeachingResult(0.001); },
       generateBridge: async () => {
         bridgeCalls += 1;
+        if (bridgeAvailable) return { markdown: "从本课程要解决的问题开始，理解当前页的输入与输出关系", provider: "kuafu",
+          model: "deepseek-v4.1-flash", usage: testTeachingResult(0.001).usage };
         throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:429", "deepseek-v4-flash", {
           inputTokens: 20, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 25
         }, "kuafu");
@@ -1708,12 +1819,23 @@ describe("Course OS API", () => {
     };
     const { app, operations, readweave, release } = await seededApp(modelRouter);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unsupported-bridge-test").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });
     expect(bridgeCalls).toBe(1);
     const draft = await readweave.getDraftByPage("page-1");
     expect(draft?.status).toBe("ready");
     expect(draft?.page.lessonSections?.some((section) => section.kind === "chapter_bridge")).toBe(false);
-    expect((await operations.read()).events.some(event => event.type === "generation.page.completed" && (event.payload as { bridgeCompleted?: boolean }).bridgeCompleted === false)).toBe(true);
+    expect((await operations.read()).events.some(event => event.type === "generation.page.core_saved")).toBe(true);
+    expect((await operations.read()).events.some(event => event.type === "generation.page.completed")).toBe(false);
+    bridgeAvailable = true;
+    await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "bridge-only-retry").send({}).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+    const completed = await readweave.getDraftByPage("page-1");
+    expect(coreCalls).toBe(1);
+    expect(bridgeCalls).toBe(2);
+    expect(completed?.page.blocks).toEqual(draft?.page.blocks);
+    expect(completed?.page.questionBank).toEqual(draft?.page.questionBank);
+    expect(completed?.page.lessonSections?.find(section => section.kind === "chapter_bridge")?.markdown).toContain("当前页");
+    expect(completed?.revision).toBe((draft?.revision ?? 0) + 1);
   }, 60_000);
 
   it("saves a completed bridge and its cost in one ReadWeave mutation", async () => {
@@ -2170,6 +2292,77 @@ describe("Course OS API", () => {
     expect(scan).not.toHaveBeenCalled();
     expect(ownerRead).toHaveBeenCalledWith(release.id);
     await request(app).get("/api/v1/pages/missing-import-page/draft?view=snapshot").expect(404);
+  });
+
+  it("previews matching ready formal replica drafts and keeps selected-question answers stable", async () => {
+    const formalRelease = { ...testRelease(), lifecycle: "published" as const };
+    const { app, dependencies, release } = await seededApp(undefined, formalRelease);
+    const course: CourseProject = {
+      id: release.courseId, workspaceId: "personal", title: release.courseTitle, status: "active",
+      createdAt: release.publishedAt, updatedAt: release.publishedAt
+    };
+    const previewPage = structuredClone(release.pages[0]!);
+    previewPage.blocks[0]!.markdown = "REPLICA FORMAL PREVIEW BODY";
+    previewPage.questionBank = previewPage.questionBank!.map((item) => ({
+      ...item,
+      prompt: `REPLICA PREVIEW: ${item.prompt}`,
+      version: item.version + 1,
+      ...(item.kind === "comprehension" ? { expectedAnswer: "replica preview answer v1" } : {})
+    }));
+    const makeDraft = (revision: number, status: LessonDraft["status"], page: LessonDraft["page"]): LessonDraft => ({
+      id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+      sourceReleaseId: release.id, pageId: "page-1", revision, status, page,
+      changedBlockIds: page.blocks.map((block) => block.id), contentHash: `replica-preview-${revision}`,
+      updatedAt: new Date(Date.UTC(2026, 9, revision)).toISOString()
+    });
+    const readyDraft = makeDraft(1, "ready", previewPage);
+    const reading = new ReadingRuntime(join(dependencies.dataDir, "reading"), dependencies.readweave, "personal",
+      "authority:app-spec-formal-preview", () => buildReadingTree([course], [], [], "personal"));
+    await reading.initialize();
+    await reading.replica.replace({
+      courses: [course], releases: [release], drafts: [readyDraft],
+      tree: buildReadingTree([course], [], [], "personal"), trash: []
+    });
+    dependencies.reading = reading;
+
+    const existingReplicaSource = await reading.replica.getPageSource("personal", "page-1", release.id);
+    expect(existingReplicaSource).toBeDefined();
+    vi.spyOn(reading.replica, "getPageSource").mockResolvedValueOnce({
+      ...existingReplicaSource!, draft: { ...readyDraft, sourceReleaseId: "wrong-release" }
+    });
+    const wrongRelease = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(wrongRelease.body.page).toEqual(release.pages[0]);
+    expect(wrongRelease.body).not.toHaveProperty("unpublishedDraftRevision");
+
+    const needsReview = makeDraft(2, "needs_review", previewPage);
+    expect(await reading.replica.upsertDraft(needsReview)).toBe(true);
+    const wrongStatus = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(wrongStatus.body.page).toEqual(release.pages[0]);
+    expect(wrongStatus.body).not.toHaveProperty("unpublishedDraftRevision");
+
+    const readyAgain = makeDraft(3, "ready", previewPage);
+    expect(await reading.replica.upsertDraft(readyAgain)).toBe(true);
+    const lesson = await request(app).get("/api/v1/pages/page-1/lesson").expect(200);
+    expect(lesson.body).toMatchObject({ releaseId: release.id, page: previewPage, unpublishedDraftRevision: 3 });
+    const session = await request(app).post("/api/v1/sessions").send({ courseReleaseId: release.id }).expect(201);
+    const selected = await request(app).post("/api/v1/pages/page-1/questions:select").set("Idempotency-Key", "replica-formal-preview-select")
+      .send({ sessionId: session.body.id, seed: "replica-formal-preview", count: 2 }).expect(201);
+    expect(selected.body.questions.every((item: QuestionBankItem) => item.prompt.startsWith("REPLICA PREVIEW:"))).toBe(true);
+    expect(selected.body.selection.questionSnapshots).toEqual(selected.body.questions);
+    const selectedShortAnswer = selected.body.questions.find((item: QuestionBankItem) => item.kind === "comprehension") as QuestionBankItem;
+    expect(selectedShortAnswer.expectedAnswer).toBe("replica preview answer v1");
+
+    const updatedPage = {
+      ...previewPage,
+      questionBank: previewPage.questionBank!.map((item) => item.kind === "comprehension"
+        ? { ...item, expectedAnswer: "replica preview answer v2", version: item.version + 1 }
+        : item)
+    };
+    expect(await reading.replica.upsertDraft(makeDraft(4, "ready", updatedPage))).toBe(true);
+    const attempted = await request(app).post("/api/v1/question-attempts").set("Idempotency-Key", "replica-formal-preview-attempt")
+      .send({ selectionId: selected.body.selection.id, sessionId: session.body.id, courseReleaseId: release.id, pageId: "page-1",
+        questionId: selectedShortAnswer.id, answer: selectedShortAnswer.expectedAnswer, usedHintLevel: 0 }).expect(201);
+    expect(attempted.body.attempt).toMatchObject({ correct: true, questionVersion: selectedShortAnswer.version });
   });
 
   it("reports an ungenerated draft-source snapshot as non-retryable PAGE_NOT_GENERATED", async () => {

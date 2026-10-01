@@ -502,7 +502,7 @@ describe("import progress summary", () => {
     expect(css).toMatch(/\.import-task-workspace dl\s*\{[^}]*display:\s*grid\s*;/);
     expect(css).toContain(".import-task-workspace .import-progress.is-failed");
     expect(css).toMatch(/\.task-state-queued\s*\{[^}]*background:\s*var\(--blue\)/);
-    expect(css).toMatch(/\.task-state-running\s*\{[^}]*background:\s*var\(--amber\)/);
+    expect(css).toMatch(/\.task-state-running\s*\{[^}]*background:\s*var\(--blue\)/);
     expect(css).toMatch(/\.task-state-completed\s*\{[^}]*background:\s*var\(--green\)/);
     expect(css).toMatch(/\.task-state-failed\s*\{[^}]*background:\s*var\(--red\)/);
     expect(css).toMatch(/\.task-state-cancelled,\s*\.task-state-paused\s*\{[^}]*background:\s*var\(--faint\)/);

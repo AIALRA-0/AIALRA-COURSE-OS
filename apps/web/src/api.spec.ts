@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api.js";
+import { createQuestionBatchState } from "./question-preview.js";
 
 describe("search settings API", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -95,5 +96,35 @@ describe("self retelling API", () => {
     expect(calls[2]!.headers.get("Idempotency-Key")).toBeTruthy();
     expect(calls[2]!.headers.get("X-Actor")).toBe("personal-user");
     expect(calls[2]!.headers.get("X-Workspace-Id")).toBe("personal");
+  });
+});
+
+describe("question selection API", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reuses the persisted active seed and exclusions on preload, and includes count in request identity", async () => {
+    const state = {
+      ...createQuestionBatchState("session-refresh", "page-refresh", "2026-09-30"),
+      batchIndex: 2,
+      activeSeed: "session-refresh:page-refresh:batch:2",
+      activeCount: 5 as const,
+      requestedCount: 2 as const,
+      usedQuestionIds: ["q1", "q2"],
+      activeExcludedQuestionIds: ["q1", "q2"]
+    };
+    vi.stubGlobal("window", { sessionStorage: { getItem: vi.fn(() => JSON.stringify(state)) } });
+    const calls: Array<{ body: string; url: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: String(init?.body) });
+      return Response.json({ selection: { id: "selection" }, questions: [], available: 0 });
+    }));
+
+    await api.selectQuestions("page-refresh", "session-refresh");
+    await api.selectQuestions("page-refresh", "session-refresh", state.activeSeed, state.activeCount, state.activeExcludedQuestionIds);
+    await api.selectQuestions("page-refresh", "session-refresh", state.activeSeed, 2, state.activeExcludedQuestionIds);
+
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[0]!.body)).toMatchObject({ seed: state.activeSeed, count: 5, excludeQuestionIds: ["q1", "q2"] });
+    expect(JSON.parse(calls[1]!.body)).toMatchObject({ seed: state.activeSeed, count: 2, excludeQuestionIds: ["q1", "q2"] });
   });
 });

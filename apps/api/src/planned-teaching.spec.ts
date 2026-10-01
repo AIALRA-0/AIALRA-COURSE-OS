@@ -58,6 +58,19 @@ function input(): ModelRouterInput {
 describe("planned teaching core writer", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it.each([0, 1, 3, 5])("accepts a valid dynamic bank of %i questions without a count repair", async count => {
+    const base = teachingPackage();
+    const content = { ...base, questions: Array.from({ length: count }, (_, index) => base.questions[index % base.questions.length]!) };
+    const calls: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      calls.push(request.phase);
+      return request.phase === "plan" ? "先解释输入，再用结果检验理解" : content;
+    });
+    expect(calls).toEqual(["plan", "teaching"]);
+    expect(result.content.questions).toHaveLength(count);
+    expect(result.trace.repairDiagnostic).toBeUndefined();
+  });
+
   it("keeps full page source, shared background, and the plan separate in both requests", async () => {
     const source = "本页来源".repeat(5000);
     const context = "邻页背景：另一个定义";
@@ -91,7 +104,7 @@ describe("planned teaching core writer", () => {
     expect(calls[1]?.instructions).toContain("chapterBridgeMarkdown 必须是空字符串");
     expect(calls[1]?.instructions).toContain("无法自行核对原图");
     expect(calls[1]?.instructions).toContain("来源仅用于比较的表达式必须称为候选评分，不能定义成执行之后的真实收益");
-    expect(calls[1]?.instructions).toContain("主要内容只列三至六条简短结论");
+    expect(calls[1]?.instructions).toContain("主要内容使用顶层 Markdown BP");
     expect(calls[1]?.prompt).toContain("仅用于安排讲解顺序，不是事实来源");
     expect(result.trace).toMatchObject({
       plan: "先解释输入，再说明规则和结果",
@@ -516,12 +529,11 @@ describe("planned teaching core writer", () => {
       return partial;
     });
 
-    expect(calls).toEqual(["plan", "teaching", "format_repair"]);
+    expect(calls).toEqual(["plan", "teaching"]);
     expect(result.content.questions).toEqual([]);
     expect(result.content.fullExplanationMarkdown).toBe("简短讲解");
     expect(result.trace.qualityWarnings?.[0]?.issues).toEqual([
-      "TEACHING_QUALITY:EXPLANATION_SHORT",
-      "TEACHING_QUALITY:QUESTION_COUNT:0"
+      "TEACHING_QUALITY:EXPLANATION_SHORT"
     ]);
   });
 
@@ -539,7 +551,7 @@ describe("planned teaching core writer", () => {
     expect(result.content.fullExplanationMarkdown).toContain("输入是处理开始时已经具备的信息");
     expect(result.content.fullExplanationMarkdown).toContain("## 检查处理结果");
     expect(result.content.questions).toEqual([]);
-    expect(result.trace.qualityWarnings?.[0]?.issues).toContain("TEACHING_QUALITY:QUESTION_COUNT:0");
+    expect(result.trace.qualityWarnings?.flatMap(item => item.issues) ?? []).not.toContain("TEACHING_QUALITY:QUESTION_COUNT:0");
   });
 
   it("accepts common provider question aliases without changing lesson content", async () => {
@@ -715,7 +727,7 @@ describe("planned teaching core writer", () => {
       ...base,
       mainContentMarkdown: "既有主要内容".repeat(400),
       fullExplanationMarkdown: "既有完整讲解".repeat(600),
-      questions: []
+      questions: [{ ...base.questions[2], expectedAnswer: "不在选项中的无效答案" }]
     };
     const completed = teachingPackage();
     const calls: string[] = [];
@@ -735,7 +747,7 @@ describe("planned teaching core writer", () => {
       };
       expect(repairPrompt.source).toBe(source.slice(0, 4_000));
       expect(Object.keys(repairPrompt.currentOutput ?? {})).toEqual(["questions"]);
-      expect(repairPrompt.currentOutput?.questions).toEqual([]);
+      expect(repairPrompt.currentOutput?.questions).toEqual(initial.questions);
       expect(repairPrompt.mainContentMarkdown).toBe(initial.mainContentMarkdown.slice(0, 1_000));
       expect(repairPrompt.fullExplanationMarkdown).toBe(initial.fullExplanationMarkdown.slice(0, 2_000));
       return { questions: completed.questions };

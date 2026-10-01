@@ -34,6 +34,7 @@ import type {
   SelfRetelling
 } from "@course-os/contracts";
 import type { ImportTaskSummary, WebGenerationPlan, WebImportRecord } from "./types.js";
+import { readQuestionBatchState } from "./question-preview.js";
 
 export type { SearchProviderConfig, SearchRoutePolicy } from "@course-os/contracts";
 
@@ -332,7 +333,7 @@ export const api = {
   }),
   releases: (options?: ApiRequestOptions) => request<CourseRelease[]>("/api/v1/releases?view=index", { signal: options?.signal }),
   release: (id: string, options?: ApiRequestOptions) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`, { signal: options?.signal }),
-  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson${options?.releaseId ? `?releaseId=${encodeURIComponent(options.releaseId)}` : ""}`, { signal: options?.signal }),
+  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; unpublishedDraftRevision?: number; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson${options?.releaseId ? `?releaseId=${encodeURIComponent(options.releaseId)}` : ""}`, { signal: options?.signal }),
   pageQuestions: (pageId: string, options?: ApiRequestOptions) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`, { signal: options?.signal }),
   selfRetellings: (releaseId?: string, options?: ApiRequestOptions) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`, { signal: options?.signal }),
   saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
@@ -424,15 +425,18 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseRevision: question.revision, reviewPolicy })
   }),
-  selectQuestions: (pageId: string, sessionId: string, seed?: string) => {
-    const stableSeed = seed || `${sessionId}:${pageId}:${new Date().toISOString().slice(0, 10)}`;
-    const cacheKey = `${sessionId}:${pageId}:${stableSeed}`;
+  selectQuestions: (pageId: string, sessionId: string, seed?: string, count?: 2 | 3 | 5, excludeQuestionIds?: string[], allowRepeat = false) => {
+    const savedBatch = seed === undefined ? readQuestionBatchState(sessionId, pageId) : undefined;
+    const stableSeed = seed || savedBatch?.activeSeed || `${sessionId}:${pageId}:${new Date().toISOString().slice(0, 10)}`;
+    const stableCount = count ?? savedBatch?.activeCount ?? 3;
+    const excluded = excludeQuestionIds ?? savedBatch?.activeExcludedQuestionIds ?? [];
+    const cacheKey = `${sessionId}:${pageId}:${stableSeed}:${stableCount}`;
     const existing = questionSelectionRequests.get(cacheKey);
     if (existing) return existing;
     const pending = request<QuestionSelectionResponse>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions:select`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Idempotency-Key": `question-selection:${crypto.randomUUID()}` },
-      body: JSON.stringify({ sessionId, seed: stableSeed, count: 2 })
+      body: JSON.stringify({ sessionId, seed: stableSeed, count: stableCount, excludeQuestionIds: excluded, allowRepeat })
     }).catch((error) => { questionSelectionRequests.delete(cacheKey); throw error; });
     questionSelectionRequests.set(cacheKey, pending);
     return pending;

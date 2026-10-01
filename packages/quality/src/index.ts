@@ -55,7 +55,6 @@ export function evaluateTeachingPage(page: PageLesson): TeachingEvalResult {
   const forbidden = ["页面元素核对", "来源状态", "等待审核", "等待验证", "模型推断", "已覆盖"];
   for (const phrase of forbidden) if (explanation.includes(phrase)) issues.push(`TEACHING_METADATA_NOISE:${phrase}`);
   const questions = page.questionBank?.filter((question) => question.status === "approved") ?? [];
-  if (questions.length !== 4) issues.push("TEACHING_QUESTION_COUNT_INVALID");
   if (sections.length >= 5 && questions.length && page.teachingTrace?.version !== 1) {
     issues.push(...validateTeachingNarrative({
       lessonFlowVersion: page.lessonFlowVersion,
@@ -1233,7 +1232,7 @@ export function validatePageForPublication(page: PageLesson): string[] {
       ...(section.items ?? []).filter((item) => hasPlaceholderContent(item.text)).map((item) => `${item.id}:PLACEHOLDER_CONTENT`)
     ])
   ];
-  const questionIssues = page.questionBank && page.questionBank.filter((item) => item.status === "approved").length < 4 ? ["QUESTION_BANK_MINIMUM_NOT_MET"] : [];
+  const questionIssues: string[] = [];
   const narrativeIssues = page.teachingCompositionVersion === 1 ? evaluateTeachingPage(page).issues : [];
   // Slim teaching pages no longer create field-by-field coverage claims. Keep
   // legacy coverage diagnostics for older releases without blocking new pages.

@@ -4,10 +4,13 @@ import { formatMisconception } from "@course-os/quality";
 import { api } from "./api.js";
 import { Markdown } from "./Markdown.js";
 import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
-import { previewQuestionBank, sameQuestionPreview } from "./question-preview.js";
+import { createQuestionBatchState, previewQuestionBank, questionAnswerKey, questionKindLabel, questionOptionLabel, readQuestionBatchState, sameQuestionPreview, uniquePracticeQuestions, writeQuestionBatchState, type QuestionBatchSize, type QuestionBatchState } from "./question-preview.js";
 
-export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef, generatedReady }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null }; generatedReady?: boolean }) {
+export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef, generatedReady, unpublishedDraftRevision }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null }; generatedReady?: boolean; unpublishedDraftRevision?: number }) {
   const sections = useMemo(() => normalizeSections(page), [page]);
+  const bodyReadable = page.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())
+    || page.blocks.some(block => block.kind === "core" && block.markdown.trim());
+  const bridgeReady = page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim());
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
   const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
   const [nativeQuestions, setNativeQuestions] = useState<ReadWeavePageQuestions>({ pageId: page.id, questions: [] });
@@ -15,7 +18,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
   const [interactiveReady, setInteractiveReady] = useState(false);
   const interactiveMarkerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!sessionId || (page.questionBank?.filter((item) => item.status === "approved").length ?? 0) < 4) return;
+    if (!sessionId) return;
     // This page is already open. Reuse the same request when the learner reaches its questions.
     void api.selectQuestions(page.id, sessionId).catch(() => undefined);
   }, [page.id, page.questionBank, sessionId]);
@@ -57,13 +60,11 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
-    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页</span><h2>{page.title}</h2></div><span className={`quality-badge ${generatedReady || page.quality.publishable ? "pass" : "hold"}`}>{generatedReady || page.quality.publishable ? "讲解已生成" : "讲解草稿"}</span></header>
+    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页 · {release.lifecycle === "draft_source" ? "当前预览草稿" : release.lifecycle === "published" ? `已发布 v${release.version}${unpublishedDraftRevision ? " · 有未发布修改（当前预览草稿）" : ""}` : unpublishedDraftRevision ? "当前预览草稿" : "课程材料"}</span><h2>{page.title}</h2></div><span className={`quality-badge ${bodyReadable && bridgeReady ? "pass" : "hold"}`}>{!bodyReadable ? "讲解尚未生成" : bridgeReady ? "教学内容可读" : "正文可读 · 承接待补齐"}</span></header>
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>
-      <SelfRetellingPanel release={release} page={page} />
-      <article className="lesson-block random-questions"><SectionTitle number={String(sections.length + 1).padStart(2, "0")} english="ACTIVE RECALL" title="随机问题" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /></article>
-      <article className="lesson-block qa-records"><SectionTitle number={String(sections.length + 2).padStart(2, "0")} english="QUESTION AND ANSWER" title="ReadWeave 问答" /><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></article>
+      <article className="lesson-block random-questions"><SectionTitle number="07" english="ACTIVE RECALL" title="问答" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /><SelfRetellingPanel release={release} page={page} /><details className="qa-records"><summary>学习问答记录</summary><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></details></article>
     </>}
   </section>;
 }
@@ -139,152 +140,215 @@ function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePage
   </div>;
 }
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
-  const [selection, setSelection] = useState<QuestionSelection>(); const [questions, setQuestions] = useState<QuestionBankItem[]>([]); const [answers, setAnswers] = useState<Record<string, string>>({}); const [feedback, setFeedback] = useState<Record<string, string>>({}); const [feedbackState, setFeedbackState] = useState<Record<string, "correct" | "incorrect" | "unverified" | "error">>({}); const [pendingQuestionIds, setPendingQuestionIds] = useState<Set<string>>(() => new Set()); const [loading, setLoading] = useState(Boolean(sessionId)); const [available, setAvailable] = useState(() => page.questionBank?.filter((item) => item.status === "approved").length ?? 0); const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item.status === "draft").length ?? 0);
+  const [batchState, setBatchState] = useState<QuestionBatchState>(() => sessionId ? readQuestionBatchState(sessionId, page.id) : createQuestionBatchState("", page.id));
+  const batchStateRef = useRef(batchState);
+  const [selection, setSelection] = useState<QuestionSelection>();
+  const [questions, setQuestions] = useState<QuestionBankItem[]>([]);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
+  const [feedbackState, setFeedbackState] = useState<Record<string, "correct" | "incorrect" | "unverified" | "error">>({});
+  const [pendingQuestionKeys, setPendingQuestionKeys] = useState<Set<string>>(() => new Set());
+  const [loading, setLoading] = useState(Boolean(sessionId));
+  const [available, setAvailable] = useState(() => uniquePracticeQuestions(page.questionBank ?? []).length);
+  const [draftCount, setDraftCount] = useState(() => page.questionBank?.filter((item) => item && typeof item === "object" && item.status === "draft").length ?? 0);
   const [previewQuestions, setPreviewQuestions] = useState<QuestionBankItem[]>([]);
   const [attemptsState, setAttemptsState] = useState<"loading" | "ready" | "error">("loading");
   const [savedAnswers, setSavedAnswers] = useState<Record<string, string>>({});
-  const pendingRef = useRef(new Set<string>()); const idempotencyKeysRef = useRef(new Map<string, string>()); const selectionRequestSerial = useRef(0); const previewRef = useRef<QuestionBankItem[]>([]);
-  const preparePreview = (seed: string, serial: number) => {
-    void previewQuestionBank(page.questionBank ?? [], seed).then((items) => {
+  const pendingRef = useRef(new Set<string>());
+  const idempotencyKeysRef = useRef(new Map<string, string>());
+  const selectionRequestSerial = useRef(0);
+  const previewRef = useRef<QuestionBankItem[]>([]);
+
+  const saveBatchState = (state: QuestionBatchState) => {
+    batchStateRef.current = state;
+    setBatchState(state);
+    if (sessionId) writeQuestionBatchState(sessionId, page.id, state);
+  };
+
+  const preparePreview = (state: QuestionBatchState, serial: number) => {
+    void previewQuestionBank(page.questionBank ?? [], state.activeSeed, state.activeCount, state.activeExcludedQuestionIds).then((items) => {
       if (serial !== selectionRequestSerial.current) return;
       previewRef.current = items;
       setPreviewQuestions(items);
     }).catch(() => undefined);
   };
+
   const restoreSavedAnswers = (selected: QuestionSelection, selectedQuestions: QuestionBankItem[], serial: number) => {
     if (!sessionId) return;
     setAttemptsState("loading");
     void api.questionAttempts(page.id, sessionId, selected.id).then((attempts) => {
       if (serial !== selectionRequestSerial.current) return;
-      const latest = new Map(attempts.sort((a, b) => a.attemptedAt.localeCompare(b.attemptedAt)).map((item) => [item.questionId, item]));
+      const selectedById = new Map(selectedQuestions.map((item) => [item.id, item]));
+      const latest = new Map<string, (typeof attempts)[number]>();
+      for (const attempt of attempts.sort((a, b) => a.attemptedAt.localeCompare(b.attemptedAt))) {
+        const item = selectedById.get(attempt.questionId);
+        if (!item || (attempt.questionVersion !== undefined && attempt.questionVersion !== item.version)) continue;
+        latest.set(questionAnswerKey(selected.id, item.id, item.version), attempt);
+      }
       setAnswers((current) => {
         const next = { ...current };
-        for (const [id, attempt] of latest) if (!next[id]) next[id] = attempt.answer;
+        for (const [key, attempt] of latest) if (!next[key]) next[key] = attempt.answer;
         return next;
       });
       setSavedAnswers((current) => {
         const next = { ...current };
-        for (const [id, attempt] of latest) next[id] = attempt.answer;
+        for (const [key, attempt] of latest) next[key] = attempt.answer;
         return next;
       });
       setFeedback((current) => {
         const next = { ...current };
-        for (const item of selectedQuestions) if (latest.has(item.id) && !next[item.id]) next[item.id] = item.explanation;
+        for (const [key] of latest) {
+          const item = selectedQuestions.find((question) => questionAnswerKey(selected.id, question.id, question.version) === key);
+          if (item && !next[key]) next[key] = item.explanation;
+        }
         return next;
       });
       setFeedbackState((current) => {
         const next = { ...current };
-        for (const [id, attempt] of latest) if (!next[id]) next[id] = attempt.correct === null ? "unverified" : attempt.correct ? "correct" : "incorrect";
+        for (const [key, attempt] of latest) if (!next[key]) next[key] = attempt.correct === null ? "unverified" : attempt.correct ? "correct" : "incorrect";
         return next;
       });
       setAttemptsState("ready");
     }).catch(() => { if (serial === selectionRequestSerial.current) setAttemptsState("error"); });
   };
-  useEffect(() => { setAvailable(page.questionBank?.filter((item) => item.status === "approved").length ?? 0); setDraftCount(page.questionBank?.filter((item) => item.status === "draft").length ?? 0); }, [page.id, page.questionBank]);
-  useEffect(() => {
+
+  const loadSelection = (state: QuestionBatchState, serial: number, allowRepeat = false) => {
     if (!sessionId) return;
-    const serial = ++selectionRequestSerial.current;
-    const seed = `${sessionId}:${page.id}:${new Date().toISOString().slice(0, 10)}`;
     setLoading(true);
     setSelection(undefined);
     setQuestions([]);
     previewRef.current = [];
     setPreviewQuestions([]);
     setAttemptsState("loading");
-    setSavedAnswers({});
-    preparePreview(seed, serial);
-    void api.selectQuestions(page.id, sessionId, seed).then((result) => {
+    setFeedback((current) => ({ ...current, load: "" }));
+    preparePreview(state, serial);
+    void api.selectQuestions(page.id, sessionId, state.activeSeed, state.activeCount, state.activeExcludedQuestionIds, allowRepeat).then((result) => {
       if (serial !== selectionRequestSerial.current) return;
-      if (previewRef.current.length && !sameQuestionPreview(previewRef.current, result.questions)) {
-        setAnswers({});
-        setFeedback({ load: "题库在准备期间发生变化，请检查新题目后重新作答" });
-      }
-      setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
+      const previewMatched = previewRef.current.length > 0 && sameQuestionPreview(previewRef.current, result.questions);
+      setAnswers((current) => {
+        const next = { ...current };
+        for (const item of result.questions) {
+          const previewKey = questionAnswerKey(state.activeSeed, item.id, item.version);
+          const activeKey = questionAnswerKey(result.selection.id, item.id, item.version);
+          if (next[previewKey] && !next[activeKey]) next[activeKey] = next[previewKey];
+        }
+        return next;
+      });
+      saveBatchState({ ...state, usedQuestionIds: [...new Set([...state.usedQuestionIds, ...result.selection.questionIds])] });
+      setSelection(result.selection);
+      setQuestions(result.questions);
+      setAvailable(result.available);
+      setDraftCount(result.draftCount ?? 0);
+      setFeedback((current) => ({ ...current, load: previewMatched || !previewRef.current.length ? "" : "本组已按首次保存的题目版本恢复。" }));
+      setLoading(false);
       restoreSavedAnswers(result.selection, result.questions, serial);
-    }).catch((error) => { if (serial === selectionRequestSerial.current) { setPreviewQuestions([]); setFeedback({ load: error instanceof Error ? error.message : "随机问题加载失败" }); } })
-      .finally(() => { if (serial === selectionRequestSerial.current) setLoading(false); });
-    return () => { selectionRequestSerial.current += 1; };
-  }, [page.id, sessionId]);
-  const chooseAnotherPair = async () => {
-    if (!sessionId || loading) return;
-    const serial = ++selectionRequestSerial.current;
-    const seed = crypto.randomUUID();
-    setLoading(true);
-    setSelection(undefined); setQuestions([]); setPreviewQuestions([]); previewRef.current = [];
-    setAnswers({}); setFeedback({}); setFeedbackState({}); setSavedAnswers({}); setAttemptsState("loading");
-    preparePreview(seed, serial);
-    try {
-      const result = await api.selectQuestions(page.id, sessionId, seed);
-      if (serial !== selectionRequestSerial.current) return;
-      if (previewRef.current.length && !sameQuestionPreview(previewRef.current, result.questions)) {
-        setAnswers({});
-        setFeedback({ load: "题库在准备期间发生变化，请检查新题目后重新作答" });
+    }).catch((error) => {
+      if (serial === selectionRequestSerial.current) {
+        setFeedback((current) => ({ ...current, load: error instanceof Error ? error.message : "题库暂时无法读取" }));
+        setLoading(false);
       }
-      setSelection(result.selection); setQuestions(result.questions); setAvailable(result.available); setDraftCount(result.draftCount ?? 0);
-      restoreSavedAnswers(result.selection, result.questions, serial);
-    } catch (error) { if (serial === selectionRequestSerial.current) { setPreviewQuestions([]); setFeedback({ load: error instanceof Error ? error.message : "换题失败" }); } }
-    finally { if (serial === selectionRequestSerial.current) setLoading(false); }
+    });
   };
+
+  useEffect(() => {
+    setAvailable(uniquePracticeQuestions(page.questionBank ?? []).length);
+    setDraftCount(page.questionBank?.filter((item) => item && typeof item === "object" && item.status === "draft").length ?? 0);
+  }, [page.id, page.questionBank]);
+
+  useEffect(() => {
+    if (!sessionId) { setLoading(false); return; }
+    const state = readQuestionBatchState(sessionId, page.id);
+    batchStateRef.current = state;
+    setBatchState(state);
+    const serial = ++selectionRequestSerial.current;
+    loadSelection(state, serial);
+    return () => { if (selectionRequestSerial.current === serial) selectionRequestSerial.current++; };
+  }, [page.id, page.questionBank, sessionId]);
+
+  const chooseAnotherPair = (replayExhaustedBank = false) => {
+    if (!sessionId) return;
+    const current = batchStateRef.current;
+    const nextIndex = current.batchIndex + 1;
+    const nextState: QuestionBatchState = {
+      ...current,
+      batchIndex: nextIndex,
+      activeSeed: sessionId + ":" + page.id + ":batch:" + nextIndex,
+      activeCount: current.requestedCount,
+      usedQuestionIds: replayExhaustedBank ? [] : current.usedQuestionIds,
+      activeExcludedQuestionIds: replayExhaustedBank ? [] : current.usedQuestionIds
+    };
+    saveBatchState(nextState);
+    loadSelection(nextState, ++selectionRequestSerial.current, replayExhaustedBank);
+  };
+
+  const changeRequestedCount = (value: string) => {
+    const count = Number(value) as QuestionBatchSize;
+    if (![2, 3, 5].includes(count)) return;
+    saveBatchState({ ...batchStateRef.current, requestedCount: count });
+  };
+
   const submit = async (item: QuestionBankItem) => {
-    const answer = answers[item.id]?.trim();
-    if (!selection || !sessionId || !answer || attemptsState !== "ready" || pendingRef.current.has(item.id)) return;
-    pendingRef.current.add(item.id);
-    setPendingQuestionIds(new Set(pendingRef.current));
-    setFeedback((current) => ({ ...current, [item.id]: "" }));
-    const replayKey = `${selection.id}:${item.id}:${answer}`;
+    if (!sessionId || !selection || attemptsState !== "ready") return;
+    const answerKey = questionAnswerKey(selection.id, item.id, item.version);
+    const answer = answers[answerKey]?.trim();
+    if (!answer || pendingRef.current.has(answerKey)) return;
+    pendingRef.current.add(answerKey);
+    setPendingQuestionKeys(new Set(pendingRef.current));
+    setFeedback((current) => ({ ...current, [answerKey]: "" }));
+    const replayKey = answerKey + ":" + answer;
     const idempotencyKey = idempotencyKeysRef.current.get(replayKey) ?? crypto.randomUUID();
     idempotencyKeysRef.current.set(replayKey, idempotencyKey);
     try {
       const result = await api.questionAttempt({ selectionId: selection.id, sessionId, courseReleaseId: release.id, pageId: page.id, questionId: item.id, answer, usedHintLevel: 0 }, idempotencyKey);
       idempotencyKeysRef.current.delete(replayKey);
-      setSavedAnswers((current) => ({ ...current, [item.id]: result.attempt.answer }));
-      setFeedbackState((current) => ({ ...current, [item.id]: result.evaluationState }));
-      setFeedback((current) => ({ ...current, [item.id]: result.feedback }));
+      setSavedAnswers((current) => ({ ...current, [answerKey]: result.attempt.answer }));
+      setFeedbackState((current) => ({ ...current, [answerKey]: result.evaluationState }));
+      setFeedback((current) => ({ ...current, [answerKey]: result.feedback }));
     } catch (error) {
-      setFeedbackState((current) => ({ ...current, [item.id]: "error" }));
-      setFeedback((current) => ({ ...current, [item.id]: error instanceof Error ? error.message : "作答保存失败" }));
+      setFeedbackState((current) => ({ ...current, [answerKey]: "error" }));
+      setFeedback((current) => ({ ...current, [answerKey]: error instanceof Error ? error.message : "作答保存失败" }));
     } finally {
-      pendingRef.current.delete(item.id);
-      setPendingQuestionIds(new Set(pendingRef.current));
+      pendingRef.current.delete(answerKey);
+      setPendingQuestionKeys(new Set(pendingRef.current));
     }
   };
-  const bankNotice = available < 4 || draftCount > 0;
-  if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /> <p className="empty-inline">学习会话建立后会抽取 1道理解题和 1道选择题</p></>;
-  if (loading && !previewQuestions.length) return <p className="empty-inline" role="status">ReadWeave 正在读取本页题库并保存选题，完成后会自动显示两道可作答的问题</p>;
-  if (!loading && !questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || "本页题库尚未达到发布要求，请从制作模式补齐题目"}</p></>;
-  const visibleQuestions = loading ? previewQuestions : questions;
-  return <>{loading && <p className="empty-inline" role="status">本页两道题已可先填写；ReadWeave 正在保存选题，保存并核对旧作答后即可提交</p>}{!loading && attemptsState === "loading" && <p className="empty-inline" role="status">正在恢复本次已保存的作答记录</p>}{!loading && attemptsState === "error" && <p className="empty-inline" role="alert">作答记录暂时无法读取，提交已暂停 <button type="button" className="quiet-button" onClick={() => selection && restoreSavedAnswers(selection, questions, selectionRequestSerial.current)}>重试读取</button></p>}{feedback.load && <p className="empty-inline" role="status">{feedback.load}</p>}{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{visibleQuestions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} data-question-id={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!selection || attemptsState !== "ready" || !answers[item.id]?.trim() || pending || answers[item.id]?.trim() === savedAnswers[item.id]} aria-busy={pending} title={!selection ? "正在保存本次选题" : attemptsState === "loading" ? "正在核对已有作答" : attemptsState === "error" ? "请先重试读取作答" : !answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : answers[item.id]?.trim() === savedAnswers[item.id] ? "本题作答已保存" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : !selection ? "等待选题保存" : attemptsState !== "ready" ? "等待作答记录" : answers[item.id]?.trim() === savedAnswers[item.id] ? "已保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div>{!loading && <button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button>}</>;
-}
 
+  const bankNotice = draftCount > 0;
+  if (!sessionId) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{available ? "建立学习会话后即可练习本页 " + available + " 道合格题目" : "本页目前没有符合条件的可练习题目"}</p></>;
+  if (loading && !previewQuestions.length) return <p className="empty-inline" role="status">正在恢复本组题目并核对已保存的作答</p>;
+  if (!loading && !questions.length) return <><QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} /><p className="empty-inline">{feedback.load || (available > 0 ? "本页合格题目都已练过；可以明确选择从头再练。" : "本页目前没有符合条件的可练习题目。")}</p>{available > 0 && !feedback.load && <button type="button" className="quiet-button" data-action="questions-restart" onClick={() => chooseAnotherPair(true)}>从头再练</button>}</>;
+  const visibleQuestions = loading ? previewQuestions : questions;
+  return <>{loading && <p className="empty-inline" role="status">正在保存本组 {batchState.activeCount} 道题；可以先填写答案，保存完成后即可提交</p>}{!loading && attemptsState === "loading" && <p className="empty-inline" role="status">正在恢复本次已保存的作答记录</p>}{!loading && attemptsState === "error" && <p className="empty-inline" role="alert">作答记录暂时无法读取，提交已暂停 <button type="button" className="quiet-button" onClick={() => selection && restoreSavedAnswers(selection, questions, selectionRequestSerial.current)}>重试读取</button></p>}{feedback.load && <p className="empty-inline" role="status">{feedback.load}</p>}{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-batch-controls"><label className="question-batch-size">下一组题数 <select value={batchState.requestedCount} onChange={(event) => changeRequestedCount(event.target.value)} disabled={loading}><option value={2}>2 题</option><option value={3}>3 题</option><option value={5}>5 题</option></select></label><span>本组实际 {visibleQuestions.length} 题</span></div><div className="question-stack">{visibleQuestions.map((item, index) => { const answerKey = questionAnswerKey(selection?.id ?? batchState.activeSeed, item.id, item.version); const pending = pendingQuestionKeys.has(answerKey); const state = feedbackState[answerKey]; const isChoice = item.kind === "multiple_choice"; return <section key={item.id + ":" + item.version} data-question-id={item.id} data-question-version={item.version} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{questionKindLabel(item.kind)}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{isChoice ? <div className="choice-list">{item.options!.map((option, optionIndex) => <label key={item.id + ":" + item.version + ":" + optionIndex}><input type="radio" name={answerKey} value={option} checked={answers[answerKey] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [answerKey]: event.target.value }))} /><span className="choice-label">{questionOptionLabel(optionIndex)}</span><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[answerKey] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [answerKey]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!selection || attemptsState !== "ready" || !answers[answerKey]?.trim() || pending || answers[answerKey]?.trim() === savedAnswers[answerKey]} aria-busy={pending} title={!selection ? "正在保存本次选题" : attemptsState === "loading" ? "正在核对已有作答" : attemptsState === "error" ? "请先重试读取作答" : !answers[answerKey]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : answers[answerKey]?.trim() === savedAnswers[answerKey] ? "本题作答已保存" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : !selection ? "等待选题保存" : attemptsState !== "ready" ? "等待作答记录" : answers[answerKey]?.trim() === savedAnswers[answerKey] ? "已保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[answerKey] && <div className={"answer answer-" + (state || "unverified")} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道简答题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[answerKey]!} /></div></div>}</section>; })}</div>{!loading && <button type="button" className="quiet-button" data-action="questions-another-pair" onClick={() => chooseAnotherPair()}>换一组题</button>}</>;
+}
 export function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
-  if (available >= 4 && draftCount === 0) return null;
-  const message = available < 4
-    ? `当前有 ${available} 道可用题目、${draftCount} 道草稿题；还差 ${4 - available} 道可用题目才能练习`
-    : `当前有 ${available} 道可用题目，已经达到练习要求；另有 ${draftCount} 道草稿题尚未确认`;
-  return <div className="question-bank-status"><div><strong>题库尚未就绪</strong><span>{message}</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>去制作模式补齐</button>}</div>;
+  if (available > 0 && draftCount === 0) return null;
+  const message = available === 0
+    ? draftCount > 0 ? `当前没有已确认的合格题；${draftCount} 道草稿题不会参与练习` : "当前没有符合条件的可练习题目"
+    : `当前有 ${available} 道合格题可以练习；另有 ${draftCount} 道草稿题尚未确认`;
+  return <div className="question-bank-status"><div><strong>{available === 0 ? "暂无可练习题目" : "题库状态"}</strong><span>{message}</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>管理题库</button>}</div>;
 }
 
 function normalizeSections(page: PageLesson): LessonSection[] {
   const anchorIds = page.anchors.map((item) => item.id); const atomIds = page.atoms.map((item) => item.id);
-  const sectionTitles: Array<[LessonSection["kind"], string]> = [["chapter_bridge", "承上启下"], ["prior_knowledge", "先验知识"], ["learning_objectives", "学完能做什么"], ["full_explanation", "完整讲解"], ["main_content", "主要内容"], ["misconceptions", "易错点"]];
+  const sectionTitles: Array<[LessonSection["kind"], string]> = [["chapter_bridge", "承上启下"], ["prior_knowledge", "先验知识"], ["learning_objectives", "学习目标"], ["full_explanation", "完整讲解"], ["main_content", "主要内容"], ["misconceptions", "易错点"]];
   if (page.lessonSections?.length) {
     const byKind = new Map(page.lessonSections.map((section) => [section.kind, section]));
     return sectionTitles.map(([kind, title]) => {
       const section = byKind.get(kind);
-      if (kind === "chapter_bridge" && !section) return undefined;
+      if (kind === "chapter_bridge" && !section?.markdown?.trim()) return { id: `${page.id}:section:chapter_bridge`, kind, title, markdown: "承上启下尚未补齐；当前页教学结构未完成", sourceAnchorIds: anchorIds, atomIds };
       if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: kind === "full_explanation" ? "完整讲解尚未生成；已有摘要保留" : "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
       if (kind === "main_content" && section.markdown) return { ...section, markdown: summaryMarkdown(section.markdown) };
       if (kind === "full_explanation" && !section.markdown?.trim() && !section.items?.some((item) => item.text.trim())) {
         return { ...section, markdown: "完整讲解尚未生成；已有摘要保留" };
       }
-      return section;
+      return { ...section, title };
     }).filter((section): section is LessonSection => Boolean(section));
   }
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
   const fullExplanation = find("core", "example", "deep_dive", "check");
-  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanation.trim() ? fullExplanation : "完整讲解尚未生成；已有摘要保留", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+  return [{ id: `${page.id}:section:bridge`, kind: "chapter_bridge", title: "承上启下", markdown: "承上启下尚未补齐；当前页教学结构未完成", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanation.trim() ? fullExplanation : "完整讲解尚未生成；已有摘要保留", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
 }
 
 export function summaryMarkdown(markdown: string): string {

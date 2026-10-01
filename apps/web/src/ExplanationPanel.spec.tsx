@@ -31,7 +31,7 @@ describe("lesson generation readiness badge", () => {
     const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={readyCandidate} generatedReady />);
 
     expect(markup).toContain("候选讲解内容");
-    expect(markup).toContain('class="quality-badge pass">讲解已生成</span>');
+    expect(markup).toContain('class="quality-badge hold">讲解尚未生成</span>');
     expect(readyCandidate.quality.publishable).toBe(false);
   });
 
@@ -39,8 +39,8 @@ describe("lesson generation readiness badge", () => {
     const unfinished = renderToStaticMarkup(<ExplanationPanel release={release} page={page(false)} generatedReady={false} />);
     const published = renderToStaticMarkup(<ExplanationPanel release={release} page={page(true)} />);
 
-    expect(unfinished).toContain('class="quality-badge hold">讲解草稿</span>');
-    expect(published).toContain('class="quality-badge pass">讲解已生成</span>');
+    expect(unfinished).toContain('class="quality-badge hold">讲解尚未生成</span>');
+    expect(published).toContain('class="quality-badge hold">讲解尚未生成</span>');
   });
 
   it("shows an explicit missing full explanation and never fills it with the summary", () => {
@@ -72,11 +72,19 @@ describe("lesson generation readiness badge", () => {
     expect(markup.split(repeatedOpening)).toHaveLength(3);
   });
 
-  it("reports the actual approved and draft question counts without filling missing questions", () => {
+  it("reports available and draft questions without imposing a four-question threshold", () => {
     const markup = renderToStaticMarkup(<QuestionBankStatus available={2} draftCount={1} />);
 
-    expect(markup).toContain("当前有 2 道可用题目、1 道草稿题；还差 2 道可用题目才能练习");
+    expect(markup).toContain("当前有 2 道合格题可以练习；另有 1 道草稿题尚未确认");
+    expect(markup).not.toContain("还差");
     expect(markup).not.toContain("第 3 道题");
+  });
+
+  it("explains an empty question bank accurately", () => {
+    const markup = renderToStaticMarkup(<QuestionBankStatus available={0} draftCount={0} />);
+
+    expect(markup).toContain("当前没有符合条件的可练习题目");
+    expect(markup).not.toContain("还差");
   });
 
   it("renders pseudocode explanation math while preserving the code line", () => {

@@ -135,7 +135,7 @@ async function waitForPreviousCoreContext(input: {
 }): Promise<{ context?: string; fingerprint?: string }> {
   const previousPage = input.release.pages.find(candidate => candidate.pageNumber === input.pageNumber - 1);
   if (!previousPage) {
-    const context = `这是模块“${input.release.moduleId}”的起始页；从课程主题和本页问题自然建立阅读起点`;
+    const context = "这是本材料的起始页；从课程主题和当前页要解决的问题自然建立阅读起点，不虚构前一页";
     return { context, fingerprint: sha256Text(context) };
   }
   if (!input.planId) {
@@ -145,9 +145,9 @@ async function waitForPreviousCoreContext(input: {
     const context = previousLessonContext(previous);
     return { context, fingerprint: context ? sha256Text(context) : undefined };
   }
-  // The bridge is optional: never make a readable core page wait minutes for
-  // another worker. A late predecessor can be reconciled separately.
-  const deadline = Date.now() + 5_000;
+  // Core has already been saved and is readable. Only the later bridge waits
+  // for its predecessor's saved body, never for that predecessor's bridge.
+  const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     await assertGenerationFence(input.jobId, input.fenceToken, input.dependencies);
     const readyDraft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
@@ -179,8 +179,7 @@ async function waitForPreviousCoreContext(input: {
     }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  const context = previousLessonContext(previousPage);
-  return { context, fingerprint: context ? `source:${sha256Text(context)}` : "unavailable:timeout" };
+  throw new Error("PREVIOUS_CORE_NOT_READY");
 }
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
@@ -207,6 +206,8 @@ export function createApp(dependencies: AppDependencies): Express {
   const app = express();
   const learningSessionCache = new Map<string, LearningSession>();
   const persistedQuestionSelections = new Map<string, QuestionSelection>();
+  const persistedQuestionSelectionsById = new Map<string, QuestionSelection>();
+  const selectedQuestionIdsByLearnerPage = new Map<string, Set<string>>();
   const rememberLearningSession = (workspaceId: string, session: LearningSession) => {
     const key = JSON.stringify([workspaceId, session.id]);
     learningSessionCache.delete(key);
@@ -880,9 +881,18 @@ export function createApp(dependencies: AppDependencies): Express {
         const source = await dependencies.reading.replica.getPageSource(workspaceId, request.params.id, asOptionalString(request.query.releaseId));
         if (!source) return sendError(request, response, 409, "PAGE_NOT_READY", "这页还没有已确认的讲解，请稍后查看", true);
         const qaRecords = request.query.includeQa === "1" ? await dependencies.readweave.listQuestions(request.params.id) : [];
+        const previewDraft = source.release.lifecycle !== "draft_source"
+          && isMatchingReadyLessonDraft(source.draft, workspaceId, source.release.courseId, source.release.id, request.params.id)
+          ? source.draft
+          : undefined;
         response.setHeader("X-Reading-Source", "confirmed-replica");
         response.setHeader("Server-Timing", `snapshot;dur=${(performance.now() - startedAt).toFixed(1)}`);
-        return response.json({ releaseId: source.release.id, page: source.page, qaRecords });
+        return response.json({
+          releaseId: source.release.id,
+          page: previewDraft?.page ?? source.page,
+          ...(previewDraft ? { unpublishedDraftRevision: previewDraft.revision } : {}),
+          qaRecords
+        });
       }
       const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, request.params.id);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
@@ -890,7 +900,11 @@ export function createApp(dependencies: AppDependencies): Express {
       const candidateDraft = dependencies.readweave.getDraftSnapshotByPage
         ? await dependencies.readweave.getDraftSnapshotByPage(request.params.id)
         : await dependencies.readweave.getDraftByPage(request.params.id);
-      const draft = candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined;
+      const draft = source.release.lifecycle === "draft_source"
+        ? candidateDraft && candidateDraft.workspaceId === workspaceId && candidateDraft.courseId === source.release.courseId ? candidateDraft : undefined
+        : isMatchingReadyLessonDraft(candidateDraft, workspaceId, source.release.courseId, source.release.id, request.params.id)
+          ? candidateDraft
+          : undefined;
       const draftLookupMs = performance.now() - startedAt - sourceLookupMs;
       // A lesson's teaching content must not wait for historical Q&A. The
       // interactive section reads that small collection when it becomes visible.
@@ -901,6 +915,7 @@ export function createApp(dependencies: AppDependencies): Express {
       response.json({
         releaseId: source.release.id,
         page: draft?.page ?? source.page,
+        ...(source.release.lifecycle !== "draft_source" && draft ? { unpublishedDraftRevision: draft.revision } : {}),
         qaRecords
       });
     } catch (error) { next(error); }
@@ -950,9 +965,9 @@ export function createApp(dependencies: AppDependencies): Express {
         // A ready draft edit preserves readability, not publication approval.
         // Existing publication diagnostics must not erase an acknowledged body.
         const full = page.lessonSections?.find((section: LessonSection) => section.kind === "full_explanation")?.markdown;
-        const issues = current?.status === "ready"
-          ? [...validatePageMath(page), ...(typeof full === "string" && !full.trim() ? ["full_explanation:CONTENT_REQUIRED"] : [])]
-          : validatePageForPublication(page);
+        const hasBody = typeof full === "string" ? Boolean(full.trim())
+          : page.blocks.some((block: { kind: string; markdown?: string }) => block.kind === "core" && block.markdown?.trim());
+        const issues = [...validatePageMath(page), ...(!hasBody ? ["full_explanation:CONTENT_REQUIRED"] : [])];
         if (issues.length > 0) return sendError(request, response, 422, "DRAFT_NOT_PUBLISHABLE", "页面仍有发布检查问题，无法标记为可用", false, { issues });
       }
       const changedBlockIds = Array.isArray(request.body.changedBlockIds) ? request.body.changedBlockIds.map(String) : page.blocks.map((block: { id: string }) => block.id);
@@ -1502,7 +1517,7 @@ export function createApp(dependencies: AppDependencies): Express {
         .map(event => (event.payload as { pageId: string }).pageId)]);
       const latestCost = detail.events.filter(event => jobIds.has(event.streamId) && event.type === "generation.cost.recorded").at(-1)?.payload as { provider?: string; model?: string } | undefined;
       const route = latestCost?.provider && latestCost.model ? latestCost : plan.modelRoutes?.at(-1);
-      const crossPageIds = new Set(plan.pageIds.slice(1));
+      const crossPageIds = new Set(plan.pageIds);
       const progress = {
         core: { completed: [...coreSaved].filter(pageId => plan.pageIds.includes(pageId)).length, total: plan.pageIds.length },
         crossPage: { completed: [...bridgeSaved].filter(pageId => crossPageIds.has(pageId)).length, total: crossPageIds.size },
@@ -1848,29 +1863,49 @@ export function createApp(dependencies: AppDependencies): Express {
       if (!release || !release.pageIds.includes(pageId)) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到题目对应的课程页面", false);
       if (!page) return sendError(request, response, 409, dependencies.reading ? "PAGE_NOT_READY" : "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", Boolean(dependencies.reading));
       const seed = String(request.body.seed || `${session.id}:${page.id}:${new Date().toISOString().slice(0, 10)}`);
-      const count = Math.max(1, Math.min(4, Number(request.body.count || 2)));
+      const countValue = request.body.count === undefined ? 3 : Number(request.body.count);
+      if (![2, 3, 5].includes(countValue)) return sendError(request, response, 422, "QUESTION_COUNT_INVALID", "每组题目数量只能是 2、3 或 5", false);
+      const count = countValue as 2 | 3 | 5;
+      const excludedQuestionIds = Array.isArray(request.body.excludeQuestionIds)
+        ? request.body.excludeQuestionIds.filter((id: unknown): id is string => typeof id === "string").slice(0, 10_000)
+        : [];
       const bank = page.questionBank ?? legacyQuestionBank(release, page.id);
-      const questions = selectQuestionBank(bank, seed, count);
+      const availableQuestions = uniquePracticeQuestionBank(bank);
       requireIdempotencyKey(request);
-      const selectionKey = `question-selection:${sha256Text(stableStringify({ workspaceId, sessionId: session.id, releaseId: release.id, pageId: page.id, seed, questionIds: questions.map((item) => item.id) }))}`;
+      const selectionKey = `question-selection:${sha256Text(stableStringify({ workspaceId, sessionId: session.id, releaseId: release.id, pageId: page.id, seed, count }))}`;
+      const historyKey = JSON.stringify([workspaceId, session.id, release.id, page.id]);
+      const rememberSelectedQuestionIds = (ids: string[], reset = false) => {
+        const seen = reset ? new Set<string>() : selectedQuestionIdsByLearnerPage.get(historyKey) ?? new Set<string>();
+        for (const id of ids) seen.add(id);
+        selectedQuestionIdsByLearnerPage.set(historyKey, seen);
+        if (selectedQuestionIdsByLearnerPage.size > 256) selectedQuestionIdsByLearnerPage.delete(selectedQuestionIdsByLearnerPage.keys().next().value!);
+      };
       const cachedSelection = persistedQuestionSelections.get(selectionKey);
       if (cachedSelection) {
+        persistedQuestionSelectionsById.set(cachedSelection.id, cachedSelection);
+        rememberSelectedQuestionIds(cachedSelection.questionIds, request.body.allowRepeat === true);
         response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=0.0`);
-        return response.status(201).json({ selection: cachedSelection, questions, available: bank.filter((item) => item.status === "approved").length, draftCount: bank.filter((item) => item.status === "draft").length });
+        return response.status(201).json({ selection: cachedSelection, questions: questionsForSavedSelection(cachedSelection, availableQuestions), available: availableQuestions.length, draftCount: bank.filter((item) => item && typeof item === "object" && item.status === "draft").length });
       }
+      const seen = selectedQuestionIdsByLearnerPage.get(historyKey) ?? new Set<string>();
+      const effectiveExclusions = request.body.allowRepeat === true ? [] : [...new Set([...excludedQuestionIds, ...seen])];
+      const questions = selectQuestionBank(availableQuestions, seed, count, effectiveExclusions);
       const selection: QuestionSelection = {
         id: randomUUID(), sessionId: session.id, courseReleaseId: release.id, pageId: page.id, seed,
-        questionIds: questions.map((item) => item.id), createdAt: new Date().toISOString()
+        questionIds: questions.map((item) => item.id), count, questionSnapshots: structuredClone(questions), createdAt: new Date().toISOString()
       };
       const saved = await dependencies.readweave.saveQuestionSelection(selection, writeContext(request, selectionKey));
       persistedQuestionSelections.set(selectionKey, saved);
+      persistedQuestionSelectionsById.set(saved.id, saved);
+      rememberSelectedQuestionIds(saved.questionIds, request.body.allowRepeat === true);
       if (persistedQuestionSelections.size > 256) persistedQuestionSelections.delete(persistedQuestionSelections.keys().next().value!);
+      if (persistedQuestionSelectionsById.size > 512) persistedQuestionSelectionsById.delete(persistedQuestionSelectionsById.keys().next().value!);
       response.setHeader("Server-Timing", `session;dur=${sessionLookupMs.toFixed(1)}, release;dur=${releaseLookupMs.toFixed(1)}, page;dur=${pageLookupMs.toFixed(1)}, selection-save;dur=${(performance.now() - startedAt - sessionLookupMs - releaseLookupMs - pageLookupMs).toFixed(1)}`);
       response.status(201).json({
         selection: saved,
-        questions,
-        available: bank.filter((item) => item.status === "approved").length,
-        draftCount: bank.filter((item) => item.status === "draft").length
+        questions: questionsForSavedSelection(saved, availableQuestions),
+        available: availableQuestions.length,
+        draftCount: bank.filter((item) => item && typeof item === "object" && item.status === "draft").length
       });
     } catch (error) { next(error); }
   });
@@ -1972,14 +2007,23 @@ export function createApp(dependencies: AppDependencies): Express {
         ? localPage?.page
         : release ? await learningPageForQuestions(dependencies.readweave, release, pageId, workspaceId) : undefined;
       if (release && release.pageIds.includes(pageId) && !page) return sendError(request, response, 409, dependencies.reading ? "PAGE_NOT_READY" : "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", Boolean(dependencies.reading));
-      const item = page?.questionBank?.find((candidate) => candidate.id === request.body.questionId);
-      if (!release || !page || !item) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到这道随机问题", false);
+      const selectionId = String(request.body.selectionId || "");
+      const selection = persistedQuestionSelectionsById.get(selectionId);
+      if (selection && (selection.sessionId !== request.body.sessionId || selection.courseReleaseId !== release?.id || selection.pageId !== pageId)) {
+        return sendError(request, response, 409, "QUESTION_SELECTION_CONFLICT", "这道题不属于当前学习会话或页面的选题批次", false);
+      }
+      if (selection && !selection.questionIds.includes(String(request.body.questionId || ""))) {
+        return sendError(request, response, 409, "QUESTION_NOT_IN_SELECTION", "这道题不属于当前选题批次", false);
+      }
+      const item = selection?.questionSnapshots?.find((candidate) => candidate.id === request.body.questionId && isPracticeReadyQuestion(candidate))
+        ?? page?.questionBank?.find((candidate) => candidate.id === request.body.questionId);
+      if (!release || !page || !item || !isPracticeReadyQuestion(item)) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到这道随机问题", false);
       const answer = String(request.body.answer || "").trim();
       const correct = evaluateQuestionAnswer(item, answer);
       const releaseLookupMs = performance.now() - startedAt;
       const attempt: QuestionAttempt = {
-        id: randomUUID(), selectionId: String(request.body.selectionId || ""), sessionId: String(request.body.sessionId || ""),
-        courseReleaseId: release.id, pageId: page.id, questionId: item.id, objectiveId: item.objectiveId,
+        id: randomUUID(), selectionId, sessionId: String(request.body.sessionId || ""),
+        courseReleaseId: release.id, pageId: page.id, questionId: item.id, questionVersion: item.version, objectiveId: item.objectiveId,
         answer, correct, usedHintLevel: Math.max(0, Math.min(6, Number(request.body.usedHintLevel || 0))),
         misconception: correct === false ? `答案没有满足当前学习目标，正确思路是：${item.explanation}` : undefined,
         attemptedAt: new Date().toISOString()
@@ -3002,13 +3046,22 @@ async function getReplicaLearningPage(dependencies: AppDependencies, workspaceId
   if (!source) return { release };
   if (release.lifecycle === "draft_source") {
     const draft = source.draft;
-    const page = draft && draft.workspaceId === workspaceId && draft.courseId === release.courseId
-      && draft.sourceReleaseId === release.id && draft.pageId === pageId && draft.status === "ready"
-      ? draft.page
-      : undefined;
+    const page = isMatchingReadyLessonDraft(draft, workspaceId, release.courseId, release.id, pageId) ? draft.page : undefined;
     return { release, page };
   }
-  return { release, page: source.page };
+  const draft = isMatchingReadyLessonDraft(source.draft, workspaceId, release.courseId, release.id, pageId) ? source.draft : undefined;
+  return { release, page: draft?.page ?? source.page };
+}
+
+function isMatchingReadyLessonDraft(
+  draft: LessonDraft | undefined,
+  workspaceId: string,
+  courseId: string,
+  releaseId: string,
+  pageId: string
+): draft is LessonDraft {
+  return Boolean(draft && draft.workspaceId === workspaceId && draft.courseId === courseId
+    && draft.sourceReleaseId === releaseId && draft.pageId === pageId && draft.status === "ready");
 }
 
 function workspaceTrashedMaterialNodeIds(trash: TrashRecord[], workspaceId: string): Set<string> {
@@ -3044,12 +3097,12 @@ function standaloneGenerationTaskRecord(job: GenerationJob, relatedImport?: Impo
 
 async function learningPageForQuestions(readweave: ReadWeaveCourseApi, release: CourseRelease, pageId: string, workspaceId: string): Promise<CourseRelease["pages"][number] | undefined> {
   const sourcePage = release.pages.find((page) => page.id === pageId);
-  if (!sourcePage || release.lifecycle !== "draft_source") return sourcePage;
+  if (!sourcePage) return undefined;
   const draft = readweave.getDraftSnapshotByPage
     ? await readweave.getDraftSnapshotByPage(pageId)
     : await readweave.getDraftByPage(pageId);
-  return draft?.sourceReleaseId === release.id && draft.workspaceId === workspaceId && draft.courseId === release.courseId
-    && draft.status === "ready" ? draft.page : undefined;
+  if (isMatchingReadyLessonDraft(draft, workspaceId, release.courseId, release.id, pageId)) return draft.page;
+  return release.lifecycle === "draft_source" ? undefined : sourcePage;
 }
 
 async function resolveWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string): Promise<CourseTreeNode | undefined> {
@@ -3391,8 +3444,9 @@ async function settleGenerationPlan(planId: string, dependencies: AppDependencie
     if (!plan) return;
     const jobs = state.jobs.filter((item) => item.planId === plan.id);
     plan.completedPageIds = uniqueStrings(jobs.flatMap((item) => item.completedPageIds));
-    plan.coreCompletedPageIds = [...plan.completedPageIds];
     const jobIds = new Set(jobs.map(item => item.id));
+    plan.coreCompletedPageIds = uniqueStrings([...plan.completedPageIds, ...state.events.filter(event => jobIds.has(event.streamId)
+      && event.type === "generation.page.core_saved").map(event => (event.payload as { pageId: string }).pageId)]);
     plan.bridgeCompletedPageIds = uniqueStrings(state.events.filter(event => jobIds.has(event.streamId)
       && event.type === "generation.page.completed"
       && (event.payload as { bridgeCompleted?: boolean }).bridgeCompleted === true)
@@ -3585,8 +3639,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
-      if (currentJob.attempt > 1
-        && await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt)) continue;
+      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter)) continue;
       if (currentJob.spentUsd >= currentJob.budgetUsd) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
@@ -3697,7 +3750,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         sourceReleaseId: release.id,
         pageId: page.id,
         revision: existing?.revision ?? 0,
-        status: generation.content.fullExplanationMarkdown.trim() && generation.content.questions.length === 4
+        status: generation.content.fullExplanationMarkdown.trim()
           ? "ready" : "needs_review",
         page: generatedPage,
         changedBlockIds: generatedPage.blocks.map((block) => block.id),
@@ -3802,7 +3855,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             phase: "bridge", provider: bridge.provider, model: bridge.model, durationMs: bridge.usage.durationMs });
         } catch (bridgeError) {
           await appendGenerationStageEvent(jobId, page.id, "teach", "skipped", dependencies, {
-            phase: "bridge", reason: safeGenerationIssue(bridgeError) });
+            phase: "bridge", reason: safeGenerationIssue(bridgeError), coreReadable: true, incomplete: true });
+          // Preserve the saved body; retry below resumes just this missing bridge.
+          throw bridgeError;
         }
       }
       timings.bridgeAndSettlementMs = Date.now() - bridgeStartedAt;
@@ -3838,13 +3893,19 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         failureRoute
       }));
       const billedCalls = meter.groupedUsage();
-      if (!finalizedCostPersisted && (finalizedCost || billedCalls.length > 0 || error instanceof ModelRouterGenerationError)) {
+      const unsettledCost = finalizedCostPersisted ? undefined : finalizedCost;
+      if (billedCalls.length > 0 || (!finalizedCostPersisted && (finalizedCost || error instanceof ModelRouterGenerationError))) {
         const receipts = billedCalls.length ? billedCalls : error instanceof ModelRouterGenerationError
           ? [{ provider: error.provider, model: error.model, usage: error.usage }] : [];
-        for (const receipt of (finalizedCost ? receipts.slice(0, 1) : receipts)) {
+        for (const receipt of (unsettledCost ? receipts.slice(0, 1) : receipts)) {
         const billedError = new ModelRouterGenerationError(safeGenerationIssue(error), receipt.model, receipt.usage, receipt.provider);
-        const failedCost = finalizedCost ?? failedGenerationCostEntry(jobId, currentJob, release, page.id, billedError);
-        if (!finalizedCost && receipts.length > 1) failedCost.id += `:provider:${receipt.provider}:model:${receipt.model}`;
+        const failedCost = unsettledCost ?? failedGenerationCostEntry(jobId, currentJob, release, page.id, billedError);
+        if (finalizedCostPersisted) {
+          failedCost.id += ":bridge";
+          const existingCosts = await dependencies.readweave.listCostEntries({ jobId, pageId });
+          if (existingCosts.some(entry => entry.id === failedCost.id)) continue;
+        }
+        if (!unsettledCost && receipts.length > 1) failedCost.id += `:provider:${receipt.provider}:model:${receipt.model}`;
         await dependencies.readweave.appendCostEntry(failedCost, systemWriteContext(failedCost.id, currentJob.workspaceId));
         await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
           // Billing records remain valid after cancellation; they must not revive
@@ -3893,11 +3954,18 @@ async function settleCoreSavedPage(
   fenceToken: number,
   dependencies: AppDependencies,
   timings: Record<string, number>,
-  pageStartedAt: number
+  pageStartedAt: number,
+  router: ModelRouterClient
 ): Promise<boolean> {
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
     && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
+  if (!event) {
+    const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId);
+    // Initial submissions have nothing to resume. Retry can recover the narrow
+    // authority-save/receipt gap using the existing durable generationJobId.
+    if (!job || job.attempt <= 1) return false;
+  }
   const saved = event?.payload as {
     pageId: string;
     draftRevision?: number;
@@ -3922,16 +3990,46 @@ async function settleCoreSavedPage(
     throw new Error("GENERATION_CORE_SAVED_COST_UNAVAILABLE");
   }
 
+  let confirmedDraft = draft;
+  if (!draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())
+    && router.generateBridge) {
+    const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId)!;
+    const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: job.workspaceId,
+      planId: job.planId, release, pageNumber: draft.page.pageNumber, dependencies });
+    const result = await router.generateBridge({ pageTitle: draft.page.title, pageNumber: draft.page.pageNumber,
+      sourceText: "", previousPageContext: previous.context,
+      currentSummary: draft.page.lessonSections?.find(section => section.kind === "main_content")?.markdown || "",
+      language: job.language || "zh-CN", qualityMode: job.qualityMode || generationQualityMode(job.budgetUsd),
+      writingPolicySnapshotId: job.writingPolicySnapshotId || release.writingPolicySnapshotId,
+      idempotencyKey: `course-os:${jobId}:attempt:${job.attempt}:${pageId}:bridge:v1`,
+      maxCostUsd: Math.max(0.001, job.budgetUsd - job.spentUsd), stage: "teach" });
+    const page = structuredClone(draft.page);
+    page.lessonSections = [{ id: `${pageId}:section:bridge`, kind: "chapter_bridge", title: "承上启下",
+      markdown: result.markdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) },
+      ...(page.lessonSections || []).filter(section => section.kind !== "chapter_bridge")];
+    const cost = makeGenerationCostEntry(jobId, job, release, pageId, result.provider, result.model, result.usage, "succeeded", true);
+    cost.id += ":bridge";
+    const write = systemWriteContext(`generation:${jobId}:attempt:${job.attempt}:${pageId}:bridge`, job.workspaceId);
+    const patch = { ...draft, page, contentHash: sha256Text(stableStringify(page)), updatedAt: new Date().toISOString() };
+    await assertGenerationFence(jobId, fenceToken, dependencies);
+    confirmedDraft = dependencies.readweave.saveDraftWithCost
+      ? await dependencies.readweave.saveDraftWithCost(patch, draft.revision, write, cost)
+      : await dependencies.readweave.saveDraft(patch, draft.revision, write);
+    const readback = await dependencies.readweave.getDraftByPage(pageId);
+    if (readback?.contentHash !== confirmedDraft.contentHash) throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
+    if (!dependencies.readweave.saveDraftWithCost) await dependencies.readweave.appendCostEntry(cost, systemWriteContext(cost.id, job.workspaceId));
+    costs.push(cost);
+  }
   await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
     if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) return;
     for (const cost of costs) applyScopedCost(job, cost, context);
     if (!job.completedPageIds.includes(pageId)) job.completedPageIds.push(pageId);
     const primaryCost = costs.find((cost) => cost.stage === "teach" && !cost.id.endsWith(":bridge")) ?? costs[0]!;
     context.appendEvent("generation.page.completed", {
-      pageId, draftRevision: draft.revision, contentHash: draft.contentHash,
+      pageId, draftRevision: confirmedDraft.revision, contentHash: confirmedDraft.contentHash,
       actualMicrousd: primaryCost.actualMicrousd,
       publishable: saved?.publishable ?? draft.page.quality.publishable,
-      bridgeCompleted: saved?.bridgeCompleted === true || costs.some((cost) => cost.id.endsWith(":bridge")),
+      bridgeCompleted: !!confirmedDraft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim()),
       settledMs: Date.now() - Date.parse(job.createdAt),
       timings: { ...timings, recoverySettlementMs: Date.now() - pageStartedAt }
     });
@@ -5086,7 +5184,11 @@ function normalizeAnswer(value: string): string {
 
 export function evaluateQuestionAnswer(item: QuestionBankItem, answer: string): boolean | null {
   if (normalizeAnswer(answer) === normalizeAnswer(item.expectedAnswer)) return true;
-  if (item.kind === "multiple_choice") return false;
+  if (item.kind === "multiple_choice") {
+    const options = Array.isArray(item.options) ? item.options.filter((option): option is string => typeof option === "string") : [];
+    if (options.length < 2) return null;
+    return options.some((option) => normalizeAnswer(option) === normalizeAnswer(answer)) ? false : null;
+  }
   const numeric = (value: string): number | undefined => {
     const normalized = value.trim().replace(/^\$|\$$/g, "").replace(/,/g, "");
     return /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized) ? Number(normalized) : undefined;
@@ -5097,19 +5199,60 @@ export function evaluateQuestionAnswer(item: QuestionBankItem, answer: string): 
   return null;
 }
 
-function selectQuestionBank(bank: QuestionBankItem[], seed: string, count: number): QuestionBankItem[] {
-  const approved = bank.filter((item) => item.status === "approved");
+export function isPracticeReadyQuestion(item: QuestionBankItem): boolean {
+  if (!item || typeof item !== "object"
+    || typeof item.id !== "string" || !item.id.trim()
+    || typeof item.pageId !== "string" || !item.pageId.trim()
+    || typeof item.objectiveId !== "string" || !item.objectiveId.trim()
+    || typeof item.prompt !== "string" || !item.prompt.trim()
+    || typeof item.expectedAnswer !== "string" || !item.expectedAnswer.trim()
+    || typeof item.explanation !== "string" || !item.explanation.trim()
+    || item.status !== "approved" || !Number.isInteger(item.version) || item.version < 1) return false;
+  if (item.kind === "comprehension") return true;
+  if (item.kind !== "multiple_choice" || !Array.isArray(item.options)) return false;
+  if (!item.options.every((option) => typeof option === "string" && Boolean(option.trim()))) return false;
+  const options = item.options as string[];
+  const uniqueOptions = new Set(options.map(normalizeAnswer));
+  return uniqueOptions.size >= 2 && options.some((option) => normalizeAnswer(option) === normalizeAnswer(item.expectedAnswer));
+}
+
+export function selectQuestionBank(bank: QuestionBankItem[], seed: string, count: number, excludedQuestionIds: string[] = []): QuestionBankItem[] {
+  const excluded = new Set(excludedQuestionIds);
+  const approved = uniquePracticeQuestionBank(bank).filter((item) => !excluded.has(item.id));
   const score = (item: QuestionBankItem) => sha256Text(`${seed}:${item.id}`);
   const comprehension = approved.filter((item) => item.kind === "comprehension").sort((a, b) => score(a).localeCompare(score(b)));
   const choice = approved.filter((item) => item.kind === "multiple_choice").sort((a, b) => score(a).localeCompare(score(b)));
+  const plan: Array<QuestionBankItem["kind"]> = count === 2
+    ? ["multiple_choice", "comprehension"]
+    : count === 3
+      ? ["multiple_choice", "multiple_choice", "comprehension"]
+      : count === 5
+        ? ["multiple_choice", "multiple_choice", "comprehension", "multiple_choice", "multiple_choice"]
+        : Array.from({ length: count }, (_, index) => index < Math.min(count, Math.max(1, Math.round(count * 2 / 3))) ? "multiple_choice" : "comprehension");
   const selected: QuestionBankItem[] = [];
-  while (selected.length < count && (comprehension.length || choice.length)) {
-    const source = selected.length % 2 === 0 ? comprehension : choice;
-    const fallback = source.length ? source : selected.length % 2 === 0 ? choice : comprehension;
-    const item = fallback.shift();
+  for (const kind of plan) {
+    const preferred = kind === "multiple_choice" ? choice : comprehension;
+    const fallback = kind === "multiple_choice" ? comprehension : choice;
+    const item = preferred.shift() ?? fallback.shift();
     if (item) selected.push(item);
   }
   return selected;
+}
+
+function uniquePracticeQuestionBank(bank: QuestionBankItem[]): QuestionBankItem[] {
+  const byId = new Map<string, QuestionBankItem>();
+  for (const item of bank) {
+    if (!isPracticeReadyQuestion(item)) continue;
+    const current = byId.get(item.id);
+    if (!current || item.version > current.version) byId.set(item.id, item);
+  }
+  return [...byId.values()];
+}
+
+function questionsForSavedSelection(selection: QuestionSelection, currentBank: QuestionBankItem[]): QuestionBankItem[] {
+  if (Array.isArray(selection.questionSnapshots)) return selection.questionSnapshots.filter(isPracticeReadyQuestion);
+  const selectedIds = new Set(selection.questionIds);
+  return currentBank.filter((item) => selectedIds.has(item.id));
 }
 
 function seededOrder(values: string[], seed: string): string[] {

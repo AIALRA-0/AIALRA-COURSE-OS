@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseTreeNode } from "@course-os/contracts";
-import { CourseTree } from "./CourseTree.js";
+import { buildCourseTreeSearchResults, CourseTree, moveSearchIndex, resolveCourseTreeSearchActivation, type CourseTreeSearchMaterial } from "./CourseTree.js";
 
 describe("CourseTree background task entries", () => {
   it("places a persisted import under its course rather than in the unrelated task section", () => {
@@ -102,5 +102,71 @@ describe("CourseTree background task entries", () => {
     expect(markup.indexOf('data-task-id="task-running"')).toBeLessThan(historyStart);
     expect(markup).not.toContain('<details class="tree-task-history" open');
     expect(markup).not.toContain('<details class="tree-task-attention" aria-label="需处理" open');
+  });
+});
+
+describe("CourseTree search navigation", () => {
+  const currentMaterial = {
+    id: "material-current", kind: "material", title: "Linear Algebra", currentReleaseId: "release-current", releaseId: "release-current",
+    revision: 4, status: "draft", children: []
+  } as unknown as CourseTreeNode;
+  const treeNodes = [
+    {
+      id: "course-1", kind: "course", title: "EE680", status: "published", children: [
+        currentMaterial,
+        { id: "material-archived", kind: "material", title: "Archived Linear Algebra", archived: true, children: [] },
+        { id: "release-history", kind: "release", title: "Historical Release", children: [{ id: "old-page", kind: "page", title: "Archived Eigenvalues", pageId: "old-page", releaseId: "release-old", children: [] }] }
+      ]
+    } as unknown as CourseTreeNode,
+    { id: "trash", kind: "trash", title: "Trash Eigenvalues", children: [] } as unknown as CourseTreeNode
+  ];
+  const searchMaterials: CourseTreeSearchMaterial[] = [
+    { materialNodeId: "material-current", releaseId: "release-current", version: 4, lifecycle: "draft_source", pages: [{ id: "page-current", pageNumber: 7, title: "Eigenvalues and Stability" }] },
+    { materialNodeId: "material-current", releaseId: "release-old", version: 3, lifecycle: "published", pages: [{ id: "page-old", pageNumber: 6, title: "Archived Eigenvalues" }] }
+  ];
+
+  it("returns current page targets while excluding archived, trash, and release history", () => {
+    const results = buildCourseTreeSearchResults(treeNodes, "eigenvalues", searchMaterials);
+
+    expect(results.map(({ node }) => node.pageId)).toEqual(["page-current"]);
+    expect(results[0]?.node.releaseId).toBe("release-current");
+    expect(results[0]?.detail).toContain("v4");
+    expect(buildCourseTreeSearchResults(treeNodes, "trash", searchMaterials)).toHaveLength(0);
+    expect(buildCourseTreeSearchResults(treeNodes, "archived", searchMaterials)).toHaveLength(0);
+  });
+
+  it("wraps arrow selection and resolves page, material, and course activation to their intended actions", () => {
+    expect(moveSearchIndex(0, -1, 3)).toBe(2);
+    expect(moveSearchIndex(2, 1, 3)).toBe(0);
+    expect(moveSearchIndex(-1, 1, 3)).toBe(0);
+    expect(moveSearchIndex(0, 1, 0)).toBe(-1);
+
+    expect(resolveCourseTreeSearchActivation({ id: "page", kind: "page", title: "Page", pageId: "page-9", releaseId: "release-2", children: [] } as CourseTreeNode))
+      .toEqual({ kind: "page", releaseId: "release-2", pageId: "page-9" });
+    expect(resolveCourseTreeSearchActivation(currentMaterial))
+      .toEqual({ kind: "material", node: currentMaterial, restoreReadingPosition: true });
+    expect(resolveCourseTreeSearchActivation(treeNodes[0]!)).toEqual({ kind: "container" });
+  });
+
+  it("shows version publication labels on materials only and keeps review status separate", () => {
+    const publishedMaterial = {
+      id: "material-published", kind: "material", title: "Published Material", currentReleaseId: "release-published", revision: 8,
+      status: "needs_review", children: []
+    } as unknown as CourseTreeNode;
+    const draft = { ...currentMaterial, id: "material-draft", title: "Draft Material", currentReleaseId: "release-draft", revision: 4 };
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "课程空间", courses: [{ ...treeNodes[0]!, children: [publishedMaterial, draft] }], rootMaterials: [], updatedAt: "2026-09-30T10:00:00.000Z" },
+      searchMaterials: [
+        { materialNodeId: "material-published", releaseId: "release-published", version: 8, lifecycle: "published", pages: [] },
+        { materialNodeId: "material-draft", releaseId: "release-draft", version: 4, lifecycle: "draft_source", pages: [] }
+      ],
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+
+    expect(markup).toContain("已发布 v8");
+    expect(markup).toContain("草稿 v4");
+    expect(markup).toContain("材料状态：需要审核");
+    expect(markup).not.toContain('aria-label="状态：已发布"');
+    expect(markup).not.toContain('aria-label="材料版本：已发布 v0"');
   });
 });

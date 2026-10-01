@@ -676,6 +676,10 @@ export interface QuestionSelection {
   pageId: Identifier;
   seed: string;
   questionIds: Identifier[];
+  /** Requested dynamic practice batch size; older selections may omit it. */
+  count?: 2 | 3 | 5;
+  /** Immutable question content used by this selection, preserving the selected versions. */
+  questionSnapshots?: QuestionBankItem[];
   createdAt: ISODateTime;
 }
 
@@ -686,6 +690,8 @@ export interface QuestionAttempt {
   courseReleaseId: Identifier;
   pageId: Identifier;
   questionId: Identifier;
+  /** Version presented when this answer was submitted; absent on historical attempts. */
+  questionVersion?: number;
   objectiveId: Identifier;
   answer: string;
   correct: boolean | null;

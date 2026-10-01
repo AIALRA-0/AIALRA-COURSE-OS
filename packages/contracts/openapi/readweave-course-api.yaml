@@ -167,14 +167,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        '201': { description: Random seed and selected question order stored }
+        '201': { description: Stable question batch size, seed, selected IDs, and immutable question version snapshots stored }
   /question-attempts:
     post:
       operationId: saveQuestionAttempt
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        '201': { description: Question attempt and misconception evidence stored }
+        '201': { description: Question attempt, source selection, and presented question version stored; unverifiable free text is not counted as incorrect }
   /question-attempt-transactions:
     post:
       operationId: saveQuestionAttemptTransaction

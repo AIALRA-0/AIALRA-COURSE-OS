@@ -215,8 +215,7 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
     ];
     const questionChoices = [record.questions, record.exercises, record.quizQuestions, record.assessmentQuestions,
       providerQuizQuestions(record.quiz), record.practiceQuestions, splitQuestions];
-    const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length === 4)
-      ?? questionChoices.find(item => Array.isArray(item) && item.length > 0)
+    const sourceQuestions = questionChoices.find(item => Array.isArray(item) && item.length > 0)
       ?? record.questions ?? [];
     const rawOptions = record.options ?? record.choices;
     const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
@@ -511,7 +510,6 @@ function recordFormatWarnings(trace: PlannedTrace, issues: string[]): void {
 function recordQualityWarnings(trace: PlannedTrace, content: TeachingPackage): void {
   const issues: string[] = [];
   if (content.fullExplanationMarkdown.length < 120) issues.push("TEACHING_QUALITY:EXPLANATION_SHORT");
-  if (content.questions.length !== 4) issues.push("TEACHING_QUALITY:QUESTION_COUNT:" + content.questions.length);
   if (content.questions.some(question => question.explanation.trim() === question.expectedAnswer.trim())) {
     issues.push("TEACHING_QUALITY:QUESTION_EXPLANATION_EQUALS_ANSWER");
   }
@@ -520,12 +518,11 @@ function recordQualityWarnings(trace: PlannedTrace, content: TeachingPackage): v
 
 function questionsNeedRepair(value: TeachingPackage | undefined): boolean {
   const questions = value?.questions;
-  if (!Array.isArray(questions) || questions.length !== 4) return true;
-  const comprehension = questions.filter(question => question.kind === "comprehension");
+  if (!Array.isArray(questions)) return true;
   const choices = questions.filter(question => question.kind === "multiple_choice");
-  return comprehension.length !== 2 || choices.length !== 2
-    || choices.some(question => !Array.isArray(question.options) || question.options.length !== 4
-      || !question.options.includes(question.expectedAnswer));
+  return choices.some(question => !Array.isArray(question.options) || question.options.length < 2
+    || new Set(question.options).size !== question.options.length
+    || !question.options.includes(question.expectedAnswer));
 }
 
 function repairFieldsFor(issues: string[], formatIssues: string[], questionsIncomplete: boolean): string[] {
@@ -662,9 +659,7 @@ export async function writePlannedLesson(
     };
     const repairSchema = !fullPackageRepair && repairFields.length > 0 ? {
       type: "object",
-      properties: Object.fromEntries(repairFields.map(field => [field, field === "questions"
-        ? { ...schemaProperties.questions, minItems: 4, maxItems: 4 }
-        : schemaProperties[field]])),
+      properties: Object.fromEntries(repairFields.map(field => [field, schemaProperties[field]])),
       required: repairFields,
       additionalProperties: false
     } : teachingPackageSchema;
@@ -684,7 +679,7 @@ export async function writePlannedLesson(
       contentFormatIssues: [],
       instruction: fullPackageRepair
         ? "当前没有有效候选教学包；只根据完整来源生成 targetFields 列出的全部最终字段，不假设未提供的内容已经保存。"
-        : "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。questions 必须是 2 道理解题和 2 道四选一选择题。"
+        : "只返回 targetFields 中列出的字段。保留已有教学事实，不重写其他字段。题库随实质知识变化，以单选为主、少量简答；没有实质练习必要时可以为空，不为凑数考元数据。"
     });
     try {
       const repairedRaw = (await run({
