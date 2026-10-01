@@ -672,6 +672,32 @@ describe("planned teaching core writer", () => {
     expect(projected.mainContentMarkdown).toBe(source.mainContentMarkdown);
   });
 
+  it("projects the observed teacherNarration string and ignores unusable aliases", () => {
+    const source = teachingPackage();
+    const { fullExplanationMarkdown: _full, ...withoutFullExplanation } = source;
+    const fromNarration = projectPlannedOutputToSchema({
+      ...withoutFullExplanation,
+      teacherNarration: explanation
+    }, teachingPackageSchema) as typeof source;
+    expect(fromNarration.fullExplanationMarkdown).toBe(explanation);
+
+    const canonicalWins = projectPlannedOutputToSchema({
+      ...source,
+      teacherNarration: { text: "wrong type alias" }
+    }, teachingPackageSchema) as typeof source;
+    expect(canonicalWins.fullExplanationMarkdown).toBe(source.fullExplanationMarkdown);
+
+    const emptyCanonicalFallsBack = projectPlannedOutputToSchema({
+      ...source,
+      fullExplanationMarkdown: "",
+      teacherNarration: explanation,
+      mainContentMarkdown: null,
+      mainContentSummaryMarkdown: source.mainContentMarkdown
+    }, teachingPackageSchema) as typeof source;
+    expect(emptyCanonicalFallsBack.fullExplanationMarkdown).toBe(explanation);
+    expect(emptyCanonicalFallsBack.mainContentMarkdown).toBe(source.mainContentMarkdown);
+  });
+
   it("fills the empty options shape for a comprehension answer", () => {
     const projected = projectPlannedOutputToSchema({
       type: "short_answer", question: "这一步解决什么问题？", answer: "连接输入与输出", rationale: "从输入追踪到输出"
@@ -733,12 +759,46 @@ describe("planned teaching core writer", () => {
     expect(plannedContentIssues(result.content)).toEqual([]);
   });
 
-  it("recovers the final required summary from existing explanation text", async () => {
-    const answer = { ...teachingPackage(), mainContentMarkdown: undefined };
-    const result = await writePlannedLesson(input(), async request =>
-      request.phase === "plan" ? "先解释输入" : answer);
-    expect(result.content.mainContentMarkdown).toContain("输入是处理开始时已经具备的信息");
-    expect(plannedContentIssues(result.content)).toEqual([]);
+  it("keeps the real body for review when question repair fails", async () => {
+    const source = teachingPackage();
+    const initial = {
+      ...source,
+      questions: [source.questions[0], { kind: "invalid" }]
+    };
+    const result = await writePlannedLesson(input(), async request => {
+      if (request.phase === "plan") return "先解释输入";
+      if (request.phase === "teaching") return initial;
+      throw new Error("QUESTION_REPAIR_UNAVAILABLE");
+    });
+
+    expect(result.content.mainContentMarkdown).toBe(source.mainContentMarkdown);
+    expect(result.content.fullExplanationMarkdown).toBe(
+      normalizePlannedSourceIntroductions({ fullExplanationMarkdown: source.fullExplanationMarkdown }).fullExplanationMarkdown
+    );
+    expect(result.content.questions).toEqual([source.questions[0]]);
+    expect(result.trace.repairDiagnostic?.providerError).toBe("QUESTION_REPAIR_UNAVAILABLE");
+  });
+
+  it.each(["mainContentMarkdown", "fullExplanationMarkdown"] as const)(
+    "preserves partial body content and warns when %s remains missing", async field => {
+      const source = teachingPackage();
+      const answer = { ...source, [field]: undefined };
+      const result = await writePlannedLesson(input(), async request =>
+        request.phase === "plan" ? "先解释输入" : answer);
+      expect(result.content[field]).toBe("");
+      expect(result.content[field === "mainContentMarkdown" ? "fullExplanationMarkdown" : "mainContentMarkdown"])
+        .toBe(field === "mainContentMarkdown"
+          ? normalizePlannedSourceIntroductions({ fullExplanationMarkdown: source.fullExplanationMarkdown }).fullExplanationMarkdown
+          : source.mainContentMarkdown);
+      expect(result.trace.formatWarnings?.[0]?.issues).toContain(`result.${field}:empty`);
+    }
+  );
+
+  it("fails when neither of the two body fields contains usable text", async () => {
+    const answer = { ...teachingPackage(), mainContentMarkdown: undefined, fullExplanationMarkdown: undefined };
+    await expect(writePlannedLesson(input(), async request =>
+      request.phase === "plan" ? "先解释输入" : answer))
+      .rejects.toThrow("TEACHING_PACKAGE_INVALID:");
   });
 
   it("keeps deterministic typography and provider-shape normalizers", () => {

@@ -51,11 +51,11 @@ import type {
 } from "@course-os/contracts";
 import type { WorkspaceTree } from "@course-os/contracts";
 import type { ReadingRuntime } from "./reading-runtime.js";
-import { toCourseReleaseIndex, withReadBudget } from "@course-os/readweave-adapter";
+import { selectMaterialRelease, toCourseReleaseIndex, withReadBudget } from "@course-os/readweave-adapter";
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, removeMainExplanationDuplicateLines, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
@@ -833,7 +833,13 @@ export function createApp(dependencies: AppDependencies): Express {
           await dependencies.reading.confirmPage(pageId, release.id);
         }
         const saved = await dependencies.reading.replica.getDraft(workspaceId, pageId, release.id);
-        if (!saved) return sendError(request, response, 409, "PAGE_NOT_READY", "这页还没有已确认的讲解，请稍后查看", true);
+        if (!saved) {
+          const sourcePage = release.pages.find(page => page.id === pageId);
+          const notGenerated = release.lifecycle === "draft_source"
+            && sourcePage?.quality.issues.includes("TEACHING_GENERATION_REQUIRED");
+          return sendError(request, response, 409, notGenerated ? "PAGE_NOT_GENERATED" : "PAGE_NOT_READY",
+            notGenerated ? "这页尚无已保存的讲解，请在制作区生成" : "这页的讲解副本尚未就绪", !notGenerated);
+        }
         if (saved.workspaceId !== workspaceId || saved.courseId !== release.courseId || saved.sourceReleaseId !== release.id || saved.pageId !== pageId) {
           return sendError(request, response, 409, "PAGE_NOT_READY", "这页还没有已确认的讲解，请稍后查看", true);
         }
@@ -927,19 +933,28 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const idempotencyKey = requireIdempotencyKey(request);
       const pageId = request.params.id;
-      const source = findPageSource(await listWorkspaceReleases(dependencies.readweave, request.header("X-Workspace-Id") || "personal"), pageId);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const requestedReleaseId = typeof request.body.releaseId === "string" ? request.body.releaseId : undefined;
+      const requestedRelease = requestedReleaseId ? await getWorkspaceRelease(dependencies.readweave, requestedReleaseId, workspaceId) : undefined;
+      const source = findPageSource(requestedReleaseId ? (requestedRelease ? [requestedRelease] : []) : await listWorkspaceReleases(dependencies.readweave, workspaceId), pageId);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
       const expectedRevision = Number(request.body.baseRevision);
       if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return sendError(request, response, 422, "BASE_REVISION_INVALID", "保存草稿时必须提供有效的 baseRevision", false);
       const page = request.body.page;
       if (!page || page.id !== pageId || !Array.isArray(page.blocks)) return sendError(request, response, 422, "DRAFT_PAGE_INVALID", "草稿页面结构无效", false);
-      const keepReady = request.body.keepReady === true;
-      if (keepReady) {
-        const issues = validatePageForPublication(page);
-        if (issues.length > 0) return sendError(request, response, 422, "DRAFT_NOT_PUBLISHABLE", "页面仍有发布检查问题，无法标记为可用", false, { issues });
-      }
       const currentCandidate = await dependencies.readweave.getDraftByPage(pageId);
       const current = currentCandidate && currentCandidate.workspaceId === (request.header("X-Workspace-Id") || "personal") && currentCandidate.courseId === source.release.courseId ? currentCandidate : undefined;
+      if (current && requestedReleaseId && current.sourceReleaseId !== requestedReleaseId) return sendError(request, response, 409, "DRAFT_RELEASE_CONFLICT", "草稿已属于另一版本，请重新读取后保存", false);
+      const keepReady = request.body.keepReady === true;
+      if (keepReady) {
+        // A ready draft edit preserves readability, not publication approval.
+        // Existing publication diagnostics must not erase an acknowledged body.
+        const full = page.lessonSections?.find((section: LessonSection) => section.kind === "full_explanation")?.markdown;
+        const issues = current?.status === "ready"
+          ? [...validatePageMath(page), ...(typeof full === "string" && !full.trim() ? ["full_explanation:CONTENT_REQUIRED"] : [])]
+          : validatePageForPublication(page);
+        if (issues.length > 0) return sendError(request, response, 422, "DRAFT_NOT_PUBLISHABLE", "页面仍有发布检查问题，无法标记为可用", false, { issues });
+      }
       const changedBlockIds = Array.isArray(request.body.changedBlockIds) ? request.body.changedBlockIds.map(String) : page.blocks.map((block: { id: string }) => block.id);
       const draft: LessonDraft = {
         ...(current ?? createVirtualDraft(source.release, source.page, request.header("X-Workspace-Id") || "personal")),
@@ -2482,13 +2497,12 @@ function buildCourseTree(courses: CourseProject[], releases: CourseRelease[], dr
   }
   const materialRows: CourseTreeNode[] = [...groups.entries()].map(([key, moduleReleases]): CourseTreeNode => {
     const sorted = [...moduleReleases].sort((left, right) => right.version - left.version || right.publishedAt.localeCompare(left.publishedAt));
-    const latestPublished = sorted.find((release) => release.lifecycle !== "draft_source");
-    const current = latestPublished ?? sorted[0];
     const separator = key.indexOf("\u0000");
     const sourceCourseId = key.slice(0, separator);
     const moduleId = key.slice(separator + 1);
     const materialId = `material:${sourceCourseId}:${moduleId}`;
     const persisted = persistedMaterials.get(materialId);
+    const current = selectMaterialRelease(sorted, drafts, sourceCourseId, moduleId, persisted?.currentReleaseId);
     const parentId = persisted
       ? (persisted.parentId && formalCourses.some((candidate) => candidate.id === persisted.parentId) ? persisted.parentId : undefined)
       : sourceCourseId;
@@ -2500,7 +2514,7 @@ function buildCourseTree(courses: CourseProject[], releases: CourseRelease[], dr
       subtitle: `${current?.pages.length ?? 0} 页 · ${current?.lifecycle === "draft_source" ? "待审核" : current?.pages.every((page) => page.quality.publishable) ? "已就绪" : draftCount ? `${draftCount} 页有草稿` : "已就绪"}`,
       parentId,
       releaseId: current?.id,
-      currentReleaseId: latestPublished?.id ?? current?.id,
+      currentReleaseId: current?.id,
       materialId,
       pageCount: current?.pages.length ?? 0,
       status: persisted?.archived ? "draft" as const : current?.lifecycle === "draft_source" ? "draft" as const : current?.pages.every((page) => page.quality.publishable) ? "published" as const : "needs_review" as const,
@@ -3641,7 +3655,6 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       timings.formatCheckMs = generation.teachingTrace?.formatCheckMs ?? 0;
       if (generation.teachingTrace && sourceDescription) generation.teachingTrace.sourceDescription = sourceDescription;
       const reviewStartedAt = Date.now();
-      generation.content.fullExplanationMarkdown = removeMainExplanationDuplicateLines(generation.content.mainContentMarkdown, generation.content.fullExplanationMarkdown);
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, {
         provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens,
@@ -3684,7 +3697,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         sourceReleaseId: release.id,
         pageId: page.id,
         revision: existing?.revision ?? 0,
-        status: "ready",
+        status: generation.content.fullExplanationMarkdown.trim() && generation.content.questions.length === 4
+          ? "ready" : "needs_review",
         page: generatedPage,
         changedBlockIds: generatedPage.blocks.map((block) => block.id),
         contentHash,
@@ -4046,7 +4060,7 @@ export function applyTeachingPackage(page: CourseRelease["pages"][number], conte
   const sentenceItems = (prefix: string, values: string[]) => values.map((text, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: text.replace(/^[-*+]\s+/, "").trim(), sourceAnchorIds: anchorIds }));
   // Coverage evidence is operational metadata. Appending it to the lesson
   // made the learner-facing explanation read like an internal audit log.
-  const fullExplanationMarkdown = teachingTrace ? normalizedContent.fullExplanationMarkdown : removeRepeatedTeachingOpening(normalizedContent.mainContentMarkdown, normalizedContent.fullExplanationMarkdown);
+  const fullExplanationMarkdown = normalizedContent.fullExplanationMarkdown;
   const lessonSections: LessonSection[] = [
     ...(normalizedContent.chapterBridgeMarkdown?.trim() ? [{ id: `${page.id}:section:bridge`, kind: "chapter_bridge" as const, title: "承上启下", markdown: normalizedContent.chapterBridgeMarkdown.trim(), sourceAnchorIds: anchorIds, atomIds }] : []),
     { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: sentenceItems("prior", normalizedContent.priorKnowledge), sourceAnchorIds: anchorIds, atomIds },
@@ -4376,14 +4390,6 @@ function normalizeMathSpan(match: string, source: string, delimiter: "$" | "$$")
 
 function oneSentence(value: string): string {
   return value.replace(/^[-*]\s*/, "").replace(/[\r\n]+/g, " ").trim();
-}
-
-function removeRepeatedTeachingOpening(main: string, full: string): string {
-  const mainText = main.trim();
-  const fullText = full.trim();
-  if (mainText.length < 24 || !fullText.startsWith(mainText)) return fullText;
-  const remainder = fullText.slice(mainText.length).trim();
-  return remainder || fullText;
 }
 
 async function originalPageDataUrl(page: CourseRelease["pages"][number], dependencies: AppDependencies): Promise<string | undefined> {

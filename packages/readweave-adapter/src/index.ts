@@ -27,7 +27,9 @@ import type {
   WorkspaceSettings
 } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
-import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
+import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, selectMaterialRelease, stableMaterialId } from "./tree-identity.js";
+
+export { selectMaterialRelease };
 
 export interface QuestionAttemptTransactionResult {
   attempt: QuestionAttempt;
@@ -254,7 +256,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
       .map((node) => [node.id, structuredClone(node)] as const));
     for (const node of generatedCourses) if (!byId.has(node.id)) byId.set(node.id, node);
     const persistedMaterials = new Map(state.treeNodes.filter((node) => node.kind === "material" && !node.archived).map((node) => [node.id, node]));
-    for (const group of materialGroups(state.releases)) {
+    for (const group of materialGroups(state.releases, state.drafts)) {
       const course = generatedCourses.find((item) => item.id === group.courseId);
       if (!course) continue;
       const id = stableMaterialId(group.courseId, group.moduleId);
@@ -267,7 +269,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
         status: "active",
         createdAt: new Date(0).toISOString(),
         updatedAt: new Date(0).toISOString()
-      }, group, persisted), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? fileMaterialNoteId(id) });
+      }, group, persisted, state.drafts), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? fileMaterialNoteId(id) });
     }
     return [...byId.values()];
   }
@@ -957,7 +959,7 @@ function ensureMaterialForTreeMutation(state: ReadWeaveFileState, nodeId: string
     return stable;
   }
   if (!isStableMaterialId(nodeId, state.releases)) return undefined;
-  const group = materialGroups(state.releases).find((item) => stableMaterialId(item.courseId, item.moduleId) === nodeId);
+  const group = materialGroups(state.releases, state.drafts).find((item) => stableMaterialId(item.courseId, item.moduleId) === nodeId);
   if (!group) return undefined;
   let course = state.courses.find((item) => item.id === group.courseId);
   if (!course) {
@@ -965,7 +967,7 @@ function ensureMaterialForTreeMutation(state: ReadWeaveFileState, nodeId: string
     if (course) state.courses.push(course);
   }
   if (!course) return undefined;
-  const material = { ...materialTreeNode(course, group), readweaveNoteId: fileMaterialNoteId(nodeId) };
+  const material = { ...materialTreeNode(course, group, undefined, state.drafts), readweaveNoteId: fileMaterialNoteId(nodeId) };
   state.treeNodes.push(material);
   return material;
 }

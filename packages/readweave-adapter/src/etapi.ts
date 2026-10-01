@@ -1168,7 +1168,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       .filter((node) => !(node.kind === "material" && node.id !== node.materialId && node.materialId && stableMaterialIds.has(node.materialId)))
       .map((node) => [node.id, structuredClone(node)] as const));
     for (const node of generated) if (!byId.has(node.id)) byId.set(node.id, node);
-    for (const group of materialGroups(state.releases)) {
+    for (const group of materialGroups(state.releases, state.drafts)) {
       const course = courses.find((item) => item.id === group.courseId);
       if (!course) continue;
       const id = stableMaterialId(group.courseId, group.moduleId);
@@ -1176,7 +1176,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const persisted = state.treeNodes.find((node) => node.kind === "material" && !node.archived && (node.id === id || node.materialId === id));
       const projection = state.projections.courses[group.courseId];
       const legacyNoteId = projection?.modules[group.moduleId];
-      byId.set(id, { ...materialTreeNode(course, group, persisted), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId });
+      byId.set(id, { ...materialTreeNode(course, group, persisted, state.drafts), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId });
     }
     return [...byId.values()];
   }
@@ -1564,7 +1564,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async ensureStableMaterialNode(state: EtapiState, nodeId: string): Promise<CourseTreeNode | undefined> {
-    const group = materialGroups(state.releases).find((item) => stableMaterialId(item.courseId, item.moduleId) === nodeId);
+    const group = materialGroups(state.releases, state.drafts).find((item) => stableMaterialId(item.courseId, item.moduleId) === nodeId);
     if (!group || !isStableMaterialId(nodeId, state.releases)) return undefined;
     let course = state.courses.find((item) => item.id === group.courseId);
     if (!course) {
@@ -1579,7 +1579,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.courses.push(course);
     }
     const projection = await this.ensureCourseScaffold(state, course.id, course.title, course.description);
-    const material = materialTreeNode(course, group);
+    const material = materialTreeNode(course, group, undefined, state.drafts);
     const noteId = projection.modules[group.moduleId] ?? projection.modules[nodeId];
     if (noteId) {
       material.readweaveNoteId = noteId;

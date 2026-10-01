@@ -256,9 +256,12 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
   return <>{loading && <p className="empty-inline" role="status">本页两道题已可先填写；ReadWeave 正在保存选题，保存并核对旧作答后即可提交</p>}{!loading && attemptsState === "loading" && <p className="empty-inline" role="status">正在恢复本次已保存的作答记录</p>}{!loading && attemptsState === "error" && <p className="empty-inline" role="alert">作答记录暂时无法读取，提交已暂停 <button type="button" className="quiet-button" onClick={() => selection && restoreSavedAnswers(selection, questions, selectionRequestSerial.current)}>重试读取</button></p>}{feedback.load && <p className="empty-inline" role="status">{feedback.load}</p>}{bankNotice && <QuestionBankStatus available={available} draftCount={draftCount} onEnterStudio={onEnterStudio} />}<div className="question-stack">{visibleQuestions.map((item, index) => { const pending = pendingQuestionIds.has(item.id); const state = feedbackState[item.id]; return <section key={item.id} data-question-id={item.id} className="question-card"><header><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.kind === "comprehension" ? "理解题" : "选择题"}</strong></header><div className="question-prompt"><Markdown>{item.prompt}</Markdown></div>{item.options?.length ? <div className="choice-list">{item.options.map((option) => <label key={option}><input type="radio" name={item.id} value={option} checked={answers[item.id] === option} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} /><span className="choice-copy"><Markdown inline>{option}</Markdown></span></label>)}</div> : <textarea value={answers[item.id] || ""} disabled={pending} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="不用照抄原文，先用自己的话回答" />}<button className="primary" disabled={!selection || attemptsState !== "ready" || !answers[item.id]?.trim() || pending || answers[item.id]?.trim() === savedAnswers[item.id]} aria-busy={pending} title={!selection ? "正在保存本次选题" : attemptsState === "loading" ? "正在核对已有作答" : attemptsState === "error" ? "请先重试读取作答" : !answers[item.id]?.trim() ? "请先作答" : pending ? "正在保存本题作答" : answers[item.id]?.trim() === savedAnswers[item.id] ? "本题作答已保存" : undefined} onClick={() => void submit(item)}>{pending ? "正在保存" : !selection ? "等待选题保存" : attemptsState !== "ready" ? "等待作答记录" : answers[item.id]?.trim() === savedAnswers[item.id] ? "已保存" : "提交并保存记录"}</button>{pending && <p className="answer-progress" role="status">作答正在保存，请稍候</p>}{feedback[item.id] && <div className={`answer answer-${state || "unverified"}`} aria-live="polite"><strong>{state === "correct" ? "回答正确：记录已保存" : state === "incorrect" ? "还需要复习：答案没有满足当前学习目标" : state === "error" ? "保存失败：答案仍保留在输入框" : "作答已保存：这道理解题暂不能自动判定"}</strong><div><strong>{state === "error" ? "请检查后重试" : state === "unverified" ? "参考思路是" : "正确思路是"}：</strong><Markdown children={feedback[item.id]!} /></div></div>}</section>; })}</div>{!loading && <button className="quiet-button" data-action="questions-another-pair" onClick={() => void chooseAnotherPair()}>换一组题</button>}</>;
 }
 
-function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
+export function QuestionBankStatus({ available, draftCount, onEnterStudio }: { available: number; draftCount: number; onEnterStudio?: () => void }) {
   if (available >= 4 && draftCount === 0) return null;
-  return <div className="question-bank-status"><div><strong>题库尚未就绪</strong><span>当前有 {available} 道可用题目，另有 {draftCount} 道草稿题；补齐 4 道可用题目后即可练习</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>去制作模式补齐</button>}</div>;
+  const message = available < 4
+    ? `当前有 ${available} 道可用题目、${draftCount} 道草稿题；还差 ${4 - available} 道可用题目才能练习`
+    : `当前有 ${available} 道可用题目，已经达到练习要求；另有 ${draftCount} 道草稿题尚未确认`;
+  return <div className="question-bank-status"><div><strong>题库尚未就绪</strong><span>{message}</span></div>{onEnterStudio && <button className="quiet-button" data-action="questions-open-studio" onClick={onEnterStudio}>去制作模式补齐</button>}</div>;
 }
 
 function normalizeSections(page: PageLesson): LessonSection[] {
@@ -266,39 +269,27 @@ function normalizeSections(page: PageLesson): LessonSection[] {
   const sectionTitles: Array<[LessonSection["kind"], string]> = [["chapter_bridge", "承上启下"], ["prior_knowledge", "先验知识"], ["learning_objectives", "学完能做什么"], ["full_explanation", "完整讲解"], ["main_content", "主要内容"], ["misconceptions", "易错点"]];
   if (page.lessonSections?.length) {
     const byKind = new Map(page.lessonSections.map((section) => [section.kind, section]));
-    const main = byKind.get("main_content")?.markdown;
     return sectionTitles.map(([kind, title]) => {
       const section = byKind.get(kind);
       if (kind === "chapter_bridge" && !section) return undefined;
-      if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
+      if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: kind === "full_explanation" ? "完整讲解尚未生成；已有摘要保留" : "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
       if (kind === "main_content" && section.markdown) return { ...section, markdown: summaryMarkdown(section.markdown) };
-      if (page.lessonFlowVersion === 2 || kind !== "full_explanation" || !section.markdown || !main) return section;
-      const distinctExplanation = removeRepeatedOpening(main, section.markdown);
-      return distinctExplanation ? { ...section, markdown: distinctExplanation } : section;
+      if (kind === "full_explanation" && !section.markdown?.trim() && !section.items?.some((item) => item.text.trim())) {
+        return { ...section, markdown: "完整讲解尚未生成；已有摘要保留" };
+      }
+      return section;
     }).filter((section): section is LessonSection => Boolean(section));
   }
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
-  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: removeRepeatedOpening(main, find("core", "example", "deep_dive", "check")) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
+  const fullExplanation = find("core", "example", "deep_dive", "check");
+  return [{ id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学完能做什么", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanation.trim() ? fullExplanation : "完整讲解尚未生成；已有摘要保留", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
 }
 
 export function summaryMarkdown(markdown: string): string {
   if (!/^\s*[-*+]\s+/m.test(markdown)) return markdown;
   return markdown.replace(/^\s*#{1,6}\s+[^\n]+\n+/u, "").trim();
-}
-
-/**
- * Older releases stored the short main-content list again at the beginning
- * of the full explanation. Keep the persisted data intact, but do not make a
- * learner read the same opening twice.
- */
-function removeRepeatedOpening(main: string, full: string): string {
-  const mainText = main.trim();
-  const fullText = full.trim();
-  if (mainText.length < 24 || !fullText.startsWith(mainText)) return fullText;
-  const remainder = fullText.slice(mainText.length).trim();
-  return remainder || fullText;
 }
 
 function splitOutsideMath(source: string): string[] {

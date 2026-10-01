@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
-import type { CourseRelease, LearningSession, LessonDraft, PageLesson } from "@course-os/contracts";
+import type { CourseRelease, LearningSession, LessonDraft, PageLesson, WorkspaceTree } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./api.js";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, beginFormalPageLoad, candidatePreviewAfterReadFailure, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState, type SharedReadLease } from "./App.js";
+import { beginCandidatePreviewLoad, beginFormalPageLoad, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -180,7 +180,8 @@ describe("saved lesson navigation", () => {
     expect(directReadEffect).toContain("loaded.id !== releaseId");
     expect(directReadEffect).not.toContain("defaultRelease");
     expect(directReadEffect).toContain("api.release(releaseId, { signal })");
-    expect(source).toContain("if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || \"\")");
+    expect(source).toContain("defaultRelease(items, initialTree)?.id");
+    expect(source).toContain("const treeRead = initialNavigation.current.releaseId");
     expect(source).toContain("snapshotRead = readCandidateSnapshotOnce(candidateSnapshotRequests.current, release.id, page.id)");
     expect(source).toContain("readCurrentDraft: (signal, confirm) => api.draftSnapshot(page.id, { signal, releaseId: release.id, confirm })");
     expect(source).toContain("release-index-retry");
@@ -207,14 +208,121 @@ describe("saved lesson navigation", () => {
     expect(omittedIndex.find((item) => item.id === "requested")).toBe(detailed);
   });
 
-  it("keeps the existing published default when navigation has no requested release", () => {
+  it("uses each material's exact current release pointer and does not filter readable drafts by lifecycle", () => {
     const releases = [
-      { id: "old", lifecycle: "published", version: 1, publishedAt: "2026-01-01T00:00:00.000Z" },
-      { id: "latest", lifecycle: "published", version: 2, publishedAt: "2026-02-01T00:00:00.000Z" },
-      { id: "draft", lifecycle: "draft_source", version: 99, publishedAt: "2026-03-01T00:00:00.000Z" }
+      { id: "old", courseId: "course-a", moduleId: "module-a", lifecycle: "published", version: 1, publishedAt: "2026-01-01T00:00:00.000Z" },
+      { id: "latest", courseId: "course-a", moduleId: "module-a", lifecycle: "published", version: 2, publishedAt: "2026-02-01T00:00:00.000Z" },
+      { id: "draft", courseId: "course-a", moduleId: "module-a", lifecycle: "draft_source", version: 99, publishedAt: "2026-03-01T00:00:00.000Z" },
+      { id: "other-course", courseId: "course-b", moduleId: "module-a", lifecycle: "published", version: 1, publishedAt: "2026-01-15T00:00:00.000Z" }
     ] as CourseRelease[];
-    expect(defaultRelease(releases)?.id).toBe("latest");
-    expect(defaultRelease([{ ...releases[2]! }])?.id).toBe("draft");
+    const tree = {
+      courses: [{ id: "course-a", kind: "course", children: [{ id: "material-a", kind: "material", currentReleaseId: "draft", releaseId: "latest", children: [] }] }],
+      rootMaterials: []
+    } as unknown as WorkspaceTree;
+
+    expect(defaultRelease(releases)?.id).toBe("draft");
+    expect(defaultRelease(releases, tree)?.id).toBe("draft");
+    expect(currentMaterialReleases(releases, tree).map((release) => release.id)).toEqual(["draft"]);
+
+    const oldReadablePointer = { ...tree, courses: [{ ...tree.courses[0]!, children: [{ ...tree.courses[0]!.children[0]!, currentReleaseId: "old", releaseId: "draft" }] }] };
+    expect(defaultRelease(releases, oldReadablePointer)?.id).toBe("old");
+    expect(currentMaterialReleases(releases).map((release) => release.id).sort()).toEqual(["draft", "other-course"]);
+
+    const confirmedEmptyTree = { courses: [], rootMaterials: [] } as unknown as WorkspaceTree;
+    expect(currentMaterialReleases(releases, confirmedEmptyTree)).toEqual([]);
+    expect(defaultRelease(releases, confirmedEmptyTree)).toBeUndefined();
+
+    const archivedTree = {
+      courses: [{ id: "course-a", kind: "course", children: [{ id: "material-a", kind: "material", currentReleaseId: "latest", releaseId: "latest", archived: true, children: [] }] }],
+      rootMaterials: []
+    } as unknown as WorkspaceTree;
+    expect(currentMaterialReleases(releases, archivedTree)).toEqual([]);
+  });
+
+  it("turns PAGE_NOT_GENERATED and PAGE_NOT_READY into Studio guidance without retry errors", () => {
+    const cases = [
+      ["PAGE_NOT_GENERATED", "这页尚未生成", false],
+      ["PAGE_NOT_READY", "副本尚未就绪", true]
+    ] as const;
+    for (const [code, message, retryable] of cases) {
+      const preview = candidatePreviewAfterReadFailure(undefined, "page-a", new ApiRequestError(message, code, 409, retryable));
+      expect(preview).toMatchObject({ pageId: "page-a", unavailable: code === "PAGE_NOT_GENERATED" ? "not_generated" : "not_ready" });
+      expect(preview.error).toBeUndefined();
+      expect(preview.notice).toContain(message);
+      expect(preview.notice).toContain("制作模式");
+    }
+
+    const cachedPage = candidateDraft("release-a", "page-a", "上次可读正文").page;
+    const preserved = candidatePreviewAfterReadFailure(
+      { pageId: "page-a", page: cachedPage, generatedReady: true },
+      "page-a",
+      new ApiRequestError("副本尚未就绪", "PAGE_NOT_READY", 409, true)
+    );
+    expect(preserved.page).toBe(cachedPage);
+    expect(preserved.notice).toContain("副本尚未就绪");
+    expect(preserved.unavailable).toBe("not_ready");
+    expect(preserved.error).toBeUndefined();
+    const laterTransientFailure = candidatePreviewAfterReadFailure(preserved, "page-a", new ApiRequestError("当前 ReadWeave 暂时超时", "READ_DEADLINE_EXCEEDED", 504, true));
+    expect(laterTransientFailure.page).toBe(cachedPage);
+    expect(laterTransientFailure.unavailable).toBeUndefined();
+    expect(laterTransientFailure.notice).toContain("当前 ReadWeave 暂时超时");
+  });
+
+  it("keeps a needs_review candidate out of learning until it is confirmed", async () => {
+    const partial = candidateDraft("release-a", "page-a", "partial summary");
+    partial.status = "needs_review";
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn(() => Promise.resolve(candidateDraft("release-a", "page-a", "must not replace")));
+
+    beginCandidatePreviewLoad({ releaseId: "release-a", pageId: "page-a", readSnapshot: () => Promise.resolve(partial), readCurrentDraft, isActive: () => true, setPreview });
+    await flushPromises();
+
+    expect(preview?.unavailable).toBe("not_ready");
+    expect(preview?.notice).toContain("needs_review");
+    expect(readCurrentDraft).not.toHaveBeenCalled();
+  });
+
+  it("shows a confirmed summary-only needs_review page with missing-full and actual-question guidance", async () => {
+    const partial = needsReviewDraft("release-a", "page-a", "", "已保存的摘要正文", 2);
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn(() => Promise.resolve(partial));
+
+    beginCandidatePreviewLoad({ releaseId: "release-a", pageId: "page-a", readSnapshot: () => Promise.resolve(partial), readCurrentDraft, isActive: () => true, setPreview });
+    await flushPromises();
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(preview?.page).toBe(partial.page);
+    expect(preview?.generatedReady).toBe(false);
+    expect(preview?.unavailable).toBeUndefined();
+    expect(preview?.notice).toContain("完整讲解尚未生成；已有摘要保留");
+    expect(preview?.notice).toContain("题库当前有 2 道可用题，尚差 2 道待补齐");
+    expect(preview?.notice).toContain("无需重试读取，请进入制作模式");
+    expect(source).toContain("canShowContent && contentReviewRequired && contentNotice");
+    expect(readCurrentDraft).not.toHaveBeenCalled();
+  });
+
+  it("shows a confirmed full-only needs_review page while marking the summary missing", async () => {
+    const partial = needsReviewDraft("release-a", "page-a", "已保存的完整讲解正文", "", 4);
+    let preview: CandidatePreviewState | undefined;
+    const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
+      preview = typeof next === "function" ? next(preview) : next;
+    };
+    const readCurrentDraft = vi.fn(() => Promise.resolve(partial));
+
+    beginCandidatePreviewLoad({ releaseId: "release-a", pageId: "page-a", readSnapshot: () => Promise.resolve(partial), readCurrentDraft, isActive: () => true, setPreview });
+    await flushPromises();
+
+    expect(preview?.page).toBe(partial.page);
+    expect(preview?.generatedReady).toBe(false);
+    expect(preview?.notice).toContain("已有完整讲解正文可读；主要内容摘要尚未补齐");
+    expect(preview?.notice).not.toContain("完整讲解已保存并可读");
+    expect(readCurrentDraft).not.toHaveBeenCalled();
   });
 
   it("treats only the matching ready candidate snapshot as generated", () => {
@@ -732,4 +840,19 @@ function candidateDraft(releaseId: string, pageId: string, markdown: string): Le
     quality: { publishable: false, issues: ["OFFLINE_AUDIT"] }
   } as unknown as PageLesson;
   return { sourceReleaseId: releaseId, pageId, status: "ready", page } as LessonDraft;
+}
+
+function needsReviewDraft(releaseId: string, pageId: string, fullExplanation: string, mainContent: string, approvedQuestionCount: number): LessonDraft {
+  const draft = candidateDraft(releaseId, pageId, mainContent || fullExplanation);
+  draft.status = "needs_review";
+  draft.page = {
+    ...draft.page,
+    teachingCompositionVersion: 1,
+    lessonSections: [
+      { id: `${pageId}:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanation, sourceAnchorIds: [], atomIds: [] },
+      { id: `${pageId}:main`, kind: "main_content", title: "主要内容", markdown: mainContent, sourceAnchorIds: [], atomIds: [] }
+    ],
+    questionBank: Array.from({ length: approvedQuestionCount }, (_, index) => ({ status: "approved", id: `question-${index + 1}` })) as unknown as NonNullable<PageLesson["questionBank"]>
+  };
+  return draft;
 }

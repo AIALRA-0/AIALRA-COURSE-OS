@@ -7,11 +7,12 @@ import { promisify } from "node:util";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import type { CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
+import type { CourseProject, CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
-import { applyTeachingPackage, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
+import { applyTeachingPackage, buildReadingTree, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
+import { ReadingRuntime } from "./reading-runtime.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -659,6 +660,17 @@ describe("Course OS API", () => {
     expect(nativeReader).toHaveBeenCalledWith(pageId, "personal");
     expect(listReleases).not.toHaveBeenCalled();
     await request(app).get(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`).set("X-Workspace-Id", "other-workspace").expect(404);
+  });
+
+  it("preserves the complete body even when its opening and long lines also appear in the summary", () => {
+    const content = testTeachingResult(0).content;
+    content.mainContentMarkdown = "这里定义当前移动的增益，并说明满足平衡约束后才可以执行这次移动";
+    content.fullExplanationMarkdown = `${content.mainContentMarkdown}\n\n## 为什么最后一步还要单独看\n${content.mainContentMarkdown}\n\n这一段保留计算与后续状态变化，不应该只留下章节标题`;
+    for (const trace of [undefined, { version: 1 as const, plan: "", phases: [] }]) {
+      const page = applyTeachingPackage(testRelease().pages[0]!, content, true, "text_only", trace);
+      expect(page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown)
+        .toBe(content.fullExplanationMarkdown);
+    }
   });
 
   it("keeps generated paragraph and list boundaries after page compilation", () => {
@@ -1777,19 +1789,17 @@ describe("Course OS API", () => {
     expect(costs.body.entries[0]).toMatchObject({ status: "succeeded", actualMicrousd: 3_000 });
   }, 60_000);
 
-  it("delivers pages with content-quality and coverage issues as ready drafts", async () => {
+  it("saves partial generations with an empty full explanation as needs_review", async () => {
     const candidate = testRelease();
     candidate.lifecycle = "draft_source";
     candidate.pages[0]!.atoms = [{ kind: "text_region", id: "source-atom", label: "来源片段", observation: "输入经过规则得到输出" }];
     candidate.pages[0]!.coverageRequirements = [{ id: "source-requirement", atomId: "source-atom", requiredFields: ["observation"], risk: "high" }];
+    const partialResult = testTeachingResult(0.001);
+    partialResult.content.fullExplanationMarkdown = "";
+    partialResult.content.questions = [];
+    partialResult.content.coverageEvidence = [{ atomId: "unknown-atom", coveredFields: ["observation"], explanation: "无法对应来源的说明" }];
     const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => {
-        const result = testTeachingResult(0.001);
-        result.content.fullExplanationMarkdown = "只给结论，没有展开说明";
-        result.content.questions = [];
-        result.content.coverageEvidence = [{ atomId: "unknown-atom", coveredFields: ["observation"], explanation: "无法对应来源的说明" }];
-        return result;
-      }
+      generateTeachingPackage: async () => partialResult
     };
     const { app, readweave, release } = await seededApp(modelRouter, candidate);
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "app-nonblocking-content-quality")
@@ -1799,7 +1809,10 @@ describe("Course OS API", () => {
       state: "completed", completedPageIds: ["page-1"], failedPageIds: []
     });
     const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.status).toBe("ready");
+    expect(draft?.status).toBe("needs_review");
+    expect(draft?.page.lessonSections?.find(section => section.kind === "main_content")?.markdown)
+      .toBe(partialResult.content.mainContentMarkdown);
+    expect(draft?.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown).toBe("");
     expect(draft?.page.quality.publishable).toBe(false);
     expect(draft?.page.quality.issues.length).toBeGreaterThan(0);
     expect(draft?.page.quality.issues.some((issue) => issue.includes(":MISSING:"))).toBe(false);
@@ -2034,7 +2047,7 @@ describe("Course OS API", () => {
     expect(listDrafts).not.toHaveBeenCalled();
   });
 
-  it("keeps persisted material properties while advancing its pointer to the latest release", async () => {
+  it("keeps persisted material properties and its release pointer when a newer release is published", async () => {
     const { app, readweave, release } = await seededApp();
     const firstTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
     const material = firstTree.body.courses[0].children[0];
@@ -2053,8 +2066,8 @@ describe("Course OS API", () => {
     const nextTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
     expect(nextTree.body.courses[0].children[0]).toMatchObject({
       title: "保留的材料名称",
-      releaseId: nextRelease.id,
-      currentReleaseId: nextRelease.id,
+      releaseId: release.id,
+      currentReleaseId: release.id,
       pageCount: nextRelease.pages.length
     });
   });
@@ -2157,6 +2170,28 @@ describe("Course OS API", () => {
     expect(scan).not.toHaveBeenCalled();
     expect(ownerRead).toHaveBeenCalledWith(release.id);
     await request(app).get("/api/v1/pages/missing-import-page/draft?view=snapshot").expect(404);
+  });
+
+  it("reports an ungenerated draft-source snapshot as non-retryable PAGE_NOT_GENERATED", async () => {
+    const source = testRelease();
+    source.lifecycle = "draft_source";
+    source.pages[0]!.quality.issues = ["TEACHING_GENERATION_REQUIRED"];
+    const { app, dependencies, readweave, release } = await seededApp(undefined, source);
+    const course: CourseProject = {
+      id: release.courseId, workspaceId: "personal", title: release.courseTitle, status: "active",
+      createdAt: release.publishedAt, updatedAt: release.publishedAt
+    };
+    const reading = new ReadingRuntime(join(dependencies.dataDir, "reading"), readweave, "personal",
+      "authority:app-spec-snapshot", () => buildReadingTree([course], [], [], "personal"));
+    await reading.initialize();
+    await reading.replica.replace({
+      courses: [course], releases: [release], drafts: [],
+      tree: buildReadingTree([course], [], [], "personal"), trash: []
+    });
+    dependencies.reading = reading;
+
+    const response = await request(app).get("/api/v1/pages/page-1/draft?view=snapshot").expect(409);
+    expect(response.body.error).toMatchObject({ code: "PAGE_NOT_GENERATED", retryable: false });
   });
 
   it("adds passive Server-Timing phases to release indexes, draft snapshots, media reads and release details", async () => {
@@ -2404,17 +2439,52 @@ describe("Course OS API", () => {
       .send({ baseRevision: 1, page: correctedPage, keepReady: true }).expect(200);
     expect(promoted.body).toMatchObject({ revision: 2, status: "ready" });
 
-    const invalidPage = {
+    const offlineMisconceptionsPage = {
       ...correctedPage,
-      blocks: correctedPage.blocks.map((block: { id: string; markdown: string }, index: number) => index === 0
+      lessonSections: correctedPage.lessonSections.map((section: { kind: string; items?: unknown[] }) =>
+        section.kind === "misconceptions" ? { ...section, items: [] } : section)
+    };
+    const recovered = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "ready-draft-offline-misconceptions")
+      .send({ baseRevision: 2, page: offlineMisconceptionsPage, keepReady: true }).expect(200);
+    expect(recovered.body).toMatchObject({ revision: 3, status: "ready" });
+    expect((await request(app).post("/api/v1/pages/page-1:validate").expect(200)).body.issues)
+      .toContain("misconceptions:ITEMS_REQUIRED");
+
+    const invalidPage = {
+      ...offlineMisconceptionsPage,
+      blocks: offlineMisconceptionsPage.blocks.map((block: { id: string; markdown: string }, index: number) => index === 0
         ? { ...block, markdown: `${block.markdown}\n损坏公式 \\[x^2` }
         : block)
     };
     const rejected = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "ready-draft-invalid")
-      .send({ baseRevision: 2, page: invalidPage, keepReady: true }).expect(422);
+      .send({ baseRevision: 3, page: invalidPage, keepReady: true }).expect(422);
     expect(rejected.body.error.code).toBe("DRAFT_NOT_PUBLISHABLE");
-    expect(rejected.body.error.details.issues.length).toBeGreaterThan(0);
-    expect(await request(app).get("/api/v1/pages/page-1/draft").then((response) => response.body)).toMatchObject({ revision: 2, status: "ready" });
+    expect(rejected.body.error.details.issues.some((issue: string) => issue.includes("MATH_UNCLOSED_DISPLAY_DELIMITER"))).toBe(true);
+    expect(await request(app).get("/api/v1/pages/page-1/draft").then((response) => response.body)).toMatchObject({ revision: 3, status: "ready" });
+  });
+
+  it("rejects a draft PATCH pinned to another release without mutating the saved draft", async () => {
+    const { app, readweave, release } = await seededApp();
+    const virtual = await request(app).get("/api/v1/pages/page-1/draft").expect(200);
+    const saved = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "draft-release-owner")
+      .send({ baseRevision: 0, page: virtual.body.page }).expect(200);
+    const otherRelease = { ...structuredClone(release), id: "test-release-v2", version: 2 };
+    await readweave.publishRelease(otherRelease, testManifest(otherRelease.id), {
+      idempotencyKey: "publish-draft-release-conflict",
+      actor: "test",
+      workspaceId: "personal",
+      schemaVersion: "2.4.0",
+      requestId: "publish-draft-release-conflict"
+    });
+    const before = await readweave.getDraftByPage("page-1");
+
+    const rejected = await request(app).patch("/api/v1/pages/page-1/draft").set("Idempotency-Key", "draft-wrong-release")
+      .send({ baseRevision: saved.body.revision, page: { ...saved.body.page, title: "错误版本的修改" }, releaseId: otherRelease.id })
+      .expect(409);
+
+    expect(rejected.body.error).toMatchObject({ code: "DRAFT_RELEASE_CONFLICT", retryable: false });
+    expect(await readweave.getDraftByPage("page-1")).toEqual(before);
+    expect(before).toMatchObject({ sourceReleaseId: release.id, revision: 1 });
   });
 });
 

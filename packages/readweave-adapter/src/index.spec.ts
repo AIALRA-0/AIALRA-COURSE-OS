@@ -3,8 +3,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, ReleaseManifest } from "@course-os/contracts";
-import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy, withReadBudget } from "./index.js";
+import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, PageLesson, ReleaseManifest } from "@course-os/contracts";
+import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy, selectMaterialRelease, withReadBudget } from "./index.js";
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
 import { EMPTY_STATE } from "./index.js";
 import { sha256Text, stableStringify } from "@course-os/domain";
@@ -2234,6 +2234,163 @@ describe("ReadWeave ETAPI adapter", () => {
     const moved = await api.updateTreeNode(created.id, { parentId: null }, 0, { ...context, idempotencyKey: "stale-branch-move" });
     expect(moved.parentId).toBeUndefined();
     expect(remote.parentTitleOf(moved.readweaveNoteId!)).toBe("00 工作区根材料");
+  });
+});
+
+describe("material release identity", () => {
+  const published = { ...releaseWithPage(), id: "material-published-v1", version: 1, lifecycle: "published" as const };
+  const readyCandidate: CourseRelease = {
+    ...published,
+    id: "material-candidate-v2",
+    version: 2,
+    lifecycle: "draft_source",
+    pageIds: ["candidate-page-1"],
+    pages: [{ ...published.pages[0]!, id: "candidate-page-1" }]
+  };
+  const readyDraft: LessonDraft = {
+    ...draftFor(readyCandidate, "candidate-page-1"),
+    status: "ready"
+  };
+
+  it("selects complete readable drafts, preserves valid pointers and ignores cross-material pointers", () => {
+    expect(selectMaterialRelease([published], [], published.courseId, published.moduleId)?.id).toBe(published.id);
+    expect(selectMaterialRelease([published, readyCandidate], [readyDraft], published.courseId, published.moduleId)?.id).toBe(readyCandidate.id);
+
+    const emptyBodyCandidate: CourseRelease = {
+      ...readyCandidate,
+      id: "material-empty-body-v2",
+      pageIds: ["candidate-page-1", "candidate-page-2"],
+      pages: [
+        { ...readyCandidate.pages[0]!, blocks: [] },
+        { ...readyCandidate.pages[0]!, id: "candidate-page-2", pageNumber: 2 }
+      ]
+    };
+    const emptyBodyDraft: LessonDraft = {
+      ...readyDraft,
+      sourceReleaseId: emptyBodyCandidate.id,
+      page: { ...emptyBodyCandidate.pages[0]! }
+    };
+    expect(selectMaterialRelease([published, emptyBodyCandidate], [emptyBodyDraft], published.courseId, published.moduleId)?.id).toBe(published.id);
+
+    const blankFullPage: PageLesson = {
+      ...readyCandidate.pages[0]!,
+      id: "blank-full-page",
+      lessonSections: [{
+        id: "blank-full-section",
+        kind: "full_explanation",
+        title: "完整讲解",
+        markdown: "  ",
+        items: [{ id: "summary-item", text: "简短摘要不能替代完整讲解", sourceAnchorIds: [] }],
+        sourceAnchorIds: [],
+        atomIds: []
+      }],
+      blocks: [{ id: "summary-core", kind: "core", title: "核心解释", markdown: "简短摘要", sourceAnchorIds: [], atomIds: [] }]
+    };
+    const blankFullCandidate: CourseRelease = {
+      ...readyCandidate,
+      id: "material-blank-full-v2",
+      pageIds: [blankFullPage.id],
+      pages: [blankFullPage]
+    };
+    const blankFullDraft: LessonDraft = {
+      ...readyDraft,
+      sourceReleaseId: blankFullCandidate.id,
+      pageId: blankFullPage.id,
+      page: blankFullPage
+    };
+    expect(selectMaterialRelease([published, blankFullCandidate], [blankFullDraft], published.courseId, published.moduleId)?.id).toBe(published.id);
+
+    const legacyCorePage: PageLesson = {
+      ...readyCandidate.pages[0]!,
+      id: "legacy-core-page",
+      blocks: [{ id: "legacy-core", kind: "core", title: "核心解释", markdown: "旧版核心讲解仍可阅读", sourceAnchorIds: [], atomIds: [] }]
+    };
+    delete legacyCorePage.lessonSections;
+    const legacyCoreCandidate: CourseRelease = {
+      ...readyCandidate,
+      id: "material-legacy-core-v2",
+      pageIds: [legacyCorePage.id],
+      pages: [legacyCorePage]
+    };
+    const legacyCoreDraft: LessonDraft = {
+      ...readyDraft,
+      sourceReleaseId: legacyCoreCandidate.id,
+      pageId: legacyCorePage.id,
+      page: legacyCorePage
+    };
+    expect(selectMaterialRelease([published, legacyCoreCandidate], [legacyCoreDraft], published.courseId, published.moduleId)?.id).toBe(legacyCoreCandidate.id);
+
+    const completeV3: CourseRelease = {
+      ...readyCandidate,
+      id: "material-candidate-v3",
+      version: 3,
+      pageIds: ["candidate-page-3"],
+      pages: [{ ...readyCandidate.pages[0]!, id: "candidate-page-3" }]
+    };
+    const readyDraftV3: LessonDraft = {
+      ...readyDraft,
+      id: "draft:candidate-page-3",
+      sourceReleaseId: completeV3.id,
+      pageId: "candidate-page-3",
+      page: completeV3.pages[0]!
+    };
+    expect(selectMaterialRelease([published, readyCandidate, completeV3], [readyDraft, readyDraftV3], published.courseId, published.moduleId, readyCandidate.id)?.id).toBe(readyCandidate.id);
+    expect(selectMaterialRelease([published, readyCandidate], [readyDraft], published.courseId, published.moduleId, published.id)?.id).toBe(published.id);
+
+    const otherMaterial = { ...completeV3, id: "other-material-v9", moduleId: "other-module", version: 9 };
+    expect(selectMaterialRelease([published, readyCandidate, otherMaterial], [readyDraft], published.courseId, published.moduleId, otherMaterial.id)?.id).toBe(readyCandidate.id);
+  });
+
+  it("keeps a partially drafted upload selectable when no readable published release exists", () => {
+    const pages = Array.from({ length: 112 }, (_, index) => ({
+      ...published.pages[0]!,
+      id: `lecture-page-${index + 1}`,
+      pageNumber: index + 1
+    }));
+    const upload: CourseRelease = {
+      ...readyCandidate,
+      id: "lecture-upload-112",
+      pageIds: pages.map((page) => page.id),
+      pages
+    };
+    const availableDrafts = pages.slice(0, 46).map((page, index) => ({
+      ...draftFor(upload, page.id),
+      id: `draft:lecture-page-${index + 1}`,
+      status: "ready" as const,
+      page
+    }));
+
+    expect(selectMaterialRelease([upload], availableDrafts, upload.courseId, upload.moduleId)?.id).toBe(upload.id);
+  });
+
+  it("passes the loaded draft state through both File and ETAPI material projections", async () => {
+    const fileRoot = await mkdtemp(join(tmpdir(), "course-os-material-identity-"));
+    const remote = new FakeEtapi();
+    const adapters = [
+      new FileReadWeaveCourseApi(join(fileRoot, "state.json")),
+      new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch })
+    ];
+    for (const [index, api] of adapters.entries()) {
+      const suffix = String(index);
+      const base = { ...published, id: `material-published-${suffix}` };
+      const candidate: CourseRelease = {
+        ...readyCandidate,
+        id: `material-candidate-${suffix}`,
+        pageIds: [`candidate-page-${suffix}`],
+        pages: [{ ...readyCandidate.pages[0]!, id: `candidate-page-${suffix}` }]
+      };
+      await api.publishRelease(base, { ...manifest, courseReleaseId: base.id }, { ...context, idempotencyKey: `publish-material-${suffix}` });
+      await api.registerDraftSource(candidate, { ...context, idempotencyKey: `register-candidate-${suffix}` });
+      await api.saveDraft({ ...draftFor(candidate), status: "ready" }, 0, { ...context, idempotencyKey: `save-ready-${suffix}` });
+
+      const material = (await api.listTreeNodes()).find((node) => node.kind === "material");
+      expect(material).toMatchObject({
+        id: `material:${candidate.courseId}:${candidate.moduleId}`,
+        materialId: `material:${candidate.courseId}:${candidate.moduleId}`,
+        releaseId: candidate.id,
+        currentReleaseId: candidate.id
+      });
+    }
   });
 });
 

@@ -21,7 +21,8 @@ const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) 
 type MobileMode = "visual" | "lesson" | "practice";
 type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
-export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; terminal?: boolean; generatedReady?: boolean; notice?: string };
+export type CandidateReadUnavailable = "not_generated" | "not_ready";
+export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; terminal?: boolean; generatedReady?: boolean; notice?: string; unavailable?: CandidateReadUnavailable };
 export type CachedPageSnapshot = { releaseId: string; page: PageLesson; contentHash: string };
 export interface SharedReadRequest<T> {
   promise: Promise<T>;
@@ -85,16 +86,74 @@ function pageReadErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "当前页面暂时无法读取";
 }
 
+function candidateReadUnavailable(error: unknown): CandidateReadUnavailable | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const code = (error as { code?: unknown }).code;
+  if (code === "PAGE_NOT_GENERATED") return "not_generated";
+  if (code === "PAGE_NOT_READY") return "not_ready";
+  return undefined;
+}
+
+function candidateUnavailableGuidance(state: CandidateReadUnavailable): string {
+  return state === "not_generated"
+    ? "请进入制作模式生成本页讲解。"
+    : "请进入制作模式检查候选讲解及其保存状态。";
+}
+
+function candidateNeedsReviewPreview(draft: LessonDraft, releaseId: string, pageId: string): CandidatePreviewState | undefined {
+  if (draft.status !== "needs_review" || candidateSnapshotIdentityMismatch(draft, releaseId, pageId)) return undefined;
+  const sections = draft.page.lessonSections ?? [];
+  const hasTeachingText = (kind: "full_explanation" | "main_content") => {
+    const markdown = sections.find((section) => section.kind === kind)?.markdown?.trim() ?? "";
+    return Boolean(markdown) && !/(?:待生成|待确认|待补充|上传中|等待上传|当前只完成来源拆解|还没有冒充教授级讲解)/u.test(markdown);
+  };
+  const hasFullExplanation = hasTeachingText("full_explanation");
+  const hasMainContent = hasTeachingText("main_content");
+  if (draft.page.teachingCompositionVersion !== 1 || (!hasFullExplanation && !hasMainContent)) return undefined;
+
+  const availableQuestions = draft.page.questionBank?.filter((question) => question.status === "approved").length ?? 0;
+  const bodyNotice = hasFullExplanation && hasMainContent
+    ? "完整讲解已保存并可读，主要内容摘要已保存。"
+    : hasFullExplanation
+      ? "已有完整讲解正文可读；主要内容摘要尚未补齐。"
+      : "完整讲解尚未生成；已有摘要保留。可先阅读已有摘要。";
+  const questionNotice = availableQuestions < 4
+    ? `题库当前有 ${availableQuestions} 道可用题，尚差 ${4 - availableQuestions} 道待补齐。`
+    : "";
+  const actionNotice = `无需重试读取，请进入制作模式${availableQuestions < 4 ? "补齐题目" : "检查候选内容"}并确认。`;
+  const title = readablePageTitle(draft.page.title);
+  return {
+    pageId,
+    page: title === draft.page.title ? draft.page : { ...draft.page, title },
+    generatedReady: false,
+    notice: [bodyNotice, questionNotice, actionNotice].filter(Boolean).join(" ")
+  };
+}
+
+export function candidatePreviewForUnavailableRead(
+  current: CandidatePreviewState | undefined,
+  pageId: string,
+  state: CandidateReadUnavailable,
+  evidence: string
+): CandidatePreviewState {
+  const guidance = candidateUnavailableGuidance(state);
+  return current?.pageId === pageId && current.page
+    ? { ...current, error: undefined, terminal: false, unavailable: state, notice: `当前显示的是上次可读讲解；${evidence}。${guidance}` }
+    : { pageId, unavailable: state, notice: `${evidence}。${guidance}` };
+}
+
 export function candidatePreviewAfterReadFailure(
   current: CandidatePreviewState | undefined,
   pageId: string,
   error: unknown
 ): CandidatePreviewState {
   const detail = pageReadErrorMessage(error);
+  const unavailable = candidateReadUnavailable(error);
+  if (unavailable) return candidatePreviewForUnavailableRead(current, pageId, unavailable, detail);
   if (isTerminalPageReadError(error)) return { pageId, error: `当前候选页已不可访问：${detail}`, terminal: true };
   if (current?.pageId === pageId && current.terminal) return current;
   return current?.pageId === pageId && current.page
-    ? { ...current, error: undefined, terminal: false, notice: `当前显示的是上次可读讲解；最新 ReadWeave 内容读取失败：${detail}` }
+    ? { ...current, error: undefined, terminal: false, unavailable: undefined, notice: `当前显示的是上次可读讲解；最新 ReadWeave 内容读取失败：${detail}` }
     : { pageId, error: detail };
 }
 
@@ -423,15 +482,34 @@ export function App() {
     setReleaseIndexLoading(true);
     setReleaseIndexError("");
     const indexRead = readOnce(releaseIndexRequests.current, "release-index", (signal) => api.releases({ signal }));
-    void indexRead.promise.then((items) => {
+    const treeRead = initialNavigation.current.releaseId
+      ? undefined
+      : readOnce(treeRequests.current, "workspace-tree", (signal) => api.workspaceTree(undefined, { signal }));
+    void indexRead.promise.then(async (items) => {
       if (!active) return;
       setReleases((current) => mergeReleaseIndex(current, items, detailedReleaseIds.current));
-      if (!initialNavigation.current.releaseId) setReleaseId((current) => current || defaultRelease(items)?.id || "");
+      if (initialNavigation.current.releaseId) return;
+      let initialTree = tree;
+      if (treeRead) {
+        try {
+          initialTree = await treeRead.promise;
+          if (active) {
+            setTree(initialTree);
+            setTreeError("");
+          }
+        } catch (reason) {
+          if (active) setTreeError(reason instanceof Error ? reason.message : "无法读取课程目录");
+        }
+      }
+      if (active && !initialNavigation.current.releaseId) {
+        setReleaseId((current) => current || defaultRelease(items, initialTree)?.id || "");
+      }
     }).catch((reason) => {
       if (active) setReleaseIndexError(reason instanceof Error ? reason.message : "无法读取课程列表");
     })
       .finally(() => {
         indexRead.release();
+        treeRead?.release();
         if (active) {
           setReleaseIndexLoading(false);
           setLoading(false);
@@ -631,7 +709,7 @@ export function App() {
       window.removeEventListener("focus", reconcileCandidatePreview);
     };
   }, [mode, release?.id, release?.lifecycle, page?.id, candidatePreviewReload]);
-  const firstContentReady = mode !== "learn" || !releaseId || Boolean(activeImportId || error || currentFormalPageError || candidatePreview?.error
+  const firstContentReady = mode !== "learn" || !releaseId || Boolean(activeImportId || error || currentFormalPageError || candidatePreview?.error || candidatePreview?.unavailable
     || (release?.lifecycle === "draft_source" ? candidatePreview?.page : detailedPage));
   useEffect(() => {
     if (firstContentReady) { setSecondaryReadsStarted(true); return; }
@@ -860,13 +938,17 @@ export function App() {
   const shellStyle = { "--course-sidebar": `${sidebarWidth}px` } as CSSProperties;
 
   const openTreeNode = (node: CourseTreeNode, nextMode: "learn" | "studio") => {
-    const candidateReleaseId = node.currentReleaseId ?? node.releaseId;
-    const candidateRelease = releases.find((item) => item.id === candidateReleaseId)
-      ?? releases.find((item) => item.courseId === node.id && item.lifecycle !== "draft_source")
-      ?? (node.kind === "course" ? releases.find((item) => item.courseId === node.id) : undefined);
+    const candidateRelease = [node.currentReleaseId, node.releaseId]
+      .filter((id): id is string => Boolean(id))
+      .map((id) => releases.find((item) => item.id === id))
+      .find((item): item is CourseRelease => Boolean(item))
+      ?? (node.kind === "course"
+        ? [...releases].filter((item) => item.courseId === node.id && item.lifecycle !== "draft_source").sort(compareReleaseRecency)[0]
+          ?? [...releases].filter((item) => item.courseId === node.id).sort(compareReleaseRecency)[0]
+        : undefined);
     const candidatePage = candidateRelease?.pages[0];
     if (!candidateRelease || !candidatePage) {
-      setToast("这个材料还没有可打开的正式页面");
+      setToast("这个材料还没有可读取的页面");
       return;
     }
     selectPage(candidateRelease.id, candidatePage.id);
@@ -928,7 +1010,7 @@ export function App() {
       <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
     {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
     {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -960,9 +1042,9 @@ export function App() {
         <CourseTree tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
-          {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.notice && <p className="empty-inline" role="status">{candidatePreview.notice}</p>}
+          {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.page && candidatePreview.notice && candidatePreview.generatedReady !== false && <p className="empty-inline" role="status">{candidatePreview.notice}{candidatePreview.unavailable && <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={() => setMode("studio")}>进入制作模式</button>}</p>}
           {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
+            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
           </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -974,7 +1056,7 @@ export function App() {
       <MobileTreeDrawer tree={tree} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
        {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
       {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
       {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -1009,7 +1091,7 @@ function MobileTreeDrawer({ tree, selectedPageId, selectedTaskId, backgroundTask
   </div>;
 }
 
-function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, contentTerminalError = false, onRetryContent }: {
+function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, generatedReady, contentReady = true, contentError, contentNotice, contentReviewRequired = false, contentUnavailable = false, contentTerminalError = false, onRetryContent }: {
   release: CourseRelease;
   pageIndex: number;
   setPageIndex: Dispatch<SetStateAction<number>>;
@@ -1028,6 +1110,9 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   generatedReady?: boolean;
   contentReady?: boolean;
   contentError?: string;
+  contentNotice?: string;
+  contentReviewRequired?: boolean;
+  contentUnavailable?: boolean;
   contentTerminalError?: boolean;
   onRetryContent?: () => void;
 }) {
@@ -1066,7 +1151,7 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
         : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && <div className="loader" />}<span>{contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
@@ -1080,9 +1165,10 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   </div>;
 }
 
-function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onRefreshSync, onOpenTrash, onClose }: {
+function UtilityDialog({ panel, releases, tree, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onRefreshSync, onOpenTrash, onClose }: {
   panel: Exclude<UtilityPanel, null>;
   releases: CourseRelease[];
+  tree?: WorkspaceTree;
   sync?: ReadWeaveSyncStatus;
   conflicts: CourseConflict[];
   theme: "light" | "dark";
@@ -1096,7 +1182,7 @@ function UtilityDialog({ panel, releases, sync, conflicts, theme, onTheme, onSel
   const [query, setQuery] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ kind: "success" | "error" | "pending"; text: string }>();
-  const latestReleases = releases.filter((release) => !releases.some((candidate) => candidate.moduleId === release.moduleId && candidate.version > release.version));
+  const latestReleases = currentMaterialReleases(releases, tree);
   const results = latestReleases.flatMap((release) => release.pages.map((page) => ({ release, page }))).filter(({ release, page }) => {
     const needle = query.trim().toLocaleLowerCase();
     return !needle || `${release.courseTitle} ${release.moduleTitle} ${page.title} ${page.pageNumber}`.toLocaleLowerCase().includes(needle);
@@ -1902,12 +1988,21 @@ export function beginCandidatePreviewLoad({
         const title = readablePageTitle(draft.page.title);
         const updatedPage = title === draft.page.title ? draft.page : { ...draft.page, title };
         setPreview((current) => current?.pageId === pageId
-          ? { ...current, page: updatedPage, error: undefined, terminal: false, notice: undefined, generatedReady: true }
+          ? { ...current, page: updatedPage, error: undefined, terminal: false, unavailable: undefined, notice: undefined, generatedReady: true }
           : current);
       } else {
-        setPreview((current) => current?.pageId === pageId && current.page
-          ? { ...current, notice: "当前显示的是上次可读讲解；最新候选内容尚未生成，暂未替换正文" }
-          : { pageId, error: "这页候选讲解尚未生成完成" });
+        const partialPreview = candidateNeedsReviewPreview(draft, releaseId, pageId);
+        if (partialPreview) {
+          snapshotReady = false;
+          setPreview(partialPreview);
+        } else {
+          setPreview((current) => candidatePreviewForUnavailableRead(
+            current,
+            pageId,
+            "not_ready",
+            `ReadWeave 候选状态为 ${draft.status}；本页尚未确认可供学习的完整讲解`
+          ));
+        }
       }
     }).catch((reason: unknown) => {
       if (!isActive() || readId !== latestRead) return;
@@ -1937,16 +2032,19 @@ export function beginCandidatePreviewLoad({
       setPreview({ pageId, page: snapshotPage, generatedReady: true });
       reconcile();
     } else {
-      reportSnapshotProblem("这页候选讲解尚未生成完成");
+      const partialPreview = candidateNeedsReviewPreview(draft, releaseId, pageId);
+      if (partialPreview) setPreview(partialPreview);
+      else setPreview((current) => candidatePreviewForUnavailableRead(
+          current,
+          pageId,
+          "not_ready",
+          `ReadWeave 候选状态为 ${draft.status}；本页尚未确认可供学习的完整讲解`
+        ));
     }
   }).catch((reason: unknown) => {
     if (!isActive()) return;
-    if (isTerminalPageReadError(reason)) {
-      onTerminalError?.(reason);
-      setPreview((current) => candidatePreviewAfterReadFailure(current, pageId, reason));
-    } else {
-      reportSnapshotProblem(reason instanceof Error && reason.message ? reason.message : "候选讲解暂时无法读取，请重试");
-    }
+    if (isTerminalPageReadError(reason)) onTerminalError?.(reason);
+    setPreview((current) => candidatePreviewAfterReadFailure(current, pageId, reason));
   });
   return Object.assign(reconcile, {
     cancel: () => {
@@ -1958,8 +2056,37 @@ export function beginCandidatePreviewLoad({
   });
 }
 
-export function defaultRelease(items: CourseRelease[]): CourseRelease | undefined {
-  return [...items].filter((item) => item.lifecycle !== "draft_source").sort((a, b) => b.version - a.version || b.publishedAt.localeCompare(a.publishedAt))[0] ?? items[0];
+function compareReleaseRecency(left: CourseRelease, right: CourseRelease): number {
+  return right.version - left.version || right.publishedAt.localeCompare(left.publishedAt);
+}
+
+export function currentMaterialReleases(items: CourseRelease[], tree?: WorkspaceTree): CourseRelease[] {
+  if (tree) {
+    const materialNodes = flattenTree([...tree.courses, ...(tree.rootMaterials ?? [])])
+      .map(({ node }) => node)
+      .filter((node) => node.kind === "material" && !node.archived && node.visibility !== "archived");
+    const byId = new Map(items.map((release) => [release.id, release]));
+    const selected = new Map<string, CourseRelease>();
+    for (const node of materialNodes) {
+      const release = [node.currentReleaseId, node.releaseId]
+        .filter((id): id is string => Boolean(id))
+        .map((id) => byId.get(id))
+        .find((candidate): candidate is CourseRelease => Boolean(candidate));
+      if (release) selected.set(release.id, release);
+    }
+    return [...selected.values()];
+  }
+
+  const latestByMaterial = new Map<string, CourseRelease>();
+  for (const release of [...items].sort(compareReleaseRecency)) {
+    const key = `${release.courseId}\u0000${release.moduleId}`;
+    if (!latestByMaterial.has(key)) latestByMaterial.set(key, release);
+  }
+  return [...latestByMaterial.values()];
+}
+
+export function defaultRelease(items: CourseRelease[], tree?: WorkspaceTree): CourseRelease | undefined {
+  return currentMaterialReleases(items, tree).sort(compareReleaseRecency)[0];
 }
 
 function flattenTree(nodes: CourseTreeNode[], depth = 0): Array<{ node: CourseTreeNode; depth: number }> {

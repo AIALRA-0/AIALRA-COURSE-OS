@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CourseRelease, PageLesson } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { ExplanationPanel, summaryMarkdown } from "./ExplanationPanel.js";
+import { ExplanationPanel, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
 
 describe("lesson summary", () => {
   it("removes a duplicate leading title while preserving the existing conclusions", () => {
@@ -41,6 +41,42 @@ describe("lesson generation readiness badge", () => {
 
     expect(unfinished).toContain('class="quality-badge hold">讲解草稿</span>');
     expect(published).toContain('class="quality-badge pass">讲解已生成</span>');
+  });
+
+  it("shows an explicit missing full explanation and never fills it with the summary", () => {
+    const lesson = page(false);
+    lesson.lessonSections = [
+      { id: "full", kind: "full_explanation", title: "完整讲解", markdown: "", sourceAnchorIds: [], atomIds: [] },
+      { id: "main", kind: "main_content", title: "主要内容", markdown: "只保留的摘要", sourceAnchorIds: [], atomIds: [] }
+    ];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+    const fullSection = markup.match(/<article class="lesson-block section-full_explanation"[\s\S]*?(?=<article class="lesson-block section-main_content")/)?.[0] ?? "";
+
+    expect(fullSection).toContain("完整讲解尚未生成；已有摘要保留");
+    expect(fullSection).not.toContain("只保留的摘要");
+    expect(markup).toContain("只保留的摘要");
+  });
+
+  it("preserves a long full explanation verbatim even when its opening repeats the summary", () => {
+    const lesson = page(false);
+    const repeatedOpening = "第29页完整讲解的长正文开头，必须按原样保留，不能因它与摘要重复而删掉。";
+    const fullText = `${repeatedOpening}\n\n后续段落继续解释关键步骤、条件和推导。`;
+    lesson.lessonSections = [
+      { id: "full", kind: "full_explanation", title: "完整讲解", markdown: fullText, sourceAnchorIds: [], atomIds: [] },
+      { id: "main", kind: "main_content", title: "主要内容", markdown: repeatedOpening, sourceAnchorIds: [], atomIds: [] }
+    ];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+
+    expect(markup).toContain(repeatedOpening);
+    expect(markup).toContain("后续段落继续解释关键步骤、条件和推导。");
+    expect(markup.split(repeatedOpening)).toHaveLength(3);
+  });
+
+  it("reports the actual approved and draft question counts without filling missing questions", () => {
+    const markup = renderToStaticMarkup(<QuestionBankStatus available={2} draftCount={1} />);
+
+    expect(markup).toContain("当前有 2 道可用题目、1 道草稿题；还差 2 道可用题目才能练习");
+    expect(markup).not.toContain("第 3 道题");
   });
 
   it("renders pseudocode explanation math while preserving the code line", () => {

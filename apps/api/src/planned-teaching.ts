@@ -147,6 +147,27 @@ function explanationText(value: unknown, depth = 0): string {
     .map(item => explanationText(item, depth + 1)).filter(Boolean).join("\n\n");
 }
 
+const mainContentAliases = ["mainContentMarkdown", "mainContentSummaryMarkdown", "mainContent", "keyPoints",
+  "keyContent", "keyTakeawaysMarkdown", "keyTakeaways", "mainSummaryMarkdown", "mainContentSummary",
+  "mainPoints", "keyPointsMarkdown", "summary"] as const;
+const fullExplanationAliases = ["fullExplanationMarkdown", "teacherNarration", "fullExplanation",
+  "completeExplanationMarkdown", "lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown",
+  "teachingContentMarkdown", "explanationMarkdown", "explanation"] as const;
+
+function usableProviderText(value: unknown): boolean {
+  return typeof value === "string" ? !!value.trim()
+    : Array.isArray(value) && value.length > 0
+      && value.every(item => typeof item === "string" && !!item.trim());
+}
+
+function firstUsableProviderText(record: Record<string, unknown>, keys: readonly string[]): unknown {
+  return keys.map(key => record[key]).find(usableProviderText);
+}
+
+function firstUsableProviderString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  return keys.map(key => record[key]).find((value): value is string => typeof value === "string" && !!value.trim());
+}
+
 /** Project harmless provider wrappers and aliases into a requested JSON shape. */
 export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase = ""): unknown {
   let candidate = value;
@@ -208,6 +229,8 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       && rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
       ? (rawOptions as Record<string, unknown>)[rawAnswer.trim().toUpperCase()] ?? rawAnswer : rawAnswer;
     const rawExplanation = record.explanation ?? record.rationale ?? record.reason;
+    const mainContent = firstUsableProviderText(record, mainContentAliases);
+    const fullExplanation = firstUsableProviderString(record, fullExplanationAliases);
     const normalized = schema.properties?.kind ? {
       ...record,
       kind: questionKind,
@@ -219,11 +242,9 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
       ...record,
       chapterBridgeMarkdown: record.chapterBridgeMarkdown ?? record.chapterBridge ?? "",
       learningObjectives: record.learningObjectives ?? record.objectives ?? [],
-      ...((record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary) !== undefined
-        ? { mainContentMarkdown: record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints ?? record.keyPointsMarkdown ?? record.summary } : {}),
+      ...(mainContent !== undefined ? { mainContentMarkdown: mainContent } : {}),
       priorKnowledge: record.priorKnowledge ?? record.prerequisites ?? [],
-      ...((record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanationMarkdown ?? record.explanation) !== undefined
-        ? { fullExplanationMarkdown: record.fullExplanationMarkdown ?? record.fullExplanation ?? record.completeExplanationMarkdown ?? record.lessonContentMarkdown ?? record.lectureMarkdown ?? record.lessonMarkdown ?? record.teachingContentMarkdown ?? record.explanationMarkdown ?? record.explanation } : {}),
+      ...(fullExplanation !== undefined ? { fullExplanationMarkdown: fullExplanation } : {}),
       misconceptions: record.misconceptions ?? record.commonMistakes ?? [],
       coverageEvidence: record.coverageEvidence ?? [],
       questions: sourceQuestions
@@ -432,10 +453,7 @@ function normalizeTeachingOutput(value: unknown): TeachingPackage {
   let source = value;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
-    const main = record.mainContentMarkdown ?? record.mainContentSummaryMarkdown ?? record.mainContent ?? record.keyPoints
-      ?? record.keyContent ?? record.keyTakeawaysMarkdown ?? record.keyTakeaways
-      ?? record.mainSummaryMarkdown ?? record.mainContentSummary ?? record.mainPoints
-      ?? record.keyPointsMarkdown ?? record.summary;
+    const main = firstUsableProviderText(record, mainContentAliases);
     if (Array.isArray(main) && main.length > 0 && main.every(item => typeof item === "string" && item.trim())) {
       source = { ...record, mainContentMarkdown: main.map(item => /^\s*[-*+]\s/u.test(item)
         ? item.trim() : `- ${item.trim()}`).join("\n") };
@@ -475,8 +493,8 @@ function salvageFinalTeachingPackage(
     ? value.filter(item => machineShapeIssues(item, schema).length === 0) as T[] : [];
   return {
     ...candidate,
-    mainContentMarkdown: mainContent ?? explanation!.split(/\n\s*\n/u).filter(Boolean).slice(0, 3).join("\n\n"),
-    fullExplanationMarkdown: explanation ?? mainContent!,
+    mainContentMarkdown: mainContent ?? "",
+    fullExplanationMarkdown: explanation ?? "",
     chapterBridgeMarkdown: typeof candidate.chapterBridgeMarkdown === "string" ? candidate.chapterBridgeMarkdown : "",
     learningObjectives: strings(candidate.learningObjectives),
     priorKnowledge: strings(candidate.priorKnowledge),
@@ -621,6 +639,7 @@ export async function writePlannedLesson(
   let repairedCandidate: TeachingPackage | undefined;
   let finalShapeIssues = initialShapeIssues;
   let finalFormatIssues = initialFormatIssues;
+  let partialShapeWarnings: string[] = [];
 
   // Style findings remain visible in the trace. Only broken machine output
   // and incomplete final question structure consume the single repair call.
@@ -689,6 +708,8 @@ export async function writePlannedLesson(
           accepted = repairedCandidate;
           finalShapeIssues = [];
           finalFormatIssues = plannedFormatIssues(repairedCandidate);
+        } else {
+          finalShapeIssues = repairedShapeIssues;
         }
         trace.formatCheckMs += Math.round(performance.now() - repairedCheckStarted);
       }
@@ -702,17 +723,28 @@ export async function writePlannedLesson(
     const salvageCheckStarted = performance.now();
     const salvaged = salvageFinalTeachingPackage(initialCandidate, repairedCandidate);
     if (salvaged) {
+      const unresolvedIssues = finalShapeIssues;
       accepted = salvaged;
       finalShapeIssues = plannedContentIssues(salvaged);
       finalFormatIssues = plannedFormatIssues(salvaged);
+      const unresolvedRequired = unresolvedIssues.filter(issue => issue.endsWith(":required"));
+      const requiredPaths = new Set(unresolvedRequired.map(issue => issue.slice(0, issue.lastIndexOf(":"))));
+      partialShapeWarnings = [
+        ...unresolvedRequired,
+        ...finalShapeIssues.filter(issue => !requiredPaths.has(issue.slice(0, issue.lastIndexOf(":"))))
+      ];
     }
     trace.formatCheckMs += Math.round(performance.now() - salvageCheckStarted);
   }
 
-  if (finalShapeIssues.length || !accepted) {
+  const hasSalvageBody = accepted && [accepted.mainContentMarkdown, accepted.fullExplanationMarkdown]
+    .some(value => typeof value === "string" && !!value.trim());
+  const onlyMissingBodyIssues = finalShapeIssues.every(issue =>
+    issue === "result.mainContentMarkdown:empty" || issue === "result.fullExplanationMarkdown:empty");
+  if (!accepted || finalShapeIssues.length && !(hasSalvageBody && onlyMissingBodyIssues)) {
     throw new Error("TEACHING_PACKAGE_INVALID:" + finalShapeIssues.join(","));
   }
-  recordFormatWarnings(trace, finalFormatIssues);
+  recordFormatWarnings(trace, [...finalFormatIssues, ...partialShapeWarnings]);
   recordQualityWarnings(trace, accepted);
 
   const core = {
