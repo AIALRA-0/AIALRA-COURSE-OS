@@ -555,6 +555,21 @@ describe("planned teaching core writer", () => {
     expect(result.trace.repairDiagnostic?.targetFields).toEqual(["mainContentMarkdown"]);
   });
 
+  it("preserves the provider failure from a saved-package main-only repair", async () => {
+    const seed: TeachingPackage = { ...teachingPackage(), mainContentMarkdown: "" };
+    const before = structuredClone(seed);
+    const failure = Object.assign(new Error("Provider quota exhausted"), { code: "PROVIDER_QUOTA_EXHAUSTED" });
+    const phases: string[] = [];
+
+    await expect(writePlannedLesson({ ...input(), repairMissingMainContent: seed }, async request => {
+      phases.push(request.phase);
+      throw failure;
+    })).rejects.toBe(failure);
+
+    expect(phases).toEqual(["format_repair"]);
+    expect(seed).toEqual(before);
+  });
+
   it("records nonblocking style warnings without spending a model repair call", async () => {
     const calls: string[] = [];
     const formatted = teachingPackage();

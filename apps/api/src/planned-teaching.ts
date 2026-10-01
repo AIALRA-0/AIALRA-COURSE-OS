@@ -665,6 +665,7 @@ export async function writePlannedLesson(
   let finalShapeIssues = initialShapeIssues;
   let finalFormatIssues = initialFormatIssues;
   let partialShapeWarnings: string[] = [];
+  let repairProviderError: unknown;
 
   // Style findings remain visible in the trace. Only broken machine output
   // and incomplete final question structure consume the single repair call.
@@ -745,6 +746,7 @@ export async function writePlannedLesson(
       }
     } catch (error) {
       // A failed repair may still leave a complete lesson body in the first response.
+      repairProviderError = error;
       trace.repairDiagnostic.providerError = error instanceof Error ? error.message.split(":", 1)[0] : "unknown";
     }
   }
@@ -769,6 +771,12 @@ export async function writePlannedLesson(
 
   const hasRequiredExplanation = accepted && typeof accepted.fullExplanationMarkdown === "string"
     && !!accepted.fullExplanationMarkdown.trim();
+  // The paid body already exists in this recovery mode. A failed request did
+  // not deliver the missing field; report the provider failure, not a new
+  // successful package with an empty main and zero usage.
+  if (input.repairMissingMainContent && !accepted?.mainContentMarkdown?.trim() && repairProviderError !== undefined) {
+    throw repairProviderError;
+  }
   const onlyMissingMainContent = finalShapeIssues.every(issue => issue === "result.mainContentMarkdown:empty");
   if (!accepted || !hasRequiredExplanation || finalShapeIssues.length && !onlyMissingMainContent) {
     throw new Error("TEACHING_PACKAGE_INVALID:" + finalShapeIssues.join(","));
