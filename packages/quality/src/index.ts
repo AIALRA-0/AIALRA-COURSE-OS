@@ -937,7 +937,7 @@ export function validateMarkdownMath(markdown: string): string[] {
  * `\\(`, so ordinary Chinese square brackets remain ordinary text
  */
 export function normalizeLegacyMathDelimiters(markdown: string): string {
-  const bareNormalized = normalizeBareVariableMath(normalizeBareTexFragments(scanMarkdownMath(markdown).normalized));
+  const bareNormalized = normalizeBareVariableMath(normalizeBareTexFragments(scanMarkdownMath(markdown, false, true).normalized));
   const movedLeadIn = moveDisplayMathLeadIn(scanMarkdownMath(bareNormalized).normalized);
   return scanMarkdownMath(movedLeadIn, true).normalized;
 }
@@ -977,7 +977,7 @@ interface MathScanResult {
   issues: string[];
 }
 
-function scanMarkdownMath(markdown: string, normalizeTex = false): MathScanResult {
+function scanMarkdownMath(markdown: string, normalizeTex = false, stripNestedDisplayDollars = false): MathScanResult {
   const output: string[] = [];
   const formulas: string[] = [];
   const issues: string[] = [];
@@ -1004,7 +1004,8 @@ function scanMarkdownMath(markdown: string, normalizeTex = false): MathScanResul
     if (markdown.startsWith("\\[", index)) {
       const close = markdown.indexOf("\\]", index + 2);
       if (close < 0) { issues.push("MATH_UNCLOSED_DISPLAY_DELIMITER"); output.push(markdown.slice(index)); break; }
-      const tex = markdown.slice(index + 2, close);
+      const sourceTex = markdown.slice(index + 2, close);
+      const tex = stripNestedDisplayDollars ? stripUnescapedSingleDollarDelimiters(sourceTex) : sourceTex;
       formulas.push(tex);
       output.push(`$$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$$`);
       index = close + 2;
@@ -1022,7 +1023,8 @@ function scanMarkdownMath(markdown: string, normalizeTex = false): MathScanResul
     if (markdown.startsWith("$$", index) && !isEscaped(markdown, index)) {
       const close = findUnescaped(markdown, "$$", index + 2);
       if (close < 0) { issues.push("MATH_UNCLOSED_DISPLAY_DELIMITER"); output.push(markdown.slice(index)); break; }
-      const tex = markdown.slice(index + 2, close);
+      const sourceTex = markdown.slice(index + 2, close);
+      const tex = stripNestedDisplayDollars ? stripUnescapedSingleDollarDelimiters(sourceTex) : sourceTex;
       formulas.push(tex);
       output.push(`$$${normalizeTex ? normalizeKaTeXCompatibleTex(tex) : tex}$$`);
       index = close + 2;
@@ -1083,6 +1085,23 @@ function scanMarkdownMath(markdown: string, normalizeTex = false): MathScanResul
     index += 1;
   }
   return { normalized: output.join(""), formulas, issues };
+}
+
+function stripUnescapedSingleDollarDelimiters(tex: string): string {
+  const delimiters: number[] = [];
+  for (let index = 0; index < tex.length; index += 1) {
+    if (tex[index] === "$" && !isEscaped(tex, index) && tex[index - 1] !== "$" && tex[index + 1] !== "$") {
+      delimiters.push(index);
+    }
+  }
+  if (delimiters.length === 0 || delimiters.length % 2 !== 0 || validateTex(tex).valid) return tex;
+
+  const delimiterSet = new Set(delimiters);
+  let candidate = "";
+  for (let index = 0; index < tex.length; index += 1) {
+    if (!delimiterSet.has(index)) candidate += tex[index]!;
+  }
+  return validateTex(candidate).valid ? candidate : tex;
 }
 
 function normalizeKaTeXCompatibleTex(tex: string): string {

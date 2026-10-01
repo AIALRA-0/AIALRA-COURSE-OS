@@ -46,3 +46,25 @@
 - 摘要与题目同样执行以上要求，不能只有完整讲解遵守
 - 所有独立结论保留会改变其真实性的条件；明确区分课件原文、演示假设和未确定信息，不通过删条件来缩短句子
 - 只返回所请求字段的真实内容对象，不返回 JSON Schema，不输出自评、格式检查说明或流程状态
+
+## 最终 JSON 字段类型
+
+返回一个 JSON 对象，不返回包裹 JSON 的 Markdown 围栏或整篇 Markdown；数组必须是真正的数组，不能把条目列表或整套题写成一个字符串。下面仅演示字段类型，尖括号内容要用当前页的真实教学内容替换，不把示例写入讲义；局部修复只返回 targetFields 指定的键
+
+```json
+{
+  "chapterBridgeMarkdown": "",
+  "learningObjectives": ["<动作标签：对象、条件、动作与结果>"],
+  "mainContentMarkdown": "- <结论标签：对应目标的具体答案>",
+  "priorKnowledge": ["<中文名称（英文名称）：连续定义>"],
+  "fullExplanationMarkdown": "<完整讲解，不能只返回摘要>",
+  "misconceptions": ["**错误理解：** <混淆>\n\n**错因：** <原因>\n\n**正确判断：** <结论>\n\n**核对方法：** <方法>"],
+  "coverageEvidence": [],
+  "questions": [
+    {"kind": "multiple_choice", "prompt": "<单选题题干>", "options": ["<选项一>", "<选项二>"], "expectedAnswer": "<选项一>", "explanation": "<独立解释判断依据>"},
+    {"kind": "comprehension", "prompt": "<简答题题干>", "options": [], "expectedAnswer": "<参考答案>", "explanation": "<独立解释推理过程>"}
+  ]
+}
+```
+
+示例不是数量配额：目标、前提、易错点和题库按本页实际内容组织；题目必须包含题干、选项数组、答案和独立解释，不能只给待补答案的问题清单

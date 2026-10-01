@@ -1337,13 +1337,19 @@ describe("ReadWeave ETAPI adapter", () => {
     const remote = new FakeEtapi();
     let pageNoteId = "";
     const nativeRequests: string[] = [];
+    let linkSearchParams: URLSearchParams | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
-      const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/, "");
-      if (path.startsWith("/notes/_readweaveLinks") || path.startsWith("/notes/link-") || path.startsWith("/notes/object-")) {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/, "");
+      if (path === "/notes" && url.searchParams.get("ancestorNoteId") === "_readweaveLinks") {
+        linkSearchParams = url.searchParams;
+        nativeRequests.push(`${init?.method ?? "GET"} /notes?${url.searchParams.toString()}`);
+        return Response.json({ results: ["link-1", "link-duplicate", "link-other"].map(noteId => ({ noteId })) });
+      }
+      if (path.startsWith("/notes/link-") || path.startsWith("/notes/object-")) {
         nativeRequests.push(`${init?.method ?? "GET"} ${path}`);
-        if (path === "/notes/_readweaveLinks") return Response.json({ noteId: "_readweaveLinks", childNoteIds: ["link-1", "link-duplicate", "link-other"] });
         if (path === "/notes/link-1/content" || path === "/notes/link-duplicate/content") return Response.json({ linkId: path.includes("duplicate") ? "link-duplicate" : "link-1", articleId: pageNoteId, objectId: "object-1", contentType: "problem" });
-        if (path === "/notes/link-other/content") return Response.json({ linkId: "link-other", articleId: "another-page", objectId: "object-other", contentType: "problem" });
+        if (path === "/notes/link-other/content") return Response.json({ linkId: "link-other", articleId: "another-page", objectId: "object-other", contentType: "problem", displayBody: pageNoteId });
         if (path === "/notes/object-1/content") return Response.json({ objectId: "object-1", kind: "question", contentType: "problem", title: "为什么要保留状态？", body: "<p>因为下一步需要它</p>" });
         return new Response("not found", { status: 404 });
       }
@@ -1362,6 +1368,11 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
     const readRequests = remote.requests.slice(requestsBefore);
     expect(readRequests.filter((item) => item.path === "/notes")).toHaveLength(2);
+    expect(linkSearchParams?.get("search")).toContain(`note.content *=* "${pageNoteId}"`);
+    expect(linkSearchParams?.get("ancestorNoteId")).toBe("_readweaveLinks");
+    expect(linkSearchParams?.get("ancestorDepth")).toBe("eq1");
+    expect(nativeRequests).not.toContain("GET /notes/_readweaveLinks");
+    expect(nativeRequests).not.toContain("GET /notes/object-other/content");
     expect(readRequests.some((item) => item.path.startsWith("/notes/") && item.path.endsWith("/content") && !item.path.includes("link-") && !item.path.includes("object-"))).toBe(false);
     expect(nativeRequests.every((item) => item.startsWith("GET "))).toBe(true);
   });

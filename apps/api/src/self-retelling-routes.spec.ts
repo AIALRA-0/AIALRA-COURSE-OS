@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CourseRelease } from "@course-os/contracts";
 import type { AppDependencies } from "./app.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
@@ -19,13 +19,15 @@ function harness() {
     },
     operations: {
       read: async () => state,
+      readSelfRetellings: async (workspaceId: string, releaseId?: string) => Object.values(state.selfRetellings)
+        .filter(record => record.workspaceId === workspaceId && (!releaseId || record.releaseId === releaseId)),
       urgentMutate: async <T>(change: (value: typeof state) => T) => change(state)
     }
   } as unknown as AppDependencies;
   const app = express();
   app.use(express.json());
   registerSelfRetellingRoutes(app, dependencies);
-  return { app, state };
+  return { app, state, dependencies };
 }
 
 function writeHeaders(key: string) {
@@ -39,6 +41,43 @@ describe("self retelling routes", () => {
     expect(saved.body).toMatchObject({ workspaceId: "personal", releaseId: "release-1", pageId: "page-1", answer: "我能用自己的话解释这一页的主要关系" });
     expect(Object.keys(state.selfRetellings)).toHaveLength(1);
     expect((await request(app).get("/api/v1/self-retellings?releaseId=release-1").set("X-Workspace-Id", "personal").expect(200)).body).toHaveLength(1);
+  });
+
+  it("lists only the requested workspace and release through the scoped read", async () => {
+    const { app, state, dependencies } = harness();
+    state.selfRetellings[JSON.stringify(["personal", "release-1", "page-1"])] = {
+      workspaceId: "personal", releaseId: "release-1", pageId: "page-1", answer: "owned answer",
+      answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z"
+    };
+    state.selfRetellings[JSON.stringify(["personal", "release-2", "page-2"])] = {
+      workspaceId: "personal", releaseId: "release-2", pageId: "page-2", answer: "other release",
+      answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z"
+    };
+    state.selfRetellings[JSON.stringify(["other", "release-1", "page-3"])] = {
+      workspaceId: "other", releaseId: "release-1", pageId: "page-3", answer: "other workspace",
+      answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z"
+    };
+    const readFullState = vi.spyOn(dependencies.operations, "read").mockRejectedValue(new Error("FULL_OPERATIONAL_STATE_READ_FORBIDDEN"));
+    const readScoped = vi.spyOn(dependencies.operations, "readSelfRetellings");
+
+    const response = await request(app).get("/api/v1/self-retellings?releaseId=release-1").set("X-Workspace-Id", "personal").expect(200);
+
+    expect(response.body.map((record: { pageId: string }) => record.pageId)).toEqual(["page-1"]);
+    expect(readScoped).toHaveBeenCalledWith("personal", "release-1");
+    expect(readFullState).not.toHaveBeenCalled();
+  });
+
+  it("returns the route's explicit unavailable body when the scoped read fails", async () => {
+    const { app, dependencies } = harness();
+    vi.spyOn(dependencies.operations, "readSelfRetellings").mockRejectedValue(new Error("SCOPED_READ_FAILED"));
+
+    const response = await request(app).get("/api/v1/self-retellings").set("X-Workspace-Id", "personal").expect(503);
+
+    expect(response.body).toEqual({ error: {
+      code: "RETELLINGS_UNAVAILABLE",
+      message: "暂时无法读取自我重述，请重试",
+      retryable: true
+    } });
   });
 
   it("replays an idempotent write without creating a second record", async () => {

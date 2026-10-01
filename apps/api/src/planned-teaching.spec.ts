@@ -496,6 +496,65 @@ describe("planned teaching core writer", () => {
     expect(result.content.questions).toHaveLength(4);
   });
 
+  it("keeps heading-led Markdown in the full explanation and repairs the distinct BP main field", async () => {
+    const phases: string[] = [];
+    const body = "## APPLICATIONS\n\n本页说明图中的节点和边如何表示连接，并按来源中的步骤解释应用过程。\n\n代码片段 `G = (V, E)` 保留原样。";
+    const main = teachingPackage().mainContentMarkdown;
+    const repairedPackage = teachingPackage();
+    const result = await writePlannedLesson(input(), async request => {
+      phases.push(request.phase);
+      if (request.phase === "plan") return "先说明图的表示，再解释应用过程";
+      if (request.phase === "teaching") return body;
+
+      const prompt = JSON.parse(request.prompt) as { targetFields?: string[]; currentOutput?: Record<string, unknown> };
+      const targetFields = ["mainContentMarkdown", "learningObjectives", "priorKnowledge", "misconceptions", "questions"];
+      expect(prompt.targetFields).toEqual(targetFields);
+      expect(prompt.currentOutput).toEqual({});
+      expect(Object.keys(request.schema?.properties ?? {})).toEqual(targetFields);
+      expect(request.schema?.required).toEqual(targetFields);
+      return {
+        mainContentMarkdown: main,
+        learningObjectives: repairedPackage.learningObjectives,
+        priorKnowledge: repairedPackage.priorKnowledge,
+        misconceptions: repairedPackage.misconceptions,
+        questions: repairedPackage.questions
+      };
+    });
+
+    expect(phases).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.mainContentMarkdown).toBe(main);
+    expect(result.content.mainContentMarkdown).not.toBe(body);
+    expect(result.content.learningObjectives).toEqual(repairedPackage.learningObjectives);
+    expect(result.content.priorKnowledge).toEqual(repairedPackage.priorKnowledge);
+    expect(result.content.misconceptions).toEqual(repairedPackage.misconceptions);
+    expect(result.content.questions).toEqual(repairedPackage.questions);
+    expect(result.content.fullExplanationMarkdown).toContain("## APPLICATIONS");
+    expect(result.content.fullExplanationMarkdown).toContain("`G = (V, E)`");
+    expect(result.trace.repairDiagnostic?.repairedShapeIssues).toEqual([]);
+  });
+
+  it("uses one format repair on a saved package seed without repeating plan or teaching", async () => {
+    const seed: TeachingPackage = { ...teachingPackage(), mainContentMarkdown: "" };
+    const replacement = "- BP 目标答案：输入条件确定节点集合与边集合。";
+    const phases: string[] = [];
+    const result = await writePlannedLesson({ ...input(), sourceImageDataUrl: "data:image/png;base64,c2VlZA==",
+      repairMissingMainContent: seed }, async request => {
+      phases.push(request.phase);
+      const prompt = JSON.parse(request.prompt) as { targetFields?: string[]; currentOutput?: Record<string, unknown> };
+      expect(prompt.targetFields).toEqual(["mainContentMarkdown"]);
+      expect(prompt.currentOutput).toEqual({ mainContentMarkdown: "" });
+      expect(Object.keys(request.schema?.properties ?? {})).toEqual(["mainContentMarkdown"]);
+      expect(request.image).toBe("data:image/png;base64,c2VlZA==");
+      return { mainContentMarkdown: replacement };
+    });
+
+    expect(phases).toEqual(["format_repair"]);
+    expect(result.content.mainContentMarkdown).toBe(replacement);
+    expect(result.content.fullExplanationMarkdown).toContain("## 从输入开始");
+    expect(result.content.questions).toHaveLength(seed.questions.length);
+    expect(result.trace.repairDiagnostic?.targetFields).toEqual(["mainContentMarkdown"]);
+  });
+
   it("records nonblocking style warnings without spending a model repair call", async () => {
     const calls: string[] = [];
     const formatted = teachingPackage();

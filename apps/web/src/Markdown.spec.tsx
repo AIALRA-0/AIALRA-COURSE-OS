@@ -15,6 +15,23 @@ describe("lesson math rendering", () => {
     expect(html).toContain("katex-display");
     expect(html).not.toContain("katex-error");
   });
+  it.each([
+    ["fraction", String.raw`$$
+q = \exp\left(-\frac{a}{$T$}\right)
+$$`],
+    ["aggregation", String.raw`$$
+$x_i$ = W $x_j$, \qquad $x_k$ = \sum_{j \in N(k)} $x_j$
+$$`]
+  ])("renders repaired nested display delimiters as KaTeX: %s", (_name, source) => {
+    const normalized = normalizeLegacyMathDelimiters(source);
+    const html = renderToStaticMarkup(createElement(Markdown, { children: source }));
+
+    expect(normalized).toContain("$$");
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("katex-display");
+    expect(html).not.toContain("katex-error");
+  });
+
   it("renders a mixed Edge-GNN objective as math inside a list item", () => {
     const html = renderToStaticMarkup(createElement("li", null, createElement(Markdown, { children: "令 W_e$v_i;v_j$ 表示边的嵌入" })));
     expect(html.match(/class="katex"/g)).toHaveLength(2);
@@ -151,9 +168,12 @@ describe("lesson math rendering", () => {
       };
     };
 
-    expect(normalizeLegacyMathDelimiters(pairHeader)).toBe(pairHeader);
+    const normalizedPairHeader = String.raw`| pair | $$E_x-I_x$$ | $$E_y-I_y$$ | $c(x,y)$ | gain |
+| --- | --- | --- | --- | --- |
+| (x,y) | 1 | 2 | 3 | 4 |`;
+    expect(normalizeLegacyMathDelimiters(pairHeader)).toBe(normalizedPairHeader);
     expect(normalizeLegacyMathDelimiters(partitionHeader)).toBe(partitionHeader);
-    expect(renderStats(pairHeader)).toEqual({ rows: 2, headers: 5, cells: 5, katex: 1, katexErrors: 2 });
+    expect(renderStats(pairHeader)).toEqual({ rows: 2, headers: 5, cells: 5, katex: 3, katexErrors: 0 });
     expect(renderStats(correctedPairHeader)).toEqual({ rows: 2, headers: 5, cells: 5, katex: 3, katexErrors: 0 });
     expect(renderStats(partitionHeader)).toEqual({ rows: 2, headers: 4, cells: 4, katex: 2, katexErrors: 0 });
     expect(renderStats(correctedPartitionHeader)).toEqual({ rows: 2, headers: 4, cells: 4, katex: 2, katexErrors: 0 });

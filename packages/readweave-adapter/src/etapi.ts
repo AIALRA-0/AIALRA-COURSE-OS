@@ -363,8 +363,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private activityStateNoteId?: string;
   private activityRoutes?: EtapiActivityRoutes;
   private readonly draftReadCache = new Map<string, { draft: LessonDraft; expiresAt: number }>();
-  private nativeLinksCache?: { expiresAt: number; links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> };
-  private nativeLinksInFlight?: SharedRead<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]>;
   private lastReadAt?: string;
   private lastWriteAt?: string;
 
@@ -591,7 +589,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       try { return (await this.getNote(noteId)).childNoteIds ?? []; } catch { return []; }
     }));
     for (const noteId of grandchildren.flat().slice(0, 128)) noteIds.add(noteId);
-    const links = (await this.readNativeLinks()).filter((link) => noteIds.has(link.articleId));
+    const links = await this.findNativeLinksForArticles(noteIds);
     const byObject = new Map<string, import("@course-os/contracts").ReadWeaveNativeQuestion>();
     for (const link of links) {
       if (!link.objectId || byObject.has(link.objectId)) continue;
@@ -607,36 +605,27 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return { pageId, noteUrl: `${base.origin}/#root/${encodeURIComponent(pageNoteId)}`, questions: [...byObject.values()] };
   }
 
-  private async readNativeLinks(): Promise<NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"]> {
-    if (this.nativeLinksCache && this.nativeLinksCache.expiresAt > Date.now()) return this.nativeLinksCache.links;
-    const isWrite = Boolean(this.writeContext.getStore());
-    if (!this.nativeLinksInFlight) {
-      const read = createSharedRead(async () => {
-        const root = await this.getNote("_readweaveLinks");
-        const ids = root.childNoteIds ?? [];
-        const links: NonNullable<EtapiReadWeaveCourseApi["nativeLinksCache"]>["links"] = [];
-        for (let index = 0; index < ids.length; index += 8) {
-          const batch = await Promise.all(ids.slice(index, index + 8).map(async (id) => {
-            try {
-              const value = JSON.parse(await this.getContent(id)) as Record<string, unknown>;
-              if (value.linkId !== id || typeof value.articleId !== "string" || typeof value.objectId !== "string") return undefined;
-              return value as typeof links[number];
-            } catch { return undefined; }
-          }));
-          links.push(...batch.filter((item): item is typeof links[number] => !!item));
-        }
-        return links;
-      }, { budgeted: !isWrite, independent: isWrite });
-      this.nativeLinksInFlight = read;
-      void read.promise.then((links) => {
-        if (this.nativeLinksInFlight === read) this.nativeLinksCache = { links, expiresAt: Date.now() + 15_000 };
-      }).catch(() => undefined).finally(() => {
-        if (this.nativeLinksInFlight === read) this.nativeLinksInFlight = undefined;
-      });
-    }
-    const pendingRead = this.nativeLinksInFlight;
-    if (!pendingRead) throw new Error("READWEAVE_NATIVE_LINKS_READ_MISSING");
-    return joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
+  private async findNativeLinksForArticles(articleIds: Set<string>): Promise<Array<{
+    articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string
+  }>> {
+    if (articleIds.size === 0) return [];
+    const clauses = [...articleIds].map((id) => `note.content *=* "${id.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`);
+    const query = new URLSearchParams({
+      search: clauses.join(" OR "),
+      ancestorNoteId: "_readweaveLinks",
+      ancestorDepth: "eq1"
+    });
+    const matches = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results;
+    const articleIdSet = articleIds;
+    const links = await Promise.all(matches.map(async (note) => {
+      try {
+        const value = JSON.parse(await this.getContent(note.noteId)) as Record<string, unknown>;
+        if (value.linkId !== note.noteId || typeof value.articleId !== "string"
+          || !articleIdSet.has(value.articleId) || typeof value.objectId !== "string") return undefined;
+        return value as { articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string };
+      } catch { return undefined; }
+    }));
+    return links.filter((item): item is NonNullable<typeof item> => !!item);
   }
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {

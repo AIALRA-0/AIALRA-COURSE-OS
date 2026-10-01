@@ -70,6 +70,8 @@ export interface ModelRouterInput {
   teachingFingerprint?: string;
   generationAttempt?: number;
   resumeTeaching?: PlannedCheckpoint;
+  /** Retry a saved partial draft by asking the existing format repair for mainContentMarkdown only. */
+  repairMissingMainContent?: Partial<TeachingPackage>;
   onTeachingCheckpoint?: (checkpoint: PlannedCheckpoint) => Promise<void>;
   sourceImageDataUrl?: string;
   writingPolicySnapshotId: string;

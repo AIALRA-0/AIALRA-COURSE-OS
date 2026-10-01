@@ -445,11 +445,19 @@ function unpackCallResult(value: unknown): CallResult {
   return { content: value };
 }
 
-function parseTeachingOutput(value: unknown): { content?: unknown; raw?: string; issue?: string } {
+function parseTeachingOutput(value: unknown, allowHeadingMarkdownBody = false): {
+  content?: unknown; raw?: string; issue?: string; headingMarkdownBody?: boolean
+} {
   if (typeof value === "string") {
     try {
       return { content: JSON.parse(value) };
     } catch {
+      // Some provider responses contain the full Markdown explanation but
+      // violate the requested JSON envelope. Keep it in its own teaching field;
+      // the existing format repair must still produce the BP main content.
+      if (allowHeadingMarkdownBody && /^\s*#{1,6}[ \t]+\S[^\r\n]*\r?\n[\s\S]*\S/u.test(value)) {
+        return { content: { fullExplanationMarkdown: value }, headingMarkdownBody: true };
+      }
       return { raw: value, issue: "result:json" };
     }
   }
@@ -579,7 +587,9 @@ export async function writePlannedLesson(
   };
 
   const suppliedPlan = (input as ModelRouterInput & { teachingPlan?: string }).teachingPlan;
-  if (typeof suppliedPlan === "string") {
+  if (input.repairMissingMainContent) {
+    trace.plan = "";
+  } else if (typeof suppliedPlan === "string") {
     trace.plan = suppliedPlan;
   } else {
     const planResult = await run({
@@ -617,17 +627,24 @@ export async function writePlannedLesson(
 
   let initialRaw: unknown;
   let initialProviderDiagnostic: ProviderOutputDiagnostic | undefined;
-  try {
-    const initialResult = await run(teachingRequest);
-    initialRaw = initialResult.content;
-    initialProviderDiagnostic = initialResult.providerDiagnostic;
-  } catch (error) {
-    const recoverable = error instanceof Error ? transientInvalidProviderOutput(error) : undefined;
-    if (recoverable === undefined) throw error;
-    initialRaw = recoverable;
+  if (input.repairMissingMainContent) {
+    initialRaw = input.repairMissingMainContent;
+  } else {
+    try {
+      const initialResult = await run(teachingRequest);
+      initialRaw = initialResult.content;
+      initialProviderDiagnostic = initialResult.providerDiagnostic;
+    } catch (error) {
+      const recoverable = error instanceof Error ? transientInvalidProviderOutput(error) : undefined;
+      if (recoverable === undefined) throw error;
+      initialRaw = recoverable;
+    }
   }
 
-  const initialParsed = parseTeachingOutput(initialRaw);
+  const initialParsed = input.repairMissingMainContent
+    ? { content: initialRaw }
+    : parseTeachingOutput(initialRaw, true);
+  const headingMarkdownFallback = "headingMarkdownBody" in initialParsed && initialParsed.headingMarkdownBody === true;
   const initialCheckStarted = performance.now();
   const initialCandidate = initialParsed.issue ? undefined : normalizeTeachingOutput(initialParsed.content);
   trace.initialOutputDiagnostic = {
@@ -657,8 +674,12 @@ export async function writePlannedLesson(
       && typeof initialCandidate.fullExplanationMarkdown === "string"
       && !!initialCandidate.fullExplanationMarkdown.trim();
     const onlyQuestionShapeErrors = initialShapeIssues.every(issue => issue.startsWith("result.questions"));
-    const fullPackageRepair = !!initialParsed.issue || !initialCandidate;
-    const repairFields = fullPackageRepair
+    const fullPackageRepair = !input.repairMissingMainContent && (!!initialParsed.issue || !initialCandidate);
+    const repairFields = input.repairMissingMainContent
+      ? ["mainContentMarkdown"]
+      : headingMarkdownFallback
+      ? ["mainContentMarkdown", "learningObjectives", "priorKnowledge", "misconceptions", "questions"]
+      : fullPackageRepair
       ? Object.keys(schemaProperties)
       : validCore && incompleteQuestions && onlyQuestionShapeErrors
         ? ["questions"] : repairFieldsFor(initialShapeIssues, [], incompleteQuestions);
@@ -674,7 +695,9 @@ export async function writePlannedLesson(
       required: repairFields,
       additionalProperties: false
     } : teachingPackageSchema;
-    const currentFields = initialCandidate && repairFields.length > 0
+    const currentFields = headingMarkdownFallback
+      ? {}
+      : initialCandidate && repairFields.length > 0
       ? Object.fromEntries(repairFields.map(field => [field, (initialCandidate as unknown as Record<string, unknown>)[field]]))
       : initialParsed.raw;
     const repairPrompt = JSON.stringify({
@@ -698,7 +721,8 @@ export async function writePlannedLesson(
         instructions: repairInstructions(input.language, fullPackageRepair),
         prompt: repairPrompt,
         schema: repairSchema,
-        maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000
+        maxOutputTokens: repairFields.includes("fullExplanationMarkdown") || repairSchema === teachingPackageSchema ? 9_000 : 5_000,
+        ...(input.repairMissingMainContent && input.sourceImageDataUrl ? { image: input.sourceImageDataUrl } : {})
       })).content;
       const repairedParsed = parseTeachingOutput(repairedRaw);
       if (repairedParsed.issue) trace.repairDiagnostic.parseIssue = repairedParsed.issue;
@@ -745,8 +769,8 @@ export async function writePlannedLesson(
 
   const hasRequiredExplanation = accepted && typeof accepted.fullExplanationMarkdown === "string"
     && !!accepted.fullExplanationMarkdown.trim();
-  const onlyMissingSummary = finalShapeIssues.every(issue => issue === "result.mainContentMarkdown:empty");
-  if (!accepted || !hasRequiredExplanation || finalShapeIssues.length && !onlyMissingSummary) {
+  const onlyMissingMainContent = finalShapeIssues.every(issue => issue === "result.mainContentMarkdown:empty");
+  if (!accepted || !hasRequiredExplanation || finalShapeIssues.length && !onlyMissingMainContent) {
     throw new Error("TEACHING_PACKAGE_INVALID:" + finalShapeIssues.join(","));
   }
   recordFormatWarnings(trace, [...finalFormatIssues, ...partialShapeWarnings]);

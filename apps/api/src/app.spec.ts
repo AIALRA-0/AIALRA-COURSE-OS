@@ -1622,6 +1622,75 @@ describe("Course OS API", () => {
     }
   }, 15_000);
 
+  it("accounts for an authority-saved main repair after restart without repeating model calls or cost", async () => {
+    const previousExternalWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const modelRouter: ModelRouterClient = {
+        generateTeachingPackage: vi.fn(async () => testTeachingResult(0.001))
+      };
+      const { app, dependencies, operations, readweave, release } = await seededApp(modelRouter);
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "repair-cost-restart-gap")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+
+      const partialResult = testTeachingResult(0.025);
+      partialResult.content.mainContentMarkdown = "";
+      const partialPage = applyTeachingPackage(release.pages[0]!, partialResult.content, true, "text_only");
+      const teachCost = testGenerationCost(created.body.id, release, "page-1");
+      const writeContext = (idempotencyKey: string): IdempotentWriteContext => ({ idempotencyKey, actor: "test", workspaceId: "personal",
+        schemaVersion: "2.4.0", requestId: idempotencyKey });
+      const partialDraft = await readweave.saveDraftWithCost({
+        id: "draft:page-1", generationJobId: created.body.id, workspaceId: "personal", courseId: release.courseId,
+        moduleId: release.moduleId, sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "needs_review",
+        page: partialPage, changedBlockIds: partialPage.blocks.map(block => block.id), contentHash: "pre-repair-core",
+        updatedAt: new Date().toISOString()
+      }, 0, writeContext("pre-repair-core-save"), teachCost);
+
+      const repairedPage = structuredClone(partialPage);
+      repairedPage.lessonSections = (repairedPage.lessonSections ?? []).map(section => section.kind === "main_content"
+        ? { ...section, markdown: "- BP 主结论已由格式修复补齐。" } : section);
+      repairedPage.blocks = repairedPage.blocks.map(block => block.kind === "core"
+        ? { ...block, markdown: "- BP 主结论已由格式修复补齐。" } : block);
+      const repairCost: GenerationCostEntry = {
+        ...testGenerationCost(created.body.id, release, "page-1"),
+        id: `${teachCost.id}:main-content-format-repair`, stage: "repair", actualMicrousd: 5_000,
+        estimatedMicrousd: 5_000, cashCostMicrousd: 5_000, estimatedCashCostMicrousd: 5_000
+      };
+      const repairedDraft = await readweave.saveDraftWithCost({
+        ...partialDraft, page: repairedPage, status: "ready", contentHash: "authority-saved-main-repair",
+        updatedAt: new Date().toISOString()
+      }, partialDraft.revision, writeContext("authority-saved-main-repair"), repairCost);
+
+      await operations.mutateGenerationJob(created.body.id, (job, context) => {
+        job.state = "running";
+        job.attempt = 2;
+        job.spentUsd = 0.025;
+        context.appendEvent("generation.cost.recorded", { costEntryId: teachCost.id, status: "succeeded",
+          actualMicrousd: teachCost.actualMicrousd, spentUsd: job.spentUsd });
+        context.appendEvent("generation.page.core_saved", { pageId: "page-1", draftRevision: partialDraft.revision,
+          contentHash: partialDraft.contentHash, costEntryIds: [teachCost.id], publishable: false, bridgeCompleted: false });
+      });
+
+      delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      await resumeIncompleteJobs(dependencies);
+
+      expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"],
+        failedPageIds: [], spentUsd: 0.03 });
+      expect(modelRouter.generateTeachingPackage).not.toHaveBeenCalled();
+      expect(await readweave.getDraftByPage("page-1")).toEqual(repairedDraft);
+      expect(await readweave.listCostEntries({ jobId: created.body.id, pageId: "page-1" }))
+        .toEqual(expect.arrayContaining([teachCost, repairCost]));
+      const events = (await operations.read()).events.filter(event => event.streamId === created.body.id);
+      expect(events.filter(event => event.type === "generation.cost.recorded"
+        && (event.payload as { costEntryId?: string }).costEntryId === teachCost.id)).toHaveLength(1);
+      expect(events.filter(event => event.type === "generation.cost.recorded"
+        && (event.payload as { costEntryId?: string }).costEntryId === repairCost.id)).toHaveLength(1);
+    } finally {
+      if (previousExternalWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previousExternalWorker;
+    }
+  }, 15_000);
+
   it("retries only the page that failed to save and preserves completed page drafts", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: vi.fn(async () => testTeachingResult(0))
@@ -2033,7 +2102,7 @@ describe("Course OS API", () => {
     expect(costs.body.entries[0].actualMicrousd).toBe(1000);
   }, 60_000);
 
-  it("preserves a paid usable body with missing summary but marks the page incomplete", async () => {
+  it("preserves a paid explanation with missing BP main as a nonpublishable review draft", async () => {
     const partialResult = testTeachingResult(0.001);
     partialResult.content.mainContentMarkdown = "";
     const { app, readweave, operations, release } = await seededApp({ generateTeachingPackage: async () => partialResult });
@@ -2041,13 +2110,98 @@ describe("Course OS API", () => {
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
     expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"], spentUsd: 0.001 });
     const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.status).toBe("ready");
+    expect(draft?.status).toBe("needs_review");
+    expect(draft?.page.quality.publishable).toBe(false);
+    expect(draft?.page.quality.issues).toContain("GENERATION_CORE_MAIN_CONTENT_REQUIRED");
     expect(draft?.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown)
       .toBe(partialResult.content.fullExplanationMarkdown);
     expect(draft?.page.lessonSections?.find(section => section.kind === "main_content")?.markdown).toBe("");
-    expect((await operations.read()).events.some(event => event.streamId === created.body.id && event.type === "generation.page.completed")).toBe(false);
+    const events = (await operations.read()).events.filter(event => event.streamId === created.body.id);
+    const review = events.find(event => event.type === "generation.stage.completed"
+      && (event.payload as { stage?: string }).stage === "review")?.payload as { issueCount: number; publishable: boolean } | undefined;
+    expect(review?.publishable).toBe(false);
+    expect(review?.issueCount).toBe(draft?.page.quality.issues.length);
+    expect(events.some(event => event.type === "generation.page.core_saved")).toBe(false);
+    expect(events.some(event => event.type === "generation.page.completed")).toBe(false);
     const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
     expect(costs.body.entries).toHaveLength(1);
+  }, 60_000);
+
+  it("repairs only the missing BP main from a legacy core receipt and preserves the saved page", async () => {
+    const calls: Array<Parameters<NonNullable<ModelRouterClient["generateTeachingPackage"]>>[0]> = [];
+    const repairedMain = "- BP 输出应明确列出节点集合与边集合。";
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async input => {
+        calls.push(input);
+        if (input.repairMissingMainContent) {
+          await input.onTeachingPhase?.("format_repair", "started");
+          const usage = testTeachingResult(0.0005).usage;
+          await input.onTeachingPhase?.("format_repair", "completed", usage);
+          return {
+            content: { ...input.repairMissingMainContent, mainContentMarkdown: repairedMain } as TeachingPackage,
+            provider: "kuafu", model: "deepseek-v4.1-flash", usage, schemaRetries: 1
+          };
+        }
+        const partial = testTeachingResult(0.001);
+        partial.content.mainContentMarkdown = "";
+        return partial;
+      }
+    };
+    const { app, operations, readweave, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "legacy-missing-main-recovery")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", failedPageIds: ["page-1"] });
+
+    const partialDraft = await readweave.getDraftByPage("page-1");
+    expect(partialDraft).toBeDefined();
+    const legacyPage = structuredClone(partialDraft!.page);
+    legacyPage.quality = { ...legacyPage.quality, publishable: false,
+      issues: [...new Set([...legacyPage.quality.issues.filter(issue => issue !== "GENERATION_CORE_MAIN_CONTENT_REQUIRED"), "misconceptions:ITEMS_REQUIRED"])] };
+    const retainedQualityIssues = [...legacyPage.quality.issues];
+    const legacyDraft = await readweave.saveDraft({
+      ...partialDraft!, status: "needs_review", page: legacyPage, contentHash: "legacy-ready-core-with-empty-main",
+      updatedAt: new Date().toISOString()
+    }, partialDraft!.revision, {
+      idempotencyKey: "legacy-ready-core-with-empty-main", actor: "test", workspaceId: "personal",
+      schemaVersion: "2.4.0", requestId: "legacy-ready-core-with-empty-main"
+    });
+    const oldCosts = await readweave.listCostEntries({ jobId: created.body.id, pageId: "page-1" });
+    await operations.mutateGenerationJob(created.body.id, (_job, context) => {
+      context.appendEvent("generation.page.core_saved", { pageId: "page-1", draftRevision: legacyDraft.revision,
+        contentHash: legacyDraft.contentHash, costEntryIds: oldCosts.map(cost => cost.id), publishable: false, bridgeCompleted: false });
+    });
+    const sectionsBefore = legacyDraft.page.lessonSections?.filter(section => section.kind !== "main_content");
+    const blocksBefore = legacyDraft.page.blocks.filter(block => block.kind !== "core");
+    const questionBankBefore = structuredClone(legacyDraft.page.questionBank);
+    const imageUrlBefore = legacyDraft.page.imageUrl;
+
+    await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "legacy-main-format-repair")
+      .send({}).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-1"], failedPageIds: [] });
+
+    expect(calls).toHaveLength(2);
+    expect(calls.filter(call => !call.repairMissingMainContent)).toHaveLength(1);
+    expect(calls[1]?.repairMissingMainContent).toMatchObject({
+      mainContentMarkdown: "", fullExplanationMarkdown: legacyDraft.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown
+    });
+    expect(calls[1]?.onTeachingPhase).toBeDefined();
+    const repaired = await readweave.getDraftByPage("page-1");
+    expect(repaired?.status).toBe("ready");
+    expect(repaired?.page.quality).toMatchObject({ publishable: false, issues: retainedQualityIssues });
+    expect(repaired?.page.imageUrl).toBe(imageUrlBefore);
+    expect(repaired?.page.anchors).toEqual(legacyDraft.page.anchors);
+    expect(repaired?.page.atoms).toEqual(legacyDraft.page.atoms);
+    expect(repaired?.page.questionBank).toEqual(questionBankBefore);
+    expect(repaired?.page.lessonSections?.filter(section => section.kind !== "main_content")).toEqual(sectionsBefore);
+    expect(repaired?.page.blocks.filter(block => block.kind !== "core")).toEqual(blocksBefore);
+    expect(repaired?.page.lessonSections?.find(section => section.kind === "main_content")?.markdown).toBe(repairedMain);
+    expect(repaired?.page.blocks.find(block => block.kind === "core")?.markdown).toBe(repairedMain);
+    const events = (await operations.read()).events.filter(event => event.streamId === created.body.id);
+    expect(events.filter(event => event.type === "generation.stage.started"
+      && (event.payload as { stage?: string }).stage === "repair")).toHaveLength(1);
+    expect(events.filter(event => event.type === "generation.stage.started"
+      && (event.payload as { stage?: string }).stage === "teach")).toHaveLength(1);
+    expect((await readweave.listCostEntries({ jobId: created.body.id, pageId: "page-1" })).map(cost => cost.stage)).toContain("repair");
   }, 60_000);
 
   it("does not make a complete Slim teaching page fail solely for legacy coverage fields", async () => {

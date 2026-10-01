@@ -3680,7 +3680,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
-      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter, initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined)) continue;
+      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter,
+        initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined, () => meter.markSettled())) continue;
       if (currentJob.spentUsd >= currentJob.budgetUsd) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
@@ -3765,7 +3766,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await appendGenerationStageEvent(jobId, page.id, "review", "started", dependencies);
       const generatedPage = applyTeachingPackage(page, generation.content, Boolean(runtimeModelRouter), teachingPlan ? "multimodal" : "text_only", generation.teachingTrace);
       const coverage = calculateCoverage(generatedPage.coverageRequirements, generatedPage.coverageClaims);
-      const issues = [...new Set(validatePageForPublication(generatedPage))];
+      const hasMainContent = Boolean(generation.content.mainContentMarkdown?.trim());
+      const issues = [...new Set([
+        ...validatePageForPublication(generatedPage),
+        ...(!hasMainContent ? ["GENERATION_CORE_MAIN_CONTENT_REQUIRED"] : [])
+      ])];
       generatedPage.quality = {
         highRiskCoverage: coverage.highRiskCoverage,
         generalCoverage: coverage.generalCoverage,
@@ -3794,7 +3799,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         sourceReleaseId: release.id,
         pageId: page.id,
         revision: existing?.revision ?? 0,
-        status: generation.content.fullExplanationMarkdown.trim()
+        status: generation.content.fullExplanationMarkdown.trim() && hasMainContent
           ? "ready" : "needs_review",
         page: generatedPage,
         changedBlockIds: generatedPage.blocks.map((block) => block.id),
@@ -3844,20 +3849,21 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       }
       finalizedCostPersisted = true;
       meter.markSettled();
-      await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
-        context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
-          contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
-          readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
-          costBundledIntoDraft: bundledCost, costEntryIds: [cost.id], publishable: generatedPage.quality.publishable,
-          bridgeCompleted: false, timings: { ...timings } });
-      });
+      if (hasMainContent) {
+        await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
+          context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
+            contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
+            readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
+            costBundledIntoDraft: bundledCost, costEntryIds: [cost.id], publishable: generatedPage.quality.publishable,
+            bridgeCompleted: false, timings: { ...timings } });
+        });
+      }
       persistenceStage = undefined;
       // A one-page body is durable and readable. Its bridge may await another
       // core; that wait must not reserve a core-generation worker slot.
       if (initial.pageIds.length === 1) releaseCoreSlot();
-      // Keep a usable paid body, but never report the seven-part page complete
-      // when its required summary was not delivered.
-      if (!generation.content.mainContentMarkdown?.trim()) {
+      // Keep the paid explanation, but do not complete the page without its BP main answer.
+      if (!hasMainContent) {
         await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, cost, context));
         throw new Error("GENERATION_CORE_MAIN_CONTENT_REQUIRED");
       }
@@ -4012,13 +4018,14 @@ async function settleCoreSavedPage(
   timings: Record<string, number>,
   pageStartedAt: number,
   router: ModelRouterClient,
-  releaseCoreSlot: () => void
+  releaseCoreSlot: () => void,
+  markUsageSettled: () => void
 ): Promise<boolean> {
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
     && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
+  const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId);
   if (!event) {
-    const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId);
     // Initial submissions have nothing to resume. Retry can recover the narrow
     // authority-save/receipt gap using the existing durable generationJobId.
     if (!job || job.attempt <= 1) return false;
@@ -4031,19 +4038,29 @@ async function settleCoreSavedPage(
     publishable?: boolean;
     bridgeCompleted?: boolean;
   };
-  const draft = await dependencies.readweave.getDraftByPage(pageId);
-  if (!draft || draft.status !== "ready" || draft.sourceReleaseId !== release.id) return false;
-  if (!draft.page.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())
-    || !draft.page.lessonSections?.some(section => section.kind === "main_content" && section.markdown?.trim())) return false;
+  let draft = await dependencies.readweave.getDraftByPage(pageId);
+  if (!draft || draft.sourceReleaseId !== release.id || (job && draft.workspaceId !== job.workspaceId)) return false;
   const eventMatchesDraft = Boolean(event && draft.revision === saved?.draftRevision && draft.contentHash === saved.contentHash);
   const metadataMatchesJob = draft.generationJobId === jobId;
   if (!eventMatchesDraft && !metadataMatchesJob) return false;
+  const fullExplanation = draft.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown;
+  if (!fullExplanation?.trim()) return false;
+  const savedMainContent = draft.page.lessonSections?.find(section => section.kind === "main_content")?.markdown;
+  if (!savedMainContent?.trim()) {
+    if (!job || !["ready", "needs_review"].includes(draft.status)) return false;
+    await repairSavedMainContent(jobId, pageId, release, draft, job, saved, router, dependencies,
+      fenceToken, timings, markUsageSettled);
+    return settleCoreSavedPage(jobId, pageId, release, fenceToken, dependencies, timings, pageStartedAt, router,
+      releaseCoreSlot, markUsageSettled);
+  }
+  if (draft.status !== "ready") return false;
 
   const availableCosts = await dependencies.readweave.listCostEntries({ jobId, pageId });
   const costEntryIds = eventMatchesDraft ? saved?.costEntryIds?.filter((id): id is string => typeof id === "string") : undefined;
   const costs = costEntryIds?.length
     ? costEntryIds.map((id) => availableCosts.find((entry) => entry.id === id)).filter((entry): entry is GenerationCostEntry => Boolean(entry))
-    : availableCosts.filter((entry) => entry.stage === "teach" && entry.status === "succeeded");
+    : availableCosts.filter((entry) => entry.jobId === jobId && entry.pageId === pageId
+      && ["teach", "repair"].includes(entry.stage) && entry.status === "succeeded");
   if (costs.length === 0 || (costEntryIds && costs.length !== costEntryIds.length)
     || (!metadataMatchesJob && !costEntryIds?.length && costs.length !== 1)) {
     throw new Error("GENERATION_CORE_SAVED_COST_UNAVAILABLE");
@@ -4101,6 +4118,128 @@ async function settleCoreSavedPage(
     if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, context);
   });
   return true;
+}
+
+async function repairSavedMainContent(
+  jobId: string,
+  pageId: string,
+  release: CourseRelease,
+  draft: LessonDraft,
+  job: GenerationJob,
+  saved: { costEntryIds?: string[]; publishable?: boolean } | undefined,
+  router: ModelRouterClient,
+  dependencies: AppDependencies,
+  fenceToken: number,
+  timings: Record<string, number>,
+  markUsageSettled: () => void
+): Promise<LessonDraft> {
+  const sourcePage = release.pages.find(page => page.id === pageId);
+  if (!sourcePage) throw new Error("GENERATION_MAIN_REPAIR_SOURCE_PAGE_MISSING");
+  const repairSeed = teachingPackageSeedFromDraft(draft.page);
+  const remainingBudgetUsd = job.budgetUsd - job.spentUsd;
+  if (remainingBudgetUsd <= 0) throw new Error("JOB_BUDGET_EXHAUSTED");
+  const phaseStartedAt = new Map<string, number>();
+  const result = await router.generateTeachingPackage({
+    pageTitle: sourcePage.title,
+    pageNumber: sourcePage.pageNumber,
+    sourceText: buildGenerationSourceText(preparePageForGeneration(sourcePage)),
+    sourceImageDataUrl: await originalPageDataUrl(sourcePage, dependencies),
+    courseContext: buildGenerationCourseContext(release.pages, pageId),
+    writingPolicySnapshotId: job.writingPolicySnapshotId || release.writingPolicySnapshotId,
+    language: job.language || "zh-CN",
+    qualityMode: job.qualityMode || generationQualityMode(job.budgetUsd),
+    idempotencyKey: `course-os:${jobId}:attempt:${job.attempt}:${pageId}:main-content-format-repair:v1`,
+    maxCostUsd: remainingBudgetUsd,
+    stage: "teach",
+    repairMissingMainContent: repairSeed,
+    onTeachingPhase: async (phase, state, usage) => {
+      if (phase !== "format_repair") throw new Error("GENERATION_MAIN_REPAIR_PHASE_INVALID");
+      if (state === "started") phaseStartedAt.set(phase, Date.now());
+      const wallDurationMs = state === "completed" && phaseStartedAt.has(phase)
+        ? Date.now() - phaseStartedAt.get(phase)! : undefined;
+      if (wallDurationMs !== undefined) timings.mainContentRepairMs = wallDurationMs;
+      await appendGenerationStageEvent(jobId, pageId, "repair", state, dependencies,
+        { phase, activity: "missing_main_content", ...usage, ...(wallDurationMs !== undefined ? { wallDurationMs } : {}) }, fenceToken);
+    }
+  });
+  const mainContentMarkdown = result.content.mainContentMarkdown;
+  let cost = generationCostEntry(jobId, job, release, pageId, result, Boolean(mainContentMarkdown?.trim()));
+  cost.id += ":main-content-format-repair";
+  cost.stage = "repair";
+  const existingCosts = await dependencies.readweave.listCostEntries({ jobId, pageId });
+  if (!mainContentMarkdown?.trim()) {
+    cost.qualityPassed = false;
+    await dependencies.readweave.appendCostEntry(cost, systemWriteContext(cost.id, job.workspaceId));
+    await dependencies.operations.mutateGenerationJob(jobId, (current, context) => applyScopedCost(current, cost, context));
+    markUsageSettled();
+    throw new Error("GENERATION_CORE_MAIN_CONTENT_REQUIRED");
+  }
+
+  const page = structuredClone(draft.page);
+  const sections = page.lessonSections ?? [];
+  const mainSectionIndex = sections.findIndex(section => section.kind === "main_content");
+  if (mainSectionIndex >= 0) {
+    page.lessonSections = sections.map((section, index) => index === mainSectionIndex
+      ? { ...section, markdown: mainContentMarkdown } : section);
+  } else {
+    page.lessonSections = [...sections, { id: `${pageId}:section:main`, kind: "main_content", title: "主要内容",
+      markdown: mainContentMarkdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) }];
+  }
+  page.blocks = page.blocks.map(block => block.kind === "core" ? { ...block, markdown: mainContentMarkdown } : block);
+  const qualityIssues = page.quality.issues.filter(issue => issue !== "GENERATION_CORE_MAIN_CONTENT_REQUIRED");
+  page.quality = { ...page.quality, issues: qualityIssues };
+  const hasFullExplanation = (page.lessonSections ?? []).some(section => section.kind === "full_explanation" && section.markdown?.trim());
+  const status = hasFullExplanation && mainContentMarkdown.trim() ? "ready" : "needs_review";
+  const updated: LessonDraft = { ...draft, status, page, contentHash: sha256Text(stableStringify(page)), updatedAt: new Date().toISOString() };
+  const write = systemWriteContext(`generation:${jobId}:attempt:${job.attempt}:${pageId}:main-content-format-repair`, job.workspaceId);
+  const save = () => dependencies.readweave.saveDraftWithCost
+    ? dependencies.readweave.saveDraftWithCost(updated, draft.revision, write, cost)
+    : dependencies.readweave.saveDraft(updated, draft.revision, write);
+  let savedDraft: LessonDraft;
+  await assertGenerationFence(jobId, fenceToken, dependencies);
+  try {
+    savedDraft = await save();
+  } catch (error) {
+    if (!isTransientReadWeaveFailure(error)) throw error;
+    await assertGenerationFence(jobId, fenceToken, dependencies);
+    savedDraft = await save();
+  }
+  if (!dependencies.readweave.saveDraftWithCost) {
+    await dependencies.readweave.appendCostEntry(cost, systemWriteContext(cost.id, job.workspaceId));
+  }
+  markUsageSettled();
+  const readback = await dependencies.readweave.getDraftByPage(pageId);
+  if (!readback || readback.contentHash !== savedDraft.contentHash) throw new Error("READWEAVE_MAIN_REPAIR_READBACK_MISMATCH");
+  const priorCostIds = saved?.costEntryIds?.filter((id): id is string => typeof id === "string")
+    ?? existingCosts.filter(entry => entry.status === "succeeded").map(entry => entry.id);
+  await dependencies.operations.mutateGenerationJob(jobId, (current, context) => {
+    if (!isGenerationLeaseCurrent(current, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
+    applyScopedCost(current, cost, context);
+    context.appendEvent("generation.page.core_saved", {
+      pageId, draftRevision: savedDraft.revision, contentHash: savedDraft.contentHash,
+      provider: result.provider, model: result.model, readableAt: new Date().toISOString(),
+      costEntryIds: [...new Set([...priorCostIds, cost.id])], publishable: savedDraft.page.quality.publishable,
+      bridgeCompleted: !!savedDraft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim()),
+      timings: { ...timings }
+    });
+  });
+  return savedDraft;
+}
+
+function teachingPackageSeedFromDraft(page: PageLesson): Partial<TeachingPackage> {
+  const section = (kind: LessonSection["kind"]) => page.lessonSections?.find(item => item.kind === kind);
+  const items = (kind: LessonSection["kind"]) => section(kind)?.items?.map(item => item.text) ?? [];
+  return {
+    chapterBridgeMarkdown: section("chapter_bridge")?.markdown ?? "",
+    learningObjectives: items("learning_objectives"),
+    mainContentMarkdown: "",
+    priorKnowledge: items("prior_knowledge"),
+    fullExplanationMarkdown: section("full_explanation")?.markdown ?? "",
+    misconceptions: items("misconceptions"),
+    coverageEvidence: [],
+    questions: (page.questionBank ?? []).map(question => ({ kind: question.kind, prompt: question.prompt,
+      options: question.options ?? [], expectedAnswer: question.expectedAnswer, explanation: question.explanation }))
+  };
 }
 
 async function appendGenerationStageEvent(jobId: string, pageId: string, stage: GenerationCostEntry["stage"], status: "started" | "completed" | "skipped", dependencies: AppDependencies, details: Record<string, unknown> = {}, fenceToken?: number): Promise<void> {

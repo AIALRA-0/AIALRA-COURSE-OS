@@ -95,6 +95,32 @@ describe("OperationalStore model settings projection", () => {
   });
 });
 
+describe("OperationalStore self-retelling reads", () => {
+  it("filters retellings by workspace and optional release from the existing state", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-self-retelling-read-"));
+    try {
+      const store = new OperationalStore(join(directory, "operations.json"));
+      await store.mutate(state => {
+        state.selfRetellings = {
+          selected: { workspaceId: "personal", releaseId: "release-1", pageId: "page-1", answer: "selected",
+            answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" },
+          anotherRelease: { workspaceId: "personal", releaseId: "release-2", pageId: "page-2", answer: "other release",
+            answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" },
+          anotherWorkspace: { workspaceId: "other", releaseId: "release-1", pageId: "page-3", answer: "other workspace",
+            answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" }
+        };
+      });
+
+      await expect(store.readSelfRetellings("personal", "release-1")).resolves.toMatchObject([
+        { workspaceId: "personal", releaseId: "release-1", pageId: "page-1", answer: "selected" }
+      ]);
+      await expect(store.readSelfRetellings("personal")).resolves.toHaveLength(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 interface PostgresFixture {
   pool: pg.Pool;
   store: PostgresOperationalStore;
@@ -158,6 +184,38 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       expect(sql).toContain("state->'modelRoutePolicy'");
       expect(sql).not.toContain("state->'events'");
       expect(sql).not.toMatch(/\bSELECT\s+(?:\w+\.)?state\s*(?=,|\bAS\b|\bFROM\b)/i);
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
+  it("reads workspace retellings from the existing JSON field without loading full operational state", async () => {
+    const fixture = await startFixture([]);
+    try {
+      const records = {
+        personal: { workspaceId: "personal", releaseId: "release-1", pageId: "page-1", answer: "owned",
+          answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" },
+        anotherRelease: { workspaceId: "personal", releaseId: "release-2", pageId: "page-2", answer: "other release",
+          answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" },
+        anotherWorkspace: { workspaceId: "other", releaseId: "release-1", pageId: "page-3", answer: "other workspace",
+          answeredAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nextReviewAt: "2026-01-02T00:00:00.000Z" }
+      };
+      await fixture.pool.query(
+        "UPDATE operational_state SET state = jsonb_set(state, '{selfRetellings}', $1::jsonb, true) WHERE id = 1",
+        [JSON.stringify(records)]
+      );
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+      const query = vi.spyOn((fixture.store as unknown as { pool: pg.Pool }).pool, "query");
+
+      await expect(fixture.store.readSelfRetellings("personal", "release-1")).resolves.toEqual([records.personal]);
+
+      expect(fullRead).not.toHaveBeenCalled();
+      const sql = String(query.mock.calls.at(-1)?.[0]);
+      expect(sql).toContain("jsonb_each");
+      expect(sql).toContain("entry.value->>'workspaceId'");
+      expect(sql).toContain("entry.value->>'releaseId'");
+      expect(sql).not.toMatch(/SELECT\s+(?:\w+\.)?state\s*(?=,|\bAS\b|\bFROM\b)/i);
+      fullRead.mockRestore();
     } finally {
       await stopFixture(fixture);
     }

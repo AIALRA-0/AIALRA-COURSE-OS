@@ -53,8 +53,7 @@ export function registerSelfRetellingRoutes(app: Express, dependencies: AppDepen
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const releaseId = typeof request.query.releaseId === "string" ? request.query.releaseId : undefined;
-      const records = Object.values((await dependencies.operations.read()).selfRetellings)
-        .filter(record => record.workspaceId === workspaceId && (!releaseId || record.releaseId === releaseId));
+      const records = await dependencies.operations.readSelfRetellings(workspaceId, releaseId);
       response.json(records);
     } catch { problem(response, 503, "RETELLINGS_UNAVAILABLE", "暂时无法读取自我重述，请重试"); }
   });

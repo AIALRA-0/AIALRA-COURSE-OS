@@ -95,6 +95,12 @@ export class OperationalStore {
     return { modelProviders: state.modelProviders, modelRoutePolicy: state.modelRoutePolicy };
   }
 
+  async readSelfRetellings(workspaceId: string, releaseId?: string): Promise<SelfRetelling[]> {
+    const retellings = Object.values((await this.read()).selfRetellings)
+      .filter(item => item.workspaceId === workspaceId && (!releaseId || item.releaseId === releaseId));
+    return structuredClone(retellings);
+  }
+
   /** Read only the fields needed by the task tree and import detail screens. */
   async readTaskIndex(): Promise<TaskIndex> {
     const state = await this.read();
@@ -245,6 +251,23 @@ export class PostgresOperationalStore extends OperationalStore {
        FROM operational_state WHERE id = 1`
     );
     return normalizeModelSettings(result.rows[0]);
+  }
+
+  override async readSelfRetellings(workspaceId: string, releaseId?: string): Promise<SelfRetelling[]> {
+    await this.ready;
+    const result = await this.pool.query<{ records: SelfRetelling[] }>(
+      `SELECT COALESCE(jsonb_agg(entry.value), '[]'::jsonb) AS records
+       FROM operational_state
+       CROSS JOIN LATERAL jsonb_each(
+         CASE WHEN jsonb_typeof(state->'selfRetellings') = 'object'
+           THEN state->'selfRetellings' ELSE '{}'::jsonb END
+       ) AS entry(key, value)
+       WHERE operational_state.id = 1
+         AND entry.value->>'workspaceId' = $1
+         AND ($2::text IS NULL OR entry.value->>'releaseId' = $2)`,
+      [workspaceId, releaseId ?? null]
+    );
+    return result.rows[0]?.records ?? [];
   }
 
   override async readTaskIndex(): Promise<TaskIndex> {

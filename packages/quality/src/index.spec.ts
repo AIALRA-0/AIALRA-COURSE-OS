@@ -82,6 +82,46 @@ describe("strict math", () => {
     expect(validateMarkdownMath("矩阵 $$\\begin{bmatrix}1 & 0\\\\0 & 1\\end{bmatrix}$$")).toEqual([]);
   });
 
+  it("repairs stray inline-dollar delimiters inside display math only", () => {
+    const fraction = String.raw`$$
+q = \exp\left(-\frac{a}{$T$}\right)
+$$`;
+    const aggregate = String.raw`$$
+$x_i$ = W $x_j$, \qquad $x_k$ = \sum_{j \in N(k)} $x_j$
+$$`;
+    const normalizedFraction = normalizeLegacyMathDelimiters(fraction);
+    const normalizedAggregate = normalizeLegacyMathDelimiters(aggregate);
+
+    expect(validateTex(String.raw`q = \exp\left(-\frac{a}{$T$}\right)`).valid).toBe(false);
+    expect(validateTex(String.raw`$x_i$ = W $x_j$, \qquad $x_k$ = \sum_{j \in N(k)} $x_j$`).valid).toBe(false);
+    expect(normalizedFraction).toBe(String.raw`$$
+q = \exp\left(-\frac{a}{T}\right)
+$$`);
+    expect(normalizedAggregate).toBe(String.raw`$$
+x_i = W x_j, \qquad x_k = \sum_{j \in N(k)} x_j
+$$`);
+    expect(validateTex(String.raw`q = \exp\left(-\frac{a}{T}\right)`).valid).toBe(true);
+    expect(validateTex(String.raw`x_i = W x_j, \qquad x_k = \sum_{j \in N(k)} x_j`).valid).toBe(true);
+    expect(validateMarkdownMath(normalizedFraction)).toEqual([]);
+    expect(validateMarkdownMath(normalizedAggregate)).toEqual([]);
+
+    const escapedDollar = String.raw`$$
+\text{cost} = \$5
+$$`;
+    expect(validateTex(String.raw`\text{cost} = \$5`).valid).toBe(true);
+    expect(normalizeLegacyMathDelimiters(escapedDollar)).toBe(escapedDollar);
+
+    const oddDollar = String.raw`$$x + $y$$`;
+    expect(validateTex("x + $y").valid).toBe(false);
+    expect(normalizeLegacyMathDelimiters(oddDollar)).toBe(oddDollar);
+
+    const stillInvalid = String.raw`$$\mystery{$x$}$$`;
+    expect(validateTex(String.raw`\mystery{$x$}`).valid).toBe(false);
+    expect(validateTex(String.raw`\mystery{x}`).valid).toBe(false);
+    expect(normalizeLegacyMathDelimiters(stillInvalid)).toBe(stillInvalid);
+    expect(normalizeLegacyMathDelimiters("inline $T$ and `$$x$y$$`")).toBe("inline $T$ and `$$x$y$$`");
+  });
+
   it("reports an unclosed explicit delimiter instead of returning a misleading plain-text formula", () => {
     expect(validateMarkdownMath("损坏公式 \\[x^2")).toContain("MATH_UNCLOSED_DISPLAY_DELIMITER");
   });
