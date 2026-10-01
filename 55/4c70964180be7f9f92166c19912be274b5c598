@@ -1,0 +1,92 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_28f229bb2e19c8 1,1233
+  s_e8850ef125fb32::t_3f083413873fd6 381,814,1033,1079,1200,1202,1224
+  s_e8850ef125fb32::t_366f77c5c27b8f 4,26-29,811,1190-1198,1216,1219-1223,1225-1232,1234-1241,1255,1586,1594,1596,1603-1604
+  s_e8850ef125fb32::t_e2d55f4c58ff2f 1199
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_e2dc21d0a33a77 450
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_e2dc21d0a33a77 306
+  s_e8850ef125fb32::t_c0a34ab39df4f3 11-16,67,344,354
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_ea30f53323e26d 544-560
+  s_48d70a375114e2::t_43cd893c81ae0b 561-562
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_69242bfe3705e1 368,372,375,806-832
+  s_e8850ef125fb32::t_92cf5e478f0a57 351,365-367,369-371,373-374,376
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_f678d26c736045 3,6-8,11-15,201-206,225,230,233,241,246-251,253-260,264
+  s_e8850ef125fb32::t_a445d61ed7139f 9-10
+  s_e8850ef125fb32::t_f2d30b58a36e32 252,261-263
+  s_e8850ef125fb32::t_c1f0b9892fe445 265-266
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_e2dc21d0a33a77 661-665
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_43066123ee439a 735-738
+  s_e8850ef125fb32::t_09de10a65c3e1f 153
+packages/readweave-adapter/src/index.ts
+  s_e8850ef125fb32::t_38b166b759ee2f 94
+  s_e8850ef125fb32::t_e2dc21d0a33a77 637-641,1077-1084
+  s_48d70a375114e2::t_3f9ff95cd758f3 1085
+config/generation-harness/page-plan-prompt.md
+  s_e8850ef125fb32::t_e75b602383073d 4
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_e75b602383073d 22
+  s_e8850ef125fb32::t_2901ac599abe1b 20,24
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_f069f00c901f00 2-3,8,38,40-42,52-82
+  s_e8850ef125fb32::t_0b4f8df0b4ac34 39,43-51
+  s_e8850ef125fb32::t_dc0b1f4b976685 83-84
+apps/api/src/reading-routes.spec.ts
+  s_e8850ef125fb32::t_d63625883764b3 202,205-207,211-212
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_e2dc21d0a33a77 173,2007-2019,2022-2025,2028-2031,2033-2038
+  s_e8850ef125fb32::t_804b54554697ba 945-948,954-956,3667
+  s_e8850ef125fb32::t_317ae0d198660a 150,160-162,169,172,2039,3157,3574-3581,3590,3609,3619,3737-3739,3839-3847,3852-3853,3863,3884,3998-3999,4020-4021,4037
+packages/readweave-adapter/src/question-selection-getter.spec.ts
+  s_e8850ef125fb32::t_42c3dfec6b3e27 5,60
+  s_e8850ef125fb32::t_a9d0ad0fafb98f 1-4,6-59,61-62
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_2f7b13f396511d 277,918-919,922-923
+  s_e8850ef125fb32::t_0ce234f83ab741 541,905,912,916-917,920-921,924-926
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_be4d2978145da5 5,151-163
+  s_e8850ef125fb32::t_df87965ff0d7cd 164-165
+apps/api/src/bridge-dependency.spec.ts
+  s_e8850ef125fb32::t_63d717e0dbfb4d 177-234
+  s_e8850ef125fb32::t_c45a5d7d9aa4e9 1-176,235-423
+apps/api/src/question-selection-recovery.spec.ts
+  s_e8850ef125fb32::t_3520e142847578 62-69
+  s_e8850ef125fb32::t_a630718fc02cc5 1-6,8-9,11-61,70-128
+  s_e8850ef125fb32::t_42c3dfec6b3e27 7,10
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_3096550baf26ea 42-73
+  s_e8850ef125fb32::t_d80ca245867d59 1964,2717-2775
+  s_e8850ef125fb32::t_23bca28da2078f 1946,1949-1950,1952-1960,1962-1963,1965-1968,1970-1976
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_aa3c6a92942eb8 60-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "554c70964180be7f9f92166c19912be274b5c598",
+  "prompts": {},
+  "sessions": {
+    "s_48d70a375114e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f187-0ff2-70a3-8b42-08f9a330930d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
