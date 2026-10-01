@@ -2303,6 +2303,89 @@ describe("Course OS API", () => {
     });
   });
 
+  it("switches a material current release only to a complete owned draft source", async () => {
+    const { app, readweave, release } = await seededApp();
+    const tree = await request(app).get("/api/v1/workspaces/personal/tree?view=library").expect(200);
+    const course = tree.body.courses[0];
+    const material = course.children[0];
+    const secondPage = replaceTestIds(structuredClone(release.pages[0]!), release.pages[0]!.id, "page-2");
+    secondPage.pageNumber = 2;
+    const origin = {
+      ...structuredClone(release),
+      id: "origin-draft-source",
+      version: 0,
+      lifecycle: "draft_source" as const,
+      pageIds: [...release.pageIds, secondPage.id],
+      pages: [...structuredClone(release.pages), secondPage]
+    };
+    await readweave.registerDraftSource(origin, {
+      idempotencyKey: "tree-pointer-origin-source", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "tree-pointer-origin-source"
+    });
+
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-unready")
+      .send({ expectedRevision: material.revision, currentReleaseId: origin.id })
+      .expect(409)
+      .expect((response) => expect(response.body.error.code).toBe("TREE_CURRENT_RELEASE_NOT_READY"));
+
+    const page = structuredClone(origin.pages[0]!);
+    await readweave.saveDraft({
+      id: "draft:origin-page-1", workspaceId: "personal", courseId: origin.courseId, moduleId: origin.moduleId,
+      sourceReleaseId: origin.id, pageId: page.id, revision: 0, status: "ready", page,
+      changedBlockIds: page.blocks.map((block) => block.id), contentHash: "origin-ready-page", updatedAt: new Date().toISOString()
+    }, 0, {
+      idempotencyKey: "tree-pointer-origin-ready-page", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "tree-pointer-origin-ready-page"
+    });
+
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-partial")
+      .send({ expectedRevision: material.revision, currentReleaseId: origin.id })
+      .expect(409)
+      .expect((response) => expect(response.body.error.code).toBe("TREE_CURRENT_RELEASE_NOT_READY"));
+
+    await readweave.saveDraft({
+      id: "draft:origin-page-2", workspaceId: "personal", courseId: origin.courseId, moduleId: origin.moduleId,
+      sourceReleaseId: origin.id, pageId: secondPage.id, revision: 0, status: "ready", page: secondPage,
+      changedBlockIds: secondPage.blocks.map((block) => block.id), contentHash: "origin-ready-page-2", updatedAt: new Date().toISOString()
+    }, 0, {
+      idempotencyKey: "tree-pointer-origin-ready-page-2", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "tree-pointer-origin-ready-page-2"
+    });
+
+    const switched = await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-ready")
+      .send({ expectedRevision: material.revision, currentReleaseId: origin.id })
+      .expect(200);
+    expect(switched.body).toMatchObject({ id: material.id, kind: "material", currentReleaseId: origin.id, releaseId: origin.id, revision: material.revision + 1 });
+    const replayed = await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-ready")
+      .send({ expectedRevision: material.revision, currentReleaseId: origin.id })
+      .expect(200);
+    expect(replayed.body).toMatchObject({ currentReleaseId: origin.id, revision: switched.body.revision });
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-stale-cas")
+      .send({ expectedRevision: material.revision, currentReleaseId: release.id })
+      .expect(409);
+    const afterRejectedCas = await request(app).get("/api/v1/workspaces/personal/tree?view=library").expect(200);
+    expect(afterRejectedCas.body.courses[0].children[0]).toMatchObject({ currentReleaseId: origin.id });
+    await expect(readweave.getRelease(release.id)).resolves.toMatchObject({ id: release.id, version: release.version, pages: release.pages });
+
+    const foreignMaterialRelease = { ...structuredClone(origin), id: "other-material-source", moduleId: "different-module" };
+    await readweave.registerDraftSource(foreignMaterialRelease, {
+      idempotencyKey: "tree-pointer-other-material", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "tree-pointer-other-material"
+    });
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "tree-pointer-foreign-material")
+      .send({ expectedRevision: switched.body.revision, currentReleaseId: foreignMaterialRelease.id })
+      .expect(422)
+      .expect((response) => expect(response.body.error.code).toBe("TREE_CURRENT_RELEASE_OWNERSHIP"));
+
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(course.id)}`)
+      .set("Idempotency-Key", "tree-pointer-course-node")
+      .send({ expectedRevision: course.revision, currentReleaseId: origin.id })
+      .expect(422)
+      .expect((response) => expect(response.body.error.code).toBe("TREE_CURRENT_RELEASE_MATERIAL_ONLY"));
+  });
+
   it("supports revision-checked course-tree CRUD, trash recovery and exact ReadWeave links", async () => {
     const { app, release, readweave } = await seededApp();
     const firstTree = await request(app).get("/api/v1/workspaces/personal/tree?view=library").expect(200);

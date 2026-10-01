@@ -27,7 +27,7 @@ import type {
   WorkspaceSettings
 } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
-import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, selectMaterialRelease, stableMaterialId } from "./tree-identity.js";
+import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, selectMaterialRelease, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
 
 export { selectMaterialRelease };
 
@@ -116,7 +116,7 @@ export interface ReadWeaveCourseApi {
   getSyncStatus(): Promise<ReadWeaveSyncStatus>;
   listTreeNodes(): Promise<CourseTreeNode[]>;
   createTreeNode(node: CourseTreeNode, context: IdempotentWriteContext): Promise<CourseTreeNode>;
-  updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode>;
+  updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode>;
   duplicateTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<CourseTreeNode>;
   trashTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<TrashRecord>;
   listTrash(): Promise<TrashRecord[]>;
@@ -288,7 +288,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.readBackTreeNode(saved.id, saved);
   }
 
-  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
+  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
     const saved = await this.mutate(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
@@ -304,6 +304,11 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
       const currentRevision = course?.revision ?? node?.revision ?? 0;
       if (!course && !node) throw new Error("TREE_NODE_STALE");
       if (currentRevision !== expectedRevision) throw new Error("READWEAVE_TREE_NODE_REVISION_CONFLICT");
+      if (patch.currentReleaseId !== undefined) {
+        const targetRelease = validateMaterialReleaseTarget(node, patch.currentReleaseId, state.courses, state.releases, state.drafts, context.workspaceId);
+        node!.currentReleaseId = targetRelease.id;
+        node!.releaseId = targetRelease.id;
+      }
       const now = new Date().toISOString();
       if (course) {
         if (patch.title?.trim()) course.title = patch.title.trim();
@@ -838,7 +843,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
         const selectedContent = resolution === "local" ? conflict.localContent : resolution === "remote" ? conflict.remoteContent : mergedContent!;
         try {
           draft.page = JSON.parse(selectedContent);
-          draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision) + 1;
+          draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision, draft.revision) + 1;
           draft.status = "editing";
           draft.contentHash = createHash("sha256").update(selectedContent).digest("hex");
           draft.updatedAt = conflict.resolvedAt;
@@ -933,6 +938,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     const visible = (await this.listTreeNodes()).find((candidate) => candidate.id === nodeId);
     const node = visible ?? (await this.read()).treeNodes.find((candidate) => candidate.id === nodeId);
     if (!node || node.title !== expected.title || node.parentId !== expected.parentId || (expected.revision !== undefined && node.revision !== expected.revision)) throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    if (expected.currentReleaseId !== undefined && node.currentReleaseId !== expected.currentReleaseId) throw new Error("READWEAVE_TREE_READBACK_FAILED");
     if (expected.readweaveNoteId && node.readweaveNoteId !== expected.readweaveNoteId) throw new Error("READWEAVE_TREE_IDENTITY_READBACK_FAILED");
     return node;
   }
@@ -1198,7 +1204,7 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.readBackTreeNode(saved.id, saved);
   }
 
-  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
+  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
     const saved = await this.request<CourseTreeNode>(`/tree/nodes/${encodeURIComponent(nodeId)}`, { method: "PATCH", body: JSON.stringify({ patch, expectedRevision }), headers: this.writeHeaders(context) });
     return this.readBackTreeNode(saved.id, saved);
   }
@@ -1296,6 +1302,7 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async readBackTreeNode(nodeId: string, expected: CourseTreeNode): Promise<CourseTreeNode> {
     const node = (await this.listTreeNodes()).find((candidate) => candidate.id === nodeId);
     if (!node || node.title !== expected.title || node.parentId !== expected.parentId || (expected.revision !== undefined && node.revision !== expected.revision)) throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    if (expected.currentReleaseId !== undefined && node.currentReleaseId !== expected.currentReleaseId) throw new Error("READWEAVE_TREE_READBACK_FAILED");
     if (expected.readweaveNoteId && node.readweaveNoteId !== expected.readweaveNoteId) throw new Error("READWEAVE_TREE_IDENTITY_READBACK_FAILED");
     return node;
   }

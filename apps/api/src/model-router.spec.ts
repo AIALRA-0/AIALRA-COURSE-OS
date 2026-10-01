@@ -4,13 +4,17 @@ import { meterModelRouter } from "./model-usage-meter.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, parseWrappedProviderJson, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingPackageSchema, withCurrentDeepSeekModels } from "./model-router.js";
 
 const explicitProviderBadRequest = [
-  "[req_synthetic123] [deepseek-v4.1-flash]",
+  "[req_synthetic_envelope_0001] [deepseek-v4.1-flash]",
   "**Bad request from AI provider**",
-  "- Your request was rejected",
-  "- invalid parameters or unsupported content",
+  "- Your request was rejected by the AI provider (invalid parameters or unsupported content).",
+  "How to fix:",
+  "- Review your request format and simplify your prompt.",
   "",
   "**Billing:**",
-  "- This request still counts as a request and is billed based on its input (minimum 1,000 prompt / 1,000 completion / 1,000 cached tokens)."
+  "- This request still counts as a request and is billed based on its input (minimum 1,000 prompt / 1,000 completion / 1,000 cached tokens).",
+  "- Do not resend the same request — it will keep failing and keep consuming your quota.",
+  "**Recommended tools:**",
+  "- These responses are optimized for opencode, Claude Code, and Codex."
 ].join("\n");
 
 const explicitProviderTemporaryUnavailable = [
@@ -50,7 +54,7 @@ describe("generation harness", () => {
   });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.2", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.3", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/planned-teaching.ts")).toBe(true);
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
@@ -216,6 +220,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(instructions).toContain("若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。");
       expect(instructions).toContain("交叉只影响实际无法跟踪的那一条或几条，其他端点明确可追踪的连接仍须逐条保留");
       expect(instructions).toContain("只有某一端点或连线本身不能唯一追踪时，才仅对该局部标注不确定");
+      expect(instructions).toContain("区分元件实例标签、信号端点和网络标签，不把门内名称当输入信号；边按两个实际端点转写，只有图例明确说明粗细代表权值时才解释为权值；数字保留负号与小数；只给实际可辨认的局部信息，不凭未看清的线宣称连接不存在。");
       expect(instructions).toContain("门的轮廓、输入输出端点数量与位置、输出端反相圈及其连接关系");
       expect(instructions).toContain("例如 AND 形状加输出反相圈表示 NAND");
       expect(instructions).toContain("背景中的通用逻辑规则须明确标为背景说明");
@@ -262,7 +267,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   });
 
   it.each(["bridge", "teaching"] as const)("rejects the HTTP-200 provider refusal before %s content is delivered and meters its usage", async kind => {
-    const providerResponse = Response.json({ model: "deepseek-v4.1-flash", output_text: explicitProviderBadRequest,
+    const providerResponse = Response.json({ status: "completed", model: "deepseek-v4.1-flash", output_text: explicitProviderBadRequest,
       usage: { input_tokens: 140, output_tokens: 0, total_cost: 0.001 } });
     expect(providerResponse.status).toBe(200);
     const fetchMock = vi.fn(async () => providerResponse);
@@ -275,7 +280,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       ? metered.client.generateBridge!({ ...input, previousPageContext: "前页已确认讲解", currentSummary: "本页教学摘要" })
       : metered.client.generateTeachingPackage(input);
 
-    await expect(generation).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED:invalid_request_error",
+    await expect(generation).rejects.toMatchObject({ code: "MODEL_PROVIDER_OPAQUE_RELAY_REJECTION",
       provider: "kuafu", model: "deepseek-v4.1-flash", usage: { inputTokens: 140, outputTokens: 0, apiEquivalentUsd: 0.001 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(metered.groupedUsage()).toMatchObject([{ provider: "kuafu", model: "deepseek-v4.1-flash",
@@ -503,6 +508,53 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await client.generateTeachingPackage(providerInput("concurrency-fallback"));
     expect(result.provider).toBe("kuafu-backup");
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("backup.test"))).toBe(true);
+  });
+
+  it.each([
+    { accounting: "reported primary usage", primaryUsage: { input_tokens: 140, output_tokens: 0, total_cost: 0.033736 }, expectedCost: 0.034736, expectReserve: false },
+    { accounting: "unreported primary usage", primaryUsage: undefined, expectedCost: 0.001, expectReserve: true }
+  ])("uses the explicit second route once and aggregates $accounting within the remaining page budget", async scenario => {
+    const requests: Array<{ url: string; maxOutputTokens?: number }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { max_output_tokens?: number };
+      requests.push({ url: String(url), maxOutputTokens: request.max_output_tokens });
+      if (String(url).includes("primary.test")) {
+        return Response.json({ status: "completed", model: "deepseek-v4.1-flash", output_text: explicitProviderBadRequest,
+          ...(scenario.primaryUsage ? { usage: scenario.primaryUsage } : {}) });
+      }
+      return Response.json({ status: "completed", model: "deepseek-v4.1-flash-expires-on-0910",
+        output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const metered = meterModelRouter(configuredKuafuFallbackClient());
+    const result = await metered.client.generateTeachingPackage({ ...providerInput(`opaque-relay-fallback-${scenario.expectReserve}`), maxCostUsd: 0.05 });
+
+    expect(result).toMatchObject({ provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910",
+      usage: { inputTokens: scenario.primaryUsage ? 240 : 100, outputTokens: 200, apiEquivalentUsd: scenario.expectedCost } });
+    if (scenario.expectReserve) expect(result.usage.unreportedCostReserveUsd).toBeGreaterThan(0);
+    else expect(result.usage.unreportedCostReserveUsd).toBeUndefined();
+    expect(requests.filter(request => request.url.includes("primary.test"))).toHaveLength(1);
+    expect(requests.filter(request => request.url.includes("backup.test"))).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    if (!scenario.expectReserve) {
+      expect(requests[1]!.maxOutputTokens).toBeLessThan(requests[0]!.maxOutputTokens!);
+    }
+    expect(metered.groupedUsage()).toEqual([{ provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910", usage: result.usage }]);
+  });
+
+  it("does not fall back for a structured HTTP 400 invalid_request_error", async () => {
+    const fetchMock = vi.fn(async (url: string) => String(url).includes("primary.test")
+      ? Response.json({ error: { code: "invalid_request_error", message: "invalid input" } }, { status: 400 })
+      : Response.json({ status: "completed", output_text: JSON.stringify(providerTeachingContent()) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = configuredKuafuFallbackClient();
+
+    await expect(client.generateTeachingPackage(providerInput("structured-invalid-request-no-fallback"))).rejects.toMatchObject({
+      provider: "kuafu", code: "MODEL_PROVIDER_FAILED:invalid_request_error"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("primary.test");
   });
 
   it("bounds simultaneous Kuafu teaching calls while all page jobs can keep running", async () => {
@@ -947,6 +999,25 @@ function providerInput(idempotencyKey: string, withImage = false) {
     idempotencyKey,
     teachingPlan: "先说明页面的核心问题，再按课件顺序解释关键对象及其关系。"
   };
+}
+
+function configuredKuafuFallbackClient() {
+  return new SettingsProviderTeachingClient({ load: async () => ({
+    providers: [
+      { id: "kuafu", displayName: "Kuafu", baseUrl: "https://primary.test", enabled: true,
+        credential: { configured: true }, models: [{ id: "deepseek-v4.1-flash", displayName: "Flash", protocol: "responses" as const,
+          supportsVision: false, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] },
+      { id: "kuafu-backup", displayName: "Kuafu backup", baseUrl: "https://backup.test", enabled: true,
+        credential: { configured: true }, models: [{ id: "deepseek-v4.1-flash-expires-on-0910", displayName: "Flash backup", protocol: "responses" as const,
+          supportsVision: false, supportsJsonSchema: true, supportsReasoning: false, billingMode: "metered" as const }] }
+    ],
+    policy: { workspaceId: "personal", allowProviderFallback: true, allowAialraEmergencyFallback: false,
+      updatedAt: new Date(0).toISOString(), routes: [
+        { providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true },
+        { providerId: "kuafu-backup", modelId: "deepseek-v4.1-flash-expires-on-0910", enabled: true }
+      ], rules: [{ stage: "teach", providerId: "kuafu", modelId: "deepseek-v4.1-flash", enabled: true }] },
+    credential: async () => "synthetic-secret"
+  }) });
 }
 
 function providerTeachingContent() {

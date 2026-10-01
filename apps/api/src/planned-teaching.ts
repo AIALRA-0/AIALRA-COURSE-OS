@@ -24,19 +24,22 @@ export const writingFormatContract = readPrompt("writing-format-contract.md");
 
 export function plannedInstructions(_fields: readonly string[], language = "zh-CN"): string {
   const completePolicy = writingPolicyInstructions(language);
-  return plannedWritingPrompt + "\n\n" + writingFormatContract
-    + (completePolicy ? "\n\n---\n\n" + completePolicy : "");
+  // The complete writing policy informs prose; the actual teaching request and
+  // machine-consumed format remain last so its generic delivery examples do
+  // not turn a structured lesson request into a conversational reply.
+  return (completePolicy ? completePolicy + "\n\n---\n\n" : "")
+    + plannedWritingPrompt + "\n\n" + writingFormatContract;
 }
 
 function repairInstructions(language: string, fullPackageRepair = false): string {
   if (fullPackageRepair) {
-    return "当前没有可沿用的有效候选教学包；targetFields 列出了本次必须重新生成的全部最终教学字段。请只根据完整来源生成这些字段，并遵守每个教学栏目的原始职责，只返回符合 schema 的 JSON 字段对象。"
-      + "\n\n" + plannedInstructions([], language);
+    return plannedInstructions([], language)
+      + "\n\n当前没有可沿用的有效候选教学包；targetFields 列出了本次必须重新生成的全部最终教学字段。请只根据完整来源生成这些字段，并遵守每个教学栏目的原始职责，只返回符合 schema 的 JSON 字段对象。";
   }
   const completePolicy = writingPolicyInstructions(language);
-  return "你只修复请求中 targetFields 指定的最终 JSON 字段；其余教学内容已经保存，不得重写或返回。先完整阅读以下格式规则与写作策略，再输出修复字段组成的 JSON 对象。"
-    + "\n\n" + writingFormatContract
-    + (completePolicy ? "\n\n---\n\n" + completePolicy : "");
+  return (completePolicy ? completePolicy + "\n\n---\n\n" : "")
+    + writingFormatContract
+    + "\n\n你只修复请求中 targetFields 指定的最终 JSON 字段；其余教学内容已经保存，不得重写或返回。输出仅为这些字段组成的 JSON 对象，不返回整页讲义、对话回复或完整教学包。";
 }
 
 export interface PlannedCall {

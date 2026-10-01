@@ -544,6 +544,38 @@ describe("file ReadWeave adapter", () => {
     }, { ...context, idempotencyKey: "question-after-conflict" })).resolves.toMatchObject({ id: "question-after-conflict" });
   });
 
+  it("resolves a stale lesson conflict above the current draft revision using the supplied merged page", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-readweave-stale-conflict-"));
+    const api = new FileReadWeaveCourseApi(join(root, "state.json"));
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const initial = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "stale-conflict-initial" });
+
+    const stalePage = structuredClone(initial.page);
+    stalePage.blocks[0]!.markdown = "旧冲突中的提交";
+    await expect(api.saveDraft({ ...initial, page: stalePage }, 0, { ...context, idempotencyKey: "stale-conflict-create" }))
+      .rejects.toThrow("READWEAVE_REVISION_CONFLICT");
+    const conflict = (await api.listConflicts()).find((item) => item.status === "open");
+    expect(conflict).toMatchObject({ localRevision: initial.revision, remoteRevision: initial.revision });
+
+    const latestPage = structuredClone(initial.page);
+    latestPage.blocks[0]!.markdown = "当前已确认的新全页稿";
+    const latest = await api.saveDraft({ ...initial, page: latestPage }, initial.revision,
+      { ...context, idempotencyKey: "stale-conflict-latest" });
+    expect(latest.revision).toBe(initial.revision + 1);
+
+    const mergedPage = structuredClone(latest.page);
+    mergedPage.title = "调用方确认的新稿标题";
+    mergedPage.blocks[0]!.markdown = "调用方确认的新全页合并稿";
+    const resolved = await api.resolveConflict(conflict!.id, "merged", JSON.stringify(mergedPage),
+      { ...context, idempotencyKey: "stale-conflict-resolve" });
+    const saved = await api.getDraftByPage(initial.pageId);
+
+    expect(resolved.status).toBe("resolved");
+    expect(saved).toMatchObject({ revision: latest.revision + 1, page: mergedPage });
+    expect(saved?.page.blocks[0]?.markdown).toBe("调用方确认的新全页合并稿");
+  });
+
   it("removes only the selected draft source and its page drafts", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-readweave-"));
     const api = new FileReadWeaveCourseApi(join(root, "state.json"));
@@ -557,6 +589,68 @@ describe("file ReadWeave adapter", () => {
 });
 
 describe("ReadWeave ETAPI adapter", () => {
+  it("updates and reads back a material pointer only after the owned source is fully readable", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const formal = releaseWithPage();
+    const secondPage = structuredClone(formal.pages[0]!);
+    secondPage.id = "page-2";
+    secondPage.pageNumber = 2;
+    secondPage.anchors.forEach((anchor) => { anchor.pageId = secondPage.id; });
+    secondPage.questionBank?.forEach((question) => { question.pageId = secondPage.id; });
+    formal.pages.push(secondPage);
+    formal.pageIds.push(secondPage.id);
+    await api.publishRelease(formal, { ...manifest, courseReleaseId: formal.id }, context);
+    const material = (await api.listTreeNodes()).find((node) => node.kind === "material");
+    expect(material).toBeDefined();
+    const origin = { ...structuredClone(formal), id: "etapi-origin-draft-source", lifecycle: "draft_source" as const };
+    await api.registerDraftSource(origin, { ...context, idempotencyKey: "etapi-tree-pointer-origin" });
+
+    await expect(api.updateTreeNode(material!.id, { currentReleaseId: origin.id }, material!.revision ?? 0,
+      { ...context, idempotencyKey: "etapi-tree-pointer-unready" })).rejects.toThrow("READWEAVE_TREE_CURRENT_RELEASE_NOT_READY");
+
+    const ready = { ...draftFor(origin), status: "ready" as const };
+    await api.saveDraft(ready, 0, { ...context, idempotencyKey: "etapi-tree-pointer-ready-draft" });
+    await expect(api.updateTreeNode(material!.id, { currentReleaseId: origin.id }, material!.revision ?? 0,
+      { ...context, idempotencyKey: "etapi-tree-pointer-partial" })).rejects.toThrow("READWEAVE_TREE_CURRENT_RELEASE_NOT_READY");
+    const secondReady = { ...draftFor(origin, secondPage.id), status: "ready" as const };
+    await api.saveDraft(secondReady, 0, { ...context, idempotencyKey: "etapi-tree-pointer-second-ready-draft" });
+    const switched = await api.updateTreeNode(material!.id, { currentReleaseId: origin.id }, material!.revision ?? 0,
+      { ...context, idempotencyKey: "etapi-tree-pointer-switch" });
+
+    expect(switched).toMatchObject({ id: material!.id, kind: "material", currentReleaseId: origin.id, releaseId: origin.id });
+    await expect(api.getRelease(formal.id)).resolves.toMatchObject({ id: formal.id, version: formal.version, pages: formal.pages });
+  });
+
+  it("resolves a stale lesson conflict above the latest page-record revision", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const initial = await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "etapi-stale-conflict-initial" });
+
+    const stalePage = structuredClone(initial.page);
+    stalePage.blocks[0]!.markdown = "旧冲突中的提交";
+    await expect(api.saveDraft({ ...initial, page: stalePage }, 0, { ...context, idempotencyKey: "etapi-stale-conflict-create" }))
+      .rejects.toThrow("READWEAVE_REVISION_CONFLICT");
+    const conflict = (await api.listConflicts()).find((item) => item.status === "open");
+    expect(conflict).toBeDefined();
+
+    const latestPage = structuredClone(initial.page);
+    latestPage.blocks[0]!.markdown = "当前页记录中的最新稿";
+    const latest = await api.saveDraft({ ...initial, page: latestPage }, initial.revision,
+      { ...context, idempotencyKey: "etapi-stale-conflict-latest" });
+    const mergedPage = structuredClone(latest.page);
+    mergedPage.blocks[0]!.markdown = "调用方确认的新全页合并稿";
+
+    await expect(api.resolveConflict(conflict!.id, "merged", JSON.stringify(mergedPage),
+      { ...context, idempotencyKey: "etapi-stale-conflict-resolve" })).resolves.toMatchObject({ status: "resolved" });
+    await expect(api.getDraftByPage(initial.pageId)).resolves.toMatchObject({
+      revision: latest.revision + 1,
+      page: expect.objectContaining({ blocks: [expect.objectContaining({ markdown: "调用方确认的新全页合并稿" })] })
+    });
+  });
+
   it("round-trips the optional generation job owner in its draft record", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });

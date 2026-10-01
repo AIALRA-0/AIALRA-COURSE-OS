@@ -92,13 +92,98 @@ function sectionDescriptor(value: string): string {
 }
 
 export function displayMisconception(value: string): string {
-  return formatMisconception(value);
+  return formatMisconception(normalizeMalformedBoldLabelClosers(value));
+}
+
+export function displayPriorKnowledge(value: string): string {
+  return value.replace(/^([ \t]*)\*\*([^*\r\n]{1,100}?[：:])[ \t]*\*\*/u, "$1$2");
+}
+
+function normalizeMalformedBoldLabelClosers(value: string): string {
+  const parts = value.split(/(\r?\n)/u);
+  let output = "";
+  let plain = "";
+  let fence: { marker: "`" | "~"; length: number } | undefined;
+  const flushPlain = () => {
+    output += normalizeOutsideInlineCode(plain);
+    plain = "";
+  };
+
+  for (let index = 0; index < parts.length; index += 2) {
+    const line = parts[index]!;
+    const newline = parts[index + 1] ?? "";
+    if (fence) {
+      output += line + newline;
+      const closing = /^[ \t]{0,3}(`+|~+)[ \t]*$/u.exec(line)?.[1];
+      if (closing?.[0] === fence.marker && closing.length >= fence.length) fence = undefined;
+      continue;
+    }
+    const opening = /^[ \t]{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opening) {
+      flushPlain();
+      output += line + newline;
+      fence = { marker: opening[0] as "`" | "~", length: opening.length };
+      continue;
+    }
+    plain += line + newline;
+  }
+  flushPlain();
+  return output;
+}
+
+function normalizeOutsideInlineCode(value: string): string {
+  let output = "";
+  let plainStart = 0;
+  let index = 0;
+  while (index < value.length) {
+    if (value[index] !== "`" || isEscapedMarkdownDelimiter(value, index)) { index += 1; continue; }
+    let openingEnd = index + 1;
+    while (value[openingEnd] === "`") openingEnd += 1;
+    const length = openingEnd - index;
+    let closingStart = openingEnd;
+    let closingEnd = -1;
+    while (closingStart < value.length) {
+      const next = value.indexOf("`", closingStart);
+      if (next < 0) break;
+      let runEnd = next + 1;
+      while (value[runEnd] === "`") runEnd += 1;
+      if (runEnd - next === length && !isEscapedMarkdownDelimiter(value, next)) {
+        closingStart = next;
+        closingEnd = runEnd;
+        break;
+      }
+      closingStart = runEnd;
+    }
+    if (closingEnd < 0) { index = openingEnd; continue; }
+    output += normalizeLabelText(value.slice(plainStart, index)) + value.slice(index, closingEnd);
+    plainStart = closingEnd;
+    index = closingEnd;
+  }
+  return output + normalizeLabelText(value.slice(plainStart));
+}
+
+function isEscapedMarkdownDelimiter(value: string, index: number): boolean {
+  let slashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) slashes += 1;
+  return slashes % 2 === 1;
+}
+
+function normalizeLabelText(value: string): string {
+  return value.replace(/(^|[；;][ \t]*)([ \t]*(?:[-*+][ \t]+)?\*\*[^*\r\n]{1,100}?[：:])[ \t]+\*\*/gmu, (match, preceding: string, label: string, offset: number, source: string) => {
+    const next = source[offset + match.length];
+    const separator = next && /[\p{L}\p{N}]/u.test(next) ? " " : "";
+    return `${preceding}${label}**${separator}`;
+  });
 }
 
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {
   if (!section) return null;
-  const visible = (text: string) => section.kind === "misconceptions" ? displayMisconception(text) : text;
-  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{visible(item.text)}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{visible(section.markdown)}</Markdown> : null}{children}</article>;
+  const visibleItem = (text: string) => section.kind === "prior_knowledge" ? displayPriorKnowledge(text)
+    : section.kind === "misconceptions" ? displayMisconception(text)
+      : section.kind === "learning_objectives" || section.kind === "main_content" || section.kind === "full_explanation" ? normalizeMalformedBoldLabelClosers(text) : text;
+  const visibleMarkdown = (text: string) => section.kind === "misconceptions" ? displayMisconception(text)
+    : section.kind === "learning_objectives" || section.kind === "main_content" || section.kind === "full_explanation" ? normalizeMalformedBoldLabelClosers(text) : text;
+  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{visibleItem(item.text)}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{visibleMarkdown(section.markdown)}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {

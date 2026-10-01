@@ -150,6 +150,14 @@ function sumProviderUsage(first: ModelRouterUsage, second: ModelRouterUsage): Mo
   };
 }
 
+function providerUsageCostUsd(providerId: string, model: string, usage: ModelRouterUsage): number | undefined {
+  const reserve = usage.unreportedCostReserveUsd ?? 0;
+  if (usage.apiEquivalentUsd !== null) return usage.apiEquivalentUsd + reserve;
+  if (usage.inputTokens === 0 && usage.outputTokens === 0) return reserve || undefined;
+  const estimate = estimateMicrousd(priceSnapshotFor(providerId, model), usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
+  return estimate === undefined ? (reserve || undefined) : estimate / 1_000_000 + reserve;
+}
+
 export interface ProviderConnection {
   providerId: string;
   baseUrl: string;
@@ -239,7 +247,7 @@ export async function probeProviderConnection(connection: ProviderConnection, fu
     if (capability.status === 401 || capability.status === 403) return { providerId: connection.providerId, state: "offline", checkedAt, message: "模型目录可用，但调用密钥没有生成权限" };
     if (!capability.ok) return { providerId: connection.providerId, state: "degraded", checkedAt, message: `模型目录可用，但结构化调用返回 HTTP ${capability.status}` };
     const body = await capability.json().catch(() => undefined) as ProviderResponseBody | undefined;
-    const output = body && !providerBodyFailed(body) ? extractProviderOutput(body) : undefined;
+    const output = body && !providerBodyFailed(body, capability.status) ? extractProviderOutput(body) : undefined;
     let structured = false;
     if (typeof output === "string") {
       try { structured = (parseProviderJson(output) as { ok?: unknown }).ok === true; }
@@ -274,7 +282,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       emptyUsage(Date.now()), this.connection.providerId);
     const response = await this.requestPlannedStage(input, {
       phase: "page_understanding",
-      instructions: "你是课件阅读助手。看原图，并把本页可见的教学内容准确转写给只读文字的讲解模型。保留标题、正文、完整公式、条件、表格的行列与单位、代码及可见注释、图例、箭头和对象关系；按对象的自然结构组织，不按排版换行创建知识义务。表格或矩阵用带行名和列名的 Markdown 表格转写，逐格对准列名，保留每个零的位置，不省略或移动单元格；不遗漏清楚可读的数据，不猜填模糊单元格；空表头保持空白，不把教学中另取的记号写成原图标签。若提供原图代码位置参考，用实测横向位置核对缩进层级，OCR错读的字仍按原图辨认，不能按后续语句在上一句之后就假设它仍嵌套其中。代码用围栏块保留原图的逐行缩进、对齐和注释；它们决定循环与条件的作用域，不移动语句、不按算法常识改写结构；保留原缩进，不额外猜测辅助函数的内部逻辑。图中连接、标签归属或文字不能确认时，就近标明不确定，不从专业常识补成原图事实。当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。逐条检查连接；交叉只影响实际无法跟踪的那一条或几条，其他端点明确可追踪的连接仍须逐条保留；只有某一端点或连线本身不能唯一追踪时，才仅对该局部标注不确定，不猜测该处边权；未识别到某条连接不等于它不存在，也不据此宣称图与表矛盾或完全一致。逻辑门须保留门的轮廓、输入输出端点数量与位置、输出端反相圈及其连接关系，这些形状共同决定门类型；例如 AND 形状加输出反相圈表示 NAND，不能只抄标签或按常见符号替换形状。背景中的通用逻辑规则须明确标为背景说明，与本页实际可见的门形和逐条连接分开；不得用通用规则填补不清楚的图形事实。辅助提取文字供定位，原图优先；邻页背景不是当前图中的内容。省略页码、页眉、页脚、版权和装饰；不要把它们放进页面内容或教学顺序。最后给最多六行的简短教学顺序，只安排讲解，不代替来源。输出两个自然语言部分，以“页面内容：”和“教学顺序：”开头，不输出 JSON、编号证据或覆盖账本。",
+      instructions: "你是课件阅读助手。看原图，并把本页可见的教学内容准确转写给只读文字的讲解模型。保留标题、正文、完整公式、条件、表格的行列与单位、代码及可见注释、图例、箭头和对象关系；按对象的自然结构组织，不按排版换行创建知识义务。表格或矩阵用带行名和列名的 Markdown 表格转写，逐格对准列名，保留每个零的位置，不省略或移动单元格；不遗漏清楚可读的数据，不猜填模糊单元格；空表头保持空白，不把教学中另取的记号写成原图标签。若提供原图代码位置参考，用实测横向位置核对缩进层级，OCR错读的字仍按原图辨认，不能按后续语句在上一句之后就假设它仍嵌套其中。代码用围栏块保留原图的逐行缩进、对齐和注释；它们决定循环与条件的作用域，不移动语句、不按算法常识改写结构；保留原缩进，不额外猜测辅助函数的内部逻辑。图中连接、标签归属或文字不能确认时，就近标明不确定，不从专业常识补成原图事实。当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。逐条检查连接；交叉只影响实际无法跟踪的那一条或几条，其他端点明确可追踪的连接仍须逐条保留；只有某一端点或连线本身不能唯一追踪时，才仅对该局部标注不确定，不猜测该处边权；未识别到某条连接不等于它不存在，也不据此宣称图与表矛盾或完全一致。区分元件实例标签、信号端点和网络标签，不把门内名称当输入信号；边按两个实际端点转写，只有图例明确说明粗细代表权值时才解释为权值；数字保留负号与小数；只给实际可辨认的局部信息，不凭未看清的线宣称连接不存在。逻辑门须保留门的轮廓、输入输出端点数量与位置、输出端反相圈及其连接关系，这些形状共同决定门类型；例如 AND 形状加输出反相圈表示 NAND，不能只抄标签或按常见符号替换形状。背景中的通用逻辑规则须明确标为背景说明，与本页实际可见的门形和逐条连接分开；不得用通用规则填补不清楚的图形事实。辅助提取文字供定位，原图优先；邻页背景不是当前图中的内容。省略页码、页眉、页脚、版权和装饰；不要把它们放进页面内容或教学顺序。最后给最多六行的简短教学顺序，只安排讲解，不代替来源。输出两个自然语言部分，以“页面内容：”和“教学顺序：”开头，不输出 JSON、编号证据或覆盖账本。",
       prompt: JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
         extractedText: input.sourceText, courseContext: input.courseContext }),
       image: input.sourceImageDataUrl,
@@ -537,12 +545,14 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       const attemptUsage = normalizeProviderUsage(received.usage, received.usage?.cost ?? received.cost, attemptStarted);
       addAttemptUsage(attemptUsage);
       const model = received.model || this.connection.model;
-      const bodyError = providerBodyError(received);
+      const bodyError = providerBodyError(received, response.status);
       const providerFailed = !response.ok || Boolean(bodyError);
       if (providerFailed) {
         const code = providerFailureCode(response.status, bodyError);
         const retryable = retryableProviderResponse(response.status, bodyError);
-        const attemptCost = retryable ? chargeAttempt(attemptUsage) : (this.usageCostUsd(attemptUsage) ?? 0);
+        const reserveOpaqueRelayRejection = code === "MODEL_PROVIDER_OPAQUE_RELAY_REJECTION";
+        const attemptCost = retryable || reserveOpaqueRelayRejection
+          ? chargeAttempt(attemptUsage) : (this.usageCostUsd(attemptUsage) ?? 0);
         budgetSpent += attemptCost;
         const canRetry = attempt === 0 && retryable
           && budgetSpent + attemptCostCeiling <= budget + 1e-9;
@@ -583,16 +593,15 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   private usageCostUsd(usage: ModelRouterUsage): number | undefined {
-    const reserve = usage.unreportedCostReserveUsd ?? 0;
-    if (usage.apiEquivalentUsd !== null) return usage.apiEquivalentUsd + reserve;
-    if (usage.inputTokens === 0 && usage.outputTokens === 0) return reserve || undefined;
-    const estimate = estimateMicrousd(priceSnapshotFor(this.connection.providerId, this.connection.model), usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
-    return estimate === undefined ? (reserve || undefined) : estimate / 1_000_000 + reserve;
+    return providerUsageCostUsd(this.connection.providerId, this.connection.model, usage);
   }
 
 }
 
+const OPAQUE_HTTP_200_RELAY_BAD_REQUEST = "opaque_http_200_relay_bad_request";
+
 function providerFailureCode(status: number, error: ProviderResponseBody["error"]): string {
+  if (status === 200 && error?.code === OPAQUE_HTTP_200_RELAY_BAD_REQUEST) return "MODEL_PROVIDER_OPAQUE_RELAY_REJECTION";
   const providerError = `${error?.code || ""} ${error?.message || ""}`;
   if (status === 402 || /insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+exhausted|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) {
     return "MODEL_PROVIDER_INSUFFICIENT_BALANCE";
@@ -746,7 +755,7 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
     return this.runWithFallback(input.stage || "teach", input, (client, routedInput) => client.generateTeachingPackage(routedInput));
   }
 
-  private async runWithFallback<T>(stage: GenerationStage | "qa", input: ModelRouterInput,
+  private async runWithFallback<T extends { usage: ModelRouterUsage }>(stage: GenerationStage | "qa", input: ModelRouterInput,
     execute: (client: HttpProviderTeachingClient, routedInput: ModelRouterInput) => Promise<T>): Promise<T> {
     const { providers: savedProviders, policy, credential } = await this.source.load();
     const providers = withCurrentDeepSeekModels(savedProviders);
@@ -762,18 +771,39 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
     const candidates = (Array.isArray(policy.routes) ? orderedRoutes : legacyRoutes)
       .slice(0, policy.allowProviderFallback === false ? 1 : undefined);
     let lastError: ModelRouterGenerationError | undefined;
-    for (const candidate of candidates) {
+    let opaqueRelayRejection: ModelRouterGenerationError | undefined;
+    let attemptedOpaqueRelayBackup = false;
+    const includePrimaryRelayUsage = (error: ModelRouterGenerationError) => opaqueRelayRejection
+      ? new ModelRouterGenerationError(error.code, error.model,
+        sumProviderUsage(opaqueRelayRejection.usage, error.usage), error.provider, error.responseShape, error.partialContent)
+      : error;
+    for (const [candidateIndex, candidate] of candidates.entries()) {
+      if (opaqueRelayRejection) {
+        if (attemptedOpaqueRelayBackup) break;
+        attemptedOpaqueRelayBackup = true;
+      }
       const provider = providers.find((item) => item.id === candidate.providerId && item.enabled);
       const model = provider?.models.find((item) => item.id === candidate.modelId);
       const apiKey = provider ? await credential(provider.id) : undefined;
       if (!provider || !model || !apiKey) {
-        lastError = new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", candidate.modelId, emptyUsage(Date.now()), candidate.providerId);
+        lastError = includePrimaryRelayUsage(new ModelRouterGenerationError("MODEL_PROVIDER_NOT_CONFIGURED", candidate.modelId, emptyUsage(Date.now()), candidate.providerId));
         continue;
       }
       const canUseExtractedSource = input.sourceText.trim().length > 0;
       if (input.sourceImageDataUrl && !model.supportsVision && !canUseExtractedSource) {
-        lastError = new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id);
+        lastError = includePrimaryRelayUsage(new ModelRouterGenerationError("MODEL_PROVIDER_VISION_UNAVAILABLE", model.id, emptyUsage(Date.now()), provider.id));
         continue;
+      }
+      let routeMaxCostUsd = input.maxCostUsd;
+      if (opaqueRelayRejection) {
+        const pageBudget = input.maxCostUsd ?? 0.06;
+        const primarySpent = providerUsageCostUsd(opaqueRelayRejection.provider, opaqueRelayRejection.model, opaqueRelayRejection.usage) ?? pageBudget;
+        routeMaxCostUsd = Math.max(0, pageBudget - primarySpent);
+        if (routeMaxCostUsd <= 0) {
+          lastError = includePrimaryRelayUsage(new ModelRouterGenerationError("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED",
+            model.id, emptyUsage(Date.now()), provider.id));
+          continue;
+        }
       }
       // ReadWeave-style generation separates source perception from teaching:
       // a text-only writing model receives the extracted source instead
@@ -782,6 +812,7 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
       const routedInput = input.sourceImageDataUrl && !model.supportsVision
         ? { ...input, sourceImageDataUrl: undefined }
         : input;
+      const routeInput = opaqueRelayRejection ? { ...routedInput, maxCostUsd: routeMaxCostUsd } : routedInput;
       const connection: ProviderConnection = {
         providerId: provider.id,
         baseUrl: provider.baseUrl,
@@ -792,9 +823,19 @@ export class SettingsProviderTeachingClient implements ModelRouterClient {
         billingMode: model.billingMode
       };
       try {
-        return await withKuafuCapacity(provider.id, () => execute(new HttpProviderTeachingClient(connection), routedInput));
+        const result = await withKuafuCapacity(provider.id, () => execute(new HttpProviderTeachingClient(connection), routeInput));
+        return opaqueRelayRejection
+          ? { ...result, usage: sumProviderUsage(opaqueRelayRejection.usage, result.usage) }
+          : result;
       } catch (error) {
         if (!(error instanceof ModelRouterGenerationError)) throw error;
+        if (opaqueRelayRejection) throw includePrimaryRelayUsage(error);
+        if (error.code === "MODEL_PROVIDER_OPAQUE_RELAY_REJECTION") {
+          if (candidateIndex !== 0 || candidates.length < 2) throw error;
+          opaqueRelayRejection = error;
+          lastError = error;
+          continue;
+        }
         // Explicit routes are used only for transient provider failures. Auth,
         // quota exhaustion, malformed JSON and content errors are returned as
         // they stand so a fallback cannot restart a whole page generation.
@@ -901,15 +942,18 @@ async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onAc
   return finalResponse;
 }
 
-function providerBodyFailed(body: ProviderResponseBody): boolean {
-  return Boolean(providerBodyError(body));
+function providerBodyFailed(body: ProviderResponseBody, httpStatus?: number): boolean {
+  return Boolean(providerBodyError(body, httpStatus));
 }
 
-function providerBodyError(body: ProviderResponseBody): ProviderResponseBody["error"] {
+function providerBodyError(body: ProviderResponseBody, httpStatus?: number): ProviderResponseBody["error"] {
   if (body.error) return body.error;
   if (body.status === "incomplete") return { code: body.incomplete_details?.reason || "response_incomplete" };
   if (body.status === "failed") return { code: "response_failed" };
   const output = extractProviderOutput(body);
+  if (httpStatus === 200 && body.status === "completed" && isExplicitBadRequestEnvelope(output)) {
+    return { code: OPAQUE_HTTP_200_RELAY_BAD_REQUEST };
+  }
   if (isExplicitBadRequestEnvelope(output)) return { code: "invalid_request_error" };
   if (isExplicitTemporaryUnavailableEnvelope(output)) return { code: "upstream_error" };
   if (body.status === "completed" && !hasUsableProviderOutput(output)) return { code: "upstream_error" };

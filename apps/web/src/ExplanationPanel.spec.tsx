@@ -1,13 +1,27 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CourseRelease, PageLesson } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { ExplanationPanel, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
+import { displayPriorKnowledge, ExplanationPanel, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
 
 describe("lesson summary", () => {
   it("removes a duplicate leading title while preserving the existing conclusions", () => {
     expect(summaryMarkdown("## 编码器与迁移学习\n\n- 先训练编码器\n- 再将它接入另一种网络"))
       .toBe("- 先训练编码器\n- 再将它接入另一种网络");
     expect(summaryMarkdown("## 只有标题的旧内容")).toBe("## 只有标题的旧内容");
+  });
+});
+
+describe("prior knowledge definition display", () => {
+  it.each([
+    ["**图（Graph）：** 图由顶点和边组成。", "图（Graph）： 图由顶点和边组成。"],
+    ["**图（Graph）： ** 图由顶点和边组成。", "图（Graph）： 图由顶点和边组成。"]
+  ])("removes only the opening definition emphasis markers", (source, expected) => {
+    expect(displayPriorKnowledge(source)).toBe(expected);
+  });
+
+  it("preserves all text and Markdown after the definition prefix", () => {
+    const suffix = " 图用于表示关系；后文 **仍可加粗**，公式 $O(n)$ 和代码 `x**y` 保持原样。";
+    expect(displayPriorKnowledge(`**图（Graph）：**${suffix}`)).toBe(`图（Graph）：${suffix}`);
   });
 });
 
@@ -55,6 +69,72 @@ describe("lesson generation readiness badge", () => {
     expect(fullSection).toContain("完整讲解尚未生成；已有摘要保留");
     expect(fullSection).not.toContain("只保留的摘要");
     expect(markup).toContain("只保留的摘要");
+  });
+
+  it("removes emphasis only from a prior knowledge item definition prefix", () => {
+    const lesson = page(false);
+    lesson.lessonSections = [{
+      id: "prior",
+      kind: "prior_knowledge",
+      title: "先验知识",
+      items: [{ id: "definition", text: "**图（Graph）： ** 后文 **保持粗体**。", sourceAnchorIds: [] }],
+      markdown: "**段落标签： ** Markdown 正文保持原样。",
+      sourceAnchorIds: [],
+      atomIds: []
+    }];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+
+    expect(markup).toContain("图（Graph）： 后文 <strong>保持粗体</strong>。");
+    expect(markup).not.toContain("<strong>图（Graph）：");
+    expect(markup).toContain("**段落标签： ** Markdown 正文保持原样。");
+  });
+
+  it("normalizes legacy labels in objectives, full explanation, and summary while preserving code", () => {
+    const lesson = page(false);
+    lesson.lessonSections = [
+      {
+        id: "objectives",
+        kind: "learning_objectives",
+        title: "学习目标",
+        items: [{ id: "objective", text: "**目标标签： ** 判断是否满足条件。", sourceAnchorIds: [] }],
+        markdown: "**目标说明： **正文标签正常显示。\n\n```text\n**代码标签： **原样保留\n```\n\n行内代码 `x; **代码标签： **y` 保持原样。",
+        sourceAnchorIds: [],
+        atomIds: []
+      },
+      {
+        id: "full",
+        kind: "full_explanation",
+        title: "完整讲解",
+        items: [{ id: "full-item", text: "**正文标签： **完整讲解项可读。", sourceAnchorIds: [] }],
+        markdown: "**正文标签： **详细讲解清楚显示，保留 **合法粗体** 和公式 $O(n)$，行内代码 `x; **代码标签： **y` 不改。",
+        sourceAnchorIds: [],
+        atomIds: []
+      },
+      {
+        id: "summary",
+        kind: "main_content",
+        title: "主要内容",
+        items: [{ id: "summary-item", text: "**摘要项： **结论保持可读。", sourceAnchorIds: [] }],
+        markdown: "**摘要标签： **摘要正文正常显示。",
+        sourceAnchorIds: [],
+        atomIds: []
+      }
+    ];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+    const fullSection = markup.match(/<article class="lesson-block section-full_explanation"[\s\S]*?(?=<article class="lesson-block section-main_content")/)?.[0] ?? "";
+
+    expect(markup).toContain("<strong>目标标签：</strong> 判断是否满足条件。");
+    expect(markup).toContain("<strong>目标说明：</strong> 正文标签正常显示。");
+    expect(markup).toContain("<strong>正文标签：</strong> 完整讲解项可读。");
+    expect(markup).toContain("<strong>正文标签：</strong> 详细讲解清楚显示");
+    expect(markup).toContain("<strong>合法粗体</strong>");
+    expect(markup).toContain('class="katex"');
+    expect(markup).toContain("<strong>摘要项：</strong> 结论保持可读。");
+    expect(markup).toContain("<strong>摘要标签：</strong> 摘要正文正常显示。");
+    expect(markup).toContain("<code class=\"language-text\">**代码标签： **原样保留\n</code>");
+    expect(markup).toContain("<code>x; **代码标签： **y</code>");
+    expect(fullSection).toContain("<code>x; **代码标签： **y</code>");
+    expect(markup).not.toContain("**正文标签： **");
   });
 
   it("does not display a legacy summary as a full explanation", () => {

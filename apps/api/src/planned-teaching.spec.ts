@@ -790,7 +790,8 @@ describe("planned teaching core writer", () => {
       if (request.phase === "teaching") return initial;
       expect(Object.keys(request.schema?.properties ?? {})).toEqual(["questions"]);
       expect(request.instructions).not.toContain("一次写出所有主体栏目");
-      expect(request.instructions).toContain("先完整阅读以下格式规则与写作策略");
+      expect(request.instructions.indexOf(policySkill.trim())).toBeLessThan(request.instructions.indexOf(writingFormatContract));
+      expect(request.instructions.endsWith("输出仅为这些字段组成的 JSON 对象，不返回整页讲义、对话回复或完整教学包。")).toBe(true);
       expect(request.instructions).toContain("其余教学内容已经保存");
       const repairPrompt = JSON.parse(request.prompt) as {
         source?: string;
@@ -921,7 +922,9 @@ describe("planned teaching core writer", () => {
     expect(instructions).toContain("FMT-001");
     for (const policy of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
       expect(instructions).toContain(policy.trim());
+      expect(instructions.indexOf(policy.trim())).toBeLessThan(instructions.indexOf(plannedWritingPrompt));
     }
+    expect(instructions.endsWith(writingFormatContract)).toBe(true);
     expect(planningPrompt).toContain("不输出 JSON");
   });
 });

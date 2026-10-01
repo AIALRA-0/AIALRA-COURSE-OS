@@ -1,6 +1,6 @@
 {
   "id": "course-os-teaching",
-  "version": "2.5.2",
+  "version": "2.5.3",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": [
     "page-plan-prompt.md",

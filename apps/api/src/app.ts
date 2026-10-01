@@ -349,9 +349,10 @@ export function createApp(dependencies: AppDependencies): Express {
         title: typeof request.body.title === "string" ? request.body.title : undefined,
         parentId: request.body.parentId === null ? null : typeof request.body.parentId === "string" ? request.body.parentId : undefined,
         archived: typeof request.body.archived === "boolean" ? request.body.archived : undefined,
-        sortOrder: typeof request.body.sortOrder === "number" && Number.isFinite(request.body.sortOrder) ? request.body.sortOrder : undefined
+        sortOrder: typeof request.body.sortOrder === "number" && Number.isFinite(request.body.sortOrder) ? request.body.sortOrder : undefined,
+        currentReleaseId: typeof request.body.currentReleaseId === "string" ? request.body.currentReleaseId : undefined
       };
-      if (!patch.title?.trim() && patch.parentId === undefined && patch.archived === undefined && patch.sortOrder === undefined) return sendError(request, response, 422, "TREE_PATCH_EMPTY", "没有提供要修改的课程树内容", false);
+      if (!patch.title?.trim() && patch.parentId === undefined && patch.archived === undefined && patch.sortOrder === undefined && patch.currentReleaseId === undefined) return sendError(request, response, 422, "TREE_PATCH_EMPTY", "没有提供要修改的课程树内容", false);
       response.json(await dependencies.readweave.updateTreeNode(request.params.id, patch, expectedRevision, writeContext(request, idempotencyKey)));
     } catch (error) { next(error); }
   });
@@ -2540,6 +2541,9 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("FILE_TOO_LARGE")) return { status: 413, code: "FILE_TOO_LARGE", message: "文件超过允许大小，请压缩文件后再导入", retryable: false };
   if (raw.includes("REVISION_CONFLICT")) return { status: 409, code: "TREE_REVISION_CONFLICT", message: "这个项目已经被其他操作更新，请重新载入后再试", retryable: false };
   if (raw.includes("TREE_NODE_NOT_EDITABLE")) return { status: 409, code: "TREE_NODE_NOT_EDITABLE", message: "这个项目是只读版本，请从材料入口建立草稿", retryable: false };
+  if (raw.includes("READWEAVE_TREE_CURRENT_RELEASE_MATERIAL_ONLY")) return { status: 422, code: "TREE_CURRENT_RELEASE_MATERIAL_ONLY", message: "只有材料入口可以切换当前版本", retryable: false };
+  if (raw.includes("READWEAVE_TREE_CURRENT_RELEASE_OWNERSHIP")) return { status: 422, code: "TREE_CURRENT_RELEASE_OWNERSHIP", message: "目标版本不属于这个材料和工作区", retryable: false };
+  if (raw.includes("READWEAVE_TREE_CURRENT_RELEASE_NOT_READY")) return { status: 409, code: "TREE_CURRENT_RELEASE_NOT_READY", message: "目标草稿版本尚未具备完整可读内容", retryable: false };
   if (raw.includes("TREE_NODE_STALE") || raw.includes("TREE_NODE_NOT_FOUND")) return { status: 409, code: "TREE_NODE_STALE", message: "这个项目已经不在当前课程树中，请重新载入后再试", retryable: false };
   if (raw.includes("TREE_TARGET_NOT_FOUND") || raw.includes("TREE_PARENT_NOT_FOUND")) return { status: 422, code: "TREE_TARGET_NOT_FOUND", message: "目标位置不存在，请重新选择课程或材料", retryable: false };
   if (raw.includes("TREE_PARENT_CYCLE")) return { status: 422, code: "TREE_PARENT_CYCLE", message: "不能把项目移动到自己或自己的下级项目中", retryable: false };

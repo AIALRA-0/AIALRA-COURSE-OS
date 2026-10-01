@@ -244,7 +244,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ courseId, title, description })
   }),
-  updateTreeNode: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number }) => request<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, {
+  updateTreeNode: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }) => request<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ ...patch, expectedRevision: node.revision ?? 0 })

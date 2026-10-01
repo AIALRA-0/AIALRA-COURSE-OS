@@ -43,6 +43,47 @@ describe("lesson math rendering", () => {
     expect(html).toContain("Reward");
   });
   it.each([
+    "**易错边界：** 检查 $x^2$，并保留 **正文重点** 和代码 `a**b`。",
+    "**易错边界： ** 检查 $x^2$，并保留 **正文重点** 和代码 `a**b`。"
+  ])("renders a misconception subheading and preserves its following Markdown", source => {
+    const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(source) }));
+
+    expect(html).toContain("<strong>易错边界：</strong> 检查 ");
+    expect(html).toContain("<strong>正文重点</strong>");
+    expect(html).toContain("<code>a**b</code>");
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain("**易错边界");
+  });
+
+  it("repairs legacy spaces before misconception label closers", () => {
+    const source = [
+      "**错误理解： **把最大值当成平均值",
+      "**错因： **忽略了其他列",
+      "**正确判断： **应逐列比较",
+      "**核对方法： **回到表格逐列检查"
+    ].join("\n\n");
+    const visible = displayMisconception(source);
+    const html = renderToStaticMarkup(createElement(Markdown, { children: visible }));
+
+    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    }
+    expect(visible).not.toContain("： **");
+    expect(html).toContain("把最大值当成平均值");
+    expect(html).toContain("回到表格逐列检查");
+  });
+
+  it("normalizes malformed labels following an inline semicolon", () => {
+    const source = "**错误理解： **把总和当成平均值；**错因： **忽略项数；**正确判断： **按项数求平均；**核对方法： **检查分母";
+    const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(source) }));
+
+    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    }
+    expect(html).toContain("把总和当成平均值");
+    expect(html).toContain("检查分母");
+  });
+  it.each([
     ["仅有公式", "$x$", true],
     ["公式前有文字", "目标是 $J(\\theta,G)$", false],
     ["公式后有文字", "$K$ 是芯片数", false],

@@ -37,6 +37,25 @@ function isReadableRelease(release: CourseRelease, drafts: LessonDraft[]): boole
   return release.lifecycle !== "draft_source" || hasCompleteReadableDraft(release, drafts);
 }
 
+export function validateMaterialReleaseTarget(
+  node: CourseTreeNode | undefined,
+  releaseId: string,
+  courses: CourseProject[],
+  releases: CourseRelease[],
+  drafts: LessonDraft[],
+  workspaceId: string
+): CourseRelease {
+  if (node?.kind !== "material") throw new Error("READWEAVE_TREE_CURRENT_RELEASE_MATERIAL_ONLY");
+  const release = releases.find((item) => item.id === releaseId);
+  if (!release || stableMaterialId(release.courseId, release.moduleId) !== (node.materialId || node.id)) {
+    throw new Error("READWEAVE_TREE_CURRENT_RELEASE_OWNERSHIP");
+  }
+  const course = courses.find((item) => item.id === release.courseId);
+  if (!course || course.workspaceId !== workspaceId) throw new Error("READWEAVE_TREE_CURRENT_RELEASE_OWNERSHIP");
+  if (!isReadableRelease(release, drafts)) throw new Error("READWEAVE_TREE_CURRENT_RELEASE_NOT_READY");
+  return release;
+}
+
 function hasCompleteReadableDraft(release: CourseRelease, drafts: LessonDraft[]): boolean {
   const pageIds = release.pageIds.length > 0 ? release.pageIds : release.pages.map((page) => page.id);
   if (pageIds.length === 0 || pageIds.length !== release.pages.length || new Set(pageIds).size !== pageIds.length) return false;

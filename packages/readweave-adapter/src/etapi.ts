@@ -33,7 +33,7 @@ import type {
 } from "@course-os/contracts";
 import type { CourseReleaseIndex, MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
 import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings, toCourseReleaseIndex } from "./index.js";
-import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId } from "./tree-identity.js";
+import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
 
 const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
 
@@ -1078,7 +1078,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         } catch {
           throw new Error("READWEAVE_CONFLICT_CONTENT_INVALID");
         }
-        draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision) + 1;
+        draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision, draft.revision) + 1;
         draft.status = "editing";
         draft.contentHash = sha256(JSON.stringify(draft.page));
         draft.updatedAt = new Date().toISOString();
@@ -1109,7 +1109,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       } catch {
         throw new Error("READWEAVE_CONFLICT_CONTENT_INVALID");
       }
-      draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision) + 1;
+      draft.revision = Math.max(conflict.localRevision, conflict.remoteRevision, draft.revision) + 1;
       draft.status = "editing";
       draft.contentHash = sha256(JSON.stringify(draft.page));
       draft.updatedAt = new Date().toISOString();
@@ -1211,7 +1211,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.readBackTreeNode(saved.id, saved);
   }
 
-  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
+  async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
     const saved = await this.mutate(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
@@ -1227,6 +1227,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const currentRevision = course?.revision ?? node?.revision ?? 0;
       if (!course && !node) throw new Error("TREE_NODE_STALE");
       if (currentRevision !== expectedRevision) throw new Error("READWEAVE_TREE_NODE_REVISION_CONFLICT");
+      if (patch.currentReleaseId !== undefined) {
+        if (context.workspaceId !== this.workspaceId) throw new Error("READWEAVE_TREE_CURRENT_RELEASE_OWNERSHIP");
+        const targetRelease = validateMaterialReleaseTarget(node, patch.currentReleaseId, state.courses, state.releases, state.drafts, this.workspaceId);
+        node!.currentReleaseId = targetRelease.id;
+        node!.releaseId = targetRelease.id;
+      }
       if (course) {
         if (patch.title?.trim() && patch.title.trim() !== course.title) {
           if (!course.readweaveNoteId) course.readweaveNoteId = (await this.ensureCourseScaffold(state, course.id, course.title, course.description)).courseNoteId;
@@ -1472,6 +1478,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const course = state.courses.find((candidate) => candidate.id === nodeId);
     const node = stored ?? (course ? courseNodeFromProject(course) : undefined);
     if (!node || node.title !== expected.title || node.parentId !== expected.parentId || (expected.revision !== undefined && node.revision !== expected.revision)) throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    if (expected.currentReleaseId !== undefined && node.currentReleaseId !== expected.currentReleaseId) throw new Error("READWEAVE_TREE_READBACK_FAILED");
     if (expected.readweaveNoteId && node.readweaveNoteId !== expected.readweaveNoteId) throw new Error("READWEAVE_TREE_IDENTITY_READBACK_FAILED");
     if (node.readweaveNoteId) await this.getNote(node.readweaveNoteId);
     return node;
