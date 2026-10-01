@@ -1554,6 +1554,97 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(render.renderPageOverview(retry));
   });
 
+  it("resumes exact legacy section serialization after a partial write and still rejects a real section edit", async () => {
+    const remote = new FakeEtapi();
+    let blockLegacyRewrite = false;
+    const blockedNoteIds = new Set<string>();
+    const blockedWrites = new Set<string>();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/^\/etapi/, "");
+      const contentMatch = /^\/notes\/([^/]+)\/content$/.exec(path);
+      const noteId = contentMatch ? decodeURIComponent(contentMatch[1]!) : undefined;
+      if (blockLegacyRewrite && init?.method === "PUT" && noteId && blockedNoteIds.has(noteId)) {
+        blockedWrites.add(noteId);
+        return new Response("simulated interruption during section projection", { status: 409 });
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const original = draftFor(pageRelease);
+    original.page.lessonFlowVersion = 2;
+    original.page.lessonSections = [
+      ["prior_knowledge", "先验知识"], ["learning_objectives", "学习目标"], ["full_explanation", "完整讲解"],
+      ["main_content", "主要内容"], ["misconceptions", "易错点"]
+    ].map(([kind, title]) => ({
+      id: `section-${kind}`,
+      kind: kind as "prior_knowledge" | "learning_objectives" | "full_explanation" | "main_content" | "misconceptions",
+      title: title!,
+      markdown: `## ${title}\n旧正文中的 A < B 条件`,
+      sourceAnchorIds: [],
+      atomIds: []
+    }));
+    original.page.questionBank = [
+      { id: "q1", pageId: "page-1", objectiveId: "objective-1", kind: "comprehension", prompt: "问题一？", expectedAnswer: "答案一", explanation: "解释一", sourceAnchorIds: [], status: "approved", version: 1, generatedBy: "test" },
+      { id: "q2", pageId: "page-1", objectiveId: "objective-1", kind: "comprehension", prompt: "问题二？", expectedAnswer: "答案二", explanation: "解释二", sourceAnchorIds: [], status: "approved", version: 1, generatedBy: "test" }
+    ];
+    const saved = await api.saveDraft(original, 0, { ...context, idempotencyKey: "legacy-section-base" });
+    const next = structuredClone(saved);
+    next.page.questionBank![1]!.status = "retired";
+    next.page.lessonSections = next.page.lessonSections!.map((section) => ({ ...section, markdown: section.markdown!.replace("旧正文", "本次新正文") }));
+    const render = api as unknown as {
+      renderPageOverview(draft: typeof next): string;
+      renderSectionOverview(draft: typeof next, key: "prerequisites" | "objectives" | "explanation" | "main" | "misconceptions" | "assessment"): string;
+    };
+    const previousMarkdown = (kind: string) => saved.page.lessonSections!.find((section) => section.kind === kind)!.markdown!;
+    const escapeHtml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+    const legacyPre = (markdown: string) => `<pre>${escapeHtml(markdown)}</pre>`;
+
+    // These two sections were already PUT with the proposal target; the others still have the exact old serializer.
+    remote.editByTitle("01 先验知识", render.renderSectionOverview(next, "prerequisites"));
+    remote.editByTitle("02 学习目标", render.renderSectionOverview(next, "objectives"));
+    remote.editByTitle("03 完整讲解", legacyPre(previousMarkdown("full_explanation")));
+    remote.editByTitle("04 主要内容", legacyPre(previousMarkdown("main_content")));
+    remote.editByTitle("05 易错点", legacyPre(previousMarkdown("misconceptions")));
+    remote.editByTitle("06 随机问题", "<p>正式题库共 2 题，每次学习抽取两题并保存种子、顺序和作答记录</p><ol><li><strong>理解题</strong> 问题一？<details><summary>审核答案</summary><p>答案一</p><p>解释一</p></details></li><li><strong>理解题</strong> 问题二？<details><summary>审核答案</summary><p>答案二</p><p>解释二</p></details></li></ol>");
+    for (const title of ["03 完整讲解", "04 主要内容", "05 易错点", "06 随机问题"]) blockedNoteIds.add(remote.noteIdByTitle(title));
+
+    blockLegacyRewrite = true;
+    await expect(api.saveDraft(next, 1, { ...context, idempotencyKey: "legacy-section-interrupted" })).rejects.toThrow("READWEAVE_ETAPI_409");
+    expect(blockedWrites.size).toBeGreaterThan(0);
+    expect(remote.contentByTitle("第 001 页 · 测试页面")).toBe(render.renderPageOverview(next));
+    expect(remote.contentByTitle("01 先验知识")).toBe(render.renderSectionOverview(next, "prerequisites"));
+    expect(remote.contentByTitle("03 完整讲解")).toBe(legacyPre(previousMarkdown("full_explanation")));
+
+    blockLegacyRewrite = false;
+    const recovered = await api.saveDraft(next, 1, { ...context, idempotencyKey: "legacy-section-resumed" });
+    expect(recovered.revision).toBe(2);
+    for (const [title, key] of [
+      ["03 完整讲解", "explanation"], ["04 主要内容", "main"], ["05 易错点", "misconceptions"], ["06 随机问题", "assessment"]
+    ] as const) expect(remote.contentByTitle(title)).toBe(render.renderSectionOverview(next, key));
+    expect(remote.contentByTitle("06 随机问题")).toContain("默认每次学习抽取 3 题，可选 2、3 或 5 题");
+    expect(remote.contentByTitle("06 随机问题")).not.toContain("每次学习抽取两题");
+    expect(remote.contentByTitle("06 随机问题")).toContain("正式题库共 1 题");
+    expect(remote.contentByTitle("06 随机问题")).not.toContain("问题二？");
+    expect(recovered.page.questionBank).toHaveLength(2);
+    expect(recovered.page.questionBank![1]!.status).toBe("retired");
+
+    const externallyEdited = structuredClone(recovered);
+    externallyEdited.page.lessonSections = externallyEdited.page.lessonSections!.map((section) => section.kind === "main_content"
+      ? { ...section, markdown: `${section.markdown}\n再次修订` }
+      : section);
+    const externalEdit = legacyPre(recovered.page.lessonSections!.find((section) => section.kind === "main_content")!.markdown!)
+      .replace("</pre>", "\n课程教师追加的真实编辑</pre>");
+    const mainNoteId = remote.noteIdByTitle("04 主要内容");
+    remote.editByTitle("04 主要内容", externalEdit);
+    const writesBeforeExternalEdit = remote.contentWriteCount(mainNoteId);
+    await expect(api.saveDraft(externallyEdited, 2, { ...context, idempotencyKey: "legacy-section-real-edit" })).rejects.toThrow("READWEAVE_DRAFT_SECTION_CONFLICT");
+    expect(remote.contentByTitle("04 主要内容")).toBe(externalEdit);
+    expect(remote.contentWriteCount(mainNoteId)).toBe(writesBeforeExternalEdit);
+  });
+
   it("recovers an ambiguous page-record PUT without duplicating its cost note", async () => {
     const remote = new FakeEtapi();
     let pageRecordNoteId = "";

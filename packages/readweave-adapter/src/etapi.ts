@@ -1980,11 +1980,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         projection.pageOverviewHash = sha256(await this.getContent(projection.pageNoteId));
       });
     }
-    const queueContentUpdate = (noteId: string, content: string, expectedContent?: string): void => {
+    const queueContentUpdate = (noteId: string, content: string, expectedContent?: string, legacyExpectedContent?: string): void => {
       updates.push(async () => {
         const actual = await this.getContent(noteId);
         if (actual === content) return;
         if (expectedContent !== undefined && actual !== expectedContent && actual !== interruptedSectionContents.get(noteId)
+          && actual !== legacyExpectedContent
           && !(expectedDraft?.revision === 0 && actual === "")) {
           throw new Error("READWEAVE_DRAFT_SECTION_CONFLICT");
         }
@@ -2001,7 +2002,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       queueContentUpdate(
         projection.sectionNoteIds[key],
         this.renderSectionOverview(draft, key),
-        expectedDraft ? this.renderSectionOverview(expectedDraft, key) : undefined
+        expectedDraft ? this.renderSectionOverview(expectedDraft, key) : undefined,
+        expectedDraft ? this.renderLegacySectionOverview(expectedDraft, key) : undefined
       );
     }
     for (const block of draft.page.blocks) {
@@ -2148,12 +2150,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private renderSectionOverview(draft: LessonDraft, section: Exclude<SectionKey, "source">): string {
     if (section === "quality") return `<h3>页面元素</h3><pre>${escapeHtml(JSON.stringify(draft.page.atoms, null, 2))}</pre><h3>质量结果</h3><pre>${escapeHtml(JSON.stringify(draft.page.quality, null, 2))}</pre>`;
-    if (section === "assessment") {
-      const questions = draft.page.questionBank ?? [];
-      return questions.length
-        ? `<p>正式题库共 ${questions.length} 题，每次学习抽取两题并保存种子、顺序和作答记录</p><ol>${questions.map((question) => `<li><strong>${escapeHtml(question.kind === "multiple_choice" ? "选择题" : "理解题")}</strong> ${escapeHtml(question.prompt)}<details><summary>审核答案</summary><p>${escapeHtml(question.expectedAnswer)}</p><p>${escapeHtml(question.explanation)}</p></details></li>`).join("")}</ol>`
-        : "<p>本页尚未建立通过审核的随机题</p>";
-    }
+    if (section === "assessment") return this.renderAssessmentOverview(draft, "默认每次学习抽取 3 题，可选 2、3 或 5 题，并保存种子、顺序和作答记录");
     if (section === "qa") return "<p>本页实时问答会作为子笔记自动保存，撤回只改变状态，不删除历史修订</p>";
     const kind = LESSON_SECTION_KIND_BY_SECTION[section];
     if (!kind) return "<p>本节内容保存在下方结构化讲解子笔记中</p>";
@@ -2161,6 +2158,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!lesson) return "<p>本节内容保存在下方结构化讲解子笔记中</p>";
     if (lesson.items?.length) return `<ul>${lesson.items.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
     return lesson.markdown ? renderReadableLessonText(lesson.markdown) : "<p>本节内容保存在下方结构化讲解子笔记中</p>";
+  }
+
+  private renderLegacySectionOverview(draft: LessonDraft, section: Exclude<SectionKey, "source">): string | undefined {
+    if (section === "assessment") return this.renderAssessmentOverview(draft, "每次学习抽取两题并保存种子、顺序和作答记录", true);
+    const kind = LESSON_SECTION_KIND_BY_SECTION[section];
+    if (!kind) return undefined;
+    const lesson = draft.page.lessonSections?.find((item) => item.kind === kind);
+    if (!lesson?.markdown || lesson.items?.length) return undefined;
+    return `<pre>${escapeHtml(lesson.markdown)}</pre>`;
+  }
+
+  private renderAssessmentOverview(draft: LessonDraft, selectionSummary: string, legacyAllQuestions = false): string {
+    const questions = (draft.page.questionBank ?? []).filter(question => legacyAllQuestions || question.status === "approved");
+    return questions.length
+      ? `<p>正式题库共 ${questions.length} 题，${selectionSummary}</p><ol>${questions.map((question) => `<li><strong>${escapeHtml(question.kind === "multiple_choice" ? "选择题" : "理解题")}</strong> ${escapeHtml(question.prompt)}<details><summary>审核答案</summary><p>${escapeHtml(question.expectedAnswer)}</p><p>${escapeHtml(question.explanation)}</p></details></li>`).join("")}</ol>`
+      : "<p>本页尚未建立通过审核的随机题</p>";
   }
 
   private renderPageOverview(draft: LessonDraft, imageNoteId?: string, fileName = "page.png"): string {
