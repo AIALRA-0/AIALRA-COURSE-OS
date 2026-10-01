@@ -1,0 +1,75 @@
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_1509a8c8448555 27-31,36-37,40-42
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_a74f88357755d1 925,927
+  s_e8850ef125fb32::t_d206ca67229855 793-794
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_98212ff4469dd0 352-353,355,2544-2546
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_acdcee988ee1c1 797-807,815,826
+  s_e8850ef125fb32::t_99c3f611de2210 250,285,548,553-555,601-602,604,945-946,949,954-956
+  s_e8850ef125fb32::t_940bd04e077ca8 758,774-784,789,794,827-829,832-838
+  s_e8850ef125fb32::t_bbeafdd001c287 153-160,596
+apps/web/src/Markdown.spec.tsx
+  s_e8850ef125fb32::t_57565716d57f58 45-74
+  s_e8850ef125fb32::t_9250675b2e4f24 75-85
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_527292c15c3b93 1081,1112,1481
+  s_e8850ef125fb32::t_98212ff4469dd0 36,1214,1230-1235
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_9c2613f1c766a1 93-104,114-123,125-126,138-139
+  s_e8850ef125fb32::t_cb799404dcd5ce 127,132-134
+  s_e8850ef125fb32::t_d4dba00aa6f175 136
+  s_e8850ef125fb32::t_9250675b2e4f24 74-91
+  s_e8850ef125fb32::t_57565716d57f58 4,14-27
+  s_e8850ef125fb32::t_63a2d4f1fc42fd 92,105-113,128-131,135,137
+  s_e8850ef125fb32::t_b10b481005670b 124
+packages/readweave-adapter/src/index.ts
+  s_e8850ef125fb32::t_98212ff4469dd0 119,291,307-311,1207
+  s_e8850ef125fb32::t_ed16737f520f33 30
+  s_e8850ef125fb32::t_527292c15c3b93 846,941,1305
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_98212ff4469dd0 247
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_feabe1c9d115bc 513-535,537-559
+  s_e8850ef125fb32::t_f8c667846cbb7b 536,1004-1020
+  s_e8850ef125fb32::t_1182d74dee8c09 7,9-11,14-17,223,270,283,1021-1022
+  s_e8850ef125fb32::t_9e25ab5f2deb0d 57
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_acfc065d71f09b 2306-2310,2313-2316,2320-2337,2352-2358,2371-2388
+  s_e8850ef125fb32::t_cc953449852737 2359-2369
+  s_e8850ef125fb32::t_42557d0e5b14cf 2311-2312,2317-2319,2338-2351
+  s_e8850ef125fb32::t_1714f50b1f8f78 2370
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_73c7b4f4296353 3
+packages/readweave-adapter/src/tree-identity.ts
+  s_e8850ef125fb32::t_98212ff4469dd0 40-56
+  s_e8850ef125fb32::t_615f45d65e9512 57-58
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_57565716d57f58 95-102,181,186
+  s_e8850ef125fb32::t_cb799404dcd5ce 172-176
+  s_e8850ef125fb32::t_63a2d4f1fc42fd 183,185
+  s_e8850ef125fb32::t_9c2613f1c766a1 103-171,182,184
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_447905e035a224 5,25
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_527292c15c3b93 547-578,625-653
+  s_e8850ef125fb32::t_42557d0e5b14cf 596-602,614-617
+  s_e8850ef125fb32::t_154bd191accb8d 592-595,603-613,618-624
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa0c01ef7b68294bb4afdd3869480757552de6cb",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
