@@ -1071,8 +1071,21 @@ describe("Course OS API", () => {
     await operations.mutate((state) => {
       const plan = state.generationPlans.find((item) => item.id === failed.id)!;
       plan.harnessSnapshotId = "obsolete-harness";
+      plan.writingPolicySnapshotId = "writing-policy:stale";
       for (const job of state.jobs.filter((item) => item.planId === failed.id)) {
         job.harnessSnapshotId = "obsolete-harness";
+        job.writingPolicySnapshotId = "writing-policy:stale";
+      }
+    });
+    await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
+      .set("Idempotency-Key", "failed-plan-retry-stale-policy")
+      .expect(409)
+      .expect((response) => expect(response.body.error).toMatchObject({ code: "WRITING_POLICY_SNAPSHOT_CHANGED" }));
+    await operations.mutate((state) => {
+      const plan = state.generationPlans.find((item) => item.id === failed.id)!;
+      plan.writingPolicySnapshotId = "writing-policy:a4dc46c3432bf1d5";
+      for (const job of state.jobs.filter((item) => item.planId === failed.id)) {
+        job.writingPolicySnapshotId = plan.writingPolicySnapshotId;
       }
     });
     const retried = await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
@@ -1088,57 +1101,118 @@ describe("Course OS API", () => {
     const costs = await request(app).get(`/api/v1/costs?jobId=${retried.body.jobs[0].id}`).expect(200);
     expect(costs.body.entries).toHaveLength(2);
     expect(new Set(costs.body.entries.map((entry: { id: string }) => entry.id)).size).toBe(2);
+    const retryEvent = (await operations.read()).events.find(item => item.streamId === failed.id && item.type === "plan.retry.queued");
+    expect(retryEvent?.payload).toMatchObject({
+      previousHarnessSnapshotId: "obsolete-harness",
+      harnessSnapshotId: currentGenerationHarness().aggregateSha256
+    });
     await request(app).post(`/api/v1/generation-plans/${failed.id}:retry-failed`)
       .set("Idempotency-Key", "failed-plan-retry-run")
       .expect(200);
   }, 60_000);
 
-  it("continues only failed pages under a new Harness while preserving completed import pages", async () => {
-    let calls = 0;
+  it("retries a saved core's missing bridge on its existing job after an approved Harness change", async () => {
+    let coreCalls = 0;
+    let bridgeCalls = 0;
+    let bridgeAvailable = false;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => {
-        if (++calls === 1) throw new Error("PROVIDER_AUTH");
+        coreCalls += 1;
         return testTeachingResult(0.001);
+      },
+      generateBridge: async ({ pageNumber }) => {
+        bridgeCalls += 1;
+        if (pageNumber === 2 && !bridgeAvailable) {
+          throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:429", "deepseek-v4-flash", {
+            inputTokens: 20, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0, durationMs: 25
+          }, "kuafu");
+        }
+        return { markdown: `Bridge for page ${pageNumber}`, provider: "kuafu", model: "deepseek-v4.1-flash",
+          usage: testTeachingResult(0.001).usage };
       }
     };
     const source = { ...testReleaseWithPages(2), writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" };
-    const { app, operations, release } = await seededApp(modelRouter, source);
+    const { app, operations, readweave, release } = await seededApp(modelRouter, source);
+    const completedPageId = release.pageIds[0]!;
+    const bridgePageId = release.pageIds[1]!;
     const created = await request(app).post("/api/v1/generation-plans")
       .set("Idempotency-Key", "partial-snapshot-create")
       .send({ materialVersionId: release.id, pageIds: release.pageIds, budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
     const oldPlan = await waitForPlan(app, created.body.plan.id);
-    expect(oldPlan).toMatchObject({ state: "failed", completedPageIds: [release.pageIds[1]], failedPageIds: [release.pageIds[0]] });
+    expect(oldPlan).toMatchObject({ state: "failed", completedPageIds: [completedPageId], failedPageIds: [bridgePageId] });
+    expect(coreCalls).toBe(2);
+    expect(bridgeCalls).toBe(2);
+    const beforeRetry = await operations.read();
+    const originalFailedJob = beforeRetry.jobs.find(item => item.planId === oldPlan.id && item.failedPageIds.includes(bridgePageId))!;
+    const originalCompletedJob = beforeRetry.jobs.find(item => item.planId === oldPlan.id && item.completedPageIds.includes(completedPageId))!;
+    const coreDraft = await readweave.getDraftByPage(bridgePageId);
+    expect(coreDraft?.generationJobId).toBe(originalFailedJob.id);
+    expect(coreDraft?.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())).toBe(false);
+    expect(beforeRetry.events.some(item => item.streamId === originalFailedJob.id && item.type === "generation.page.core_saved"
+      && (item.payload as { pageId?: string }).pageId === bridgePageId)).toBe(true);
+    const completedJobHarness = "completed-job-original-harness";
+    const obsoleteHarness = "obsolete-harness-before-bridge-retry";
     await operations.mutate(state => {
       const old = state.generationPlans.find(item => item.id === oldPlan.id)!;
-      old.harnessSnapshotId = "obsolete-harness";
+      old.harnessSnapshotId = obsoleteHarness;
+      const failedJob = state.jobs.find(item => item.id === originalFailedJob.id)!;
+      failedJob.harnessSnapshotId = obsoleteHarness;
+      state.jobs.find(item => item.id === originalCompletedJob.id)!.harnessSnapshotId = completedJobHarness;
       old.sourceImportId = "import-continuation-test";
-      state.imports.push({ id: old.sourceImportId, workspaceId: "personal", materialVersionId: release.id,
+      state.imports.push({ id: "import-continuation-test", workspaceId: "personal", materialVersionId: release.id,
         pageIds: [...release.pageIds], generationPlanId: old.id, generationState: "failed",
         generationCompletedPageIds: [...old.completedPageIds], generationFailedPageIds: [...old.failedPageIds],
         originalName: "sample.pdf", kind: "pdf", state: "ready", autoGenerate: true,
         createdAt: new Date().toISOString(), sensitivity: "private" } as ImportRecord);
     });
+    bridgeAvailable = true;
     const retried = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
       .set("Idempotency-Key", "partial-snapshot-retry").expect(202);
-    expect(retried.body.plan).toMatchObject({ retryOfPlanId: oldPlan.id, pageIds: [release.pageIds[0]] });
-    const completed = await waitForPlan(app, retried.body.plan.id);
-    expect(completed).toMatchObject({ state: "completed", completedPageIds: [release.pageIds[0]], failedPageIds: [] });
+    expect(retried.body.plan.id).toBe(oldPlan.id);
+    expect(retried.body.plan.retryOfPlanId).toBeUndefined();
+    expect(retried.body.jobs).toHaveLength(1);
+    expect(retried.body.jobs[0].id).toBe(originalFailedJob.id);
+    expect(retried.body.jobs[0].harnessSnapshotId).toBe(currentGenerationHarness().aggregateSha256);
+    const completed = await waitForPlan(app, oldPlan.id);
+    expect(completed).toMatchObject({ state: "completed", completedPageIds: [completedPageId, bridgePageId], failedPageIds: [] });
+    expect(coreCalls).toBe(2);
+    expect(bridgeCalls).toBe(3);
+    const bridgedDraft = await readweave.getDraftByPage(bridgePageId);
+    expect(bridgedDraft?.page.blocks).toEqual(coreDraft?.page.blocks);
+    expect(bridgedDraft?.page.questionBank).toEqual(coreDraft?.page.questionBank);
+    expect(bridgedDraft?.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())).toBe(true);
     const snapshot = await operations.read();
-    expect(snapshot.generationPlans.find(item => item.id === oldPlan.id)).toMatchObject({ state: "failed", completedPageIds: [release.pageIds[1]] });
+    expect(snapshot.generationPlans).toHaveLength(1);
+    expect(snapshot.generationPlans.find(item => item.id === oldPlan.id)).toMatchObject({
+      state: "completed", completedPageIds: [completedPageId, bridgePageId], failedPageIds: [],
+      harnessSnapshotId: currentGenerationHarness().aggregateSha256,
+      coreCompletedPageIds: [completedPageId, bridgePageId]
+    });
+    expect(snapshot.events.some(item => item.streamId === originalFailedJob.id && item.type === "generation.page.core_saved"
+      && (item.payload as { pageId?: string }).pageId === bridgePageId)).toBe(true);
+    expect(snapshot.jobs.find(item => item.id === originalCompletedJob.id)?.harnessSnapshotId).toBe(completedJobHarness);
+    const retryEvent = snapshot.events.find(item => item.streamId === oldPlan.id && item.type === "plan.retry.queued");
+    expect(retryEvent?.payload).toMatchObject({
+      previousHarnessSnapshotId: obsoleteHarness,
+      harnessSnapshotId: currentGenerationHarness().aggregateSha256
+    });
     expect(snapshot.imports.find(item => item.id === "import-continuation-test")).toMatchObject({
-      generationState: "completed", generationPlanId: completed.id,
-      generationCompletedPageIds: release.pageIds, generationFailedPageIds: []
+      generationState: "completed", generationPlanId: oldPlan.id,
+      generationCompletedPageIds: [completedPageId, bridgePageId], generationFailedPageIds: []
     });
     const detail = await request(app).get("/api/v1/imports/import-continuation-test").expect(200);
-    expect(detail.body).toMatchObject({ generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
+    expect(detail.body).toMatchObject({ generationState: "completed", generationCompletedPageIds: [completedPageId, bridgePageId], generationFailedPageIds: [] });
     const listing = await request(app).get("/api/v1/imports").expect(200);
     expect(listing.body.find((item: ImportRecord) => item.id === "import-continuation-test"))
-      .toMatchObject({ materialVersionId: release.id, generationState: "completed", generationCompletedPageIds: release.pageIds, generationFailedPageIds: [] });
+      .toMatchObject({ materialVersionId: release.id, generationState: "completed", generationCompletedPageIds: [completedPageId, bridgePageId], generationFailedPageIds: [] });
+    const costs = await request(app).get(`/api/v1/costs?jobId=${originalFailedJob.id}`).expect(200);
+    expect(costs.body.entries.filter((entry: { stage: string; status: string; id: string }) =>
+      entry.stage === "teach" && entry.status === "succeeded" && !entry.id.endsWith(":bridge"))).toHaveLength(1);
+    expect(costs.body.entries.filter((entry: { id: string }) => entry.id.endsWith(":bridge"))).toHaveLength(2);
     const replay = await request(app).post(`/api/v1/generation-plans/${oldPlan.id}:retry-failed`)
-      .set("Idempotency-Key", "partial-snapshot-retry-again").expect(200);
-    expect(replay.body.plan.id).toBe(completed.id);
-    expect(calls).toBe(3);
+      .set("Idempotency-Key", "partial-snapshot-retry").expect(200);
+    expect(replay.body.plan.id).toBe(oldPlan.id);
   }, 60_000);
 
   it("deduplicates the same uploaded source even when the idempotency key changes", async () => {

@@ -1534,21 +1534,21 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const idempotencyKey = requireIdempotencyKey(request);
       const harnessSnapshotId = currentGenerationHarness().aggregateSha256;
-      const previous = (await dependencies.operations.read()).generationPlans.find(item => item.id === planId && item.workspaceId === workspaceId);
-      if (previous?.state === "failed" && previous.harnessSnapshotId && previous.harnessSnapshotId !== harnessSnapshotId && previous.completedPageIds.length > 0 && previous.failedPageIds.length > 0) {
+      const initial = await dependencies.operations.read();
+      const previous = initial.generationPlans.find(item => item.id === planId && item.workspaceId === workspaceId);
+      const previousFailedJobs = previous
+        ? initial.jobs.filter(item => item.planId === previous.id && item.failedPageIds.length > 0)
+        : [];
+      let approvedPolicySnapshotForHarnessAdoption: string | undefined;
+      if (previous?.state === "failed" && previous.harnessSnapshotId
+        && previous.harnessSnapshotId !== harnessSnapshotId && previous.failedPageIds.length > 0) {
         const currentPolicy = await currentWritingPolicy();
-        if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== previous.writingPolicySnapshotId) {
-          throw new Error("WRITING_POLICY_SNAPSHOT_CHANGED");
+        if (currentPolicy.validator.status !== "passed" || currentPolicy.policySnapshotId !== previous.writingPolicySnapshotId
+          || previousFailedJobs.some(job => job.writingPolicySnapshotId !== previous.writingPolicySnapshotId)) {
+          return sendError(request, response, 409, "WRITING_POLICY_SNAPSHOT_CHANGED", "当前写作策略已经变化，请重新建立生成计划", false,
+            { policySnapshotId: currentPolicy.policySnapshotId, generationPolicySnapshotId: previous.writingPolicySnapshotId });
         }
-        const continuation = await createGenerationPlan({
-          idempotencyKey, workspaceId, materialVersionId: previous.materialVersionId,
-          pageIds: [...previous.failedPageIds], budgetUsd: previous.budgetUsd,
-          sourceImportId: previous.sourceImportId, qualityMode: previous.qualityMode,
-          language: previous.language, writingPolicySnapshotId: previous.writingPolicySnapshotId,
-          holdForReview: false, retryOfPlanId: previous.id
-        }, dependencies);
-        startCreatedGenerationPlanJobs(continuation, dependencies);
-        return response.status(continuation.created ? 202 : 200).json({ plan: continuation.plan, jobs: continuation.jobs ?? [], continuationOfPlanId: previous.id });
+        approvedPolicySnapshotForHarnessAdoption = currentPolicy.policySnapshotId;
       }
       const retried = await dependencies.operations.mutate((state) => {
         const replay = state.idempotency[idempotencyKey];
@@ -1564,20 +1564,27 @@ export function createApp(dependencies: AppDependencies): Express {
         const failedJobs = planJobs.filter((item) => item.failedPageIds.length > 0);
         if (failedJobs.length === 0) throw new Error("GENERATION_RETRY_HAS_NO_FAILED_PAGES");
 
-        // A fully failed plan has not committed mixed-Harness teaching content,
-        // so its retry may safely adopt the currently deployed Harness. Partial
-        // plans keep their original snapshot and remain protected from mixing.
-        const mayAdoptHarness = plan.completedPageIds.length === 0
-          && planJobs.every((item) => item.completedPageIds.length === 0);
-        if (mayAdoptHarness) {
+        // Under the same approved writing policy, only failed jobs may adopt a
+        // changed Harness. Completed jobs, their content, and their receipts stay intact.
+        const previousHarnessSnapshotId = plan.harnessSnapshotId;
+        const harnessChanged = Boolean(previousHarnessSnapshotId && previousHarnessSnapshotId !== harnessSnapshotId);
+        if (harnessChanged) {
+          if (!approvedPolicySnapshotForHarnessAdoption
+            || plan.harnessSnapshotId !== previous?.harnessSnapshotId
+            || plan.writingPolicySnapshotId !== approvedPolicySnapshotForHarnessAdoption
+            || failedJobs.some(job => job.writingPolicySnapshotId !== approvedPolicySnapshotForHarnessAdoption)) {
+            throw new Error("WRITING_POLICY_SNAPSHOT_CHANGED");
+          }
           plan.harnessSnapshotId = harnessSnapshotId;
+          const mayResetAttempt = plan.completedPageIds.length === 0
+            && planJobs.every((item) => item.completedPageIds.length === 0);
           for (const job of failedJobs) {
             job.harnessSnapshotId = harnessSnapshotId;
-            job.attempt = 0;
-            job.lastErrorCode = undefined;
+            if (mayResetAttempt) {
+              job.attempt = 0;
+              job.lastErrorCode = undefined;
+            }
           }
-        } else if (plan.harnessSnapshotId && plan.harnessSnapshotId !== harnessSnapshotId) {
-          throw new Error("GENERATION_HARNESS_SNAPSHOT_CHANGED");
         }
 
         const queued: GenerationJob[] = [];
@@ -1589,7 +1596,10 @@ export function createApp(dependencies: AppDependencies): Express {
             failedPageIds: [],
             cancelRequested: false
           });
-          dependencies.operations.appendEvent(state, job.id, "job.retry.queued", { pageIds: retryPageIds, nextAttempt: job.attempt + 1, harnessSnapshotId: job.harnessSnapshotId });
+          dependencies.operations.appendEvent(state, job.id, "job.retry.queued", {
+            pageIds: retryPageIds, nextAttempt: job.attempt + 1,
+            previousHarnessSnapshotId, harnessSnapshotId: job.harnessSnapshotId
+          });
           queued.push(structuredClone(job));
         }
         plan.activeJobIds = queued.map((item) => item.id);
@@ -1597,12 +1607,14 @@ export function createApp(dependencies: AppDependencies): Express {
         plan.lastJobId = queued.at(-1)?.id || plan.lastJobId;
         plan.failedPageIds = [];
         const retryPageIds = new Set(queued.flatMap(item => item.pageIds));
-        plan.coreCompletedPageIds = (plan.coreCompletedPageIds ?? []).filter(pageId => !retryPageIds.has(pageId));
         plan.bridgeCompletedPageIds = (plan.bridgeCompletedPageIds ?? []).filter(pageId => !retryPageIds.has(pageId));
         plan.state = "queued";
         plan.updatedAt = new Date().toISOString();
         syncImportGenerationPlan(state, plan);
-        dependencies.operations.appendEvent(state, plan.id, "plan.retry.queued", { jobIds: plan.activeJobIds, pageIds: queued.flatMap((item) => item.pageIds), harnessSnapshotId: plan.harnessSnapshotId });
+        dependencies.operations.appendEvent(state, plan.id, "plan.retry.queued", {
+          jobIds: plan.activeJobIds, pageIds: queued.flatMap((item) => item.pageIds),
+          previousHarnessSnapshotId, harnessSnapshotId: plan.harnessSnapshotId
+        });
         state.idempotency[idempotencyKey] = { kind: "generation_plan_retry", objectId: plan.id };
         return { plan: structuredClone(plan), jobs: queued, replayed: false };
       });
