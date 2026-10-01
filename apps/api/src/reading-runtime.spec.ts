@@ -77,6 +77,90 @@ describe("ReadingRuntime", () => {
     restarted.close();
   });
 
+  it("upserts a resolved lesson draft from its targeted authority snapshot", async () => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const release = await publishFixture(store);
+    let snapshotReads = 0;
+    let broadDraftReads = 0;
+    const authority = new Proxy(store, {
+      get(target, property) {
+        if (property === "getDraftSnapshotByPage") return async (pageId: string) => {
+          snapshotReads += 1;
+          return target.getDraftByPage(pageId);
+        };
+        if (property === "getDraftByPage") return async (pageId: string) => {
+          broadDraftReads += 1;
+          return target.getDraftByPage(pageId);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+
+    const observedAuthority = observeReadingWrites(authority, runtime);
+    let confirmed = await observedAuthority.saveDraft(makeDraft(release, 1, "confirmed revision 1"), 0,
+      writeContext("resolved-draft-r1"));
+    for (let revision = 2; revision <= 4; revision += 1) {
+      confirmed = await observedAuthority.saveDraft(makeDraft(release, revision, `confirmed revision ${revision}`), confirmed.revision,
+        writeContext(`resolved-draft-r${revision}`));
+    }
+    expect(await runtime.replica.getDraft(workspaceId, confirmed.pageId, release.id)).toMatchObject({ revision: 4 });
+
+    await expect(observedAuthority.saveDraft(makeDraft(release, 3, "stale conflict proposal"), 3,
+      writeContext("resolved-draft-conflict"))).rejects.toThrow("READWEAVE_REVISION_CONFLICT:");
+    const conflict = (await store.listConflicts()).find(item => item.status === "open");
+    expect(conflict).toMatchObject({ objectType: "lesson_draft", objectId: confirmed.pageId, remoteRevision: 4 });
+    const mergedPage = structuredClone(confirmed.page);
+    mergedPage.blocks[0]!.markdown = "caller-confirmed merged full page";
+
+    await observedAuthority.resolveConflict(conflict!.id, "merged", stableStringify(mergedPage),
+      writeContext("resolved-draft-merge"));
+
+    await expect(runtime.replica.getDraft(workspaceId, confirmed.pageId, release.id)).resolves.toMatchObject({
+      revision: 5,
+      status: "editing",
+      contentHash: sha256Text(stableStringify(mergedPage)),
+      page: { blocks: [{ markdown: "caller-confirmed merged full page" }] }
+    });
+    expect(snapshotReads).toBe(1);
+    expect(broadDraftReads).toBe(0);
+    runtime.close();
+  });
+
+  it("falls back to the local file adapter draft read when no snapshot method exists", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    expect((authority as ReadWeaveCourseApi).getDraftSnapshotByPage).toBeUndefined();
+    const release = await publishFixture(authority);
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+
+    const observedAuthority = observeReadingWrites(authority, runtime);
+    const confirmed = await observedAuthority.saveDraft(makeDraft(release, 1, "confirmed revision 1"), 0,
+      writeContext("file-resolved-draft-r1"));
+    await expect(observedAuthority.saveDraft(makeDraft(release, 0, "stale conflict proposal"), 0,
+      writeContext("file-resolved-draft-conflict"))).rejects.toThrow("READWEAVE_REVISION_CONFLICT:");
+    const conflict = (await authority.listConflicts()).find(item => item.status === "open");
+    expect(conflict).toMatchObject({ objectType: "lesson_draft", objectId: confirmed.pageId, remoteRevision: 1 });
+    const mergedPage = structuredClone(confirmed.page);
+    mergedPage.blocks[0]!.markdown = "file adapter merged page";
+
+    await observedAuthority.resolveConflict(conflict!.id, "merged", stableStringify(mergedPage),
+      writeContext("file-resolved-draft-merge"));
+
+    await expect(runtime.replica.getDraft(workspaceId, confirmed.pageId, release.id)).resolves.toMatchObject({
+      revision: 2,
+      contentHash: sha256Text(stableStringify(mergedPage)),
+      page: { blocks: [{ markdown: "file adapter merged page" }] }
+    });
+    runtime.close();
+  });
+
   it("does not let a stale in-flight refresh replace a newer saved draft", async () => {
     const root = await temporaryRoot();
     const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));

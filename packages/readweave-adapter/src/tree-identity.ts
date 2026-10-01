@@ -73,6 +73,7 @@ function hasCompleteReadableDraft(release: CourseRelease, drafts: LessonDraft[])
 }
 
 function hasReadablePageBody(page: PageLesson): boolean {
+  if (page.quality.issues.includes("TEACHING_GENERATION_REQUIRED")) return false;
   const full = page.lessonSections?.find((section) => section.kind === "full_explanation");
   // A present full-explanation section is authoritative. Do not let a summary
   // or a legacy core block make an explicitly blank full explanation readable.
@@ -81,8 +82,14 @@ function hasReadablePageBody(page: PageLesson): boolean {
     : page.blocks.filter((block) => block.kind === "core").map((block) => block.markdown);
   return bodyText.some((value) => {
     const text = value.trim();
-    return text.length > 0 && !/(?:待生成|待确认|待补充|当前只完成来源拆解|还没有冒充教授级讲解)/u.test(text);
+    return text.length > 0 && !isWholeBodyPlaceholder(text);
   });
+}
+
+function isWholeBodyPlaceholder(text: string): boolean {
+  return /^(?:待生成|待确认|待补充|待核验)(?:[:：][^\r\n]*)?$/u.test(text)
+    || text === "这一页没有提取到可读文字，需要结合原图人工检查"
+    || text === "当前只完成来源拆解，还没有冒充教授级讲解；请继续生成或人工编写后再发布";
 }
 
 export function materialGroups(releases: CourseRelease[], drafts: LessonDraft[] = []): Array<{ courseId: string; moduleId: string; latest: CourseRelease; releases: CourseRelease[] }> {

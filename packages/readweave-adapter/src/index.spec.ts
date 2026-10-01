@@ -2545,6 +2545,65 @@ describe("material release identity", () => {
     expect(selectMaterialRelease([published, readyCandidate, otherMaterial], [readyDraft], published.courseId, published.moduleId, otherMaterial.id)?.id).toBe(readyCandidate.id);
   });
 
+  it("accepts local uncertainty in a complete explanation but rejects whole-body placeholders", () => {
+    const syntheticTeaching = [
+      "本节讨论虚构的澄流器如何将输入信号映射到目标输出。先把输入、内部状态和输出分开记录：输入是当前步骤收到的信息，状态保存此前步骤需要继续使用的信息，输出则是本步骤能够观察到的结果。",
+      "分析时从定义入手。给定相同输入和状态，规则应产生相同输出；状态变化时，必须重新应用规则，不能把上一轮结果直接当成新输入。逐项说明条件满足时更新哪个状态、产生什么输出，便于核对每一步使用的前提。",
+      "虚构示例中的一条观察尚未被完整解释，暂时只能记作待确认信息；这只影响该观察本身，不替代已经说明的系统定义和推理过程。随后复核输入、状态更新与输出之间的对应关系，并区分规则推出的结论和仍依赖观察的判断。",
+      "练习时可以改变输入，按同一规则重新推演，再比较各步状态和输出。若结果不同，应指出差异出现在哪个条件或状态更新处，而不是跳过中间步骤；这样可以检查规则是否前后一致，也能看出当前结论适用的范围。"
+    ].join("\n\n");
+    const fill = "复核时继续沿输入、条件、状态与输出的顺序解释每一步，不把观察误当成规则。";
+    const completeBody = `${syntheticTeaching}\n\n${fill.repeat(40)}`.slice(0, 1648);
+    expect(completeBody).toHaveLength(1648);
+    expect(completeBody).toContain("待确认信息");
+
+    const candidateFor = (id: string, page: PageLesson): CourseRelease => ({
+      ...readyCandidate,
+      id,
+      pageIds: [page.id],
+      pages: [page]
+    });
+    const draftForPage = (candidate: CourseRelease): LessonDraft => ({
+      ...readyDraft,
+      sourceReleaseId: candidate.id,
+      pageId: candidate.pages[0]!.id,
+      page: candidate.pages[0]!
+    });
+    const pageFor = (id: string, markdown: string, issues: string[] = []): PageLesson => ({
+      ...readyCandidate.pages[0]!,
+      id,
+      lessonSections: [{
+        id: `${id}-full-explanation`,
+        kind: "full_explanation",
+        title: "完整讲解",
+        markdown,
+        sourceAnchorIds: [],
+        atomIds: []
+      }],
+      quality: { ...readyCandidate.pages[0]!.quality, issues }
+    });
+
+    const localUncertaintyPage = pageFor("local-uncertainty-page", completeBody);
+    const localUncertaintyCandidate = candidateFor("material-local-uncertainty-v2", localUncertaintyPage);
+    expect(selectMaterialRelease(
+      [published, localUncertaintyCandidate], [draftForPage(localUncertaintyCandidate)], published.courseId, published.moduleId
+    )?.id).toBe(localUncertaintyCandidate.id);
+
+    for (const [id, placeholder] of [["generation-placeholder", "待生成"], ["confirmation-placeholder", "待确认"]] as const) {
+      const placeholderCandidate = candidateFor(`material-${id}-v2`, pageFor(`${id}-page`, placeholder));
+      expect(selectMaterialRelease(
+        [published, placeholderCandidate], [draftForPage(placeholderCandidate)], published.courseId, published.moduleId
+      )?.id).toBe(published.id);
+    }
+
+    const requiredCandidate = candidateFor("material-required-v2", pageFor(
+      "required-page", "完整的合成教学正文，包含定义、条件和推理。", ["TEACHING_GENERATION_REQUIRED"]
+    ));
+    expect(selectMaterialRelease(
+      [published, requiredCandidate], [draftForPage(requiredCandidate)], published.courseId, published.moduleId
+    )?.id).toBe(published.id);
+  });
+
   it("keeps a partially drafted upload selectable when no readable published release exists", () => {
     const pages = Array.from({ length: 112 }, (_, index) => ({
       ...published.pages[0]!,

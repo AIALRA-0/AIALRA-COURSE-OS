@@ -1,6 +1,6 @@
 import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import type { CourseProject, CourseRelease, LessonDraft, ReadWeaveSyncStatus, TrashRecord, WorkspaceTree, CourseTreeNode } from "@course-os/contracts";
+import type { CourseConflict, CourseProject, CourseRelease, LessonDraft, ReadWeaveSyncStatus, TrashRecord, WorkspaceTree, CourseTreeNode } from "@course-os/contracts";
 import type { ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { withReadBudget, withIndependentReadBudget } from "@course-os/readweave-adapter";
 import { writeJsonAtomic } from "@course-os/storage";
@@ -137,8 +137,19 @@ export class ReadingRuntime {
   /** Persist only the result already acknowledged by ReadWeave. */
   async saved(method: keyof ReadWeaveCourseApi, result: unknown): Promise<void> {
     try {
-      if (method === "saveDraft" || method === "saveDraftWithCost") {
-        const draft = result as LessonDraft;
+      const conflict = method === "resolveConflict" ? result as CourseConflict : undefined;
+      const projectResolvedDraft = conflict?.objectType === "lesson_draft" && conflict.workspaceId === this.workspaceId;
+      if (method === "saveDraft" || method === "saveDraftWithCost" || projectResolvedDraft) {
+        const draft = projectResolvedDraft
+          ? await (this.authority.getDraftSnapshotByPage
+            ? this.authority.getDraftSnapshotByPage(conflict!.objectId)
+            : this.authority.getDraftByPage(conflict!.objectId))
+          : result as LessonDraft;
+        if (!draft || (projectResolvedDraft && (draft.pageId !== conflict!.objectId
+          || draft.workspaceId !== conflict!.workspaceId
+          || draft.revision <= Math.max(conflict!.localRevision, conflict!.remoteRevision)))) {
+          throw new Error("READING_CONFIRMED_WRITE_NOT_PROJECTED");
+        }
         const updated = await this.replica.upsertDraft(draft);
         if (!updated) {
           const existing = await this.replica.getDraft(draft.workspaceId, draft.pageId, draft.sourceReleaseId);
