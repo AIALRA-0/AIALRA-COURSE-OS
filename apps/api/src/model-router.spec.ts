@@ -13,6 +13,22 @@ const explicitProviderBadRequest = [
   "- This request still counts as a request and is billed based on its input (minimum 1,000 prompt / 1,000 completion / 1,000 cached tokens)."
 ].join("\n");
 
+const explicitProviderTemporaryUnavailable = [
+  "[req_synthetic456] [deepseek-v4.1-flash]",
+  "**AI provider temporarily unavailable**",
+  "- The AI provider failed to process your request (temporary server issue or oversized prompt).",
+  "- This was retried automatically.",
+  "How to fix:",
+  "- Wait a moment and retry with a shorter or simpler prompt.",
+  "- Do not keep retrying the exact same request.",
+  "**Billing:**",
+  "- This request still counts as a request and is billed based on its input (minimum 1,000 prompt / 1,000 completion / 1,000 cached tokens).",
+  "- Do not resend the same request — it will keep failing and keep consuming your quota.",
+  "**Recommended tools:**",
+  "- These responses are optimized for opencode, Claude Code, and Codex.",
+  "- If you are using a non-standard client and keep hitting errors, switch to one of the supported tools above."
+].join("\n");
+
 describe("generation harness", () => {
   it("extracts the largest complete JSON object from provider wrapper text", () => {
     expect(parseWrappedProviderJson('说明文字 {"status":"meta"} 正式结果 {"facts":[{"id":"f1"}],"steps":[{"id":"s1"}]} 结束'))
@@ -227,10 +243,12 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.input).toContain("前页解释了输入");
       expect(body.input).toContain("本页讨论处理规则");
       expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
+      expect(body.instructions.endsWith("本次成文任务仅是承上启下：只用一个自然段、2–4句，从已确认的前页一点自然引出本页问题；若没有可确认的前页信息，就只依据本页摘要提出本页问题。复用已有术语，不重复定义、正文、代码或推导；输出仅限承接段。"))
+        .toBe(true);
       expect(body.max_output_tokens).toBe(700);
       expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",
-        output_text: "前页讨论过“Bad request from AI provider”这句示例提示，本页接着看处理规则。",
+        output_text: "课程举例说明：AI provider temporarily unavailable 是系统提示语，本页继续讨论处理规则。",
         usage: { input_tokens: 100, output_tokens: 50, total_cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -238,7 +256,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
     const result = await client.generateBridge({ ...providerInput("bridge-page"), previousPageContext: "前页解释了输入",
       currentSummary: "本页讨论处理规则" });
-    expect(result).toMatchObject({ markdown: "前页讨论过“Bad request from AI provider”这句示例提示，本页接着看处理规则。", provider: "deepseek",
+    expect(result).toMatchObject({ markdown: "课程举例说明：AI provider temporarily unavailable 是系统提示语，本页继续讨论处理规则。", provider: "deepseek",
       usage: { apiEquivalentUsd: 0.001 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -262,6 +280,23 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(metered.groupedUsage()).toMatchObject([{ provider: "kuafu", model: "deepseek-v4.1-flash",
       usage: { inputTokens: 140, outputTokens: 0, apiEquivalentUsd: 0.001 } }]);
+  });
+
+  it("retries the explicit HTTP-200 temporary outage envelope and retains usage from both attempts", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ model: "deepseek-v4.1-flash", output_text: explicitProviderTemporaryUnavailable,
+      usage: { input_tokens: 140, output_tokens: 0, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const upstream = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://kuafu.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+    const metered = meterModelRouter(upstream);
+    const input = providerInput("provider-temporary-unavailable");
+
+    await expect(metered.client.generateBridge!({ ...input, previousPageContext: "前页已确认讲解", currentSummary: "本页教学摘要" }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED:upstream_error", provider: "kuafu", model: "deepseek-v4.1-flash",
+        usage: { inputTokens: 280, outputTokens: 0, apiEquivalentUsd: 0.002 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(metered.groupedUsage()).toMatchObject([{ provider: "kuafu", model: "deepseek-v4.1-flash",
+      usage: { inputTokens: 280, outputTokens: 0, apiEquivalentUsd: 0.002 } }]);
   });
 
   it("starts from the current page question when previousTeaching marks a module start", async () => {
@@ -376,6 +411,50 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await runPlannedStageForTest(client);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.providerDiagnostic).toMatchObject({ status: "completed", rawOutputChars: 2 });
+  });
+
+  it("retries a completed SSE response with an output_text item but no text and keeps unknown cost reserved", async () => {
+    const encoder = new TextEncoder();
+    const emptyCompleted = { type: "response.completed", sequence_number: 1, response: {
+      status: "completed", model: "deepseek-v4.1-flash",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text" }], status: "completed" }]
+    } };
+    const validCompleted = { type: "response.completed", sequence_number: 1, response: {
+      status: "completed", model: "deepseek-v4.1-flash",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "本页继续核对前述条件。" }], status: "completed" }],
+      usage: { input_tokens: 125, output_tokens: 34, total_cost: 0.002 }
+    } };
+    const asSse = (event: unknown) => new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(encoder.encode(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { status: "in_progress" } })}\n\n`));
+      controller.enqueue(encoder.encode(`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    } }), { headers: { "Content-Type": "text/event-stream" } });
+    const fetchMock = vi.fn().mockResolvedValueOnce(asSse(emptyCompleted)).mockResolvedValueOnce(asSse(validCompleted));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+
+    const result = await client.generateBridge!({ ...providerInput("empty-bridge-output"),
+      previousPageContext: "前页已确认讲解", currentSummary: "本页教学摘要" });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ max_output_tokens: 700, stream: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.markdown).toBe("本页继续核对前述条件。");
+    expect(result.usage).toMatchObject({ inputTokens: 125, outputTokens: 34, apiEquivalentUsd: 0.002 });
+    expect(result.usage.unreportedCostReserveUsd).toBeGreaterThan(0);
+  });
+
+  it("does not retry nonempty malformed JSON as a missing-output provider failure", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ model: "deepseek-v4.1-flash", output_text: "{malformed json",
+      usage: { input_tokens: 100, output_tokens: 20, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+
+    const result = await runPlannedStageForTest(client, "teaching", { type: "object", properties: { answer: { type: "string" } } });
+
+    expect(result.content).toBe("{malformed json");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("preserves the HTTP status when a relay returns plain text instead of JSON or events", async () => {
@@ -843,16 +922,16 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   });
 });
 
-function runPlannedStageForTest(client: HttpProviderTeachingClient, phase = "teaching") {
+function runPlannedStageForTest(client: HttpProviderTeachingClient, phase = "teaching", schema?: Record<string, unknown>) {
   const internalClient = client as unknown as {
     requestPlannedStage(
       input: ReturnType<typeof providerInput>,
-      request: { phase: string; instructions: string; prompt: string; maxOutputTokens: number },
+      request: { phase: string; instructions: string; prompt: string; maxOutputTokens: number; schema?: Record<string, unknown> },
       budget: number
-    ): Promise<{ providerDiagnostic?: Record<string, unknown> }>;
+    ): Promise<{ content: unknown; providerDiagnostic?: Record<string, unknown> }>;
   };
   return internalClient.requestPlannedStage(providerInput(`diagnostic-${phase}`), {
-    phase, instructions: "test", prompt: "test", maxOutputTokens: 1_000
+    phase, instructions: "test", prompt: "test", maxOutputTokens: 1_000, ...(schema ? { schema } : {})
   }, 0.06);
 }
 

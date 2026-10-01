@@ -722,6 +722,47 @@ describe("planned teaching core writer", () => {
     expect(emptyCanonicalFallsBack.mainContentMarkdown).toBe(source.mainContentMarkdown);
   });
 
+  it("projects an ordered fullExplanation paragraph array as body and keeps summaries separate", () => {
+    const source = teachingPackage();
+    const { fullExplanationMarkdown: _full, mainContentMarkdown: _main, ...withoutCanonicalContent } = source;
+    const observedFullExplanation = Array.from({ length: 22 }, (_, index) => `第${index + 1}段正文`);
+    observedFullExplanation[0] = "## 一、核心结构";
+    observedFullExplanation[6] = "```ts\nconst result = input * 2;\n```";
+    observedFullExplanation[14] = "公式：$f(x)=x^2$";
+    observedFullExplanation[21] = "### 二、结果核对";
+
+    const projected = projectPlannedOutputToSchema({
+      ...withoutCanonicalContent,
+      fullExplanation: observedFullExplanation
+    }, teachingPackageSchema) as typeof source;
+    const expectedBody = observedFullExplanation.join("\n\n");
+    expect(projected.fullExplanationMarkdown).toBe(expectedBody);
+    expect(projected.fullExplanationMarkdown!.indexOf("## 一、核心结构"))
+      .toBeLessThan(projected.fullExplanationMarkdown!.indexOf("```ts"));
+    expect(projected.fullExplanationMarkdown).toContain("```ts\nconst result = input * 2;\n```");
+    expect(projected.fullExplanationMarkdown).toContain("公式：$f(x)=x^2$");
+    expect(projected.fullExplanationMarkdown).toContain("### 二、结果核对");
+
+    const canonicalWins = projectPlannedOutputToSchema({
+      ...source,
+      fullExplanation: observedFullExplanation
+    }, teachingPackageSchema) as typeof source;
+    expect(canonicalWins.fullExplanationMarkdown).toBe(source.fullExplanationMarkdown);
+
+    const summaryOnly = projectPlannedOutputToSchema({
+      ...withoutCanonicalContent,
+      mainContent: ["摘要一", "摘要二"]
+    }, teachingPackageSchema) as typeof source;
+    expect(summaryOnly.fullExplanationMarkdown).toBeUndefined();
+    expect(summaryOnly.mainContentMarkdown).toBe("摘要一\n\n摘要二");
+
+    const damagedArray = projectPlannedOutputToSchema({
+      ...withoutCanonicalContent,
+      fullExplanation: ["可读正文", 42]
+    }, teachingPackageSchema) as typeof source;
+    expect(damagedArray.fullExplanationMarkdown).toBeUndefined();
+  });
+
   it("fills the empty options shape for a comprehension answer", () => {
     const projected = projectPlannedOutputToSchema({
       type: "short_answer", question: "这一步解决什么问题？", answer: "连接输入与输出", rationale: "从输入追踪到输出"

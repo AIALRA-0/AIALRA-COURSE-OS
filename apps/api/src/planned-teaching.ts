@@ -165,7 +165,15 @@ function firstUsableProviderText(record: Record<string, unknown>, keys: readonly
 }
 
 function firstUsableProviderString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  return keys.map(key => record[key]).find((value): value is string => typeof value === "string" && !!value.trim());
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (Array.isArray(value) && value.length > 0 && value.every(item => typeof item === "string")
+      && value.some(item => item.trim())) {
+      return value.filter(item => item.trim()).join("\n\n");
+    }
+  }
+  return undefined;
 }
 
 /** Project harmless provider wrappers and aliases into a requested JSON shape. */

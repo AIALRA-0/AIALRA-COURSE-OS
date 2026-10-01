@@ -291,7 +291,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   async generateBridge(input: ModelRouterInput & { currentSummary: string }) {
     const response = await this.requestPlannedStage(input, {
       phase: "bridge",
-      instructions: `为当前课件页写一个简短的承上启下段。previousTeaching 只有明确包含已确认的真实前页讲解时，才可作为前页知识依据；若它明确说明本页是模块起始页、前页内容不可用，或该字段缺失、为空，就只依据 currentSummary 中的本页内容提出本页正在解决的问题，写成简短开篇，不写“上一页讲过”等前页事实，也不补造前页内容。若存在已确认的前页讲解，只回收其中理解本页确实需要的一点，再自然指出本页接着解决什么。不重复本页完整讲解，不虚构前页事实。遵守下面完整的写作策略。\n\n${writingPolicyInstructions(input.language)}`,
+      instructions: `为当前课件页写一个简短的承上启下段。previousTeaching 只有明确包含已确认的真实前页讲解时，才可作为前页知识依据；若它明确说明本页是模块起始页、前页内容不可用，或该字段缺失、为空，就只依据 currentSummary 中的本页内容提出本页正在解决的问题，写成简短开篇，不写“上一页讲过”等前页事实，也不补造前页内容。若存在已确认的前页讲解，只回收其中理解本页确实需要的一点，再自然指出本页接着解决什么。不重复本页完整讲解，不虚构前页事实。遵守下面完整的写作策略。\n\n${writingPolicyInstructions(input.language)}\n\n本次成文任务仅是承上启下：只用一个自然段、2–4句，从已确认的前页一点自然引出本页问题；若没有可确认的前页信息，就只依据本页摘要提出本页问题。复用已有术语，不重复定义、正文、代码或推导；输出仅限承接段。`,
       prompt: JSON.stringify({ pageTitle: input.pageTitle, previousTeaching: input.previousPageContext,
         currentSummary: input.currentSummary }),
       maxOutputTokens: 700
@@ -909,7 +909,10 @@ function providerBodyError(body: ProviderResponseBody): ProviderResponseBody["er
   if (body.error) return body.error;
   if (body.status === "incomplete") return { code: body.incomplete_details?.reason || "response_incomplete" };
   if (body.status === "failed") return { code: "response_failed" };
-  if (isExplicitBadRequestEnvelope(extractProviderOutput(body))) return { code: "invalid_request_error" };
+  const output = extractProviderOutput(body);
+  if (isExplicitBadRequestEnvelope(output)) return { code: "invalid_request_error" };
+  if (isExplicitTemporaryUnavailableEnvelope(output)) return { code: "upstream_error" };
+  if (body.status === "completed" && !hasUsableProviderOutput(output)) return { code: "upstream_error" };
   return undefined;
 }
 
@@ -922,6 +925,32 @@ function isExplicitBadRequestEnvelope(output: unknown): boolean {
     && /invalid parameters or unsupported content/iu.test(output)
     && /\bBilling\b/iu.test(output)
     && /\bminimum\s+1,000\s+prompt\s*\/\s*1,000\s+completion\s*\/\s*1,000\s+cached\s+tokens\b/iu.test(output);
+}
+
+/** Recognize the relay's explicit HTTP-200 temporary-outage rendering, not teaching prose. */
+function isExplicitTemporaryUnavailableEnvelope(output: unknown): boolean {
+  if (typeof output !== "string") return false;
+  const lines = output.replace(/\r/gu, "").split("\n");
+  return /^\s*\[req_[a-z0-9_-]+\]\s+\[[^\]]+\]$/iu.test(lines[0] || "")
+    && lines[1] === "**AI provider temporarily unavailable**"
+    && lines[2] === "- The AI provider failed to process your request (temporary server issue or oversized prompt)."
+    && lines[3] === "- This was retried automatically."
+    && lines.includes("**Billing:**")
+    && lines.some((line) => /\bminimum\s+1,000\s+prompt\s*\/\s*1,000\s+completion\s*\/\s*1,000\s+cached\s+tokens\b/iu.test(line));
+}
+
+function hasUsableProviderOutput(output: unknown): boolean {
+  if (typeof output === "string") return output.trim().length > 0;
+  if (!Array.isArray(output)) return output !== undefined && output !== null;
+  return output.some((item) => {
+    if (!item || typeof item !== "object") return typeof item === "string" && item.trim().length > 0;
+    const candidate = item as { type?: unknown; content?: unknown };
+    if (candidate.type !== undefined && candidate.type !== "message") return false;
+    if (!Array.isArray(candidate.content)) return false;
+    return candidate.content.some((part) => part !== null && typeof part === "object"
+      && typeof (part as { text?: unknown }).text === "string"
+      && ((part as { text: string }).text.trim().length > 0));
+  });
 }
 
 function extractProviderOutput(body: ProviderResponseBody): unknown {
