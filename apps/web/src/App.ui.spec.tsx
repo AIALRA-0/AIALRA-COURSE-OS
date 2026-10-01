@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { CourseRelease, LearningSession, LessonDraft, PageLesson, WorkspaceTree } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./api.js";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, beginFormalPageLoad, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, type CandidatePreviewState, type SharedReadLease } from "./App.js";
+import { beginCandidatePreviewLoad, beginFormalPageLoad, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -30,6 +32,53 @@ describe("workspace tree and incremental import UI inputs", () => {
 
     expect(handlers).toHaveLength(2);
     expect(handlers.every((handler) => handler.includes("rememberImport(record)") && handler.includes("trackImport(record.id)"))).toBe(true);
+  });
+});
+
+describe("global search and startup notices", () => {
+  it("opens and focuses global search for Ctrl/Cmd+K, using the material's current release", async () => {
+    expect(isGlobalSearchShortcut({ metaKey: true, ctrlKey: false, key: "k" })).toBe(true);
+    expect(isGlobalSearchShortcut({ metaKey: false, ctrlKey: true, key: "K" })).toBe(true);
+    expect(isGlobalSearchShortcut({ metaKey: false, ctrlKey: false, key: "k" })).toBe(false);
+
+    const [appSource, treeSource] = await Promise.all([
+      readFile(new URL("./App.tsx", import.meta.url), "utf8"),
+      readFile(new URL("./CourseTree.tsx", import.meta.url), "utf8")
+    ]);
+    expect(appSource).toContain("setUtilityPanel(\"search\")");
+    expect(appSource).toContain("setGlobalSearchFocusRequest((current) => current + 1)");
+    expect(appSource).toContain('if (panel === "search") searchInput.current?.focus();');
+    expect(treeSource).not.toContain('document.addEventListener("keydown"');
+
+    const releases = [
+      { id: "published-old", courseId: "course-a", moduleId: "module-a", courseTitle: "EE680", moduleTitle: "Lecture 1", lifecycle: "published", version: 1, pages: [{ id: "old-page", pageNumber: 4, title: "Eigenvalues" }] },
+      { id: "ready-draft", courseId: "course-a", moduleId: "module-a", courseTitle: "EE680", moduleTitle: "Lecture 1", lifecycle: "draft_source", version: 2, pages: [{ id: "current-page", pageNumber: 4, title: "Eigenvalues" }] }
+    ] as CourseRelease[];
+    const tree = {
+      courses: [{ id: "course-a", kind: "course", children: [{ id: "material-a", kind: "material", currentReleaseId: "ready-draft", children: [] }] }],
+      rootMaterials: []
+    } as unknown as WorkspaceTree;
+
+    expect(buildGlobalSearchResults(releases, tree, "eigenvalues").map(({ release, page }) => [release.id, page.id])).toEqual([["ready-draft", "current-page"]]);
+  });
+
+  it("renders both startup notices without a duplicate React key warning", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const markup = renderToStaticMarkup(createElement(StartupReadNotices, {
+        releaseIndexError: "索引暂不可用",
+        releaseIndexLoading: false,
+        onRetryReleaseIndex: vi.fn(),
+        treeError: "目录暂不可用",
+        treeLoading: false,
+        onRetryTree: vi.fn()
+      }));
+      expect(markup).toContain("索引暂不可用");
+      expect(markup).toContain("目录暂不可用");
+      expect(error.mock.calls.flat().join(" ")).not.toMatch(/unique.*key/i);
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 

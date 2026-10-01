@@ -199,13 +199,17 @@ describe("replica-backed reading routes", () => {
       .send({ courseReleaseId: release.id }).expect(201);
     expect(sessionResponse.body.courseReleaseId).toBe(release.id);
 
-    await request(app).post(`/api/v1/pages/page-a/questions:select`).set("X-Workspace-Id", "personal")
+    const selected = await request(app).post(`/api/v1/pages/page-a/questions:select`).set("X-Workspace-Id", "personal")
       .set("Idempotency-Key", "selection-a").send({ sessionId: sessionResponse.body.id, seed: "seed-a" }).expect(201);
     expect(saveSelection).toHaveBeenCalledOnce();
+    const selectedQuestion = selected.body.questions.find((question: { id: string }) => question.id === "question-a");
+    expect(selectedQuestion).toMatchObject({ id: "question-a", version: 1 });
+    expect(selected.body.selection.id).not.toBe("selection-a");
 
     await request(app).post("/api/v1/question-attempts").set("X-Workspace-Id", "personal")
       .set("Idempotency-Key", "attempt-a")
-      .send({ courseReleaseId: release.id, pageId: "page-a", questionId: "question-a", answer: "yes", sessionId: sessionResponse.body.id, selectionId: "selection-a" })
+      .send({ courseReleaseId: release.id, pageId: "page-a", questionId: selectedQuestion.id, questionVersion: selectedQuestion.version,
+        answer: "yes", sessionId: sessionResponse.body.id, selectionId: selected.body.selection.id })
       .expect(201);
     expect(getRelease).not.toHaveBeenCalled();
     expect(getDraftByPage).not.toHaveBeenCalled();

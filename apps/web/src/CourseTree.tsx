@@ -80,7 +80,6 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   const [dragAnnouncement, setDragAnnouncement] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const searchContainer = useRef<HTMLDivElement>(null);
-  const focusSearchAfterExpand = useRef(false);
   const visibleNodes = useMemo(() => {
     return query.trim() ? filterTree(searchableNodes.filter(isSearchableNode), query) : searchableNodes;
   }, [query, searchableNodes]);
@@ -90,27 +89,6 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     if (!tree) return;
     setExpanded((current) => new Set([...current, ...rootNodes.flatMap((node) => [node.id, ...collectExpandable(node)])]));
   }, [rootNodes, tree]);
-
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLocaleLowerCase() !== "k") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setSearchOpen(true);
-      if (collapsed) {
-        focusSearchAfterExpand.current = true;
-        onCollapse?.();
-      } else searchInput.current?.focus();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [collapsed, onCollapse]);
-
-  useEffect(() => {
-    if (collapsed || !focusSearchAfterExpand.current) return;
-    focusSearchAfterExpand.current = false;
-    searchInput.current?.focus();
-  }, [collapsed]);
 
   useEffect(() => {
     const close = (event: globalThis.MouseEvent) => {
@@ -561,6 +539,25 @@ export function moveSearchIndex(currentIndex: number, direction: 1 | -1, resultC
   if (resultCount <= 0) return -1;
   if (currentIndex < 0) return direction === 1 ? 0 : resultCount - 1;
   return (currentIndex + direction + resultCount) % resultCount;
+}
+
+export type SearchInputKeyAction =
+  | { kind: "move"; index: number }
+  | { kind: "activate"; index: number }
+  | { kind: "close" }
+  | { kind: "none" };
+
+export function resolveSearchInputKeyAction(key: string, activeIndex: number, resultCount: number): SearchInputKeyAction {
+  if (key === "ArrowDown" || key === "ArrowUp") {
+    if (resultCount <= 0) return { kind: "none" };
+    return { kind: "move", index: moveSearchIndex(activeIndex, key === "ArrowDown" ? 1 : -1, resultCount) };
+  }
+  if (key === "Enter") {
+    if (resultCount <= 0) return { kind: "none" };
+    return { kind: "activate", index: activeIndex >= 0 && activeIndex < resultCount ? activeIndex : 0 };
+  }
+  if (key === "Escape") return { kind: "close" };
+  return { kind: "none" };
 }
 
 export type CourseTreeSearchActivation =

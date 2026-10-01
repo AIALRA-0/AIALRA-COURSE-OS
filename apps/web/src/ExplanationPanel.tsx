@@ -8,8 +8,12 @@ import { createQuestionBatchState, previewQuestionBank, questionAnswerKey, quest
 
 export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef, generatedReady, unpublishedDraftRevision }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null }; generatedReady?: boolean; unpublishedDraftRevision?: number }) {
   const sections = useMemo(() => normalizeSections(page), [page]);
-  const bodyReadable = page.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())
-    || page.blocks.some(block => block.kind === "core" && block.markdown.trim());
+  const bodyReadable = page.lessonSections?.length
+    ? page.lessonSections.some(section => section.kind === "full_explanation" && section.markdown?.trim())
+    : page.blocks.some(block => block.kind === "deep_dive" && block.markdown.trim());
+  const summaryReady = page.lessonSections?.length
+    ? page.lessonSections.some(section => section.kind === "main_content" && section.markdown?.trim())
+    : page.blocks.some(block => block.kind === "core" && block.markdown.trim());
   const bridgeReady = page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim());
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
   const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
@@ -60,7 +64,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
-    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页 · {release.lifecycle === "draft_source" ? "当前预览草稿" : release.lifecycle === "published" ? `已发布 v${release.version}${unpublishedDraftRevision ? " · 有未发布修改（当前预览草稿）" : ""}` : unpublishedDraftRevision ? "当前预览草稿" : "课程材料"}</span><h2>{page.title}</h2></div><span className={`quality-badge ${bodyReadable && bridgeReady ? "pass" : "hold"}`}>{!bodyReadable ? "讲解尚未生成" : bridgeReady ? "教学内容可读" : "正文可读 · 承接待补齐"}</span></header>
+    <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页 · {release.lifecycle === "draft_source" ? "当前预览草稿" : release.lifecycle === "published" ? `已发布 v${release.version}${unpublishedDraftRevision ? " · 有未发布修改（当前预览草稿）" : ""}` : unpublishedDraftRevision ? "当前预览草稿" : "课程材料"}</span><h2>{page.title}</h2></div><span className={`quality-badge ${bodyReadable && summaryReady && bridgeReady ? "pass" : "hold"}`}>{!bodyReadable ? "讲解尚未生成" : !summaryReady ? "正文可读 · 主要内容待补齐" : bridgeReady ? "教学内容可读" : "正文可读 · 承接待补齐"}</span></header>
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>
@@ -299,7 +303,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
     const idempotencyKey = idempotencyKeysRef.current.get(replayKey) ?? crypto.randomUUID();
     idempotencyKeysRef.current.set(replayKey, idempotencyKey);
     try {
-      const result = await api.questionAttempt({ selectionId: selection.id, sessionId, courseReleaseId: release.id, pageId: page.id, questionId: item.id, answer, usedHintLevel: 0 }, idempotencyKey);
+      const result = await api.questionAttempt({ selectionId: selection.id, sessionId, courseReleaseId: release.id, pageId: page.id, questionId: item.id, questionVersion: item.version, answer, usedHintLevel: 0 }, idempotencyKey);
       idempotencyKeysRef.current.delete(replayKey);
       setSavedAnswers((current) => ({ ...current, [answerKey]: result.attempt.answer }));
       setFeedbackState((current) => ({ ...current, [answerKey]: result.evaluationState }));
@@ -337,7 +341,7 @@ function normalizeSections(page: PageLesson): LessonSection[] {
       const section = byKind.get(kind);
       if (kind === "chapter_bridge" && !section?.markdown?.trim()) return { id: `${page.id}:section:chapter_bridge`, kind, title, markdown: "承上启下尚未补齐；当前页教学结构未完成", sourceAnchorIds: anchorIds, atomIds };
       if (!section) return { id: `${page.id}:section:${kind}`, kind, title, markdown: kind === "full_explanation" ? "完整讲解尚未生成；已有摘要保留" : "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds };
-      if (kind === "main_content" && section.markdown) return { ...section, markdown: summaryMarkdown(section.markdown) };
+      if (kind === "main_content") return { ...section, title, markdown: section.markdown?.trim() ? summaryMarkdown(section.markdown) : "主要内容尚未补齐；完整讲解保留" };
       if (kind === "full_explanation" && !section.markdown?.trim() && !section.items?.some((item) => item.text.trim())) {
         return { ...section, markdown: "完整讲解尚未生成；已有摘要保留" };
       }
@@ -347,7 +351,7 @@ function normalizeSections(page: PageLesson): LessonSection[] {
   const find = (...kinds: string[]) => page.blocks.filter((item) => kinds.includes(item.kind)).map((item) => item.markdown).join("\n\n");
   const items = (prefix: string, text: string) => splitOutsideMath(text).map((textValue, index) => ({ id: `${page.id}:${prefix}:${index + 1}`, text: textValue, sourceAnchorIds: anchorIds }));
   const main = page.blocks.find((item) => item.kind === "core")?.markdown || find("core");
-  const fullExplanation = find("core", "example", "deep_dive", "check");
+  const fullExplanation = find("deep_dive", "example", "check");
   return [{ id: `${page.id}:section:bridge`, kind: "chapter_bridge", title: "承上启下", markdown: "承上启下尚未补齐；当前页教学结构未完成", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:prior`, kind: "prior_knowledge", title: "先验知识", items: items("prior", find("prerequisite")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:objective`, kind: "learning_objectives", title: "学习目标", items: items("objective", find("objective")), sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:full`, kind: "full_explanation", title: "完整讲解", markdown: fullExplanation.trim() ? fullExplanation : "完整讲解尚未生成；已有摘要保留", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:main`, kind: "main_content", title: "主要内容", markdown: summaryMarkdown(main) || "本节内容尚未生成，请进入制作模式补齐后再发布", sourceAnchorIds: anchorIds, atomIds }, { id: `${page.id}:section:misconceptions`, kind: "misconceptions", title: "易错点", items: items("misconception", find("misconception")), sourceAnchorIds: anchorIds, atomIds }];
 }
 

@@ -39,6 +39,38 @@ async function seededApp(modelRouter?: ModelRouterClient, seededRelease = testRe
   return { app: createApp(dependencies), dependencies, operations: dependencies.operations, readweave, release };
 }
 
+async function seededReplicaDraftApp() {
+  const formalRelease = { ...testRelease(), lifecycle: "published" as const };
+  const { app, dependencies, readweave, release } = await seededApp(undefined, formalRelease);
+  const page = structuredClone(release.pages[0]!);
+  const initialDraft: LessonDraft = {
+    id: "draft:page-1", workspaceId: "personal", courseId: release.courseId, moduleId: release.moduleId,
+    sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready", page,
+    changedBlockIds: page.blocks.map((block) => block.id), contentHash: "replica-draft-revision-1", updatedAt: new Date().toISOString()
+  };
+  const firstDraft = await readweave.saveDraft(initialDraft, 0, {
+    idempotencyKey: "replica-draft-revision-1", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "replica-draft-revision-1"
+  });
+  const draft = await readweave.saveDraft({
+    ...firstDraft, page: { ...firstDraft.page, title: "副本中的已保存版本 2" }, contentHash: "replica-draft-revision-2", updatedAt: new Date().toISOString()
+  }, firstDraft.revision, {
+    idempotencyKey: "replica-draft-revision-2", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "replica-draft-revision-2"
+  });
+  const course: CourseProject = {
+    id: release.courseId, workspaceId: "personal", title: release.courseTitle, status: "active",
+    createdAt: release.publishedAt, updatedAt: release.publishedAt
+  };
+  const reading = new ReadingRuntime(join(dependencies.dataDir, "reading"), readweave, "personal",
+    "authority:app-spec-draft-patch", () => buildReadingTree([course], [], [], "personal"));
+  await reading.initialize();
+  await reading.replica.replace({
+    courses: [course], releases: [release], drafts: [draft],
+    tree: buildReadingTree([course], [], [], "personal"), trash: []
+  });
+  dependencies.reading = reading;
+  return { app, dependencies, readweave, release, reading, draft };
+}
+
 describe("Course OS API", () => {
   it("restores import tasks from the server without leaking another workspace or a private path", async () => {
     const { app, operations } = await seededApp();
@@ -1911,34 +1943,37 @@ describe("Course OS API", () => {
     expect(costs.body.entries[0]).toMatchObject({ status: "succeeded", actualMicrousd: 3_000 });
   }, 60_000);
 
-  it("saves partial generations with an empty full explanation as needs_review", async () => {
-    const candidate = testRelease();
-    candidate.lifecycle = "draft_source";
-    candidate.pages[0]!.atoms = [{ kind: "text_region", id: "source-atom", label: "来源片段", observation: "输入经过规则得到输出" }];
-    candidate.pages[0]!.coverageRequirements = [{ id: "source-requirement", atomId: "source-atom", requiredFields: ["observation"], risk: "high" }];
+  it("rejects a missing full explanation without substituting summary or reporting completion", async () => {
     const partialResult = testTeachingResult(0.001);
     partialResult.content.fullExplanationMarkdown = "";
-    partialResult.content.questions = [];
-    partialResult.content.coverageEvidence = [{ atomId: "unknown-atom", coveredFields: ["observation"], explanation: "无法对应来源的说明" }];
-    const modelRouter: ModelRouterClient = {
-      generateTeachingPackage: async () => partialResult
-    };
-    const { app, readweave, release } = await seededApp(modelRouter, candidate);
-    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "app-nonblocking-content-quality")
+    const { app, readweave, operations, release } = await seededApp({ generateTeachingPackage: async () => partialResult });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "missing-body-final-contract")
       .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"] });
+    expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
+    const events = (await operations.read()).events.filter(event => event.streamId === created.body.id);
+    expect(events.some(event => event.type === "generation.page.core_saved")).toBe(false);
+    expect(events.some(event => event.type === "generation.page.completed")).toBe(false);
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toHaveLength(1);
+    expect(costs.body.entries[0].actualMicrousd).toBe(1000);
+  }, 60_000);
 
-    expect(await waitForJob(app, created.body.id)).toMatchObject({
-      state: "completed", completedPageIds: ["page-1"], failedPageIds: []
-    });
+  it("preserves a paid usable body with missing summary but marks the page incomplete", async () => {
+    const partialResult = testTeachingResult(0.001);
+    partialResult.content.mainContentMarkdown = "";
+    const { app, readweave, operations, release } = await seededApp({ generateTeachingPackage: async () => partialResult });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "missing-summary-final-contract")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "failed", completedPageIds: [], failedPageIds: ["page-1"], spentUsd: 0.001 });
     const draft = await readweave.getDraftByPage("page-1");
-    expect(draft?.status).toBe("needs_review");
-    expect(draft?.page.lessonSections?.find(section => section.kind === "main_content")?.markdown)
-      .toBe(partialResult.content.mainContentMarkdown);
-    expect(draft?.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown).toBe("");
-    expect(draft?.page.quality.publishable).toBe(false);
-    expect(draft?.page.quality.issues.length).toBeGreaterThan(0);
-    expect(draft?.page.quality.issues.some((issue) => issue.includes(":MISSING:"))).toBe(false);
-    expect((await request(app).get("/api/v1/pages/page-1/lesson").expect(200)).body.page.id).toBe("page-1");
+    expect(draft?.status).toBe("ready");
+    expect(draft?.page.lessonSections?.find(section => section.kind === "full_explanation")?.markdown)
+      .toBe(partialResult.content.fullExplanationMarkdown);
+    expect(draft?.page.lessonSections?.find(section => section.kind === "main_content")?.markdown).toBe("");
+    expect((await operations.read()).events.some(event => event.streamId === created.body.id && event.type === "generation.page.completed")).toBe(false);
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toHaveLength(1);
   }, 60_000);
 
   it("does not make a complete Slim teaching page fail solely for legacy coverage fields", async () => {
@@ -2678,6 +2713,65 @@ describe("Course OS API", () => {
     expect(rejected.body.error).toMatchObject({ code: "DRAFT_RELEASE_CONFLICT", retryable: false });
     expect(await readweave.getDraftByPage("page-1")).toEqual(before);
     expect(before).toMatchObject({ sourceReleaseId: release.id, revision: 1 });
+  });
+
+  it("patches a confirmed replica draft when remote release and draft preflight reads are unavailable", async () => {
+    const { app, readweave, release, draft } = await seededReplicaDraftApp();
+    const releaseRead = vi.spyOn(readweave, "getRelease").mockRejectedValue(new Error("READ_DEADLINE_EXCEEDED:release-index"));
+    const draftRead = vi.spyOn(readweave, "getDraftByPage").mockRejectedValue(new Error("READ_DEADLINE_EXCEEDED:draft-read"));
+    const save = vi.spyOn(readweave, "saveDraft");
+    const page = { ...draft.page, title: "副本离线时恢复的人工修订" };
+
+    const patched = await request(app).patch("/api/v1/pages/page-1/draft")
+      .set("X-Workspace-Id", "personal").set("Idempotency-Key", "replica-preflight-save")
+      .send({ baseRevision: draft.revision, releaseId: release.id, page, keepReady: true }).expect(200);
+
+    expect(patched.body).toMatchObject({ revision: draft.revision + 1, status: "ready", page: { title: page.title } });
+    expect(releaseRead).not.toHaveBeenCalled();
+    expect(draftRead).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]?.[1]).toBe(draft.revision);
+
+    releaseRead.mockRestore();
+    draftRead.mockRestore();
+    save.mockRestore();
+    expect(await readweave.getDraftByPage("page-1")).toMatchObject({ revision: draft.revision + 1, page: { title: page.title } });
+  });
+
+  it("keeps authoritative draft CAS conflicts when the replica preflight is stale", async () => {
+    const { app, readweave, release, draft } = await seededReplicaDraftApp();
+    const authoritativePage = { ...draft.page, title: "权威端已先保存的版本" };
+    await readweave.saveDraft({ ...draft, page: authoritativePage, contentHash: "authoritative-revision-3" }, draft.revision, {
+      idempotencyKey: "authority-advances-after-replica", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "authority-advances-after-replica"
+    });
+    const releaseRead = vi.spyOn(readweave, "getRelease").mockRejectedValue(new Error("READ_DEADLINE_EXCEEDED:release-index"));
+    const draftRead = vi.spyOn(readweave, "getDraftByPage").mockRejectedValue(new Error("READ_DEADLINE_EXCEEDED:draft-read"));
+    const save = vi.spyOn(readweave, "saveDraft");
+
+    const rejected = await request(app).patch("/api/v1/pages/page-1/draft")
+      .set("X-Workspace-Id", "personal").set("Idempotency-Key", "replica-preflight-stale-cas")
+      .send({ baseRevision: draft.revision, releaseId: release.id, page: { ...draft.page, title: "陈旧副本的覆盖尝试" } }).expect(409);
+
+    expect(rejected.body.error.details.conflictId).toContain("conflict:page-1:");
+    expect(releaseRead).not.toHaveBeenCalled();
+    expect(draftRead).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledOnce();
+    releaseRead.mockRestore();
+    draftRead.mockRestore();
+    save.mockRestore();
+    expect(await readweave.getDraftByPage("page-1")).toMatchObject({ revision: draft.revision + 1, page: { title: authoritativePage.title } });
+  });
+
+  it("does not write a confirmed draft through a different workspace", async () => {
+    const { app, readweave, release, draft } = await seededReplicaDraftApp();
+    const save = vi.spyOn(readweave, "saveDraft");
+
+    await request(app).patch("/api/v1/pages/page-1/draft")
+      .set("X-Workspace-Id", "another-workspace").set("Idempotency-Key", "replica-preflight-wrong-workspace")
+      .send({ baseRevision: draft.revision, releaseId: release.id, page: { ...draft.page, title: "跨工作区修改" } }).expect(404);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(await readweave.getDraftByPage("page-1")).toMatchObject({ revision: draft.revision, page: { title: draft.page.title } });
   });
 });
 

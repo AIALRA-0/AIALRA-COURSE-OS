@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generationHarnessFileSha256 } from "./generation-harness.js";
+import { meterModelRouter } from "./model-usage-meter.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, parseWrappedProviderJson, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingPackageSchema, withCurrentDeepSeekModels } from "./model-router.js";
+
+const explicitProviderBadRequest = [
+  "[req_synthetic123] [deepseek-v4.1-flash]",
+  "**Bad request from AI provider**",
+  "- Your request was rejected",
+  "- invalid parameters or unsupported content",
+  "",
+  "**Billing:**",
+  "- This request still counts as a request and is billed based on its input (minimum 1,000 prompt / 1,000 completion / 1,000 cached tokens)."
+].join("\n");
 
 describe("generation harness", () => {
   it("extracts the largest complete JSON object from provider wrapper text", () => {
@@ -187,6 +198,12 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(instructions).toContain("不猜填模糊单元格");
       expect(instructions).toContain("当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。");
       expect(instructions).toContain("若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。");
+      expect(instructions).toContain("交叉只影响实际无法跟踪的那一条或几条，其他端点明确可追踪的连接仍须逐条保留");
+      expect(instructions).toContain("只有某一端点或连线本身不能唯一追踪时，才仅对该局部标注不确定");
+      expect(instructions).toContain("门的轮廓、输入输出端点数量与位置、输出端反相圈及其连接关系");
+      expect(instructions).toContain("例如 AND 形状加输出反相圈表示 NAND");
+      expect(instructions).toContain("背景中的通用逻辑规则须明确标为背景说明");
+      expect(instructions).not.toContain("只保留可见标签与整体结构，不分配具体边权");
       const textPart = (body.messages[1]?.content as Array<{ type: string; text?: string }>).find(part => part.type === "text");
       const sent = JSON.parse(textPart!.text!);
       expect(sent.extractedText).toBe("完整来源".repeat(5000));
@@ -205,14 +222,15 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
   it("generates a bridge from the previous explanation and current summary", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { input: string; instructions: string; text?: { format?: { name?: string } } };
+      const body = JSON.parse(String(init?.body)) as { input: string; instructions: string; max_output_tokens: number; text?: { format?: { name?: string } } };
       expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("bridge-page:bridge");
       expect(body.input).toContain("前页解释了输入");
       expect(body.input).toContain("本页讨论处理规则");
       expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
+      expect(body.max_output_tokens).toBe(700);
       expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",
-        output_text: "前页认识了输入，本页接着看处理规则。",
+        output_text: "前页讨论过“Bad request from AI provider”这句示例提示，本页接着看处理规则。",
         usage: { input_tokens: 100, output_tokens: 50, total_cost: 0.001 } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -220,9 +238,30 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
     const result = await client.generateBridge({ ...providerInput("bridge-page"), previousPageContext: "前页解释了输入",
       currentSummary: "本页讨论处理规则" });
-    expect(result).toMatchObject({ markdown: "前页认识了输入，本页接着看处理规则。", provider: "deepseek",
+    expect(result).toMatchObject({ markdown: "前页讨论过“Bad request from AI provider”这句示例提示，本页接着看处理规则。", provider: "deepseek",
       usage: { apiEquivalentUsd: 0.001 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["bridge", "teaching"] as const)("rejects the HTTP-200 provider refusal before %s content is delivered and meters its usage", async kind => {
+    const providerResponse = Response.json({ model: "deepseek-v4.1-flash", output_text: explicitProviderBadRequest,
+      usage: { input_tokens: 140, output_tokens: 0, total_cost: 0.001 } });
+    expect(providerResponse.status).toBe(200);
+    const fetchMock = vi.fn(async () => providerResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    const upstream = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://kuafu.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+    const metered = meterModelRouter(upstream);
+    const input = providerInput(`provider-refusal-${kind}`);
+    const generation = kind === "bridge"
+      ? metered.client.generateBridge!({ ...input, previousPageContext: "前页已确认讲解", currentSummary: "本页教学摘要" })
+      : metered.client.generateTeachingPackage(input);
+
+    await expect(generation).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED:invalid_request_error",
+      provider: "kuafu", model: "deepseek-v4.1-flash", usage: { inputTokens: 140, outputTokens: 0, apiEquivalentUsd: 0.001 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(metered.groupedUsage()).toMatchObject([{ provider: "kuafu", model: "deepseek-v4.1-flash",
+      usage: { inputTokens: 140, outputTokens: 0, apiEquivalentUsd: 0.001 } }]);
   });
 
   it("starts from the current page question when previousTeaching marks a module start", async () => {

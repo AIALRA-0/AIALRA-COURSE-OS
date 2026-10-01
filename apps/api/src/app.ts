@@ -147,8 +147,7 @@ async function waitForPreviousCoreContext(input: {
   }
   // Core has already been saved and is readable. Only the later bridge waits
   // for its predecessor's saved body, never for that predecessor's bridge.
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
+  while (true) {
     await assertGenerationFence(input.jobId, input.fenceToken, input.dependencies);
     const readyDraft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
     if (readyDraft?.status === "ready" && readyDraft.workspaceId === input.workspaceId
@@ -158,28 +157,21 @@ async function waitForPreviousCoreContext(input: {
     }
     const snapshot = await input.dependencies.operations.readTaskIndex();
     const predecessorJobs = snapshot.jobs.filter(job => job.planId === input.planId && job.pageIds.includes(previousPage.id));
-    if (predecessorJobs.length === 0) {
-      const draft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
-      const previous = draft?.status === "ready" && draft.workspaceId === input.workspaceId
-        && draft.sourceReleaseId === input.release.id ? draft.page : previousPage;
-      const context = previousLessonContext(previous);
-      return { context, fingerprint: draft?.contentHash || (context ? `source:${sha256Text(context)}` : "unavailable:not_scheduled") };
-    }
+    if (predecessorJobs.length === 0) throw new Error("PREVIOUS_CORE_UNAVAILABLE");
+    if (predecessorJobs.some(job => job.state === "running" && job.lease
+      && Date.parse(job.lease.expiresAt) <= Date.now())) throw new Error("PREVIOUS_CORE_LEASE_EXPIRED");
     if (predecessorJobs.some(job => job.state === "completed")) {
       const draft = await input.dependencies.readweave.getDraftByPage(previousPage.id);
       if (draft?.status === "ready" && draft.workspaceId === input.workspaceId && draft.sourceReleaseId === input.release.id) {
         const context = previousLessonContext(draft.page);
         return { context, fingerprint: draft.contentHash || (context ? sha256Text(context) : undefined) };
       }
+      throw new Error("PREVIOUS_CORE_UNAVAILABLE");
     }
     const terminal = predecessorJobs.find(job => ["failed", "cancelled"].includes(job.state));
-    if (terminal) {
-      const context = previousLessonContext(previousPage);
-      return { context, fingerprint: context ? `source:${sha256Text(context)}` : `unavailable:${terminal.state}` };
-    }
-    await new Promise(resolve => setTimeout(resolve, 250));
+    if (terminal) throw new Error("PREVIOUS_CORE_UNAVAILABLE");
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  throw new Error("PREVIOUS_CORE_NOT_READY");
 }
 
 const activeImports = new WeakMap<OperationalStore, Set<string>>();
@@ -950,14 +942,18 @@ export function createApp(dependencies: AppDependencies): Express {
       const pageId = request.params.id;
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const requestedReleaseId = typeof request.body.releaseId === "string" ? request.body.releaseId : undefined;
-      const requestedRelease = requestedReleaseId ? await getWorkspaceRelease(dependencies.readweave, requestedReleaseId, workspaceId) : undefined;
-      const source = findPageSource(requestedReleaseId ? (requestedRelease ? [requestedRelease] : []) : await listWorkspaceReleases(dependencies.readweave, workspaceId), pageId);
+      if (dependencies.reading) assertReadingAvailable(dependencies);
+      const confirmedSource = await dependencies.reading?.replica.getPageSource(workspaceId, pageId, requestedReleaseId);
+      const requestedRelease = !confirmedSource && requestedReleaseId ? await getWorkspaceRelease(dependencies.readweave, requestedReleaseId, workspaceId) : undefined;
+      const source = confirmedSource ?? findPageSource(requestedReleaseId ? (requestedRelease ? [requestedRelease] : []) : await listWorkspaceReleases(dependencies.readweave, workspaceId), pageId);
       if (!source) return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
       const expectedRevision = Number(request.body.baseRevision);
       if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return sendError(request, response, 422, "BASE_REVISION_INVALID", "保存草稿时必须提供有效的 baseRevision", false);
       const page = request.body.page;
       if (!page || page.id !== pageId || !Array.isArray(page.blocks)) return sendError(request, response, 422, "DRAFT_PAGE_INVALID", "草稿页面结构无效", false);
-      const currentCandidate = await dependencies.readweave.getDraftByPage(pageId);
+      // A confirmed page already supplies the edit base. The authority save below
+      // still checks its revision; loading a whole remote index adds no CAS safety.
+      const currentCandidate = confirmedSource ? confirmedSource.draft : await dependencies.readweave.getDraftByPage(pageId);
       const current = currentCandidate && currentCandidate.workspaceId === (request.header("X-Workspace-Id") || "personal") && currentCandidate.courseId === source.release.courseId ? currentCandidate : undefined;
       if (current && requestedReleaseId && current.sourceReleaseId !== requestedReleaseId) return sendError(request, response, 409, "DRAFT_RELEASE_CONFLICT", "草稿已属于另一版本，请重新读取后保存", false);
       const keepReady = request.body.keepReady === true;
@@ -2008,16 +2004,39 @@ export function createApp(dependencies: AppDependencies): Express {
         : release ? await learningPageForQuestions(dependencies.readweave, release, pageId, workspaceId) : undefined;
       if (release && release.pageIds.includes(pageId) && !page) return sendError(request, response, 409, dependencies.reading ? "PAGE_NOT_READY" : "CANDIDATE_PAGE_NOT_READY", "这页讲解尚未生成完成，暂时不能作答", Boolean(dependencies.reading));
       const selectionId = String(request.body.selectionId || "");
-      const selection = persistedQuestionSelectionsById.get(selectionId);
-      if (selection && (selection.sessionId !== request.body.sessionId || selection.courseReleaseId !== release?.id || selection.pageId !== pageId)) {
+      const sessionId = String(request.body.sessionId || "");
+      const candidateSession = cachedLearningSession(workspaceId, sessionId) ?? await dependencies.operations.findLearningSession(sessionId);
+      const session = candidateSession && (candidateSession.workspaceId ?? workspaceId) === workspaceId ? candidateSession : undefined;
+      if (!session) return sendError(request, response, 404, "SESSION_NOT_FOUND", "没有找到这个学习会话", false);
+      if (session.courseReleaseId !== release?.id) return sendError(request, response, 409, "QUESTION_SELECTION_CONFLICT", "这道题不属于当前学习会话对应的课程版本", false);
+      let selection = persistedQuestionSelectionsById.get(selectionId);
+      if (!selection && dependencies.readweave.getQuestionSelection) {
+        selection = await dependencies.readweave.getQuestionSelection(selectionId);
+      }
+      if (!selection || selection.id !== selectionId) {
+        return sendError(request, response, 409, "QUESTION_SELECTION_NOT_FOUND", "选题批次已失效，请恢复选题后重新提交", false);
+      }
+      if (selection.sessionId !== session.id || selection.courseReleaseId !== release?.id || selection.pageId !== pageId) {
         return sendError(request, response, 409, "QUESTION_SELECTION_CONFLICT", "这道题不属于当前学习会话或页面的选题批次", false);
       }
-      if (selection && !selection.questionIds.includes(String(request.body.questionId || ""))) {
+      persistedQuestionSelectionsById.set(selection.id, selection);
+      if (persistedQuestionSelectionsById.size > 512) persistedQuestionSelectionsById.delete(persistedQuestionSelectionsById.keys().next().value!);
+      const questionId = String(request.body.questionId || "");
+      if (!selection.questionIds.includes(questionId)) {
         return sendError(request, response, 409, "QUESTION_NOT_IN_SELECTION", "这道题不属于当前选题批次", false);
       }
-      const item = selection?.questionSnapshots?.find((candidate) => candidate.id === request.body.questionId && isPracticeReadyQuestion(candidate))
-        ?? page?.questionBank?.find((candidate) => candidate.id === request.body.questionId);
+      const hasSnapshots = Boolean(selection.questionSnapshots?.length);
+      const item = hasSnapshots
+        ? selection.questionSnapshots?.find((candidate) => candidate.id === questionId && isPracticeReadyQuestion(candidate))
+        : page?.questionBank?.find((candidate) => candidate.id === questionId && isPracticeReadyQuestion(candidate));
       if (!release || !page || !item || !isPracticeReadyQuestion(item)) return sendError(request, response, 404, "QUESTION_NOT_FOUND", "没有找到这道随机问题", false);
+      const requestedVersion = request.body.questionVersion;
+      if (hasSnapshots && requestedVersion !== undefined && requestedVersion !== item.version) {
+        return sendError(request, response, 409, "QUESTION_VERSION_CONFLICT", "题目版本与选题快照不一致，请恢复选题后重新提交", false);
+      }
+      if (!hasSnapshots && (!Number.isInteger(requestedVersion) || requestedVersion !== item.version)) {
+        return sendError(request, response, 409, requestedVersion === undefined ? "QUESTION_VERSION_REQUIRED" : "QUESTION_VERSION_CONFLICT", "旧选题没有保存题目快照，请按当前题目版本恢复选题后重新提交", false);
+      }
       const answer = String(request.body.answer || "").trim();
       const correct = evaluateQuestionAnswer(item, answer);
       const releaseLookupMs = performance.now() - startedAt;
@@ -3135,7 +3154,7 @@ async function assertWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: st
   return node;
 }
 
-function createVirtualDraft(release: CourseRelease, page: CourseRelease["pages"][number], workspaceId = "personal"): LessonDraft {
+function createVirtualDraft(release: Pick<CourseRelease, "id" | "courseId" | "moduleId" | "publishedAt">, page: CourseRelease["pages"][number], workspaceId = "personal"): LessonDraft {
   return {
     id: `draft:${page.id}`,
     workspaceId,
@@ -3552,8 +3571,14 @@ export function executeGenerationJob(jobId: string, dependencies: AppDependencie
   if (existing) return existing;
   const execution = (async () => {
     const releaseSlot = await acquireGenerationJobSlot();
-    try { await executeGenerationJobWithinSlot(jobId, dependencies); }
-    finally { releaseSlot(); }
+    let slotReleased = false;
+    const releaseCoreSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      releaseSlot();
+    };
+    try { await executeGenerationJobWithinSlot(jobId, dependencies, releaseCoreSlot); }
+    finally { releaseCoreSlot(); }
   })();
   inProcessGenerationJobs.set(jobId, execution);
   void execution.finally(() => {
@@ -3562,7 +3587,7 @@ export function executeGenerationJob(jobId: string, dependencies: AppDependencie
   return execution;
 }
 
-async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDependencies): Promise<void> {
+async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDependencies, releaseCoreSlot: () => void): Promise<void> {
   const leaseOwner = `course-os-worker:${process.pid}`;
   const claimed = await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
     if (job.state !== "queued" || job.cancelRequested) return undefined;
@@ -3581,7 +3606,7 @@ async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDe
   }, 5 * 60_000);
   leaseHeartbeat.unref();
   try {
-    await runLocalJob(jobId, dependencies, fenceToken);
+    await runLocalJob(jobId, dependencies, fenceToken, releaseCoreSlot);
   } catch (error) {
     const issue = safeGenerationIssue(error);
     if (issue !== "LEASE_LOST") await failGenerationJob(jobId, issue, dependencies, fenceToken);
@@ -3591,7 +3616,7 @@ async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDe
   }
 }
 
-async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceToken: number): Promise<void> {
+async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceToken: number, releaseCoreSlot: () => void): Promise<void> {
   const leaseOwner = `course-os-worker:${process.pid}`;
   const initial = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
   if (!initial || initial.state !== "running" || initial.lease?.fenceToken !== fenceToken) return;
@@ -3639,7 +3664,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     try {
-      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter)) continue;
+      if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter, initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined)) continue;
       if (currentJob.spentUsd >= currentJob.budgetUsd) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
@@ -3709,6 +3734,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       if (generation.teachingTrace && sourceDescription) generation.teachingTrace.sourceDescription = sourceDescription;
       const reviewStartedAt = Date.now();
       generation.content = normalizeTeachingPackageMath(generation.content, sourceText, page.title);
+      if (!generation.content.fullExplanationMarkdown?.trim()) {
+        throw new Error("GENERATION_CORE_FULL_EXPLANATION_REQUIRED");
+      }
       await appendGenerationStageEvent(jobId, page.id, "teach", "completed", dependencies, {
         provider: generation.provider, model: generation.model, inputTokens: generation.usage.inputTokens,
         outputTokens: generation.usage.outputTokens, schemaRetries: generation.schemaRetries ?? 0,
@@ -3808,20 +3836,31 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           bridgeCompleted: false, timings: { ...timings } });
       });
       persistenceStage = undefined;
+      // A one-page body is durable and readable. Its bridge may await another
+      // core; that wait must not reserve a core-generation worker slot.
+      if (initial.pageIds.length === 1) releaseCoreSlot();
+      // Keep a usable paid body, but never report the seven-part page complete
+      // when its required summary was not delivered.
+      if (!generation.content.mainContentMarkdown?.trim()) {
+        await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, cost, context));
+        throw new Error("GENERATION_CORE_MAIN_CONTENT_REQUIRED");
+      }
       let bridgeCompleted = false;
       const bridgeStartedAt = Date.now();
       if (pageModelRouter.generateBridge) {
         try {
+          await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies,
+            { phase: "bridge", activity: "await_previous_core" }, fenceToken);
           const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: currentJob.workspaceId,
             planId: currentJob.planId, release, pageNumber: page.pageNumber, dependencies });
           previousPageContext = previous.context;
-          await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies, { phase: "bridge" }, fenceToken);
           const bridge = await pageModelRouter.generateBridge({ pageTitle: page.title, pageNumber: page.pageNumber,
             sourceText, previousPageContext, currentSummary: generation.content.mainContentMarkdown,
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
             language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
             idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge:v1`,
             maxCostUsd: Math.max(0.001, pageCostLimitUsd - (generationUsageCostUsd(generation) ?? 0)), stage: "teach" });
+          await assertGenerationFence(jobId, fenceToken, dependencies);
           const bridged = applyTeachingPackage(page, { ...generation.content, chapterBridgeMarkdown: bridge.markdown },
             true, teachingPlan ? "multimodal" : "text_only", generation.teachingTrace);
           bridged.quality = generatedPage.quality;
@@ -3842,6 +3881,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
           }
           await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
+            if (!isGenerationLeaseCurrent(_job, leaseOwner, fenceToken)) throw new Error("LEASE_LOST");
             context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
               contentHash: saved.contentHash, provider: generation.provider, model: generation.model,
               readableAt, readableMs, pageElapsedMs: Date.now() - pageStartedAt,
@@ -3955,7 +3995,8 @@ async function settleCoreSavedPage(
   dependencies: AppDependencies,
   timings: Record<string, number>,
   pageStartedAt: number,
-  router: ModelRouterClient
+  router: ModelRouterClient,
+  releaseCoreSlot: () => void
 ): Promise<boolean> {
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
@@ -3976,6 +4017,8 @@ async function settleCoreSavedPage(
   };
   const draft = await dependencies.readweave.getDraftByPage(pageId);
   if (!draft || draft.status !== "ready" || draft.sourceReleaseId !== release.id) return false;
+  if (!draft.page.lessonSections?.some(section => section.kind === "full_explanation" && section.markdown?.trim())
+    || !draft.page.lessonSections?.some(section => section.kind === "main_content" && section.markdown?.trim())) return false;
   const eventMatchesDraft = Boolean(event && draft.revision === saved?.draftRevision && draft.contentHash === saved.contentHash);
   const metadataMatchesJob = draft.generationJobId === jobId;
   if (!eventMatchesDraft && !metadataMatchesJob) return false;
@@ -3991,6 +4034,7 @@ async function settleCoreSavedPage(
   }
 
   let confirmedDraft = draft;
+  releaseCoreSlot();
   if (!draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())
     && router.generateBridge) {
     const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId)!;

@@ -150,7 +150,7 @@ function explanationText(value: unknown, depth = 0): string {
 const mainContentAliases = ["mainContentMarkdown", "mainContentSummaryMarkdown", "mainContent", "keyPoints",
   "keyContent", "keyTakeawaysMarkdown", "keyTakeaways", "mainSummaryMarkdown", "mainContentSummary",
   "mainPoints", "keyPointsMarkdown", "summary"] as const;
-const fullExplanationAliases = ["fullExplanationMarkdown", "teacherNarration", "fullExplanation",
+const fullExplanationAliases = ["fullExplanationMarkdown", "teacherNarration", "fullExplanation", "detailedExplanation",
   "completeExplanationMarkdown", "lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown",
   "teachingContentMarkdown", "explanationMarkdown", "explanation"] as const;
 
@@ -732,11 +732,10 @@ export async function writePlannedLesson(
     trace.formatCheckMs += Math.round(performance.now() - salvageCheckStarted);
   }
 
-  const hasSalvageBody = accepted && [accepted.mainContentMarkdown, accepted.fullExplanationMarkdown]
-    .some(value => typeof value === "string" && !!value.trim());
-  const onlyMissingBodyIssues = finalShapeIssues.every(issue =>
-    issue === "result.mainContentMarkdown:empty" || issue === "result.fullExplanationMarkdown:empty");
-  if (!accepted || finalShapeIssues.length && !(hasSalvageBody && onlyMissingBodyIssues)) {
+  const hasRequiredExplanation = accepted && typeof accepted.fullExplanationMarkdown === "string"
+    && !!accepted.fullExplanationMarkdown.trim();
+  const onlyMissingSummary = finalShapeIssues.every(issue => issue === "result.mainContentMarkdown:empty");
+  if (!accepted || !hasRequiredExplanation || finalShapeIssues.length && !onlyMissingSummary) {
     throw new Error("TEACHING_PACKAGE_INVALID:" + finalShapeIssues.join(","));
   }
   recordFormatWarnings(trace, [...finalFormatIssues, ...partialShapeWarnings]);

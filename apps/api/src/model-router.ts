@@ -274,7 +274,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       emptyUsage(Date.now()), this.connection.providerId);
     const response = await this.requestPlannedStage(input, {
       phase: "page_understanding",
-      instructions: "你是课件阅读助手。看原图，并把本页可见的教学内容准确转写给只读文字的讲解模型。保留标题、正文、完整公式、条件、表格的行列与单位、代码及可见注释、图例、箭头和对象关系；按对象的自然结构组织，不按排版换行创建知识义务。表格或矩阵用带行名和列名的 Markdown 表格转写，逐格对准列名，保留每个零的位置，不省略或移动单元格；不遗漏清楚可读的数据，不猜填模糊单元格；空表头保持空白，不把教学中另取的记号写成原图标签。若提供原图代码位置参考，用实测横向位置核对缩进层级，OCR错读的字仍按原图辨认，不能按后续语句在上一句之后就假设它仍嵌套其中。代码用围栏块保留原图的逐行缩进、对齐和注释；它们决定循环与条件的作用域，不移动语句、不按算法常识改写结构；保留原缩进，不额外猜测辅助函数的内部逻辑。图中连接、标签归属或文字不能确认时，就近标明不确定，不从专业常识补成原图事实。当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。连接线交叉、数字紧邻多条边或端点无法唯一追踪时，只保留可见标签与整体结构，不分配具体边权；未识别到的连接不等于不存在，不据此宣称图与表矛盾或完全一致。辅助提取文字供定位，原图优先；邻页背景不是当前图中的内容。省略页码、页眉、页脚、版权和装饰；不要把它们放进页面内容或教学顺序。最后给最多六行的简短教学顺序，只安排讲解，不代替来源。输出两个自然语言部分，以“页面内容：”和“教学顺序：”开头，不输出 JSON、编号证据或覆盖账本。",
+      instructions: "你是课件阅读助手。看原图，并把本页可见的教学内容准确转写给只读文字的讲解模型。保留标题、正文、完整公式、条件、表格的行列与单位、代码及可见注释、图例、箭头和对象关系；按对象的自然结构组织，不按排版换行创建知识义务。表格或矩阵用带行名和列名的 Markdown 表格转写，逐格对准列名，保留每个零的位置，不省略或移动单元格；不遗漏清楚可读的数据，不猜填模糊单元格；空表头保持空白，不把教学中另取的记号写成原图标签。若提供原图代码位置参考，用实测横向位置核对缩进层级，OCR错读的字仍按原图辨认，不能按后续语句在上一句之后就假设它仍嵌套其中。代码用围栏块保留原图的逐行缩进、对齐和注释；它们决定循环与条件的作用域，不移动语句、不按算法常识改写结构；保留原缩进，不额外猜测辅助函数的内部逻辑。图中连接、标签归属或文字不能确认时，就近标明不确定，不从专业常识补成原图事实。当同一对象同时出现在示意图、表格或图例中时，在同一张原图内交叉核对其可见位置、分组和标签归属。若这些观察冲突，重新核读原图；仍不能消解时只保留已确认的文字与数值并就近标注局部不确定，不依据未确认的分组关系宣称来源自相矛盾。逐条检查连接；交叉只影响实际无法跟踪的那一条或几条，其他端点明确可追踪的连接仍须逐条保留；只有某一端点或连线本身不能唯一追踪时，才仅对该局部标注不确定，不猜测该处边权；未识别到某条连接不等于它不存在，也不据此宣称图与表矛盾或完全一致。逻辑门须保留门的轮廓、输入输出端点数量与位置、输出端反相圈及其连接关系，这些形状共同决定门类型；例如 AND 形状加输出反相圈表示 NAND，不能只抄标签或按常见符号替换形状。背景中的通用逻辑规则须明确标为背景说明，与本页实际可见的门形和逐条连接分开；不得用通用规则填补不清楚的图形事实。辅助提取文字供定位，原图优先；邻页背景不是当前图中的内容。省略页码、页眉、页脚、版权和装饰；不要把它们放进页面内容或教学顺序。最后给最多六行的简短教学顺序，只安排讲解，不代替来源。输出两个自然语言部分，以“页面内容：”和“教学顺序：”开头，不输出 JSON、编号证据或覆盖账本。",
       prompt: JSON.stringify({ pageTitle: input.pageTitle, pageNumber: input.pageNumber,
         extractedText: input.sourceText, courseContext: input.courseContext }),
       image: input.sourceImageDataUrl,
@@ -538,7 +538,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       addAttemptUsage(attemptUsage);
       const model = received.model || this.connection.model;
       const bodyError = providerBodyError(received);
-      const providerFailed = !response.ok || providerBodyFailed(received);
+      const providerFailed = !response.ok || Boolean(bodyError);
       if (providerFailed) {
         const code = providerFailureCode(response.status, bodyError);
         const retryable = retryableProviderResponse(response.status, bodyError);
@@ -902,14 +902,26 @@ async function readResponsesEventStream(stream: ReadableStream<Uint8Array>, onAc
 }
 
 function providerBodyFailed(body: ProviderResponseBody): boolean {
-  return body.status === "failed" || body.status === "incomplete";
+  return Boolean(providerBodyError(body));
 }
 
 function providerBodyError(body: ProviderResponseBody): ProviderResponseBody["error"] {
   if (body.error) return body.error;
   if (body.status === "incomplete") return { code: body.incomplete_details?.reason || "response_incomplete" };
   if (body.status === "failed") return { code: "response_failed" };
+  if (isExplicitBadRequestEnvelope(extractProviderOutput(body))) return { code: "invalid_request_error" };
   return undefined;
+}
+
+/** Recognize the relay's explicit HTTP-200 error rendering, not arbitrary prose. */
+function isExplicitBadRequestEnvelope(output: unknown): boolean {
+  if (typeof output !== "string") return false;
+  return /^\s*\[req_[a-z0-9_-]+\]\s+\[[^\]\r\n]+\]/iu.test(output)
+    && /\*{0,2}Bad request from AI provider\*{0,2}/iu.test(output)
+    && /Your request was rejected/iu.test(output)
+    && /invalid parameters or unsupported content/iu.test(output)
+    && /\bBilling\b/iu.test(output)
+    && /\bminimum\s+1,000\s+prompt\s*\/\s*1,000\s+completion\s*\/\s*1,000\s+cached\s+tokens\b/iu.test(output);
 }
 
 function extractProviderOutput(body: ProviderResponseBody): unknown {

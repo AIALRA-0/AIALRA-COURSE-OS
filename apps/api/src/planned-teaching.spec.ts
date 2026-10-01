@@ -348,7 +348,7 @@ describe("planned teaching core writer", () => {
     expect(result.content.questions.filter(question => question.kind === "comprehension")).toHaveLength(2);
   });
 
-  it.each(["lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown", "teachingContentMarkdown"]) (
+  it.each(["lessonContentMarkdown", "lectureMarkdown", "lessonMarkdown", "teachingContentMarkdown", "detailedExplanation"]) (
     "uses %s as the provider's existing complete explanation", async field => {
     const calls: string[] = [];
     const { fullExplanationMarkdown, ...body } = teachingPackage();
@@ -361,6 +361,18 @@ describe("planned teaching core writer", () => {
     expect(result.content.fullExplanationMarkdown).toContain("## 从输入开始");
     }
   );
+
+  it("keeps canonical explanation ahead of an observed detailedExplanation alias", async () => {
+    const content = teachingPackage();
+    const phases: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      phases.push(request.phase);
+      return request.phase === "plan" ? "先讲输入" : { ...content, detailedExplanation: "别名不能覆盖已保存的完整正文" };
+    });
+    expect(phases).toEqual(["plan", "teaching"]);
+    expect(result.content.fullExplanationMarkdown).toContain("## 从输入开始");
+    expect(result.content.fullExplanationMarkdown).not.toContain("别名不能覆盖");
+  });
 
   it("uses keyPoints list as the provider's existing main content", async () => {
     const calls: string[] = [];
@@ -791,20 +803,33 @@ describe("planned teaching core writer", () => {
     expect(result.trace.repairDiagnostic?.providerError).toBe("QUESTION_REPAIR_UNAVAILABLE");
   });
 
-  it.each(["mainContentMarkdown", "fullExplanationMarkdown"] as const)(
-    "preserves partial body content and warns when %s remains missing", async field => {
-      const source = teachingPackage();
-      const answer = { ...source, [field]: undefined };
-      const result = await writePlannedLesson(input(), async request =>
-        request.phase === "plan" ? "先解释输入" : answer);
-      expect(result.content[field]).toBe("");
-      expect(result.content[field === "mainContentMarkdown" ? "fullExplanationMarkdown" : "mainContentMarkdown"])
-        .toBe(field === "mainContentMarkdown"
-          ? normalizePlannedSourceIntroductions({ fullExplanationMarkdown: source.fullExplanationMarkdown }).fullExplanationMarkdown
-          : source.mainContentMarkdown);
-      expect(result.trace.formatWarnings?.[0]?.issues).toContain(`result.${field}:empty`);
-    }
-  );
+  it("rejects summary-only salvage when the full explanation is missing", async () => {
+    const source = teachingPackage();
+    const answer = { ...source, fullExplanationMarkdown: undefined };
+    const phases: string[] = [];
+    await expect(writePlannedLesson(input(), async request => {
+      phases.push(request.phase);
+      return request.phase === "plan" ? "先解释输入" : answer;
+    })).rejects.toThrow("TEACHING_PACKAGE_INVALID:result.fullExplanationMarkdown:empty");
+    expect(phases).toEqual(["plan", "teaching", "format_repair"]);
+  });
+
+  it("retains full explanation with an empty summary as explicitly incomplete", async () => {
+    const source = teachingPackage();
+    const answer = { ...source, mainContentMarkdown: undefined };
+    const phases: string[] = [];
+    const result = await writePlannedLesson(input(), async request => {
+      phases.push(request.phase);
+      return request.phase === "plan" ? "先解释输入" : answer;
+    });
+
+    expect(phases).toEqual(["plan", "teaching", "format_repair"]);
+    expect(result.content.mainContentMarkdown).toBe("");
+    expect(result.content.fullExplanationMarkdown).toBe(
+      normalizePlannedSourceIntroductions({ fullExplanationMarkdown: source.fullExplanationMarkdown }).fullExplanationMarkdown
+    );
+    expect(result.trace.formatWarnings?.[0]?.issues).toContain("result.mainContentMarkdown:empty");
+  });
 
   it("fails when neither of the two body fields contains usable text", async () => {
     const answer = { ...teachingPackage(), mainContentMarkdown: undefined, fullExplanationMarkdown: undefined };

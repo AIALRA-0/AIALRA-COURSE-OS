@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseTreeNode } from "@course-os/contracts";
-import { buildCourseTreeSearchResults, CourseTree, moveSearchIndex, resolveCourseTreeSearchActivation, type CourseTreeSearchMaterial } from "./CourseTree.js";
+import { buildCourseTreeSearchResults, CourseTree, moveSearchIndex, resolveCourseTreeSearchActivation, resolveSearchInputKeyAction, type CourseTreeSearchMaterial } from "./CourseTree.js";
 
 describe("CourseTree background task entries", () => {
   it("places a persisted import under its course rather than in the unrelated task section", () => {
@@ -146,6 +146,21 @@ describe("CourseTree search navigation", () => {
     expect(resolveCourseTreeSearchActivation(currentMaterial))
       .toEqual({ kind: "material", node: currentMaterial, restoreReadingPosition: true });
     expect(resolveCourseTreeSearchActivation(treeNodes[0]!)).toEqual({ kind: "container" });
+  });
+
+  it("maps search arrows, Enter, Escape, and typing without navigating while typing", () => {
+    const results = buildCourseTreeSearchResults(treeNodes, "eigenvalues", searchMaterials);
+    const down = resolveSearchInputKeyAction("ArrowDown", 0, results.length + 1);
+    const up = resolveSearchInputKeyAction("ArrowUp", 0, results.length + 1);
+    const enter = resolveSearchInputKeyAction("Enter", 0, results.length);
+
+    expect(down).toEqual({ kind: "move", index: 1 });
+    expect(up).toEqual({ kind: "move", index: 1 });
+    expect(enter).toEqual({ kind: "activate", index: 0 });
+    expect(results[enter.kind === "activate" ? enter.index : -1]?.node).toMatchObject({ pageId: "page-current", releaseId: "release-current" });
+    expect(resolveSearchInputKeyAction("Escape", 0, results.length)).toEqual({ kind: "close" });
+    expect(resolveSearchInputKeyAction("e", 0, results.length)).toEqual({ kind: "none" });
+    expect(resolveSearchInputKeyAction("Enter", 0, 0)).toEqual({ kind: "none" });
   });
 
   it("shows version publication labels on materials only and keeps review status separate", () => {

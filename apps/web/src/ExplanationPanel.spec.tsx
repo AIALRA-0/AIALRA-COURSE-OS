@@ -57,6 +57,29 @@ describe("lesson generation readiness badge", () => {
     expect(markup).toContain("只保留的摘要");
   });
 
+  it("does not display a legacy summary as a full explanation", () => {
+    const lesson = page(false);
+    lesson.blocks = [{ id: "summary", kind: "core", title: "摘要", markdown: "仅存摘要", sourceAnchorIds: [], atomIds: [] }] as PageLesson["blocks"];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+    expect(markup).toContain('class="quality-badge hold">讲解尚未生成</span>');
+    const full = markup.match(/<article class="lesson-block section-full_explanation"[\s\S]*?(?=<article class="lesson-block section-main_content")/)?.[0] ?? "";
+    expect(full).not.toContain("仅存摘要");
+    expect(markup).toContain("仅存摘要");
+  });
+
+  it("marks missing main content as incomplete while retaining its full explanation", () => {
+    const lesson = page(false);
+    lesson.lessonSections = [
+      { id: "bridge", kind: "chapter_bridge", title: "承上启下", markdown: "已确认的真实承接", sourceAnchorIds: [], atomIds: [] },
+      { id: "full", kind: "full_explanation", title: "完整讲解", markdown: "已有完整教学正文", sourceAnchorIds: [], atomIds: [] },
+      { id: "main", kind: "main_content", title: "主要内容", markdown: "", sourceAnchorIds: [], atomIds: [] }
+    ];
+    const markup = renderToStaticMarkup(<ExplanationPanel release={release} page={lesson} />);
+    expect(markup).toContain('class="quality-badge hold">正文可读 · 主要内容待补齐</span>');
+    expect(markup).toContain("已有完整教学正文");
+    expect(markup).toContain("主要内容尚未补齐；完整讲解保留");
+  });
+
   it("preserves a long full explanation verbatim even when its opening repeats the summary", () => {
     const lesson = page(false);
     const repeatedOpening = "第29页完整讲解的长正文开头，必须按原样保留，不能因它与摘要重复而删掉。";

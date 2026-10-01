@@ -658,6 +658,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }, context);
   }
 
+  async getQuestionSelection(selectionId: string): Promise<QuestionSelection | undefined> {
+    const selection = (await this.readActivityReference()).questionSelections.find((item) => item.id === selectionId);
+    return selection ? structuredClone(selection) : undefined;
+  }
+
   async saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt> {
     let wasReplay = false;
     const saved = await this.mutateActivity(async (state) => {

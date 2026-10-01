@@ -1,7 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, LessonDraft, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
 import { api, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
-import { CourseTree, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
+import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
@@ -23,6 +23,10 @@ type UtilityPanel = "search" | "sync" | "account" | "settings" | "trash" | null;
 type TreeTextAction = { kind: "module" | "rename"; node: CourseTreeNode };
 export type CandidateReadUnavailable = "not_generated" | "not_ready";
 export type CandidatePreviewState = { pageId: string; page?: PageLesson; error?: string; terminal?: boolean; generatedReady?: boolean; notice?: string; unavailable?: CandidateReadUnavailable };
+
+export function isGlobalSearchShortcut(event: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "key">): boolean {
+  return (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
+}
 export type CachedPageSnapshot = { releaseId: string; page: PageLesson; contentHash: string; unpublishedDraftRevision?: number };
 export interface SharedReadRequest<T> {
   promise: Promise<T>;
@@ -374,6 +378,7 @@ export function App() {
   const [secondaryReadsStarted, setSecondaryReadsStarted] = useState(false);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanel>(null);
+  const [globalSearchFocusRequest, setGlobalSearchFocusRequest] = useState(0);
   const [leftCollapsed, setLeftCollapsed] = useState(() => localStorage.getItem("course-os-left-collapsed") === "true");
   const [rightCollapsed, setRightCollapsed] = useState(() => localStorage.getItem("course-os-right-collapsed") === "true");
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
@@ -803,9 +808,10 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (isGlobalSearchShortcut(event)) {
         event.preventDefault();
         setUtilityPanel("search");
+        setGlobalSearchFocusRequest((current) => current + 1);
       }
       if (event.key === "Escape") {
         setUtilityPanel(null);
@@ -1024,7 +1030,7 @@ export function App() {
       <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} focusRequest={globalSearchFocusRequest} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
     {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
     {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
     {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -1070,7 +1076,7 @@ export function App() {
       <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} selectedPageId={page.id} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={(nextReleaseId, nextPageId) => { setMobileTreeOpen(false); selectPage(nextReleaseId, nextPageId); }} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
        {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
       {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
-       {utilityPanel && <UtilityDialog panel={utilityPanel} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
+       {utilityPanel && <UtilityDialog panel={utilityPanel} focusRequest={globalSearchFocusRequest} releases={releases} tree={tree} sync={sync} conflicts={conflicts} theme={theme} onTheme={setTheme} onSelectPage={selectPage} onRefresh={refreshMetadata} onRefreshSync={refreshSyncStatus} onOpenTrash={() => setUtilityPanel("trash")} onClose={() => setUtilityPanel(null)} />}
       {historyNode && <HistoryDialog node={historyNode} releases={releases} onClose={() => setHistoryNode(undefined)} onSelectPage={selectPage} />}
       {textAction && <TreeTextDialog action={textAction} onClose={() => setTextAction(undefined)} onSubmit={(title) => { const action = textAction; setTextAction(undefined); if (action.kind === "module") void runTreeAction(() => api.createModule(action.node.id, title).then(() => undefined), "模块已建立"); else if (title !== action.node.title) void runTreeAction(() => api.updateTreeNode(action.node, { title }).then((updated) => { updateTreeAfterRename(updated); }), "名称已更新", "正在保存名称…", false); }} />}
       {moveNode && <MoveNodeDialog node={moveNode} tree={tree} onClose={() => setMoveNode(undefined)} onMove={(parentId) => { void runTreeAction(() => api.updateTreeNode(moveNode, { parentId }).then(() => undefined), "节点位置已更新"); setMoveNode(undefined); }} />}
@@ -1181,8 +1187,19 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   </div>;
 }
 
-function UtilityDialog({ panel, releases, tree, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onRefreshSync, onOpenTrash, onClose }: {
+export type GlobalSearchResult = { release: CourseRelease; page: CourseRelease["pages"][number] };
+
+export function buildGlobalSearchResults(releases: CourseRelease[], tree: WorkspaceTree | undefined, query: string): GlobalSearchResult[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return currentMaterialReleases(releases, tree)
+    .flatMap((release) => release.pages.map((page) => ({ release, page })))
+    .filter(({ release, page }) => !needle || `${release.courseTitle} ${release.moduleTitle} ${page.title} ${page.pageNumber}`.toLocaleLowerCase().includes(needle))
+    .slice(0, 40);
+}
+
+function UtilityDialog({ panel, focusRequest, releases, tree, sync, conflicts, theme, onTheme, onSelectPage, onRefresh, onRefreshSync, onOpenTrash, onClose }: {
   panel: Exclude<UtilityPanel, null>;
+  focusRequest: number;
   releases: CourseRelease[];
   tree?: WorkspaceTree;
   sync?: ReadWeaveSyncStatus;
@@ -1196,13 +1213,32 @@ function UtilityDialog({ panel, releases, tree, sync, conflicts, theme, onTheme,
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ kind: "success" | "error" | "pending"; text: string }>();
-  const latestReleases = currentMaterialReleases(releases, tree);
-  const results = latestReleases.flatMap((release) => release.pages.map((page) => ({ release, page }))).filter(({ release, page }) => {
-    const needle = query.trim().toLocaleLowerCase();
-    return !needle || `${release.courseTitle} ${release.moduleTitle} ${page.title} ${page.pageNumber}`.toLocaleLowerCase().includes(needle);
-  }).slice(0, 40);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchResults = useRef<HTMLDivElement>(null);
+  const results = buildGlobalSearchResults(releases, tree, query);
+  useEffect(() => {
+    if (panel === "search") searchInput.current?.focus();
+  }, [focusRequest, panel]);
+  useEffect(() => {
+    if (panel !== "search") return;
+    searchResults.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [activeSearchIndex, panel, results.length]);
+  const selectSearchResult = (result: GlobalSearchResult) => {
+    onSelectPage(result.release.id, result.page.id);
+    onClose();
+  };
+  const onSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    const action = resolveSearchInputKeyAction(event.key, activeSearchIndex, results.length);
+    if (action.kind === "none") return;
+    event.preventDefault();
+    if (action.kind === "close") { onClose(); return; }
+    if (action.kind === "move") { setActiveSearchIndex(action.index); return; }
+    const result = results[action.index];
+    if (result) selectSearchResult(result);
+  };
   const refreshSync = async () => {
     setRefreshing(true);
     setSyncFeedback({ kind: "pending", text: "正在检查 ReadWeave 连接…" });
@@ -1216,7 +1252,7 @@ function UtilityDialog({ panel, releases, tree, sync, conflicts, theme, onTheme,
   return <div className="modal-backdrop utility-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="utility-dialog" role="dialog" aria-modal="true" aria-label={panelTitle(panel)}>
       <header><div><span className="section-kicker">COURSE OS</span><h2>{panelTitle(panel)}</h2></div><button className="icon-button" data-action="close-utility-panel" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
-      {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input data-action="search-pages" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程、材料、页面或页码" /></label><div className="search-results">{results.map(({ release, page }) => <button key={`${release.id}:${page.id}`} data-action="search-open-page" onClick={() => { onSelectPage(release.id, page.id); onClose(); }}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline">没有找到匹配页面</p>}</div></div>}
+      {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input ref={searchInput} data-action="search-pages" autoFocus role="combobox" aria-autocomplete="list" aria-expanded={results.length > 0} aria-controls="global-search-results" aria-activedescendant={results[activeSearchIndex] ? `global-search-result-${activeSearchIndex}` : undefined} onKeyDown={onSearchKeyDown} value={query} onChange={(event) => { setQuery(event.target.value); setActiveSearchIndex(0); }} placeholder="搜索课程、材料、页面或页码" /></label><div ref={searchResults} id="global-search-results" className="search-results" role="listbox" aria-label="搜索结果">{results.map(({ release, page }, index) => <button key={`${release.id}:${page.id}`} id={`global-search-result-${index}`} role="option" aria-selected={index === activeSearchIndex} className={index === activeSearchIndex ? "active" : undefined} style={index === activeSearchIndex ? { background: "var(--soft)" } : undefined} data-action="search-open-page" onMouseEnter={() => setActiveSearchIndex(index)} onClick={() => selectSearchResult({ release, page })}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline" role="status">没有找到匹配页面</p>}</div></div>}
       {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>最近内容确认</dt><dd>{sync?.lastReadAt ? new Date(sync.lastReadAt).toLocaleString() : "尚未确认"}</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}{syncFeedback && <p className={`sync-feedback ${syncFeedback.kind}`} role={syncFeedback.kind === "error" ? "alert" : "status"} aria-live="polite"><Icon name={syncFeedback.kind === "error" ? "warning" : syncFeedback.kind === "success" ? "check" : "sparkles"} />{syncFeedback.text}</p>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={() => void refreshSync()}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
       {panel === "settings" && <SettingsPanel theme={theme} onTheme={onTheme} sync={sync} onOpenTrash={onOpenTrash} />}
       {panel === "trash" && <TrashPanel onRefresh={onRefresh} />}
@@ -1547,7 +1583,7 @@ function WorkspaceLoader({ compact = false }: { compact?: boolean }) {
   return <div className={`workspace-loader ${compact ? "compact" : ""}`}><div className="loader" /><span>正在准备课程工具</span></div>;
 }
 
-function StartupReadNotices({ releaseIndexError, releaseIndexLoading, onRetryReleaseIndex, treeError, treeLoading, onRetryTree }: {
+export function StartupReadNotices({ releaseIndexError, releaseIndexLoading, onRetryReleaseIndex, treeError, treeLoading, onRetryTree }: {
   releaseIndexError: string;
   releaseIndexLoading: boolean;
   onRetryReleaseIndex: () => void;
@@ -1555,17 +1591,17 @@ function StartupReadNotices({ releaseIndexError, releaseIndexLoading, onRetryRel
   treeLoading: boolean;
   onRetryTree: () => void;
 }) {
-  const notice = (label: string, error: string, loading: boolean, actionId: string, onRetry: () => void) => {
+  const notice = (key: string, label: string, error: string, loading: boolean, actionId: string, onRetry: () => void) => {
     if (!error && !loading) return null;
-    return <div className="empty-inline" role={error ? "alert" : "status"} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+    return <div key={key} className="empty-inline" role={error ? "alert" : "status"} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
       <span>{error ? `${label}读取失败：${error}` : `正在读取${label}`}</span>
       {error && <button className="quiet-button" type="button" data-action={actionId} disabled={loading} onClick={onRetry}>{loading ? "正在重试" : "重试"}</button>}
     </div>;
   };
 
   const notices = [
-    notice("课程索引", releaseIndexError, releaseIndexLoading, "release-index-retry", onRetryReleaseIndex),
-    notice("课程目录", treeError, treeLoading, "workspace-tree-retry", onRetryTree)
+    notice("release-index", "课程索引", releaseIndexError, releaseIndexLoading, "release-index-retry", onRetryReleaseIndex),
+    notice("workspace-tree", "课程目录", treeError, treeLoading, "workspace-tree-retry", onRetryTree)
   ].filter(Boolean);
   if (notices.length === 0) return null;
 

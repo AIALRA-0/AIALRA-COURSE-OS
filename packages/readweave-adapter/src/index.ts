@@ -91,6 +91,7 @@ export interface ReadWeaveCourseApi {
   listNativePageQuestions?(pageId: string, workspaceId?: string): Promise<import("@course-os/contracts").ReadWeavePageQuestions>;
   listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]>;
   saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection>;
+  getQuestionSelection?(selectionId: string): Promise<QuestionSelection | undefined>;
   saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt>;
   saveQuestionAttemptTransaction(attempt: QuestionAttempt, assessmentAttempt: AssessmentAttempt, reduceMastery: MasteryReducer, context: IdempotentWriteContext): Promise<QuestionAttemptTransactionResult>;
   getReviewPlan(planId: string): Promise<ReviewPlan | undefined>;
@@ -633,6 +634,11 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.appendAuthorityObject("questionSelection", selection, context, "questionSelections");
   }
 
+  async getQuestionSelection(selectionId: string): Promise<QuestionSelection | undefined> {
+    const selection = (await this.read()).questionSelections.find((item) => item.id === selectionId);
+    return selection ? structuredClone(selection) : undefined;
+  }
+
   async saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt> {
     return this.appendAuthorityObject("questionAttempt", attempt, context, "questionAttempts");
   }
@@ -1066,6 +1072,15 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   async saveQuestionSelection(selection: QuestionSelection, context: IdempotentWriteContext): Promise<QuestionSelection> {
     return this.request<QuestionSelection>("/question-selections", { method: "POST", body: JSON.stringify(selection), headers: this.writeHeaders(context) });
+  }
+
+  async getQuestionSelection(selectionId: string): Promise<QuestionSelection | undefined> {
+    try {
+      return await this.request<QuestionSelection>(`/question-selections/${encodeURIComponent(selectionId)}`);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("READWEAVE_HTTP_404:")) return undefined;
+      throw error;
+    }
   }
 
   async saveQuestionAttempt(attempt: QuestionAttempt, context: IdempotentWriteContext): Promise<QuestionAttempt> {
