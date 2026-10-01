@@ -169,11 +169,12 @@ function isEscapedMarkdownDelimiter(value: string, index: number): boolean {
 }
 
 function normalizeLabelText(value: string): string {
-  return value.replace(/(^|[；;][ \t]*)([ \t]*(?:[-*+][ \t]+)?\*\*[^*\r\n]{1,100}?[：:])[ \t]+\*\*/gmu, (match, preceding: string, label: string, offset: number, source: string) => {
+  const repairedLegacyClosers = value.replace(/(^|[；;][ \t]*)([ \t]*(?:[-*+][ \t]+)?\*\*[^*\r\n]{1,100}?[：:])[ \t]+\*\*/gmu, (match, preceding: string, label: string, offset: number, source: string) => {
     const next = source[offset + match.length];
     const separator = next && /[\p{L}\p{N}]/u.test(next) ? " " : "";
     return `${preceding}${label}**${separator}`;
   });
+  return repairedLegacyClosers.replace(/(^|[；;][ \t]*)([ \t]*(?:[-*+][ \t]+)?\*\*[^*\r\n]{1,100}?[：:])\*\*(?=[\p{L}\p{N}])/gmu, "$1$2** ");
 }
 
 function LessonSectionView({ section, number, children }: { section?: LessonSection; number: string; children?: ReactNode }) {

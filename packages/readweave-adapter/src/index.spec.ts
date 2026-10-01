@@ -631,10 +631,15 @@ describe("ReadWeave ETAPI adapter", () => {
 
     const stalePage = structuredClone(initial.page);
     stalePage.blocks[0]!.markdown = "旧冲突中的提交";
-    await expect(api.saveDraft({ ...initial, page: stalePage }, 0, { ...context, idempotencyKey: "etapi-stale-conflict-create" }))
-      .rejects.toThrow("READWEAVE_REVISION_CONFLICT");
-    const conflict = (await api.listConflicts()).find((item) => item.status === "open");
-    expect(conflict).toBeDefined();
+    let conflictId = "";
+    try {
+      await api.saveDraft({ ...initial, page: stalePage }, 0, { ...context, idempotencyKey: "etapi-stale-conflict-create" });
+    } catch (error) {
+      const message = String(error);
+      expect(message).toContain("READWEAVE_REVISION_CONFLICT:");
+      conflictId = message.slice(message.indexOf("conflict:"));
+    }
+    expect(conflictId).toMatch(/^conflict:/u);
 
     const latestPage = structuredClone(initial.page);
     latestPage.blocks[0]!.markdown = "当前页记录中的最新稿";
@@ -643,9 +648,23 @@ describe("ReadWeave ETAPI adapter", () => {
     const mergedPage = structuredClone(latest.page);
     mergedPage.blocks[0]!.markdown = "调用方确认的新全页合并稿";
 
-    await expect(api.resolveConflict(conflict!.id, "merged", JSON.stringify(mergedPage),
+    const recordSearches: string[] = [];
+    const resolver = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+        if (url.pathname === "/etapi/notes" && (init?.method ?? "GET") === "GET") {
+          recordSearches.push(url.searchParams.get("search") ?? "");
+        }
+        return remote.fetch(input, init);
+      }
+    });
+    await expect(resolver.resolveConflict(conflictId, "merged", JSON.stringify(mergedPage),
       { ...context, idempotencyKey: "etapi-stale-conflict-resolve" })).resolves.toMatchObject({ status: "resolved" });
-    await expect(api.getDraftByPage(initial.pageId)).resolves.toMatchObject({
+    expect(recordSearches).toContain(`#courseOsDraftRecordPageId="${initial.pageId}"`);
+    expect(recordSearches).not.toContain('#courseOsType="draft_record"');
+    expect(recordSearches).not.toContain('"Course OS draft record"');
+    await expect(resolver.getDraftByPage(initial.pageId)).resolves.toMatchObject({
       revision: latest.revision + 1,
       page: expect.objectContaining({ blocks: [expect.objectContaining({ markdown: "调用方确认的新全页合并稿" })] })
     });

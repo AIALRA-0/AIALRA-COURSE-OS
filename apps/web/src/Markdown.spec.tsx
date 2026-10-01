@@ -83,6 +83,14 @@ describe("lesson math rendering", () => {
     expect(html).toContain("把总和当成平均值");
     expect(html).toContain("检查分母");
   });
+
+  it("renders a bold colon label when legacy prose immediately follows its closer", () => {
+    const source = "**混淆位置：**以为选好单元位置就完成了连接。";
+    const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(source) }));
+
+    expect(html).toContain("<strong>混淆位置：</strong> 以为选好单元位置就完成了连接。");
+    expect(html).not.toContain("**混淆位置：**");
+  });
   it.each([
     ["仅有公式", "$x$", true],
     ["公式前有文字", "目标是 $J(\\theta,G)$", false],

@@ -1059,18 +1059,29 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict> {
-    const initial = (await this.readState()).conflicts.find((item) => item.id === conflictId);
+    const stateReference = await this.readStateReference(true, false);
+    let initial = stateReference.conflicts.find((item) => item.id === conflictId);
+    if (!initial) {
+      const pageId = lessonDraftPageIdFromConflictId(conflictId);
+      if (pageId) initial = (await this.findDraftPageRecord(pageId))?.record.conflicts.find((item) => item.id === conflictId);
+    }
     if (initial?.objectType === "lesson_draft") {
       return this.withDraftPageLock(initial.objectId, context, async () => {
-        const state = structuredClone(await this.readStateReference(true));
+        const stateReference = await this.readStateReference(true, false);
         const located = await this.findDraftPageRecord(initial.objectId);
-        if (located) this.mergeDraftPageRecord(state, located.record);
+        const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === initial!.objectId);
+        if (!draft) throw new Error("READWEAVE_DRAFT_NOT_FOUND");
+        const state = this.createDraftPageReadContext(stateReference, draft, located?.record);
+        const replay = state.idempotency[context.idempotencyKey];
+        if (replay) {
+          const existing = state.conflicts.find((item) => item.id === replay.objectId);
+          if (!existing) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
+          return existing;
+        }
         const conflict = state.conflicts.find((item) => item.id === conflictId);
         if (!conflict) throw new Error("READWEAVE_CONFLICT_NOT_FOUND");
         if (conflict.status === "resolved") return conflict;
         if (resolution === "merged" && !mergedContent?.trim()) throw new Error("READWEAVE_MERGED_CONTENT_REQUIRED");
-        const draft = located?.record.draft ?? state.drafts.find((item) => item.pageId === conflict.objectId);
-        if (!draft) throw new Error("READWEAVE_DRAFT_NOT_FOUND");
         const selected = resolution === "local" ? conflict.localContent : resolution === "remote" ? conflict.remoteContent : mergedContent!;
         const previousDraft = structuredClone(draft);
         try {
@@ -1083,7 +1094,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         draft.contentHash = sha256(JSON.stringify(draft.page));
         draft.updatedAt = new Date().toISOString();
         const projection = located?.record.projection ?? state.projections.drafts[draft.id]
-          ?? await this.ensureDraftProjection(state, draft);
+          ?? await this.ensureDraftProjection(stateReference, draft);
+        state.projections.drafts[draft.id] = projection;
         conflict.status = "resolved";
         conflict.resolution = resolution;
         conflict.resolvedAt = draft.updatedAt;
@@ -1092,7 +1104,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const record = this.makeDraftPageRecord(state, draft, projection, located?.record);
         record.conflicts = [...record.conflicts.filter((item) => item.id !== conflict.id), conflict];
         record.idempotency[context.idempotencyKey] = { kind: "conflict", objectId: conflict.id };
-        await this.writeDraftPageRecord(record, located?.noteId, state);
+        await this.writeDraftPageRecord(record, located?.noteId, stateReference);
         return structuredClone(conflict);
       });
     }
@@ -3337,6 +3349,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
 function plainReadWeaveText(value: string): string {
   return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim();
+}
+
+function lessonDraftPageIdFromConflictId(conflictId: string): string | undefined {
+  const prefix = "conflict:";
+  if (!conflictId.startsWith(prefix)) return undefined;
+  const timestampSeparator = conflictId.lastIndexOf(":");
+  if (timestampSeparator <= prefix.length || !/^\d+$/u.test(conflictId.slice(timestampSeparator + 1))) return undefined;
+  return conflictId.slice(prefix.length, timestampSeparator);
 }
 
 function normalizeState(input: Partial<EtapiState>, projection: ProjectionIndex): EtapiState {
