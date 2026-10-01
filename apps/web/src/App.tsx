@@ -584,7 +584,7 @@ export function App() {
   const previousImageScope = useRef(releaseId);
   useEffect(() => {
     if (previousImageScope.current && previousImageScope.current !== releaseId) {
-      imageResources.clear();
+      imageResources.clear(indexedPage?.imageUrl);
       pagePrefetchQueue.current.clearPending();
     }
     previousImageScope.current = releaseId;

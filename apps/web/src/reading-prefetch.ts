@@ -79,8 +79,9 @@ export class ImageResourceCache {
     return this.load(url, priority);
   }
 
-  clear(): void {
+  clear(preserveUrl?: string): void {
     for (const [url, resource] of this.resources) {
+      if (url === preserveUrl) continue;
       if (resource.state !== "loading") continue;
       resource.cancel?.();
       if (this.resources.get(url) === resource) this.resources.delete(url);

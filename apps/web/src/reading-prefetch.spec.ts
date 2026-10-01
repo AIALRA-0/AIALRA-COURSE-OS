@@ -156,6 +156,27 @@ describe("bounded image resources", () => {
     expect(cache.get("/ready.png")?.state).toBe("ready");
     expect(cache.get("/ready.png")?.promise).toBe(ready);
   });
+
+  it("clears old-scope downloads but preserves the current URL shared with SlideViewer", async () => {
+    const images: FakeImage[] = [];
+    vi.stubGlobal("Image", class extends FakeImage { constructor() { super(); images.push(this); } });
+    const cache = new ImageResourceCache(2);
+    const oldScope = cache.load("/old-scope.png", "low");
+    const current = cache.load("/current-page.png", "high");
+    const oldFailure = expect(oldScope).rejects.toThrow("Cancelled loading image");
+
+    cache.clear("/current-page.png");
+    await oldFailure;
+    expect(images[0]!.src).toBe("");
+    expect(cache.get("/old-scope.png")).toBeUndefined();
+    expect(cache.get("/current-page.png")?.state).toBe("loading");
+    expect(cache.load("/current-page.png", "high")).toBe(current);
+    expect(images).toHaveLength(2);
+
+    images[1]!.finish();
+    await expect(current).resolves.toBe(images[1]);
+    expect(cache.get("/current-page.png")?.state).toBe("ready");
+  });
 });
 
 describe("bounded page prefetch", () => {
