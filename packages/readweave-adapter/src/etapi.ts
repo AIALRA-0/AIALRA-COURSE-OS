@@ -1486,7 +1486,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async getDeepLink(noteId: string): Promise<ReadWeaveDeepLink | undefined> {
-    const state = await this.readState();
+    // Link ownership needs projection metadata, not every page's teaching body
+    // or the complete activity index. Hydrating those here stalls properties.
+    const state = await this.readStateReference(false, false);
     const known = new Set<string>();
     for (const course of state.courses) {
       if (course.readweaveNoteId) known.add(course.readweaveNoteId);
@@ -1508,6 +1510,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     for (const value of Object.values(state.projections.releases)) known.add(value);
     for (const question of state.questions) if (question.readweaveNoteId) known.add(question.readweaveNoteId);
     for (const node of state.treeNodes) if (node.readweaveNoteId) known.add(node.readweaveNoteId);
+    for (const { record } of this.draftPageRecordCache.values()) {
+      if (record.draft.readweaveNoteId) known.add(record.draft.readweaveNoteId);
+      const projection = record.projection;
+      for (const value of [projection.pageNoteId, projection.sourceNoteId, projection.atomsNoteId, projection.sourceImageNoteId]) if (value) known.add(value);
+      for (const value of Object.values(projection.blockNoteIds)) known.add(value);
+      for (const value of Object.values(projection.sectionNoteIds)) known.add(value);
+    }
     const found = known.has(noteId);
     if (!found) return undefined;
     try {

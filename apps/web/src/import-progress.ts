@@ -169,23 +169,23 @@ export function summarizeImportProgress(
 
   const directCost = firstNumber(sources, ["cumulativeCostUsd", "totalCostUsd", "spentUsd", "costUsd"]);
   const planCost = plan?.spentUsd;
-  const knownEntryCosts = costs.filter((entry) => entry.costBasis !== "not_available");
-  const entryCostMicrousd = knownEntryCosts.reduce((sum, entry) => sum + (entry.costBasis === "provider_reported" ? entry.actualMicrousd : entry.estimatedMicrousd), 0);
+  const accountedEntryCosts = costs.filter((entry) => entry.costBasis !== "not_available" || entry.estimatedMicrousd > 0);
+  const entryCostMicrousd = accountedEntryCosts.reduce((sum, entry) => sum + (entry.costBasis === "provider_reported" && entry.actualMicrousd !== null ? entry.actualMicrousd : entry.estimatedMicrousd), 0);
   const trustedDirectCost = directCost && directCost > 0 ? directCost : undefined;
   const trustedPlanCost = planCost && planCost > 0 ? planCost : undefined;
-  const cumulativeEntryCost = plan?.retryOfPlanId && knownEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : undefined;
+  const cumulativeEntryCost = plan?.retryOfPlanId && accountedEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : undefined;
   const candidateCost = cumulativeEntryCost ?? trustedDirectCost ?? trustedPlanCost
-    ?? (knownEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : directCost ?? planCost);
-  const unverifiedZero = candidateCost === 0 && knownEntryCosts.length === 0 && Boolean(plan &&
+    ?? (accountedEntryCosts.length > 0 ? entryCostMicrousd / 1_000_000 : directCost ?? planCost);
+  const unverifiedZero = candidateCost === 0 && accountedEntryCosts.length === 0 && Boolean(plan &&
     (plan.state === "running" || plan.state === "queued" || plan.completedPageIds.length + plan.failedPageIds.length > 0));
   const costUsd = unverifiedZero ? undefined : candidateCost;
   const costBasis = cumulativeEntryCost === undefined && (trustedDirectCost !== undefined || trustedPlanCost !== undefined)
     ? undefined
-    : knownEntryCosts.length === 0
+    : accountedEntryCosts.length === 0
       ? undefined
-      : knownEntryCosts.every((entry) => entry.costBasis === "provider_reported")
+      : accountedEntryCosts.every((entry) => entry.costBasis === "provider_reported" && entry.actualMicrousd !== null)
         ? "reported"
-        : knownEntryCosts.every((entry) => entry.costBasis === "price_snapshot")
+        : accountedEntryCosts.every((entry) => entry.costBasis === "price_snapshot" || entry.costBasis === "not_available")
           ? "estimated"
           : "mixed";
 

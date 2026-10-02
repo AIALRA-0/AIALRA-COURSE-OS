@@ -1,42 +1,51 @@
 # Course OS 架构
 
-## 1 核心决定
+## 1 核心边界
 
-Course OS 负责任务与播放器，ReadWeave 负责正式课程语义，两者通过 `/api/course/v1` 通信
+Course OS 负责材料导入、生成任务、运行状态和播放器。ReadWeave 是课程、版本、讲解及学习记录的语义权威；Course OS 不以 PostgreSQL 中的课程副本取代它。
 
-PostgreSQL 只保存运行状态，内容寻址存储只保存字节，浏览器只保存界面偏好和未提交输入
+原始上传字节放入内容寻址存储。PostgreSQL 只保存 Course OS 操作数据，例如导入与生成任务、计划、租约、事件、幂等记录和运行配置；课程语义数据不存入 PostgreSQL。
 
-## 2 数据流
+API 在操作员确认来源后，把指定工作区的课程目录、版本索引和已确认页面快照持久化到本地阅读副本。页面快照按来源身份、工作区、release 和页面隔离，供播放器读取；副本是 ReadWeave 的确认投影，不是另一份权威数据源。
+
+## 2 单页生成与读取
 
 ```mermaid
 flowchart TD
-    Upload[受限上传] --> Inspect[类型、魔数、大小和安全检查]
-    Inspect --> CAS[SHA-256 内容寻址存储]
-    Inspect --> Job[PostgreSQL 任务与租约]
-    CAS --> Compile[页面提取与教学编译]
-    Job --> Compile
-    Compile --> Quality[确定性质量门]
-    Quality -->|通过| Outbox[事务外发箱]
-    Quality -->|失败| Review[局部修复或人工审核]
-    Outbox --> ReadWeave[ReadWeave 写入与读回校验]
-    ReadWeave --> Manifest[不可变 ReleaseManifest]
-    Manifest --> Player[左图右文播放器]
+    Upload[上传材料] --> Inspect[安全与格式检查]
+    Inspect --> Bytes[原始字节写入内容寻址存储]
+    Inspect --> Ops[PostgreSQL 操作状态]
+
+    Source[页面文字与页面图像] --> Understand[可选页面图像理解]
+    Understand --> Plan[简短教学计划；理解阶段未提供时单独生成]
+    Source --> Plan
+    Plan --> Main[一次生成完整教学页]
+    Main --> Repair[机器结构需要时最多一次局部修复]
+    Repair --> Format[确定性格式整理、页面检查与状态记录]
+    Format --> Save[将页面草稿写入 ReadWeave 并读回确认]
+    Save --> Replica[更新持久化的目录与页面快照]
+    Replica --> Player[播放器按工作区与当前版本读取]
+
+    Save --> Bridge[主体保存后补写承接段]
+    Bridge --> BridgeSave[将承接段写回 ReadWeave]
+    BridgeSave --> Replica
+    Bridge -. 等待前页主体时不占核心生成槽；不阻塞已保存主体的阅读 .-> Player
 ```
 
-<div align="center">图 2.1　任务只有在 ReadWeave 写入并读回一致后，才能从 `pending_sync` 进入 `completed`</div>
+页面检查记录草稿是否可读、是否可发布及质量问题；可读草稿不因此自动成为正式发布。材料当前版本可指向 `draft_source`，前提是每页都有对应的已确认草稿，状态为 `ready` 或 `clean` 且正文完整。该材料仍标记为草稿/待审核，发布仍是独立操作。未生成页面继续保持未就绪，历史版本留在版本历史中。
 
-## 3 失败边界
+承接段在主体保存后单独补写。工作器可以等待前一页主体并补上承接段，但这个等待不占核心生成槽，也不阻止播放器读取已经保存的主体。承接段失败时保留主体，任务可以只恢复缺失的承接段。
 
-- ReadWeave 不可用时，任务停在 `pending_sync`
-- 数学解析失败、覆盖不足或来源冲突时，页面不能发布
-- 相同问题自动修订 2 次仍失败时，停止模型调用并进入人工审核
-- 模型提供商不可用时，已有正式发布仍能离线学习
-- 浏览器刷新只恢复固定发布、当前页、锚点、缩放和平移，不改变课程内容
+## 3 阅读就绪与降级
 
-## 4 2.4 运行边界
+`/healthz` 只报告 API 进程是否存活。`/readyz` 报告是否有可用的已确认阅读目录和页面副本；空安装可以健康但尚未阅读就绪。操作员通过 `scripts/materialize-reading.ts` 确认已有权威数据，这不是启动时生成内容的任务。
 
-本地开发使用文件适配器和合成资料；受控部署使用 ETAPI 适配器连接独立 ReadWeave 服务。两种模式实现相同的 Course OS 合同，不直接访问 ReadWeave 数据库。
+ReadWeave 暂时不可用时，已确认副本继续提供只读课程内容并报告同步降级；写入仍需 ReadWeave 确认。来源明确返回 401/403 时，阅读访问被停止，直到权限恢复并重新确认。
 
-正式树、页面、问答、掌握与复习读取都带工作区和固定 release 上下文。写入必须带幂等键、actor、工作区、请求 ID 与 `2.4.0` schema 版本。ReadWeave 不可用时，公开 API 只返回受控错误；已有不可变发布仍可回滚，未确认写入不得冒充成功。
+## 4 持久化与版本范围
 
-公开源码树只包含变量化部署模板。真实域名、VPS 路径、认证回调、网络名称、秘密和私有课程内容属于运行环境配置。
+本地开发可使用文件适配器与合成资料；受控部署通过 ETAPI 访问独立 ReadWeave 服务，不直接访问其数据库。PostgreSQL 承载操作数据，内容寻址存储承载原始上传，ReadWeave 承载课程语义；本地已确认副本只保存受来源身份、工作区、release 和页面范围约束的课程目录、版本索引与页面读取快照。问答和学习状态继续由 ReadWeave 提供权威数据。
+
+课程、页面、问答、掌握记录和复习状态按工作区及选定版本读取。页面写入使用幂等键、actor、工作区、请求 ID 和 schema 版本；只有权威写入被确认并读回后，才能报告写入成功。
+
+浏览器保留界面偏好与未提交输入。真实部署地址、认证回调、秘密和私有课程材料由运行环境管理，不写入公开源码。

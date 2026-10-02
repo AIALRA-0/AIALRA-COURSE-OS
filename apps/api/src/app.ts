@@ -270,7 +270,7 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const snapshot = currentGenerationHarness();
       response.json({ ...snapshot, systemPrompt: `${plannedWritingPrompt}\n\n${writingFormatContract}`, userPrompt: "提供本页来源信息及简短教学计划，一次生成完整教学页；承上启下在主体保存后补齐", blueprint: planningPrompt, schema: teachingPackageSchema,
-        phases: ["plan", "opening", "explanation", "consolidation"], maximumRepairCalls: 1 });
+        phases: ["plan", "teaching", "format_repair"], maximumRepairCalls: 1 });
     } catch (error) { next(error); }
   });
 
@@ -872,7 +872,19 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       if (dependencies.reading) {
         const source = await dependencies.reading.replica.getPageSource(workspaceId, request.params.id, asOptionalString(request.query.releaseId));
-        if (!source) return sendError(request, response, 409, "PAGE_NOT_READY", "这页还没有已确认的讲解，请稍后查看", true);
+        if (!source) {
+          const requestedReleaseId = asOptionalString(request.query.releaseId);
+          const release = requestedReleaseId
+            ? await dependencies.reading.replica.getReleaseIndex(workspaceId, requestedReleaseId)
+            : (await dependencies.reading.replica.listIndexes(workspaceId)).find(index => index.pageIds.includes(request.params.id));
+          if (!release || !release.pageIds.includes(request.params.id)) {
+            return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到当前工作区和版本中的课程页面", false);
+          }
+          const notGenerated = release.lifecycle === "draft_source"
+            && release.pages.find(page => page.id === request.params.id)?.quality.issues.includes("TEACHING_GENERATION_REQUIRED");
+          return sendError(request, response, 409, notGenerated ? "PAGE_NOT_GENERATED" : "PAGE_NOT_READY",
+            notGenerated ? "这页尚无已保存的讲解，请在制作区生成" : "这页的讲解副本尚未就绪", !notGenerated);
+        }
         const qaRecords = request.query.includeQa === "1" ? await dependencies.readweave.listQuestions(request.params.id) : [];
         const previewDraft = source.release.lifecycle !== "draft_source"
           && isMatchingReadyLessonDraft(source.draft, workspaceId, source.release.courseId, source.release.id, request.params.id)
@@ -3721,7 +3733,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
             understood.model, understood.usage, "succeeded", true);
           visionCost.id += ":understanding";
           visionCost.stage = "extract";
-          visionSpentUsd = visionCost.costBasis === "provider_reported" ? visionCost.actualMicrousd / 1_000_000
+          visionSpentUsd = visionCost.costBasis === "provider_reported" && visionCost.actualMicrousd !== null ? visionCost.actualMicrousd / 1_000_000
             : visionCost.estimatedMicrousd / 1_000_000;
           await dependencies.readweave.appendCostEntry(visionCost, systemWriteContext(visionCost.id, currentJob.workspaceId));
           await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, visionCost, context));
@@ -4708,10 +4720,18 @@ function makeGenerationCostEntry(jobId: string, job: GenerationJob, release: Cou
   const snapshot = priceSnapshotFor(provider, model) ?? unavailablePriceSnapshot(provider, model);
   const snapshotEstimate = estimateMicrousd(snapshot, usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
   const reported = typeof usage.apiEquivalentUsd === "number" && Number.isFinite(usage.apiEquivalentUsd) ? Math.max(0, Math.round(usage.apiEquivalentUsd * 1_000_000)) : undefined;
-  const estimatedMicrousd = snapshotEstimate ?? reported ?? 0;
-  const actualMicrousd = reported ?? 0;
+  const reserveUsd = usage.unreportedCostReserveUsd;
+  const unreportedReserveMicrousd = typeof reserveUsd === "number" && Number.isFinite(reserveUsd)
+    ? Math.max(0, Math.round(reserveUsd * 1_000_000)) : 0;
+  const hasKnownTokens = usage.inputTokens > 0 || usage.cachedInputTokens > 0 || usage.outputTokens > 0;
+  const actualMicrousd = reported !== undefined && unreportedReserveMicrousd === 0 ? reported : null;
+  const estimateBaseMicrousd = unreportedReserveMicrousd > 0
+    ? reported ?? snapshotEstimate ?? 0
+    : snapshotEstimate ?? reported ?? 0;
+  const estimatedMicrousd = estimateBaseMicrousd + unreportedReserveMicrousd;
+  const knownActualMicrousd = reported ?? 0;
   const billingMode = billingModeForProvider(provider);
-  const actualBilling = billingBreakdown(provider, billingMode, actualMicrousd);
+  const actualBilling = actualMicrousd === null ? undefined : billingBreakdown(provider, billingMode, actualMicrousd);
   const estimatedBilling = billingBreakdown(provider, billingMode, estimatedMicrousd);
   return {
     id: `cost:${jobId}:fence:${job.lease?.fenceToken ?? 0}:attempt:${job.attempt}:${pageId}:teach`,
@@ -4730,16 +4750,17 @@ function makeGenerationCostEntry(jobId: string, job: GenerationJob, release: Cou
     unitPriceSnapshot: snapshot,
     estimatedMicrousd,
     actualMicrousd,
+    knownActualMicrousd,
     durationMs: usage.durationMs,
     retries: Math.max(0, job.attempt - 1),
     status,
     qualityPassed,
     billingMode,
-    cashCostMicrousd: actualBilling.cashCostMicrousd,
-    quotaConsumedMicrousd: actualBilling.quotaConsumedMicrousd,
+    cashCostMicrousd: actualBilling?.cashCostMicrousd ?? null,
+    quotaConsumedMicrousd: actualBilling?.quotaConsumedMicrousd ?? null,
     estimatedCashCostMicrousd: estimatedBilling.cashCostMicrousd,
     estimatedQuotaConsumedMicrousd: estimatedBilling.quotaConsumedMicrousd,
-    costBasis: reported !== undefined ? "provider_reported" : snapshotEstimate !== undefined && snapshot.source !== "价格未配置" ? "price_snapshot" : "not_available",
+    costBasis: actualMicrousd !== null ? "provider_reported" : hasKnownTokens && snapshotEstimate !== undefined && snapshot.source !== "价格未配置" ? "price_snapshot" : "not_available",
     createdAt: new Date().toISOString()
   };
 }
@@ -4760,15 +4781,20 @@ function unavailablePriceSnapshot(provider: string, model: string) {
 }
 
 function generationUsageCostUsd(generation: TeachingGenerationResult): number | undefined {
-  if (generation.usage.apiEquivalentUsd !== null) return generation.usage.apiEquivalentUsd;
-  const estimate = estimateMicrousd(priceSnapshotFor(generation.provider, generation.model), generation.usage.inputTokens, generation.usage.cachedInputTokens, generation.usage.outputTokens);
-  return estimate === undefined ? undefined : estimate / 1_000_000;
+  const usage = generation.usage;
+  const reserve = typeof usage.unreportedCostReserveUsd === "number" && Number.isFinite(usage.unreportedCostReserveUsd)
+    ? Math.max(0, usage.unreportedCostReserveUsd) : 0;
+  if (usage.apiEquivalentUsd !== null) return usage.apiEquivalentUsd + reserve;
+  const hasKnownTokens = usage.inputTokens > 0 || usage.cachedInputTokens > 0 || usage.outputTokens > 0;
+  if (!hasKnownTokens) return reserve || undefined;
+  const estimate = estimateMicrousd(priceSnapshotFor(generation.provider, generation.model), usage.inputTokens, usage.cachedInputTokens, usage.outputTokens);
+  return estimate === undefined ? reserve || undefined : estimate / 1_000_000 + reserve;
 }
 
 function applyScopedCost(job: GenerationJob, cost: GenerationCostEntry, context: GenerationJobMutationContext): void {
   if (context.events.some(event => event.type === "generation.cost.recorded"
     && (event.payload as { costEntryId?: string }).costEntryId === cost.id)) return;
-  const accountedMicrousd = cost.costBasis === "provider_reported" ? cost.actualMicrousd : cost.estimatedMicrousd;
+  const accountedMicrousd = cost.costBasis === "provider_reported" && cost.actualMicrousd !== null ? cost.actualMicrousd : cost.estimatedMicrousd;
   job.spentUsd = Math.round((job.spentUsd + accountedMicrousd / 1_000_000) * 1_000_000) / 1_000_000;
   job.updatedAt = new Date().toISOString();
   context.appendEvent("generation.cost.recorded", { costEntryId: cost.id, status: cost.status,
@@ -5506,24 +5532,32 @@ function buildCostRollups(entries: GenerationCostEntry[]): CostRollup[] {
   return [...scopes.values()].map((group) => ({
     scope: group.scope,
     scopeId: group.scopeId,
-    actualMicrousd: group.entries.reduce((sum, item) => sum + item.actualMicrousd, 0),
+    actualMicrousd: sumNullableMicrousd(group.entries.map((item) => item.actualMicrousd)),
+    knownActualMicrousd: group.entries.reduce((sum, item) => sum + (item.knownActualMicrousd ?? item.actualMicrousd ?? 0), 0),
     estimatedMicrousd: group.entries.reduce((sum, item) => sum + item.estimatedMicrousd, 0),
-    cashCostMicrousd: group.entries.reduce((sum, item) => sum + (item.cashCostMicrousd ?? 0), 0),
-    quotaConsumedMicrousd: group.entries.reduce((sum, item) => sum + (item.quotaConsumedMicrousd ?? 0), 0),
+    cashCostMicrousd: sumNullableMicrousd(group.entries.map((item) => item.cashCostMicrousd)),
+    quotaConsumedMicrousd: sumNullableMicrousd(group.entries.map((item) => item.quotaConsumedMicrousd)),
     estimatedCashCostMicrousd: group.entries.reduce((sum, item) => sum + (item.estimatedCashCostMicrousd ?? item.cashCostMicrousd ?? 0), 0),
     estimatedQuotaConsumedMicrousd: group.entries.reduce((sum, item) => sum + (item.estimatedQuotaConsumedMicrousd ?? item.quotaConsumedMicrousd ?? 0), 0),
     callCount: group.entries.length,
-    byStage: groupedCost(group.entries, (item) => item.stage).map(([stage, value]) => ({ stage: stage as GenerationCostEntry["stage"], actualMicrousd: value.cost, calls: value.calls })),
-    byModel: groupedCost(group.entries, (item) => item.model).map(([model, value]) => ({ model, actualMicrousd: value.cost, calls: value.calls }))
+    byStage: groupedCost(group.entries, (item) => item.stage).map(([stage, value]) => ({ stage: stage as GenerationCostEntry["stage"], actualMicrousd: value.actual, knownActualMicrousd: value.knownActual, calls: value.calls })),
+    byModel: groupedCost(group.entries, (item) => item.model).map(([model, value]) => ({ model, actualMicrousd: value.actual, knownActualMicrousd: value.knownActual, calls: value.calls }))
   }));
 }
 
-function groupedCost(entries: GenerationCostEntry[], keyOf: (entry: GenerationCostEntry) => string): Array<[string, { cost: number; calls: number }]> {
-  const groups = new Map<string, { cost: number; calls: number }>();
+function sumNullableMicrousd(values: Array<number | null | undefined>): number | null {
+  if (values.some((value) => value === null)) return null;
+  return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+}
+
+function groupedCost(entries: GenerationCostEntry[], keyOf: (entry: GenerationCostEntry) => string): Array<[string, { actual: number | null; knownActual: number; calls: number }]> {
+  const groups = new Map<string, { actual: number | null; knownActual: number; calls: number }>();
   for (const entry of entries) {
     const key = keyOf(entry);
-    const current = groups.get(key) ?? { cost: 0, calls: 0 };
-    current.cost += entry.actualMicrousd;
+    const current = groups.get(key) ?? { actual: 0, knownActual: 0, calls: 0 };
+    if (entry.actualMicrousd === null) current.actual = null;
+    else if (current.actual !== null) current.actual += entry.actualMicrousd;
+    current.knownActual += entry.knownActualMicrousd ?? entry.actualMicrousd ?? 0;
     current.calls += 1;
     groups.set(key, current);
   }

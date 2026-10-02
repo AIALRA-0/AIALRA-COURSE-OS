@@ -517,9 +517,29 @@ async function waitForClose(output: ChildOutput, timeoutMs: number): Promise<Chi
   finally { if (timeoutHandle) clearTimeout(timeoutHandle); }
 }
 
-async function requestJson(baseUrl: string, path: string, init: RequestInit = {}): Promise<TimedJson> {
+export async function requestJson(
+  baseUrl: string,
+  path: string,
+  init: RequestInit = {},
+  options: { timeoutMs?: number; fetchImpl?: typeof fetch } = {}
+): Promise<TimedJson> {
   const startedAt = performance.now();
-  const responsePromise = fetch(`${baseUrl}${path}`, init).then(async (response) => {
+  const timeoutMs = options.timeoutMs ?? 8_000;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  const relayCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) relayCallerAbort();
+  else callerSignal?.addEventListener("abort", relayCallerAbort, { once: true });
+
+  const responsePromise = Promise.resolve().then(() => fetchImpl(`${baseUrl}${path}`, { ...init, signal: controller.signal })).then(async (response) => {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (/^text\/event-stream(?:\s*;|$)/iu.test(contentType.trim())) {
+      const error = new Error(`Expected JSON response but received text/event-stream: ${init.method ?? "GET"} ${path}`);
+      controller.abort(error);
+      void response.body?.cancel(error).catch(() => undefined);
+      throw error;
+    }
     const text = await response.text();
     let body: any;
     try { body = text ? JSON.parse(text) : undefined; }
@@ -533,10 +553,17 @@ async function requestJson(baseUrl: string, path: string, init: RequestInit = {}
   });
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(new Error(`HTTP request timed out after 8 seconds: ${init.method ?? "GET"} ${path}`)), 8_000);
+    timeoutHandle = setTimeout(() => {
+      const error = new Error(`HTTP request timed out after ${timeoutMs / 1_000} seconds: ${init.method ?? "GET"} ${path}`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
   });
   try { return await Promise.race([responsePromise, timeoutPromise]); }
-  finally { if (timeoutHandle) clearTimeout(timeoutHandle); }
+  finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    callerSignal?.removeEventListener("abort", relayCallerAbort);
+  }
 }
 
 function workspaceHeaders(workspace = workspaceId): Record<string, string> {
@@ -605,4 +632,4 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-void main();
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) void main();

@@ -2330,8 +2330,10 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(trashed.readweaveNoteId).toBe(created.readweaveNoteId);
     const restored = await api.restoreTrash(trashed.id, { ...context, idempotencyKey: "tree-restore" });
     expect(restored).toMatchObject({ id: created.id, archived: false });
+    const hydrateAllDrafts = vi.spyOn(api as any, "hydrateDraftPageRecords");
     const link = await api.getDeepLink(created.readweaveNoteId!);
     expect(link).toEqual(expect.objectContaining({ host: "readweave.example.com", verified: true, url: `https://readweave.example.com/#root/${created.readweaveNoteId}` }));
+    expect(hydrateAllDrafts).not.toHaveBeenCalled();
     await expect(api.permanentlyDeleteTrash(trashed.id, { ...context, idempotencyKey: "tree-permanent-delete" })).rejects.toThrow("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
   });
 

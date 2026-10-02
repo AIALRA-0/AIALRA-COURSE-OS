@@ -91,6 +91,18 @@ describe("import progress summary", () => {
     expect(summary.costBasis).toBe("estimated");
   });
 
+  it("includes a positive unreported reserve as an estimate while actual cost is unknown", () => {
+    const summary = summarizeImportProgress(
+      record({ id: "import-reserve", state: "ready", pageIds: ["p1"], issues: [] }),
+      plan({ state: "failed", pageIds: ["p1"], completedPageIds: [], failedPageIds: ["p1"], spentUsd: 0 }),
+      [], [cost("teach", "2026-09-23T00:00:00Z", {
+        id: "unreported-reserve", actualMicrousd: null, estimatedMicrousd: 25_000, costBasis: "not_available"
+      })]
+    );
+    expect(summary.costUsd).toBe(0.025);
+    expect(summary.costBasis).toBe("estimated");
+  });
+
   it("derives legacy fields without inventing unavailable cross-page progress", () => {
     const result = summarizeImportProgress(
       record({ state: "ready", autoGenerate: true, pageIds: ["page-1", "page-2"], issues: [] }),

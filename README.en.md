@@ -13,18 +13,19 @@ This repository contains Apache-2.0 source code and synthetic test material only
 ## 1. 2.4 boundaries
 
 - Immutable releases and `ReleaseManifest` objects pin source, page, explanation, assessment, writing-policy, model, quality, and cost versions.
-- The formal course tree excludes synthetic, legacy, regression, other-workspace, and draft-source content.
+- The course tree follows each material's current-version pointer. A `draft_source` can be the current readable material only when every page has a confirmed, readable draft with a complete body; it remains labeled draft / under review and is not published automatically.
+- Historical versions remain in version history. Pages without generated bodies remain not ready and do not become published when their material is selected as current.
 - Pages, questions, mastery, review plans, and randomized assessment remain scoped to the workspace and pinned release.
 - Mouse, touch, and keyboard course-tree interactions share one persistence model; page, zoom, pan, and release selection recover after reload.
 - One teaching visual stays on the left; explanations, KaTeX, line-by-line pseudocode, questions, and assessment stay on the right.
 - ReadWeave remains the semantic authority. Writes carry `Idempotency-Key`, `X-Actor`, `X-Workspace-Id`, `X-Request-Id`, and `X-Schema-Version`.
 - ReadWeave failures become controlled browser errors without exposing tokens, raw upstream responses, or server details.
 
-Private acceptance uses 25 Introduction v4 pages and 47 Chapter 2 v5 pages, 72 pages in total. Those materials and screenshots are not part of this repository.
+The user has frozen the teaching-quality prompts and engineering-candidate waiting rules. Current status: engineering baseline candidate `engineering-baseline-candidate-20261002`, authorization pending; this is not a stability conclusion. After authorization and evidence are available, Main will record final coverage and generic known limitations.
 
 ## 2. Quick start
 
-Node.js 24 and pnpm 10 are required.
+Start from a clean checkout with Node.js 24 and pnpm 10. The frozen lockfile install pins the dependency set.
 
 ```powershell
 corepack enable
@@ -67,11 +68,13 @@ The public tree provides parameterized Compose and Nginx templates. Real hostnam
 - `course-os-runtime:2.4.0-<short-sha>`
 - `course-os-converter:2.4.0-<short-sha>`
 
-Deployment stops when free disk is below 40 GB, the publication gate is denied, ReadWeave authentication is unavailable, hashes conflict, backup or rollback cannot be verified, or health checks fail.
+Estimate peak disk use for this build, current images, and retained rollback images; stop if available space cannot complete the operation. ReadWeave remains authoritative for writes. During a transient source outage, previously confirmed local reading data remains available read-only while synchronization is degraded. An empty replica is not ready, and an explicit authorization denial stops reading.
 
 ## 6. Non-goals
 
 The 2.4 closeout does not add multi-agent classrooms, voice, generated teaching decks, a paper track, public multi-user operation, LMS integration, or new infrastructure.
+
+The current engineering candidate is `engineering-baseline-candidate-20261002`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
 
 ## 7. License
 

@@ -940,6 +940,11 @@ describe("Course OS API", () => {
     expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
 
+  it("reports the phases used by planned lesson generation", async () => {
+    const harness = await request(await testApp()).get("/api/v1/generation-harness/current").expect(200);
+    expect(harness.body).toMatchObject({ phases: ["plan", "teaching", "format_repair"], maximumRepairCalls: 1 });
+  });
+
   it("creates an idempotent isolated candidate without changing the formal release", async () => {
     const { app, readweave } = await seededApp();
     const created = await request(app).post("/api/v1/release-candidates")
@@ -1925,6 +1930,44 @@ describe("Course OS API", () => {
     expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job").actualMicrousd).toBe(12_300);
   }, 60_000);
 
+  it("records a provider fault's unknown actual and positive reserve as estimate", async () => {
+    const modelRouter: ModelRouterClient = {
+      generateTeachingPackage: async () => {
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_FAILED:524", "deepseek-flash", {
+          inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, apiEquivalentUsd: 0.005,
+          unreportedCostReserveUsd: 0.025, durationMs: 80
+        }, "deepseek");
+      }
+    };
+    const { app, release } = await seededApp(modelRouter);
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "unknown-provider-cost-job")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    const failed = await waitForJob(app, created.body.id);
+    expect(failed).toMatchObject({ state: "failed", failedPageIds: ["page-1"], spentUsd: 0.03 });
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toEqual([expect.objectContaining({
+      status: "failed", actualMicrousd: null, knownActualMicrousd: 5_000, estimatedMicrousd: 30_000,
+      cashCostMicrousd: null, quotaConsumedMicrousd: null, costBasis: "not_available"
+    })]);
+    expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job")).toMatchObject({
+      actualMicrousd: null, knownActualMicrousd: 5_000, estimatedMicrousd: 30_000,
+      cashCostMicrousd: null, quotaConsumedMicrousd: null
+    });
+  }, 60_000);
+
+  it("keeps a known-zero deterministic local receipt at zero", async () => {
+    const localResult = { ...testTeachingResult(0), provider: "deterministic-local-fallback", model: "deterministic-local-v1" };
+    const { app, release } = await seededApp({ generateTeachingPackage: async () => localResult });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "known-local-zero-cost")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", spentUsd: 0 });
+    const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);
+    expect(costs.body.entries).toEqual([expect.objectContaining({
+      actualMicrousd: 0, knownActualMicrousd: 0, cashCostMicrousd: 0, quotaConsumedMicrousd: 0, costBasis: "provider_reported"
+    })]);
+    expect(costs.body.rollups.find((item: { scope: string }) => item.scope === "job")).toMatchObject({ actualMicrousd: 0, knownActualMicrousd: 0 });
+  }, 60_000);
+
   it("does not restart a page after invalid final model output", async () => {
     let calls = 0;
     const modelRouter: ModelRouterClient = {
@@ -2731,6 +2774,11 @@ describe("Course OS API", () => {
 
     const response = await request(app).get("/api/v1/pages/page-1/draft?view=snapshot").expect(409);
     expect(response.body.error).toMatchObject({ code: "PAGE_NOT_GENERATED", retryable: false });
+    const lesson = await request(app).get(`/api/v1/pages/page-1/lesson?releaseId=${release.id}`).expect(409);
+    expect(lesson.body.error).toMatchObject({ code: "PAGE_NOT_GENERATED", retryable: false });
+    const otherWorkspace = await request(app).get(`/api/v1/pages/page-1/lesson?releaseId=${release.id}`)
+      .set("X-Workspace-Id", "another-workspace").expect(404);
+    expect(otherWorkspace.body.error).toMatchObject({ code: "PAGE_NOT_FOUND", retryable: false });
   });
 
   it("adds passive Server-Timing phases to release indexes, draft snapshots, media reads and release details", async () => {

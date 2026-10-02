@@ -730,14 +730,16 @@ export interface GenerationCostEntry {
   cachedInputTokens: number;
   unitPriceSnapshot: UnitPriceSnapshot;
   estimatedMicrousd: number;
-  actualMicrousd: number;
+  actualMicrousd: number | null;
+  /** Sum of known provider-reported portions when the complete actual is unknown. */
+  knownActualMicrousd?: number;
   durationMs: number;
   retries: number;
   status: "succeeded" | "failed" | "cancelled";
   qualityPassed: boolean;
   billingMode?: BillingMode;
-  cashCostMicrousd?: number;
-  quotaConsumedMicrousd?: number;
+  cashCostMicrousd?: number | null;
+  quotaConsumedMicrousd?: number | null;
   estimatedCashCostMicrousd?: number;
   estimatedQuotaConsumedMicrousd?: number;
   costBasis?: CostBasis;
@@ -945,15 +947,17 @@ export interface GenerationHarnessCurrent {
 export interface CostRollup {
   scope: "workspace" | "course" | "material" | "page" | "job";
   scopeId: Identifier;
-  actualMicrousd: number;
+  actualMicrousd: number | null;
+  /** Known actual subtotal; actualMicrousd is null when any included actual is unknown. */
+  knownActualMicrousd?: number;
   estimatedMicrousd: number;
-  cashCostMicrousd: number;
-  quotaConsumedMicrousd: number;
+  cashCostMicrousd: number | null;
+  quotaConsumedMicrousd: number | null;
   estimatedCashCostMicrousd: number;
   estimatedQuotaConsumedMicrousd: number;
   callCount: number;
-  byStage: Array<{ stage: GenerationStage; actualMicrousd: number; calls: number }>;
-  byModel: Array<{ model: string; actualMicrousd: number; calls: number }>;
+  byStage: Array<{ stage: GenerationStage; actualMicrousd: number | null; knownActualMicrousd?: number; calls: number }>;
+  byModel: Array<{ model: string; actualMicrousd: number | null; knownActualMicrousd?: number; calls: number }>;
 }
 
 export interface AssessmentItem {

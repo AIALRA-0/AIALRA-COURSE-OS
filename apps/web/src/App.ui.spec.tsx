@@ -350,7 +350,8 @@ describe("saved lesson navigation", () => {
     expect(preview?.generatedReady).toBe(false);
     expect(preview?.unavailable).toBeUndefined();
     expect(preview?.notice).toContain("完整讲解尚未生成；已有摘要保留");
-    expect(preview?.notice).toContain("题库当前有 2 道可用题，尚差 2 道待补齐");
+    expect(preview?.notice).toContain("题库当前有 2 道可用题");
+    expect(preview?.notice).not.toContain("待补齐");
     expect(preview?.notice).toContain("无需重试读取，请进入制作模式");
     expect(source).toContain("canShowContent && contentReviewRequired && contentNotice");
     expect(readCurrentDraft).not.toHaveBeenCalled();

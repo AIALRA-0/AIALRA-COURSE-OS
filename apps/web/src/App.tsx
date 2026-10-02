@@ -121,10 +121,10 @@ function candidateNeedsReviewPreview(draft: LessonDraft, releaseId: string, page
     : hasFullExplanation
       ? "已有完整讲解正文可读；主要内容摘要尚未补齐。"
       : "完整讲解尚未生成；已有摘要保留。可先阅读已有摘要。";
-  const questionNotice = availableQuestions < 4
-    ? `题库当前有 ${availableQuestions} 道可用题，尚差 ${4 - availableQuestions} 道待补齐。`
-    : "";
-  const actionNotice = `无需重试读取，请进入制作模式${availableQuestions < 4 ? "补齐题目" : "检查候选内容"}并确认。`;
+  const questionNotice = availableQuestions > 0
+    ? `题库当前有 ${availableQuestions} 道可用题。`
+    : "题库当前没有可用题。";
+  const actionNotice = `无需重试读取，请进入制作模式${availableQuestions === 0 ? "准备题库" : "检查候选内容"}并确认。`;
   const title = readablePageTitle(draft.page.title);
   return {
     pageId,

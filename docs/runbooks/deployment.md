@@ -1,6 +1,6 @@
 # VPS deployment runbook
 
-Course OS 2.4 is deployed from an exact public `main` commit. Production hostnames, filesystem paths, authentication callbacks, network names, and secret values stay only in the private VPS environment.
+Course OS 2.4 is deployed from an exact public `main` commit. Production hostnames, filesystem paths, authentication callbacks, network names, and secret values stay in the runtime environment.
 
 ## Required private variables
 
@@ -10,20 +10,20 @@ Secret files are mounted from `COURSE_OS_SECRET_DIR`. Each secret must be readab
 
 ## Preflight
 
-1. Record the exact Git commit, `df`, all containers, images, volumes, and Compose configuration.
-2. Estimate the build's peak disk use and retain enough space for the current and rollback images; stop if this specific build would exhaust the disk.
-3. Verify the previous Compose file, runtime image, converter image, PostgreSQL backup, and ReadWeave snapshot are recoverable.
-4. Run the full local quality suite and a focused scan for secrets, private course files, server identifiers, and deployment evidence before publication.
+1. Record the exact Git commit, available disk, containers, images, volumes, and active Compose configuration.
+2. Estimate peak disk use for this build, the current images, and the images retained for rollback. Stop if available space cannot complete the operation.
+3. Verify that the previous Compose configuration and immutable images, PostgreSQL backup, ReadWeave authority backup, and Course OS data-volume backup are recoverable. Preserve the configured backup-retention schedule during deployment and rollback.
+4. From a clean checkout, use the lockfile install and synthetic startup documented in the repository README as the source-tree smoke check. Complete the required release checks for the candidate before building deployment images.
 
-Validate the template without starting services:
+Validate the template without starting services, using the operator's environment-file variable:
 
 ```sh
-docker compose --env-file /private/course-os.env -f deploy/vps/compose.yaml config --quiet
+docker compose --env-file "$COURSE_OS_ENV_FILE" -f deploy/vps/compose.yaml config --quiet
 ```
 
 ## ReadWeave reconciliation
 
-Rotate an invalid token atomically, restart only the Course OS API, and verify `/healthz` before any data operation. Run `pnpm promote:readweave` first; it is dry-run by default. Review every hash and only then run `pnpm promote:readweave -- --apply`.
+Rotate an invalid token atomically and restart only the Course OS API. Check `/healthz` for process liveness and `/readyz` for confirmed reading data before serving lessons. An empty installation can return healthy from `/healthz` while `/readyz` remains unavailable until an operator confirms existing authority data. Run `pnpm promote:readweave` first; it is dry-run by default. Review every hash and only then run `pnpm promote:readweave -- --apply`.
 
 The promotion command creates missing releases and drafts only. It stops on a same-ID/different-hash object and never deletes data or overwrites an existing draft. Never copy `readweave-course-store.json` over the remote authority.
 
@@ -31,7 +31,7 @@ The promotion command creates missing releases and drafts only. It stops on a sa
 
 ### Confirmed reading copies
 
-The normal catalog and lesson routes read a persistent, private directory under
+The normal catalog and lesson routes read a persistent confirmed replica under
 `COURSE_OS_DATA_DIR/confirmed-reading`. ReadWeave remains the content authority;
 these copies are never written back to it. Retain this directory across API
 restarts and include it in the existing data-volume backup.
@@ -50,11 +50,14 @@ metadata and native edits. A failed refresh retains confirmed readable content,
 but an explicit authority denial stops reading. Credential or authority changes
 select a new namespace and require confirmation before that namespace is ready.
 
-`/healthz` checks process liveness. `/readyz` separately checks whether a trusted
-reading catalog is available; `/api/v1/reading/status` reports its last confirmation
-and synchronization condition. No-data installations are not reading-ready even
-when settings and liveness work. A source outage can leave reading ready with
-degraded synchronization; it never means an unacknowledged answer was saved.
+`/healthz` checks process liveness. `/readyz` checks whether confirmed reading
+data is available; `/api/v1/reading/status` reports its last confirmation and
+synchronization condition. No-data installations are not reading-ready even
+when settings and liveness work. A transient source outage can leave the service
+reading-ready with degraded synchronization: previously confirmed content stays
+available read-only, while writes still require acknowledgment from ReadWeave.
+An explicit 401/403 authorization denial invalidates reading readiness and stops
+reading until access is restored and confirmation succeeds.
 
 Before switching production, verify readiness, an actual catalog, and an existing
 single-page lesson. Keep public authenticated browser acceptance separate from
@@ -69,8 +72,8 @@ registry even though application network access remains available.
 
 Build both images from the exact public commit and tag them `2.4.0-<short-sha>`. Put those tags in the private environment file, then apply Compose. API, web, worker, and converter must switch together.
 
-Keep the prior Compose file and images until internal health, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass.
+Keep the prior Compose file and images until internal health, reading readiness, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass. Keep all database, authority, and data-volume backups under the existing 7-daily, 4-weekly, and 6-monthly retention schedule; deployment and rollback do not shorten or reset retention.
 
 ## Rollback
 
-Restore the previous private environment and Compose file, then reapply the retained immutable images. Do not modify historical ReadWeave releases during application rollback. If health still fails, stop and restore from the verified database and ReadWeave backups rather than deleting or overwriting authority data.
+Restore the previous runtime environment and Compose file, then reapply the retained immutable images. Preserve every backup and rollback point under the existing retention schedule. Do not modify historical ReadWeave releases during application rollback. If readiness or confirmed reading still fails, stop and restore from the verified PostgreSQL, ReadWeave, and Course OS data-volume backups rather than deleting or overwriting authority data.
