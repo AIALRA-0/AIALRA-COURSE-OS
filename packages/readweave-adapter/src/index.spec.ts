@@ -1343,6 +1343,13 @@ describe("ReadWeave ETAPI adapter", () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
       const path = url.pathname.replace(/^\/etapi/, "");
+      if (path === "/notes" && url.searchParams.get("search")?.includes("courseOsWorkspaceId") && pageNoteId) {
+        const result = await remote.fetch(input, init);
+        const data = await result.json() as { results: unknown[] };
+        // Saved learner notes carry the workspace label too, but are not containers.
+        if (!url.searchParams.get("search")?.includes('#courseOsType="workspace"')) data.results.push({ noteId: "learner-attempt", type: "text" });
+        return Response.json(data);
+      }
       if (path === "/notes/_readweaveLinks") {
         nativeRequests.push("GET /notes/_readweaveLinks");
         return Response.json({ noteId: "_readweaveLinks", childNoteIds: ["link-1", "link-duplicate", "link-other", "link-unused-1", "link-unused-2", "link-unused-3", "link-unused-4"] });
@@ -2838,8 +2845,7 @@ class FakeEtapi {
     this.requests.push({ path, method: init?.method ?? "GET", headers: Object.fromEntries(new Headers(init?.headers).entries()), body: typeof init?.body === "string" ? init.body : undefined });
     if (path === "/notes" && (init?.method ?? "GET") === "GET") {
       const query = url.searchParams.get("search") ?? "";
-      const match = /^#([^=]+)=(.*)$/.exec(query);
-      const value = match?.[2]?.replace(/^"|"$/g, "");
+      const labels = query.split(/\s+AND\s+/).map((clause) => /^#([^=]+)=(.*)$/.exec(clause));
         const exactTitle = /^"([^"]+)"$/.exec(query)?.[1];
       const ancestor = url.searchParams.get("ancestorNoteId");
       const isDescendant = (noteId: string): boolean => {
@@ -2859,7 +2865,7 @@ class FakeEtapi {
         return false;
       };
         const results = [...this.notes.entries()].filter(([noteId, note]) => !note.deleted
-          && (match ? note.labels[match[1]!] === value : exactTitle ? note.title.includes(exactTitle) : false)
+          && (labels.every((match) => match) ? labels.every((match) => note.labels[match![1]!] === match![2]!.replace(/^"|"$/g, "")) : exactTitle ? note.title.includes(exactTitle) : false)
           && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
       return Response.json({ results });
     }

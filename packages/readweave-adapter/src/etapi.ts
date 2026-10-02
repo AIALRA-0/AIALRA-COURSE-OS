@@ -575,7 +575,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (workspaceId !== this.workspaceId || !/^[A-Za-z0-9:._-]{1,256}$/.test(pageId) || !/^[A-Za-z0-9:._-]{1,256}$/.test(workspaceId)) return { pageId, questions: [] };
     // The structured index is tens of megabytes. Search the verified workspace
     // and page labels instead of loading it for every learner-side QA refresh.
-    const workspaceQuery = new URLSearchParams({ search: `#courseOsWorkspaceId="${workspaceId}"`, ancestorNoteId: this.config.parentNoteId, ancestorDepth: "lt5", fastSearch: "true" });
+    const workspaceQuery = new URLSearchParams({ search: `#courseOsType="workspace" AND #courseOsWorkspaceId="${workspaceId}"`, ancestorNoteId: this.config.parentNoteId, ancestorDepth: "lt5", fastSearch: "true" });
     const workspaces = (await this.request<SearchResponse>(`/notes?${workspaceQuery.toString()}`)).results;
     if (workspaces.length !== 1) return { pageId, questions: [] };
     const pageQuery = new URLSearchParams({ search: `#courseOsObjectId="${pageId}"`, ancestorNoteId: workspaces[0]!.noteId, ancestorDepth: "lt12", fastSearch: "true" });
