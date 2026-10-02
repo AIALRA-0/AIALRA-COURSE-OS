@@ -1,0 +1,108 @@
+scripts/verify-reading-stability.ts
+  s_e8850ef125fb32::t_42ee542ebca087 520-525,527-542,556-560,563-566,635
+scripts/lib/verify-public.ts
+  s_e8850ef125fb32::t_497c7b4caf6670 12
+  s_e8850ef125fb32::t_93304654cb701f 7,9-10,15
+  s_e8850ef125fb32::t_27bd691ff8241f 8
+  s_e8850ef125fb32::t_5a9885ea1a1322 1-6,11,13-14,16-156
+apps/web/src/StudioWorkspace.tsx
+  s_e8850ef125fb32::t_aeab91d27c741f 315,351,354-357,366,369,373
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_f0d64ef17a8e22 2333,2336
+scripts/verify-public.ts
+  s_e8850ef125fb32::t_9d9d54f2a3fa82 67-68
+  s_e8850ef125fb32::t_2b64d0ef3d52ef 3,7,63,101,109,122,185,187
+  s_e8850ef125fb32::t_01bfdb68695f15 1-2,4-6,8-12,28-51,53,55-56,60-62,64-65,69-100,102-108,110-121,123-133,145-174,176,178-179,186,189-202,204-214,220-224,231,234
+  s_e8850ef125fb32::t_1701962abc141c 13-27,52,57,59,66,134-144,177,180-182,203,215-219,225-230
+docs/architecture.md
+  s_e8850ef125fb32::t_c014e52bb27301 7,9,19-20,24,26,30-31,35,47
+  s_e8850ef125fb32::t_3fb2c41aab7de1 3,5,11,15-18,21-23,25,27-29,32,36-39,41,43,45,49,51
+  s_e8850ef125fb32::t_3df4d09e103c39 10
+scripts/lib/verify-reading-stability.spec.ts
+  s_e8850ef125fb32::t_7c5f06ac6efbc2 1-52
+README.md
+  s_e8850ef125fb32::t_8147dff6c11999 28
+  s_e8850ef125fb32::t_3e23722f736bc3 16-17
+  s_e8850ef125fb32::t_b5f0338e4cdfe5 77
+  s_e8850ef125fb32::t_e66c6c801d9b5e 83-84
+  s_e8850ef125fb32::t_68f7946806963b 24
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_2011080392a980 353-354
+.github/workflows/ci.yml
+  s_e8850ef125fb32::t_e8a80e8fbebe91 15-27,48-50
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_1adf20bdd5d86d 733-735,741-742,950-952,954-955,959-960
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_1adf20bdd5d86d 273,3736,4723-4732,4734,4753,4759-4760,4763,4784-4791,4797,5535-5536,5538-5539,5543-5544,5548-5554,5557-5560
+  s_e8850ef125fb32::t_2011080392a980 875-887
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_aeab91d27c741f 172-173,176,178-179,184,186,188
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_e7b0caaa30ef2a 94-103
+  s_9f7652456e8616::t_ac4e4a91b5f41e 92-93
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_f0d64ef17a8e22 1489-1491,1513-1519
+docs/runbooks/deployment.md
+  s_e8850ef125fb32::t_8147dff6c11999 14
+  s_e8850ef125fb32::t_b5f0338e4cdfe5 3,13,15-16,18,21,26,34,53-60,75,79
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_2011080392a980 124-127
+docs/runbooks/local-development.md
+  s_e8850ef125fb32::t_5a483b1aa9ae65 13,37-40,53
+  s_e8850ef125fb32::t_171467b2a5540b 54
+scripts/lib/verify-course-state.ts
+  s_e8850ef125fb32::t_9b46a13ef1e44b 1-138
+scripts/verify-tree.ts
+  s_e8850ef125fb32::t_6147ca5501aa83 6-8,15,21-22,24-29,31,39,44,47,49-51,54
+  s_e8850ef125fb32::t_698fb48c31a7fc 32-36,40
+  s_e8850ef125fb32::t_7c5f06ac6efbc2 4
+scripts/lib/verify-course-state.spec.ts
+  s_e8850ef125fb32::t_5c6dfe4ec1b87b 33,85
+  s_e8850ef125fb32::t_7c5f06ac6efbc2 1-32,34-84,86-116
+scripts/verify-public.spec.ts
+  s_e8850ef125fb32::t_497c7b4caf6670 20
+  s_e8850ef125fb32::t_fca329281ddc0e 31-32
+  s_e8850ef125fb32::t_c145c78a85aaca 1-19,21-30,33-34,42-48,50,58-67
+  s_e8850ef125fb32::t_f8e2c25eabc594 49,51-57
+  s_e8850ef125fb32::t_93304654cb701f 35-41
+docs/runbooks/backup-restore.md
+  s_e8850ef125fb32::t_b5f0338e4cdfe5 5,16-20,31
+  s_e8850ef125fb32::t_8147dff6c11999 23-24
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_8089ee4627bad8 1937,1946,1949,1953,1956-1969
+  s_e8850ef125fb32::t_2011080392a980 2777-2781
+  s_e8850ef125fb32::t_e7b0caaa30ef2a 943-947,1933-1936,1938-1945,1947-1948,1950-1952,1954-1955
+  s_e8850ef125fb32::t_84e1752635cebc 1970
+scripts/verify-course.ts
+  s_e8850ef125fb32::t_af4375cbef04fd 3,5,7-13,16-24,27-41,43,45,47-50,57-115,117,123-124,127-132
+README.en.md
+  s_e8850ef125fb32::t_68f7946806963b 24
+  s_e8850ef125fb32::t_b5f0338e4cdfe5 71
+  s_e8850ef125fb32::t_8147dff6c11999 28
+  s_e8850ef125fb32::t_3e23722f736bc3 16-17
+  s_e8850ef125fb32::t_3f803467e37ca3 77-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bb317a3769b697fc7debeed9538d86adc6261946",
+  "prompts": {},
+  "sessions": {
+    "s_9f7652456e8616": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a0f-6460-7b73-bec4-9acbdcd78a39",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
