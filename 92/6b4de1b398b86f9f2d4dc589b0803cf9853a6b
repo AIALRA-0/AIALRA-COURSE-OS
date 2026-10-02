@@ -1,0 +1,26 @@
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_3cdf5aa887f8af 57-70
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_07a1318814a233 55,59
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_3cdf5aa887f8af 496-510,673-681
+  s_e8850ef125fb32::t_26f3e3ecef4005 421-439
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_07a1318814a233 551-557,614,617,623
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "926b4de1b398b86f9f2d4dc589b0803cf9853a6b",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
