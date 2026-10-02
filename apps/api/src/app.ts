@@ -438,7 +438,11 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const nodeId = request.params.id;
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const node = await resolveWorkspaceTreeNode(dependencies.readweave, nodeId, workspaceId);
+      const confirmedTree = dependencies.reading ? await dependencies.reading.replica.getTree(workspaceId) : undefined;
+      if (dependencies.reading && !confirmedTree) return sendError(request, response, 404, "TREE_NODE_NOT_FOUND", "没有找到这个课程树节点，请重新载入后再试", false);
+      const node = confirmedTree
+        ? findTreeNode([...confirmedTree.courses, ...(confirmedTree.rootMaterials ?? []), ...(confirmedTree.trash ? [confirmedTree.trash] : [])], nodeId)
+        : await resolveWorkspaceTreeNode(dependencies.readweave, nodeId, workspaceId);
       if (node && node.kind !== "course" && node.kind !== "material" && node.kind !== "trash") {
         return sendError(request, response, 409, "TREE_NODE_NOT_EDITABLE", "这个项目是只读版本，请从材料入口建立草稿", false);
       }
@@ -447,7 +451,13 @@ export function createApp(dependencies: AppDependencies): Express {
       // while opening the learning view.  Resolve that compatibility read
       // without allowing the hidden ID to become writable.
       const properties = node
-        ? (await dependencies.readweave.getTreeNodeProperties(nodeId) ?? await buildTreeNodeProperties(dependencies.readweave, nodeId, workspaceId))
+        ? {
+          nodeId: node.id, kind: node.kind, title: node.title, subtitle: node.subtitle,
+          revision: node.revision ?? 0, sortOrder: node.sortOrder, pageCount: node.pageCount,
+          readweaveNoteId: node.readweaveNoteId,
+          readweaveUrl: node.readweaveNoteId ? (await dependencies.readweave.getDeepLink(node.readweaveNoteId))?.url : undefined,
+          syncState: dependencies.reading?.status().synchronization ?? "connected"
+        }
         : await buildTreeNodeProperties(dependencies.readweave, nodeId, workspaceId);
       if (!properties) {
         if (isLikelyLegacyTreeNodeId(nodeId)) return sendError(request, response, 409, "TREE_NODE_STALE", "这个项目已经不在当前课程树中，请重新载入后再试", false);

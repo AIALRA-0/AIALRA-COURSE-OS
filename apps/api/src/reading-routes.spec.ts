@@ -73,6 +73,19 @@ async function harness() {
 }
 
 describe("replica-backed reading routes", () => {
+  it("reads container properties from the confirmed directory without rebuilding authority indexes", async () => {
+    const { app, authority } = await harness();
+    for (const method of ["listCourses", "listReleases", "listDrafts", "listTreeNodes", "listTrash", "getTreeNodeProperties"] as const) {
+      vi.spyOn(authority, method).mockRejectedValue(new Error("unrelated authority index must not be read"));
+    }
+    const result = await request(app).get("/api/v1/tree/nodes/course-a/properties")
+      .set("X-Workspace-Id", "personal").expect(200);
+    expect(result.body).toMatchObject({ nodeId: "course-a", kind: "course", title: "Course A" });
+    await request(app).get("/api/v1/tree/nodes/course-a/properties")
+      .set("X-Workspace-Id", "another-workspace").expect(404);
+    expect(authority.listDrafts).not.toHaveBeenCalled();
+    expect(authority.getTreeNodeProperties).not.toHaveBeenCalled();
+  });
   it.each(["READWEAVE_ETAPI_401", "READWEAVE_ETAPI_403", "READWEAVE_HTTP_401", "READWEAVE_HTTP_403"])(
     "reports %s as terminal access denial on the first confirmation and blocks previously readable copies",
     async (upstreamCode) => {
