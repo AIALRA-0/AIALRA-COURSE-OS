@@ -1,0 +1,21 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_858ca307402ba0 612-615,617
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_858ca307402ba0 1371-1376
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e058a5666d44ca0439fd3faab5eef3928b59590",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
