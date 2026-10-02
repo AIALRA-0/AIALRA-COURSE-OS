@@ -54,6 +54,20 @@ describe("generation error classification", () => {
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_STREAM_INTERRUPTED")))
       .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
   });
+  it.each(["502", "503", "524"])("classifies HTTP %s as a provider transport failure", status => {
+    const error = new Error(`MODEL_PROVIDER_FAILED:${status}`);
+    expect(classifyGenerationFailure(error)).toMatchObject({
+      category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE"
+    });
+    expect(shouldAutoRecoverGenerationFailure(error, 1, 0, 4)).toBe(true);
+  });
+  it("classifies quota-exceeded and disconnected-stream provider codes", () => {
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:quota_exceeded")))
+      .toMatchObject({ category: "provider", action: "switch_provider", code: "PROVIDER_QUOTA_EXHAUSTED" });
+    expect(shouldAutoRecoverGenerationFailure(new Error("MODEL_PROVIDER_FAILED:quota_exceeded"), 1, 0, 4)).toBe(false);
+    expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_STREAM_DISCONNECTED")))
+      .toMatchObject({ category: "provider", action: "retry_stage", code: "PROVIDER_NETWORK_FAILURE" });
+  });
   it("classifies a ReadWeave network failure as storage rather than model transport", () => {
     expect(classifyGenerationFailure(new Error("READWEAVE_ETAPI_NETWORK:fetch failed")))
       .toMatchObject({ category: "storage", action: "retry_readback", code: "READWEAVE_UNAVAILABLE" });

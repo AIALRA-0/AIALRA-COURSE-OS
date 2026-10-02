@@ -52,11 +52,11 @@ function normalizeCode(raw: string): string {
   if (teachingPhase) return teachingPhase;
   if (raw.includes("READWEAVE") && raw.includes("MISMATCH")) return "READWEAVE_HASH_MISMATCH";
   if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
-  if (raw.includes("INSUFFICIENT_BALANCE") || raw.includes("QUOTA_EXHAUSTED") || raw.includes("402")) return "PROVIDER_QUOTA_EXHAUSTED";
+  if (/INSUFFICIENT_BALANCE|QUOTA[_\s-]+(?:EXHAUSTED|EXCEEDED)|OUT[_\s-]+OF[_\s-]+CREDITS|402/iu.test(raw)) return "PROVIDER_QUOTA_EXHAUSTED";
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
   if (raw.includes("429") || raw.includes("RATE_LIMIT") || raw.includes("gateway_concurrency_limit")) return "PROVIDER_RATE_LIMIT";
   if (raw.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
-  if (raw.includes("MODEL_PROVIDER_STREAM_FINAL_EVENT_MISSING") || raw.includes("MODEL_PROVIDER_STREAM_INTERRUPTED")) return "PROVIDER_NETWORK_FAILURE";
+  if (/MODEL_PROVIDER_STREAM_(?:FINAL_EVENT_MISSING|INTERRUPTED|DISCONNECTED|CONNECTION_LOST)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|upstream_reasoning_only|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
   if (raw.includes("MODEL_PROVIDER_OUTPUT_LIMIT")) return "MODEL_OUTPUT_LIMIT";

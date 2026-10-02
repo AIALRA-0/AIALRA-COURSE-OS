@@ -545,10 +545,16 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       }
 
       const attemptUsage = normalizeProviderUsage(received.usage, received.usage?.cost ?? received.cost, attemptStarted);
-      addAttemptUsage(attemptUsage);
       const model = received.model || this.connection.model;
       const bodyError = providerBodyError(received, response.status);
       const providerFailed = !response.ok || Boolean(bodyError);
+      if (providerFailed && attemptUsage.inputTokens === 0 && attemptUsage.cachedInputTokens === 0
+        && attemptUsage.outputTokens === 0 && attemptUsage.apiEquivalentUsd === 0) {
+        // Error envelopes often emit total_cost: 0 as a missing-usage sentinel.
+        // Keep that distinct from a confirmed zero-cost successful request.
+        attemptUsage.apiEquivalentUsd = null;
+      }
+      addAttemptUsage(attemptUsage);
       if (providerFailed) {
         const code = providerFailureCode(response.status, bodyError);
         const retryable = retryableProviderResponse(response.status, bodyError);
@@ -605,15 +611,16 @@ const OPAQUE_HTTP_200_RELAY_BAD_REQUEST = "opaque_http_200_relay_bad_request";
 function providerFailureCode(status: number, error: ProviderResponseBody["error"]): string {
   if (status === 200 && error?.code === OPAQUE_HTTP_200_RELAY_BAD_REQUEST) return "MODEL_PROVIDER_OPAQUE_RELAY_REJECTION";
   const providerError = `${error?.code || ""} ${error?.message || ""}`;
-  if (status === 402 || /insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+exhausted|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) {
+  if (status === 402 || /insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+(?:exhausted|exceeded)|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) {
     return "MODEL_PROVIDER_INSUFFICIENT_BALANCE";
   }
+  if (status >= 500 && status <= 599) return `MODEL_PROVIDER_FAILED:${status}`;
   return `MODEL_PROVIDER_FAILED:${error?.code || status}`;
 }
 
 function retryableProviderResponse(status: number, error: ProviderResponseBody["error"]): boolean {
   const providerError = `${error?.code || ""} ${error?.message || ""}`;
-  if (/insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+exhausted|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) return false;
+  if (/insufficient[_\s-]+(?:balance|credit|quota)|quota[_\s-]+(?:exhausted|exceeded)|billing[_\s-]+(?:limit|required)|out of credits/i.test(providerError)) return false;
   if (/gateway_concurrency_limit/i.test(providerError)) return true;
   if (/\bupstream_reasoning_only\b/i.test(providerError)) return true;
   if (status === 401 || status === 403 || (status >= 400 && status < 500 && status !== 429)) return false;

@@ -418,6 +418,25 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.providerDiagnostic).toMatchObject({ status: "completed", rawOutputChars: 2 });
   });
 
+  it("reports a disconnected Responses stream as a provider error with unknown usage reserved", async () => {
+    const encoder = new TextEncoder();
+    const disconnected = () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(encoder.encode("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"));
+      controller.error(new Error("upstream stream disconnected"));
+    } }), { headers: { "Content-Type": "text/event-stream" } });
+    const fetchMock = vi.fn(async () => disconnected());
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses" });
+
+    const failure = await runPlannedStageForTest(client).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "MODEL_PROVIDER_STREAM_INTERRUPTED",
+      usage: { inputTokens: 0, outputTokens: 0, apiEquivalentUsd: null } });
+    expect((failure as ModelRouterGenerationError).usage.unreportedCostReserveUsd).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("retries a completed SSE response with an output_text item but no text and keeps unknown cost reserved", async () => {
     const encoder = new TextEncoder();
     const emptyCompleted = { type: "response.completed", sequence_number: 1, response: {
@@ -472,6 +491,21 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
     await expect(client.generateTeachingPackage(providerInput("relay-plain-text-502", true)))
       .rejects.toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_FAILED:502" });
+  });
+
+  it("keeps a 524 provider error and an unknown zero-cost receipt explicit", async () => {
+    const upstreamFailure = () => Response.json({ error: { code: "content_missing" }, usage: { total_cost: 0 } }, { status: 524 });
+    const fetchMock = vi.fn(async () => upstreamFailure());
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses", billingMode: "metered" });
+    const failure = await client.generateTeachingPackage(providerInput("upstream-524-zero-usage"))
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ provider: "kuafu", code: "MODEL_PROVIDER_FAILED:524",
+      usage: { inputTokens: 0, outputTokens: 0, apiEquivalentUsd: null } });
+    expect((failure as ModelRouterGenerationError).usage.unreportedCostReserveUsd).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("retries a relay reasoning-only failure once within the same teaching stage", async () => {
@@ -635,6 +669,15 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       .generateTeachingPackage(providerInput("quota-no-retry")).catch((error: unknown) => error);
     expect(quotaFailure).toMatchObject({ code: "MODEL_PROVIDER_INSUFFICIENT_BALANCE" });
     expect(quotaFetch).toHaveBeenCalledTimes(1);
+
+    const quotaVariantFetch = vi.fn(async () => Response.json({ error: { code: "quota_exceeded" }, usage: { total_cost: 0 } }, { status: 429 }));
+    vi.stubGlobal("fetch", quotaVariantFetch);
+    const quotaVariantFailure = await new HttpProviderTeachingClient({ providerId: "deepseek", baseUrl: "https://deepseek.test",
+      apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" })
+      .generateTeachingPackage(providerInput("quota-exceeded-no-retry")).catch((error: unknown) => error);
+    expect(quotaVariantFailure).toMatchObject({ code: "MODEL_PROVIDER_INSUFFICIENT_BALANCE",
+      usage: { apiEquivalentUsd: null } });
+    expect(quotaVariantFetch).toHaveBeenCalledTimes(1);
 
     const phases: string[] = [];
     const formatFetch = vi.fn(async (_url: string, init?: RequestInit) => {
