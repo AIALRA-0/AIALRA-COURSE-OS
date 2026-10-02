@@ -1368,7 +1368,12 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
     const readRequests = remote.requests.slice(requestsBefore);
     expect(readRequests.filter((item) => item.path === "/notes")).toHaveLength(2);
-    expect(linkSearchParams?.get("search")).toContain(`note.content *=* "${pageNoteId}"`);
+    const linkSearch = linkSearchParams?.get("search") ?? "";
+    expect(linkSearch).toMatch(/^note\.content %= /);
+    expect(linkSearch).not.toContain(" OR ");
+    const linkPattern = new RegExp(JSON.parse(linkSearch.slice("note.content %= ".length)));
+    expect(linkPattern.test(JSON.stringify({ articleId: pageNoteId }))).toBe(true);
+    expect(linkPattern.test(JSON.stringify({ articleId: "another-page", displayBody: pageNoteId }))).toBe(false);
     expect(linkSearchParams?.get("ancestorNoteId")).toBe("_readweaveLinks");
     expect(linkSearchParams?.get("ancestorDepth")).toBe("eq1");
     expect(nativeRequests).not.toContain("GET /notes/_readweaveLinks");

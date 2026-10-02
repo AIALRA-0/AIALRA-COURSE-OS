@@ -609,9 +609,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string
   }>> {
     if (articleIds.size === 0) return [];
-    const clauses = [...articleIds].map((id) => `note.content *=* "${id.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`);
+    // Each OR content clause scans note bodies upstream. Match articleId once
+    // for the whole page family, then verify the decoded link identity below.
+    const alternatives = [...articleIds].map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    const pattern = `"articleId"\\s*:\\s*"(?:${alternatives})"`;
     const query = new URLSearchParams({
-      search: clauses.join(" OR "),
+      search: `note.content %= ${JSON.stringify(pattern)}`,
       ancestorNoteId: "_readweaveLinks",
       ancestorDepth: "eq1"
     });
