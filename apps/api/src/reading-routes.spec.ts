@@ -102,6 +102,8 @@ describe("replica-backed reading routes", () => {
     const failed = await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a&confirm=1")
       .set("X-Workspace-Id", "personal").expect(503);
     expect(failed.body.error).toMatchObject({ code: "READWEAVE_UNAVAILABLE", retryable: true });
+    expect(failed.body.error.message).toContain("无法确认操作结果");
+    expect(failed.body.error.message).not.toContain("尚未保存");
     expect(reading.status()).toMatchObject({ accessDenied: false, ready: true, synchronization: "degraded" });
     const local = await request(app).get("/api/v1/pages/page-a/draft?view=snapshot&releaseId=release-a")
       .set("X-Workspace-Id", "personal").expect(200);
