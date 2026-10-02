@@ -164,7 +164,8 @@ async function main(): Promise<void> {
       });
       cycle.wrongReleaseStatus = wrongRelease.status;
       cycle.wrongReleaseMs = wrongRelease.elapsedMs;
-      assertStatus(wrongRelease, 409, "wrong release version page");
+      assertStatus(wrongRelease, 404, "wrong release version page");
+      assert(wrongRelease.body.error?.code === "PAGE_NOT_FOUND", "wrong release exposed a page state");
 
       const removedIndexes = await requestJson(baseUrl, `/api/v1/releases?course_id=${encodeURIComponent(removedCourseId)}`, {
         headers: workspaceHeaders()
@@ -178,7 +179,8 @@ async function main(): Promise<void> {
       });
       cycle.deletedPageStatus = removedPage.status;
       cycle.deletedPageMs = removedPage.elapsedMs;
-      assertStatus(removedPage, 409, "tombstoned page");
+      assertStatus(removedPage, 404, "tombstoned page");
+      assert(removedPage.body.error?.code === "PAGE_NOT_FOUND", "deleted page exposed a page state");
 
       const recycledIndexes = await requestJson(baseUrl, `/api/v1/releases?course_id=${encodeURIComponent(recycledCourseId)}`, {
         headers: workspaceHeaders()
@@ -191,7 +193,8 @@ async function main(): Promise<void> {
       });
       cycle.recycledPageStatus = recycledPage.status;
       cycle.recycledPageMs = recycledPage.elapsedMs;
-      assertStatus(recycledPage, 409, "recycled tombstoned page");
+      assertStatus(recycledPage, 404, "recycled tombstoned page");
+      assert(recycledPage.body.error?.code === "PAGE_NOT_FOUND", "recycled page exposed a deleted page state");
 
       const session = await requestJson(baseUrl, "/api/v1/sessions", {
         method: "POST",
