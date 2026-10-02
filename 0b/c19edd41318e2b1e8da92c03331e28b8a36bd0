@@ -1,0 +1,33 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_92653415072a36 612-630
+apps/web/src/question-preview.spec.ts
+  s_e8850ef125fb32::t_51badedc15a7b9 3,21-28
+apps/web/src/question-preview.ts
+  s_e8850ef125fb32::t_51badedc15a7b9 6-9
+README.md
+  s_e8850ef125fb32::t_38c2c2728d21eb 24
+  s_e8850ef125fb32::t_daebd0c4cabbbd 83
+README.en.md
+  s_e8850ef125fb32::t_38c2c2728d21eb 24
+  s_e8850ef125fb32::t_d2de449ecefa4f 77
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_96ebf5e708c3da 1340-1342,1346-1348,1352-1359,1380-1381,1385-1386
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_357bcebca5f371 7,411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0bc19edd41318e2b1e8da92c03331e28b8a36bd0",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
