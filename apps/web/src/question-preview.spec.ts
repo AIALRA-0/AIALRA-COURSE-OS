@@ -1,6 +1,6 @@
 import type { QuestionBankItem } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { createQuestionBatchState, isPracticeReadyQuestion, parseQuestionBatchState, previewQuestionBank, questionAnswerKey, questionKindLabel, questionOptionLabel, sameQuestionPreview, uniquePracticeQuestions, type QuestionBatchState } from "./question-preview.js";
+import { createQuestionBatchState, isPracticeReadyQuestion, isQuestionAnswerSaved, parseQuestionBatchState, previewQuestionBank, questionAnswerKey, questionKindLabel, questionOptionLabel, sameQuestionPreview, uniquePracticeQuestions, type QuestionBatchState } from "./question-preview.js";
 
 const item = (id: string, kind: QuestionBankItem["kind"], status: QuestionBankItem["status"] = "approved") => ({
   id,
@@ -18,6 +18,14 @@ const item = (id: string, kind: QuestionBankItem["kind"], status: QuestionBankIt
 }) as QuestionBankItem;
 
 describe("current-page question preview", () => {
+  it("never reports an empty or unconfirmed answer as saved", () => {
+    expect(isQuestionAnswerSaved(undefined, undefined)).toBe(false);
+    expect(isQuestionAnswerSaved("", "")).toBe(false);
+    expect(isQuestionAnswerSaved("   ", undefined)).toBe(false);
+    expect(isQuestionAnswerSaved("A", undefined)).toBe(false);
+    expect(isQuestionAnswerSaved("A", "B")).toBe(false);
+    expect(isQuestionAnswerSaved(" A ", "A")).toBe(true);
+  });
   it("matches the server seed order, prefers two single-choice questions and one short answer, and honors the batch size", async () => {
     const bank = [item("c1", "comprehension"), item("m2", "multiple_choice"), item("c2", "comprehension"), item("m1", "multiple_choice"), item("draft", "comprehension", "draft")];
     const seed = "session-1:page-1:2026-09-29";

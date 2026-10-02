@@ -1337,17 +1337,26 @@ describe("ReadWeave ETAPI adapter", () => {
     const remote = new FakeEtapi();
     let pageNoteId = "";
     const nativeRequests: string[] = [];
-    let linkSearchParams: URLSearchParams | undefined;
+    let linkReads = 0;
+    let peakLinkReads = 0;
+    let failLinkReads = false;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
       const path = url.pathname.replace(/^\/etapi/, "");
-      if (path === "/notes" && url.searchParams.get("ancestorNoteId") === "_readweaveLinks") {
-        linkSearchParams = url.searchParams;
-        nativeRequests.push(`${init?.method ?? "GET"} /notes?${url.searchParams.toString()}`);
-        return Response.json({ results: ["link-1", "link-duplicate", "link-other"].map(noteId => ({ noteId })) });
+      if (path === "/notes/_readweaveLinks") {
+        nativeRequests.push("GET /notes/_readweaveLinks");
+        return Response.json({ noteId: "_readweaveLinks", childNoteIds: ["link-1", "link-duplicate", "link-other", "link-unused-1", "link-unused-2", "link-unused-3", "link-unused-4"] });
       }
       if (path.startsWith("/notes/link-") || path.startsWith("/notes/object-")) {
         nativeRequests.push(`${init?.method ?? "GET"} ${path}`);
+        if (path.startsWith("/notes/link-") && path.endsWith("/content")) {
+          linkReads += 1;
+          peakLinkReads = Math.max(peakLinkReads, linkReads);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          linkReads -= 1;
+          if (failLinkReads) return new Response("unavailable", { status: 503 });
+        }
+        if (path.startsWith("/notes/link-unused-")) return Response.json({ articleId: "another-page", objectId: "object-other" });
         if (path === "/notes/link-1/content" || path === "/notes/link-duplicate/content") return Response.json({ linkId: path.includes("duplicate") ? "link-duplicate" : "link-1", articleId: pageNoteId, objectId: "object-1", contentType: "problem" });
         if (path === "/notes/link-other/content") return Response.json({ linkId: "link-other", articleId: "another-page", objectId: "object-other", contentType: "problem", displayBody: pageNoteId });
         if (path === "/notes/object-1/content") return Response.json({ objectId: "object-1", kind: "question", contentType: "problem", title: "为什么要保留状态？", body: "<p>因为下一步需要它</p>" });
@@ -1368,18 +1377,13 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
     const readRequests = remote.requests.slice(requestsBefore);
     expect(readRequests.filter((item) => item.path === "/notes")).toHaveLength(2);
-    const linkSearch = linkSearchParams?.get("search") ?? "";
-    expect(linkSearch).toMatch(/^note\.content %= /);
-    expect(linkSearch).not.toContain(" OR ");
-    const linkPattern = new RegExp(JSON.parse(linkSearch.slice("note.content %= ".length)));
-    expect(linkPattern.test(JSON.stringify({ articleId: pageNoteId }))).toBe(true);
-    expect(linkPattern.test(JSON.stringify({ articleId: "another-page", displayBody: pageNoteId }))).toBe(false);
-    expect(linkSearchParams?.get("ancestorNoteId")).toBe("_readweaveLinks");
-    expect(linkSearchParams?.get("ancestorDepth")).toBe("eq1");
-    expect(nativeRequests).not.toContain("GET /notes/_readweaveLinks");
+    expect(nativeRequests.filter((item) => item === "GET /notes/_readweaveLinks")).toHaveLength(1);
+    expect(peakLinkReads).toBe(4);
     expect(nativeRequests).not.toContain("GET /notes/object-other/content");
     expect(readRequests.some((item) => item.path.startsWith("/notes/") && item.path.endsWith("/content") && !item.path.includes("link-") && !item.path.includes("object-"))).toBe(false);
     expect(nativeRequests.every((item) => item.startsWith("GET "))).toBe(true);
+    failLinkReads = true;
+    await expect(withReadBudget({ timeoutMs: 80 }, () => api.listNativePageQuestions("page-1"))).rejects.toThrow();
   });
   it("keeps snapshots cached while live reads reconcile same-instance v2 edits before cache expiry", async () => {
     const remote = new FakeEtapi();

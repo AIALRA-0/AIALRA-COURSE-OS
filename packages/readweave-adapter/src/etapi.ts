@@ -609,26 +609,25 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string
   }>> {
     if (articleIds.size === 0) return [];
-    // Each OR content clause scans note bodies upstream. Match articleId once
-    // for the whole page family, then verify the decoded link identity below.
-    const alternatives = [...articleIds].map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-    const pattern = `"articleId"\\s*:\\s*"(?:${alternatives})"`;
-    const query = new URLSearchParams({
-      search: `note.content %= ${JSON.stringify(pattern)}`,
-      ancestorNoteId: "_readweaveLinks",
-      ancestorDepth: "eq1"
-    });
-    const matches = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results;
-    const articleIdSet = articleIds;
-    const links = await Promise.all(matches.map(async (note) => {
-      try {
-        const value = JSON.parse(await this.getContent(note.noteId)) as Record<string, unknown>;
-        if (value.linkId !== note.noteId || typeof value.articleId !== "string"
-          || !articleIdSet.has(value.articleId) || typeof value.objectId !== "string") return undefined;
-        return value as { articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string };
-      } catch { return undefined; }
-    }));
-    return links.filter((item): item is NonNullable<typeof item> => !!item);
+    // Body search scans unrelated notes upstream before applying ancestry.
+    // Read only the existing link directory, with bounded concurrent reads.
+    const root = await this.getNote("_readweaveLinks");
+    const ids = [...new Set(root.childNoteIds ?? [])];
+    const links: Array<{ articleId: string; objectId: string; kind?: string; contentType?: string; displayTitle?: string; displayBody?: string }> = [];
+    for (let offset = 0; offset < ids.length; offset += 4) {
+      const batch = await Promise.all(ids.slice(offset, offset + 4).map(async (noteId) => {
+        // A failed read must remain an error, not look like an empty question list.
+        const content = await this.getContent(noteId);
+        try {
+          const value = JSON.parse(content) as Record<string, unknown>;
+          if (value.linkId !== noteId || typeof value.articleId !== "string"
+            || !articleIds.has(value.articleId) || typeof value.objectId !== "string") return undefined;
+          return value as typeof links[number];
+        } catch { return undefined; }
+      }));
+      links.push(...batch.filter((item): item is NonNullable<typeof item> => !!item));
+    }
+    return links;
   }
 
   async listQuestionAttempts(pageId?: string): Promise<QuestionAttempt[]> {

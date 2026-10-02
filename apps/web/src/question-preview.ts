@@ -3,6 +3,10 @@ import type { QuestionBankItem, QuestionKind } from "@course-os/contracts";
 export const QUESTION_BATCH_SIZES = [2, 3, 5] as const;
 export type QuestionBatchSize = typeof QUESTION_BATCH_SIZES[number];
 
+export function isQuestionAnswerSaved(answer: string | undefined, savedAnswer: string | undefined): boolean {
+  return Boolean(answer?.trim()) && savedAnswer !== undefined && answer!.trim() === savedAnswer;
+}
+
 export interface QuestionBatchState {
   batchIndex: number;
   activeSeed: string;

@@ -21,7 +21,7 @@ This repository contains Apache-2.0 source code and synthetic test material only
 - ReadWeave remains the semantic authority. Writes carry `Idempotency-Key`, `X-Actor`, `X-Workspace-Id`, `X-Request-Id`, and `X-Schema-Version`.
 - ReadWeave failures become controlled browser errors without exposing tokens, raw upstream responses, or server details.
 
-The user has frozen the teaching-quality prompts and engineering-candidate waiting rules. Current status: engineering baseline candidate `engineering-baseline-candidate-20261002`, authorization pending; this is not a stability conclusion. After authorization and evidence are available, Main will record final coverage and generic known limitations.
+Teaching-quality prompts remain frozen at the user's request. Engineering fixes and sanitized publication are authorized. An engineering candidate tag fixes a development baseline; it does not certify teaching quality or authenticated public-browser acceptance. The commit, deployed revision, and verified coverage are recorded separately.
 
 ## 2. Quick start
 
@@ -74,7 +74,7 @@ Estimate peak disk use for this build, current images, and retained rollback ima
 
 The 2.4 closeout does not add multi-agent classrooms, voice, generated teaching decks, a paper track, public multi-user operation, LMS integration, or new infrastructure.
 
-The current engineering candidate is `engineering-baseline-candidate-20261002`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
+The current engineering candidate is `engineering-baseline-candidate-20261002-r2`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
 
 ## 7. License
 
