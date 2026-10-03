@@ -878,6 +878,91 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.countNotesByLabel("courseOsCostIndex", "personal")).toBe(1);
   });
 
+  it("reads scoped costs after cold reopen without unrelated page or activity bodies and retains ledger history", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    target.pages.push({ ...structuredClone(target.pages[0]!), id: "page-2", pageNumber: 2, title: "second target page" });
+    target.pageIds.push("page-2");
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    const unrelated = releaseWithPage();
+    unrelated.id = "unrelated-cost-release";
+    unrelated.pages[0]!.id = "unrelated-cost-page";
+    unrelated.pages[0]!.title = "unrelated cost page";
+    unrelated.pageIds = ["unrelated-cost-page"];
+    await api.registerDraftSource(unrelated, { ...context, idempotencyKey: "unrelated-cost-source" });
+    const first = costEntryFor(target, "scoped-first");
+    const second = { ...costEntryFor(target, "scoped-second"), pageId: "page-2" };
+    const other = { ...costEntryFor(unrelated, "scoped-other"), pageId: "unrelated-cost-page" };
+    const firstContext = { ...context, idempotencyKey: "scoped-first-cost" };
+    await api.appendCostEntry(first, firstContext);
+    await api.appendCostEntry(second, { ...context, idempotencyKey: "scoped-second-cost" });
+    await api.appendCostEntry(other, { ...context, idempotencyKey: "scoped-other-cost" });
+    const firstRecordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const beforeReplay = remote.contentWriteCount(firstRecordId);
+    await expect(api.appendCostEntry(first, firstContext)).resolves.toEqual(first);
+    expect(remote.contentWriteCount(firstRecordId)).toBe(beforeReplay);
+    await api.saveQuestionSelection({ id: "scoped-cost-selection", sessionId: "synthetic-cost-session",
+      courseReleaseId: target.id, pageId: "page-1", seed: "synthetic", questionIds: [], createdAt: new Date().toISOString() },
+      { ...context, idempotencyKey: "scoped-cost-selection" });
+    const legacy = { ...costEntryFor(target, "scoped-legacy"), pageId: "retired-cost-page" };
+    const compact = costEntryFor(target, "scoped-compact");
+    const orphan = { ...costEntryFor(target, "scoped-orphan"), materialVersionId: "unknown-cost-material" };
+    const indexId = remote.seedCostIndex([compact, { ...first, actualMicrousd: 5 }, orphan]);
+    const main = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      costEntries: GenerationCostEntry[]; projections: { costIndexNoteId?: string };
+    };
+    main.costEntries = [legacy, { ...first, actualMicrousd: 3 }];
+    main.projections.costIndexNoteId = indexId;
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(main));
+    const unrelatedRecordId = remote.noteIdByTitle("Course OS draft record · unrelated-cost-page");
+    const activityId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const sorted = (entries: GenerationCostEntry[]) => entries.sort((left, right) => left.id.localeCompare(right.id));
+    for (const filters of [
+      { pageId: "page-1", jobId: first.jobId, materialVersionId: target.id, courseId: target.courseId },
+      { materialVersionId: target.id }
+    ]) {
+      remote.requests.length = 0;
+      const reopened = new EtapiReadWeaveCourseApi(config);
+      const expected = filters.pageId ? [first] : [first, second, legacy, compact];
+      expect(sorted(await reopened.listCostEntries(filters))).toEqual(sorted(expected));
+      const contentReads = remote.requests.filter(item => item.method === "GET" && item.path.endsWith("/content")).map(item => item.path);
+      expect(contentReads).toContain(`/notes/${firstRecordId}/content`);
+      expect(contentReads).not.toContain(`/notes/${unrelatedRecordId}/content`);
+      expect(contentReads).not.toContain(`/notes/${activityId}/content`);
+      await expect(reopened.listCostEntries({ ...filters, courseId: "other-course" })).resolves.toEqual([]);
+    }
+    remote.requests.length = 0;
+    expect(await new EtapiReadWeaveCourseApi(config).listCostEntries({ materialVersionId: orphan.materialVersionId })).toEqual([orphan]);
+    expect(remote.requests.some(item => item.method === "GET" && item.path === `/notes/${unrelatedRecordId}/content`)).toBe(true);
+    remote.requests.length = 0;
+    expect(await new EtapiReadWeaveCourseApi(config).listCostEntries({ jobId: other.jobId })).toEqual([other]);
+    expect(remote.requests.some(item => item.method === "GET" && item.path === `/notes/${firstRecordId}/content`)).toBe(true);
+    expect(sorted(await new EtapiReadWeaveCourseApi(config).listCostEntries())).toEqual(sorted([first, second, other, legacy, compact, orphan]));
+  });
+
+  it("rejects scoped cost reads when the target durable record fails instead of returning an empty ledger", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    await api.appendCostEntry(costEntryFor(target, "failed-target-cost"), { ...context, idempotencyKey: "failed-target-cost" });
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "GET" && url.pathname.endsWith(`/notes/${recordId}/content`)) {
+        return new Response("injected target record failure", { status: 400 });
+      }
+      return remote.fetch(input, init);
+    };
+    await expect(new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ pageId: "page-1" }))
+      .rejects.toThrow("READWEAVE_ETAPI_400");
+    await expect(new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id }))
+      .rejects.toThrow("READWEAVE_ETAPI_400");
+  });
+
   it("repairs a failed quality projection on replay without duplicating the cost", async () => {
     const remote = new FakeEtapi();
     let failProjectionLookup = true;

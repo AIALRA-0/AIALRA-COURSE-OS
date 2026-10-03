@@ -827,15 +827,33 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}): Promise<GenerationCostEntry[]> {
-    const state = await this.readState();
+    const reference = filters.pageId || filters.materialVersionId
+      ? await this.readStateReference(false, false) : undefined;
+    const release = filters.materialVersionId
+      ? reference?.releases.find(item => item.id === filters.materialVersionId) : undefined;
+    const scoped = Boolean(reference && (filters.pageId || release) && (!filters.materialVersionId || release));
+    const state = scoped ? reference! : await this.readState();
     const costIndex = state.projections.costIndexNoteId
       ? await this.readCostIndex(state.projections.costIndexNoteId)
       : undefined;
-    return mergeCostEntries(costIndex?.costEntries, state.costEntries).filter((item) =>
+    let costs = state.costEntries;
+    if (scoped) {
+      const pageIds = filters.pageId ? [filters.pageId] : [...new Set([
+        ...release!.pageIds, ...release!.pages.map(page => page.id),
+        ...state.drafts.filter(draft => draft.sourceReleaseId === release!.id).map(draft => draft.pageId),
+        ...mergeCostEntries(costIndex?.costEntries, state.costEntries)
+          .filter(cost => cost.materialVersionId === release!.id && cost.pageId).map(cost => cost.pageId!)
+      ])];
+      for (const pageId of pageIds) {
+        const located = await this.findDraftPageRecord(pageId);
+        costs = mergeCostEntries(costs, located?.record.costEntries);
+      }
+    }
+    return structuredClone(mergeCostEntries(costIndex?.costEntries, costs).filter((item) =>
       (!filters.courseId || item.courseId === filters.courseId) &&
       (!filters.materialVersionId || item.materialVersionId === filters.materialVersionId) &&
       (!filters.pageId || item.pageId === filters.pageId) &&
-      (!filters.jobId || item.jobId === filters.jobId));
+      (!filters.jobId || item.jobId === filters.jobId)));
   }
 
   async saveAttempt(attempt: AssessmentAttempt, mastery: MasteryRecord, context: IdempotentWriteContext): Promise<AssessmentAttempt> {
