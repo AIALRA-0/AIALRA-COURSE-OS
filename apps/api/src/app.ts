@@ -421,8 +421,12 @@ export function createApp(dependencies: AppDependencies): Express {
       return {
         active: state.jobs.some(job => job.workspaceId === workspaceId && ["queued", "running", "pending_sync", "paused", "awaiting_review"].includes(job.state)
           && (scope.releaseIds.includes(job.materialVersionId) || job.pageIds.some(id => scope.pageIds.includes(id))))
-          || state.imports.some(record => record.workspaceId === workspaceId && activeImports.get(dependencies.operations)?.has(record.id)
-            && Boolean(record.courseId && scope.courseIds.includes(record.courseId))),
+          || state.imports.some(record => record.workspaceId === workspaceId
+            && (["accepted", "processing", "syncing"].includes(record.state) || activeImports.get(dependencies.operations)?.has(record.id))
+            && Boolean((record.courseId && scope.courseIds.includes(record.courseId))
+              || (record.parentNodeId && scope.nodeIds.includes(record.parentNodeId))
+              || (record.incrementalFromMaterialVersionId && scope.releaseIds.includes(record.incrementalFromMaterialVersionId))
+              || (record.materialVersionId && scope.releaseIds.includes(record.materialVersionId)))),
         answers: Object.values(state.selfRetellings).some(answer => answer.workspaceId === workspaceId && scope.pageIds.includes(answer.pageId))
           || state.sessions.some(session => scope.releaseIds.includes(session.courseReleaseId))
       };

@@ -72,6 +72,52 @@ async function seededReplicaDraftApp() {
 }
 
 describe("Course OS API", () => {
+  it.each(["accepted", "processing", "syncing"] as const)("protects %s imports with an empty worker map during permanent material deletion", async importState => {
+    for (const reference of ["parentNodeId", "incrementalFromMaterialVersionId", "materialVersionId"] as const) {
+      const { app, operations, readweave, release } = await seededApp();
+      const materialId = `material:${release.courseId}:${release.moduleId}`;
+      const trashed = (await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}:trash`)
+        .set("Idempotency-Key", "trash-own-material").expect(201)).body;
+      // Seed persistent work only: no converter is started and activeImports has no worker entry.
+      const record: ImportRecord = { id: `own-pending-${reference}`, workspaceId: "personal", courseId: release.courseId,
+        originalName: "synthetic.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8, sha256: "synthetic", casPath: "/synthetic/quarantine",
+        source: "user_upload", license: "private", sensitivity: "private", state: importState, autoGenerate: false, issues: [], createdAt: "2026-10-03T00:00:00Z",
+        [reference]: reference === "parentNodeId" ? materialId : release.id };
+      await operations.mutate(state => { state.imports.push(record); });
+      const deletion = vi.spyOn(readweave, "permanentlyDeleteTrash");
+      const bulk = await request(app).post("/api/v1/trash:empty").set("Idempotency-Key", "empty-own-trash")
+        .send({ items: [{ id: trashed.id, deletedAt: trashed.deletedAt }] }).expect(200);
+      expect(bulk.body).toMatchObject({ cleared: [], failed: [], skipped: [{ id: trashed.id, reason: "READWEAVE_TRASH_ACTIVITY_PROTECTED" }] });
+      const single = await request(app).delete(`/api/v1/trash/${encodeURIComponent(trashed.id)}`)
+        .set("Idempotency-Key", "delete-own-trash").set("X-Trash-Deleted-At", trashed.deletedAt);
+      expect(single.status).not.toBe(204);
+      expect(single.body.error).toBeDefined();
+      await expect(deletion.mock.results.at(-1)!.value).rejects.toThrow("READWEAVE_TRASH_ACTIVITY_PROTECTED");
+      expect(await readweave.getRelease(release.id)).toEqual(release);
+      expect((await readweave.listTrash()).find(item => item.id === trashed.id)?.restoreAvailable).toBe(true);
+      expect((await operations.read()).imports).toEqual([record]);
+    }
+  });
+
+  it.each([
+    { workspaceId: "personal", state: "ready" as const },
+    { workspaceId: "other", state: "processing" as const }
+  ])("does not block permanent deletion for an inactive or other-workspace import ($workspaceId/$state)", async importScope => {
+    const { app, operations, readweave, release } = await seededApp();
+    const materialId = `material:${release.courseId}:${release.moduleId}`;
+    const trashed = (await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}:trash`)
+      .set("Idempotency-Key", "trash-own-material").expect(201)).body;
+    const record: ImportRecord = { id: "unprotected-import", ...importScope, courseId: release.courseId, parentNodeId: materialId,
+      incrementalFromMaterialVersionId: release.id, materialVersionId: release.id,
+      originalName: "synthetic.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8, sha256: "synthetic", casPath: "/synthetic/quarantine",
+      source: "user_upload", license: "private", sensitivity: "private", autoGenerate: false, issues: [], createdAt: "2026-10-03T00:00:00Z" };
+    await operations.mutate(state => { state.imports.push(record); });
+    await request(app).delete(`/api/v1/trash/${encodeURIComponent(trashed.id)}`)
+      .set("Idempotency-Key", "delete-own-trash").set("X-Trash-Deleted-At", trashed.deletedAt).expect(204);
+    expect(await readweave.getRelease(release.id)).toBeUndefined();
+    expect((await operations.read()).imports).toEqual([record]);
+  });
+
   it("clears selected terminal failures persistently without deleting evidence or request associations", async () => {
     const { app, operations, readweave, release } = await seededApp();
     const item: ImportRecord = { id: "failed-record", workspaceId: "personal", originalName: "broken.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8,
