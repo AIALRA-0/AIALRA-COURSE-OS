@@ -166,6 +166,10 @@ export class OperationalStore {
     };
   }
 
+  async readGenerationJob(id: string): Promise<GenerationJob | undefined> {
+    return (await this.readTaskIndex()).jobs.find(job => job.id === id);
+  }
+
   /** Read only one workspace plan, its jobs, and events used by its detail response. */
   async readGenerationPlanDetail(id: string, workspaceId: string): Promise<GenerationPlanDetailRead> {
     let value: Partial<OperationalState>;
@@ -382,7 +386,8 @@ export class PostgresOperationalStore extends OperationalStore {
 
   override async readTaskIndex(): Promise<TaskIndex> {
     const result = await this.readQuery<TaskIndex & { relationalJobs: GenerationJob[] }>(
-      `SELECT state->'imports' AS imports, state->'jobs' AS jobs,
+      `WITH source AS MATERIALIZED (SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1)
+       SELECT state->'imports' AS imports, state->'jobs' AS jobs,
         state->'generationPlans' AS "generationPlans",
         (SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
          FROM jsonb_each(CASE WHEN jsonb_typeof(state->'idempotency') = 'object'
@@ -390,7 +395,7 @@ export class PostgresOperationalStore extends OperationalStore {
          WHERE entry.key LIKE 'course-os:task-dismissal:v1:%'
            AND entry.value->>'kind' = 'taskdismissal') AS "taskDismissals",
         COALESCE((SELECT jsonb_agg(job_data ORDER BY created_at, id) FROM generation_jobs WHERE job_data IS NOT NULL), '[]'::jsonb) AS "relationalJobs"
-       FROM operational_state WHERE id = 1`
+       FROM source`
     );
     const row = result.rows[0];
     if (!row) return { imports: [], jobs: [], generationPlans: [] };
@@ -400,6 +405,19 @@ export class PostgresOperationalStore extends OperationalStore {
       generationPlans: Array.isArray(row.generationPlans) ? row.generationPlans : [],
       ...(Object.keys(row.taskDismissals ?? {}).length ? { taskDismissals: row.taskDismissals } : {})
     };
+  }
+
+  override async readGenerationJob(id: string): Promise<GenerationJob | undefined> {
+    const canonical = await this.readQuery<{ job_data: GenerationJob }>(
+      "SELECT job_data FROM generation_jobs WHERE id::text = $1 AND job_data IS NOT NULL", [id]
+    );
+    if (canonical.rows.length) return canonical.rows[0]!.job_data;
+    const legacy = await this.readQuery<{ job: GenerationJob }>(
+      `SELECT entry.job FROM operational_state,
+         jsonb_array_elements(COALESCE(state->'jobs', '[]'::jsonb)) AS entry(job)
+       WHERE operational_state.id = 1 AND entry.job->>'id' = $1 LIMIT 1`, [id]
+    );
+    return legacy.rows[0]?.job;
   }
 
   override async readGenerationPlanDetail(id: string, workspaceId: string): Promise<GenerationPlanDetailRead> {

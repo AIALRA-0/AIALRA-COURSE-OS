@@ -1801,8 +1801,8 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-jobs/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const job = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
-      if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
+      const job = await dependencies.operations.readGenerationJob(request.params.id!);
+      if (!job || job.workspaceId !== workspaceId) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
       const events = await dependencies.operations.readGenerationJobEvents(job.id);
       response.json({ ...job, latestStageActivity: latestGenerationStageActivity(events, job.id) });
     } catch (error) { next(error); }
@@ -1898,8 +1898,9 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const expected = process.env.COURSE_OS_WORKER_TOKEN?.trim();
       if (!expected || request.header("X-Course-Worker-Token") !== expected) return sendError(request, response, 404, "WORKER_ENDPOINT_NOT_FOUND", "后台任务入口未启用", false);
-      const job = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === request.params.id && item.workspaceId === (request.header("X-Workspace-Id") || "personal"));
-      if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const job = await dependencies.operations.readGenerationJob(request.params.id!);
+      if (!job || job.workspaceId !== workspaceId) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
       if (job.state === "queued" && !job.cancelRequested) queueMicrotask(() => executeGenerationJob(job.id, dependencies).catch(() => undefined));
       response.status(202).json(job);
     } catch (error) { next(error); }
@@ -3777,7 +3778,7 @@ async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDe
 
 async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceToken: number, releaseCoreSlot: () => void): Promise<void> {
   const leaseOwner = `course-os-worker:${process.pid}`;
-  const initial = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
+  const initial = await dependencies.operations.readGenerationJob(jobId);
   if (!initial || initial.state !== "running" || initial.lease?.fenceToken !== fenceToken) return;
   const release = await dependencies.readweave.getRelease(initial.materialVersionId);
   if (!release) {
@@ -3806,7 +3807,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
   }
   for (const pageId of initial.pageIds) {
     if (initial.completedPageIds.includes(pageId)) continue;
-    const currentJob = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
+    const currentJob = await dependencies.operations.readGenerationJob(jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
     const sourcePage = release.pages.find((item) => item.id === pageId);
     if (!sourcePage) {
@@ -4148,7 +4149,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
 }
 
 async function assertGenerationFence(jobId: string, fenceToken: number, dependencies: AppDependencies): Promise<void> {
-  const job = (await dependencies.operations.readTaskIndex()).jobs.find((item) => item.id === jobId);
+  const job = await dependencies.operations.readGenerationJob(jobId);
   if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
 }
 
@@ -4167,7 +4168,7 @@ async function settleCoreSavedPage(
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
     && (item.payload as { pageId?: string }).pageId === pageId).at(-1);
-  const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId);
+  const job = await dependencies.operations.readGenerationJob(jobId);
   if (!event) {
     // Initial submissions have nothing to resume. Retry can recover the narrow
     // authority-save/receipt gap using the existing durable generationJobId.
@@ -4213,7 +4214,7 @@ async function settleCoreSavedPage(
   releaseCoreSlot();
   if (!draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())
     && router.generateBridge) {
-    const job = (await dependencies.operations.readTaskIndex()).jobs.find(item => item.id === jobId)!;
+    const job = (await dependencies.operations.readGenerationJob(jobId))!;
     const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: job.workspaceId,
       planId: job.planId, release, pageNumber: draft.page.pageNumber, dependencies });
     const result = await router.generateBridge({ pageTitle: draft.page.title, pageNumber: draft.page.pageNumber,

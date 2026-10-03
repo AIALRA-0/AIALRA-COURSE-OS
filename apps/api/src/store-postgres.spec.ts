@@ -282,7 +282,7 @@ describe("TaskIndex dismissal projection", () => {
   it("selects only per-task markers in PostgreSQL SQL and keeps legacy marker-free TaskIndex shape", async () => {
     // Test the read method without initializing or connecting to any database.
     const store = Object.create(PostgresOperationalStore.prototype) as PostgresOperationalStore;
-    const query = vi.fn().mockImplementation(async (sql: string) => ({ rows: sql.startsWith("SELECT")
+    const query = vi.fn().mockImplementation(async (sql: string) => ({ rows: sql.startsWith("WITH source AS MATERIALIZED")
       ? [{ imports: [], jobs: [], generationPlans: [], relationalJobs: [], taskDismissals: {} }] : [] }));
     const release = vi.fn();
     const connect = vi.fn().mockResolvedValue({ query, release });
@@ -293,7 +293,8 @@ describe("TaskIndex dismissal projection", () => {
     expect(query.mock.calls[1]![0]).toMatch(/^SET LOCAL statement_timeout = \d+$/);
     expect(query.mock.calls.at(-1)![0]).toBe("COMMIT");
     expect(release).toHaveBeenCalledExactlyOnceWith(false);
-    const sql = query.mock.calls.find(([text]) => text.startsWith("SELECT"))![0] as string;
+    const sql = query.mock.calls.find(([text]) => text.startsWith("WITH source AS MATERIALIZED"))![0] as string;
+    expect(sql).toContain("SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1");
     expect(sql).toContain("entry.value->>'kind' = 'taskdismissal'");
     expect(sql).toContain("entry.key LIKE 'course-os:task-dismissal:v1:%'");
     expect(sql).not.toMatch(/SELECT\s+state\s+FROM/i);
@@ -311,6 +312,44 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("reads one canonical job without querying operational state and overrides the legacy copy", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    try {
+      const canonical = { ...job, state: "running" as const, attempt: 3, cancelRequested: true,
+        lease: { owner: "synthetic-worker", fenceToken: 4, expiresAt: new Date(Date.now()+60000).toISOString() } };
+      await fixture.pool.query("UPDATE generation_jobs SET job_data=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(canonical)]);
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_FORBIDDEN"));
+      const indexRead = vi.spyOn(fixture.store, "readTaskIndex").mockRejectedValue(new Error("TASK_INDEX_FORBIDDEN"));
+      const query = vi.spyOn(fixture.store as unknown as { readQuery(text: string, values: unknown[]): Promise<unknown> }, "readQuery");
+      expect(await fixture.store.readGenerationJob(job.id)).toEqual(canonical);
+      expect(query).toHaveBeenCalledExactlyOnceWith(
+        "SELECT job_data FROM generation_jobs WHERE id::text = $1 AND job_data IS NOT NULL", [job.id]
+      );
+      expect(fullRead).not.toHaveBeenCalled();
+      expect(indexRead).not.toHaveBeenCalled();
+    } finally { await stopFixture(fixture); }
+  }, 15000);
+
+  it("reads one legacy job only when canonical job data is absent and returns missing safely", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    try {
+      await fixture.pool.query("DELETE FROM generation_jobs WHERE id=$1", [job.id]);
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_FORBIDDEN"));
+      const indexRead = vi.spyOn(fixture.store, "readTaskIndex").mockRejectedValue(new Error("TASK_INDEX_FORBIDDEN"));
+      const query = vi.spyOn(fixture.store as unknown as { readQuery(text: string, values: unknown[]): Promise<unknown> }, "readQuery");
+      expect(await fixture.store.readGenerationJob(job.id)).toEqual(job);
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(query.mock.calls[0]![0]).not.toContain("operational_state");
+      expect(query.mock.calls[1]![0]).toContain("state->'jobs'");
+      expect(query.mock.calls[1]![1]).toEqual([job.id]);
+      await expect(fixture.store.readGenerationJob(randomUUID())).resolves.toBeUndefined();
+      expect(fullRead).not.toHaveBeenCalled();
+      expect(indexRead).not.toHaveBeenCalled();
+    } finally { await stopFixture(fixture); }
+  }, 15000);
+
   it("gives background recovery its own finite budget while retaining a shorter foreground deadline", async () => {
     const store = new PostgresOperationalStore({ connectionString: connectionString!, max: 1 });
     await store.whenReady();
