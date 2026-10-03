@@ -122,13 +122,36 @@ describe("Course OS API", () => {
     const { app, operations, readweave, release } = await seededApp();
     const item: ImportRecord = { id: "failed-record", workspaceId: "personal", originalName: "broken.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8,
       sha256: "synthetic", casPath: "/synthetic/quarantine", source: "user_upload", license: "private", sensitivity: "private", state: "rejected", generationState: "queued", issues: ["INVALID_PDF"], createdAt: "2026-10-01T00:00:00Z" };
-    await operations.mutate(state => { state.imports.push(item, { ...item, id: "active-import", state: "processing" }); state.idempotency["original-upload"] = { kind: "import", objectId: item.id }; });
+    const activeJob: GenerationJob = { id: "active-failed-job", workspaceId: "personal", sourceImportId: "active-import",
+      materialVersionId: release.id, state: "failed", pageIds: release.pageIds, completedPageIds: [], failedPageIds: release.pageIds,
+      budgetUsd: 1, spentUsd: 0, attempt: 1, cancelRequested: false, createdAt: item.createdAt, updatedAt: item.createdAt,
+      lease: { owner: "synthetic-worker", fenceToken: 2, expiresAt: new Date(Date.now()+60000).toISOString() } };
+    await operations.mutate(state => {
+      state.imports.push(item, { ...item, id: "active-import", state: "failed", generationJobId: activeJob.id });
+      state.jobs.push(activeJob);
+      state.idempotency["original-upload"] = { kind: "import", objectId: item.id };
+      operations.appendEvent(state, activeJob.id, "job.failed", { synthetic: true });
+    });
     const before = JSON.stringify(await readweave.getRelease(release.id));
     const listed = (await request(app).get("/api/v1/imports").expect(200)).body;
     const fingerprint = listed.find((task: { id: string }) => task.id === item.id).cleanupFingerprint;
+    const originalState = await operations.read();
+    // File mode delegates to full mutation internally. Capture that delegate,
+    // then reject direct route calls to the full method.
+    const fileMutation = operations.mutate.bind(operations);
+    const scopedMutation = vi.spyOn(operations,"mutateGenerationTasks").mockImplementation(change => fileMutation(change));
+    const fullMutation = vi.spyOn(operations,"mutate").mockRejectedValue(new Error("DIRECT_FULL_MUTATION_FORBIDDEN"));
     const action = () => request(app).post("/api/v1/imports:clear-failed").set("Idempotency-Key", "clear-selected").send({ taskIds: [item.id], fingerprints: { [item.id]: fingerprint } }).expect(200);
     expect((await action()).body.cleared).toEqual([item.id]);
     expect((await action()).body.cleared).toEqual([item.id]);
+    const activeFingerprint = listed.find((task: { id: string }) => task.id === "active-import").cleanupFingerprint;
+    const protectedTask = await request(app).post("/api/v1/imports:clear-failed").set("Idempotency-Key","clear-active-lease")
+      .send({ taskIds: ["active-import"], fingerprints: { "active-import": activeFingerprint } }).expect(200);
+    expect(protectedTask.body).toMatchObject({ cleared: [], skipped: [{ id: "active-import", reason: "TASK_ACTIVE" }], retainedEntities: true });
+    expect(scopedMutation).toHaveBeenCalledTimes(3);
+    expect(fullMutation).not.toHaveBeenCalled();
+    const retained = await operations.read();
+    expect({ ...retained, idempotency: originalState.idempotency }).toEqual(originalState);
     expect((await request(app).get("/api/v1/imports")).body.map((task: { id: string }) => task.id)).toEqual(["active-import"]);
     await request(app).get(`/api/v1/imports/${item.id}`).expect(200);
     expect((await operations.read()).idempotency["original-upload"]).toEqual({ kind: "import", objectId: item.id });
@@ -1482,16 +1505,25 @@ describe("Course OS API", () => {
   });
 
   it("dismisses an exact rejected import while retaining its request and evidence", async () => {
-    const app = await testApp();
+    const { app, operations } = await seededApp();
     const rejected = await request(app)
       .post("/api/v1/imports")
       .set("Idempotency-Key", "rejected-import")
       .attach("file", Buffer.from("not a pdf"), { filename: "broken.pdf", contentType: "application/pdf" })
       .expect(422);
+    const originalState = await operations.read();
+    const fileMutation = operations.mutate.bind(operations);
+    const scopedMutation = vi.spyOn(operations,"mutateGenerationTasks").mockImplementation(change => fileMutation(change));
+    const fullMutation = vi.spyOn(operations,"mutate").mockRejectedValue(new Error("DIRECT_FULL_MUTATION_FORBIDDEN"));
     await request(app).delete(`/api/v1/imports/${rejected.body.id}`).set("Idempotency-Key", "dismiss-rejected").expect(204);
     await request(app).get(`/api/v1/imports/${rejected.body.id}`).expect(200);
     expect((await request(app).get("/api/v1/imports")).body).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: rejected.body.id })]));
     await request(app).delete(`/api/v1/imports/${rejected.body.id}`).set("Idempotency-Key", "dismiss-rejected").expect(204);
+    expect(scopedMutation).toHaveBeenCalledTimes(1);
+    expect(fullMutation).not.toHaveBeenCalled();
+    const retained = await operations.read();
+    expect({ ...retained, idempotency: originalState.idempotency }).toEqual(originalState);
+    expect(retained.idempotency["rejected-import"]).toEqual(originalState.idempotency["rejected-import"]);
   });
 
   it("rejects a job over the hard budget", async () => {

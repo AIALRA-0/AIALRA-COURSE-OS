@@ -1373,7 +1373,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const fingerprints = request.body.fingerprints || {};
       const selections: FailedTaskSelection[] = taskIds.map(id => ({ kind: id.startsWith("generation-job:") ? "job" : id.startsWith("generation-plan:") ? "plan" : "import", id: id.replace(/^generation-(?:job|plan):/, ""), fingerprint: String(fingerprints[id] || "") }));
       if (selections.some(item => !/^[a-f0-9]{64}$/.test(item.fingerprint))) return sendError(request, response, 409, "TASK_SELECTION_STALE", "请刷新失败任务列表后再确认清除", false);
-      const receipt = await dependencies.operations.mutate(state => dismissFailedTasks(state, selections, {
+      const receipt = await dependencies.operations.mutateGenerationTasks(state => dismissFailedTasks(state, selections, {
         ...context, hasActiveWrites: task => task.members.some(ref => ref.kind === "import" && activeImports.get(dependencies.operations)?.has(ref.id))
       }));
       const result = { cleared: [] as string[], skipped: [] as { id: string; reason: string }[], failed: [] as { id: string; reason: string }[], retainedEntities: true };
@@ -1485,11 +1485,11 @@ export function createApp(dependencies: AppDependencies): Express {
   app.delete("/api/v1/imports/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const snapshot = await dependencies.operations.read();
+      const snapshot = await dependencies.operations.readTaskIndex();
       if (isTaskDismissed(snapshot, workspaceId, { kind: "import", id: request.params.id })) return response.status(204).end();
       const selected = selectFailedTasks(snapshot, workspaceId).find(group => group.members.some(ref => ref.kind === "import" && ref.id === request.params.id));
       if (!selected) return sendError(request, response, 409, "IMPORT_DELETE_DENIED", "只能清除已结束且没有活动恢复的失败任务记录", false);
-      const receipt = await dependencies.operations.mutate(state => dismissFailedTasks(state, [selected], {
+      const receipt = await dependencies.operations.mutateGenerationTasks(state => dismissFailedTasks(state, [selected], {
         ...writeContext(request, requireIdempotencyKey(request)), hasActiveWrites: task => task.members.some(ref => ref.kind === "import" && activeImports.get(dependencies.operations)?.has(ref.id))
       }));
       if (receipt.results.some(item => item.status === "skipped")) return sendError(request, response, 409, "TASK_CHANGED", "任务状态已变化，未清除", false);

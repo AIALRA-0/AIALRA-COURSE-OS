@@ -1012,7 +1012,7 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(sorted(await new EtapiReadWeaveCourseApi(config).listCostEntries())).toEqual(sorted([first, second, other, legacy, compact, orphan]));
   });
 
-  it("bounds scoped cost record reads to four and merges in page order despite reversed completion", async () => {
+  it("discovers scoped cost records once and bounds duplicate body reads to four while merging in page order", async () => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
     const api = new EtapiReadWeaveCourseApi(config);
@@ -1027,17 +1027,42 @@ describe("ReadWeave ETAPI adapter", () => {
       const cost = { ...costEntryFor(target, `batch-cost-${number}`), pageId: `page-${number}`, actualMicrousd: number };
       await api.appendCostEntry(cost, { ...context, idempotencyKey: cost.id });
       const title = `Course OS draft record · page-${number}`;
-      const record = decodeReadWeaveStateContent(remote.contentByTitle(title)) as { costEntries: GenerationCostEntry[] };
+      const record = decodeReadWeaveStateContent(remote.contentByTitle(title)) as { draft: LessonDraft; costEntries: GenerationCostEntry[] };
+      record.draft.revision = 2;
       if (number <= 8) record.costEntries.push({ ...costEntryFor(target, `batch-shared-${number <= 4 ? 1 : 2}`),
         pageId: number <= 4 ? "page-1" : "page-5", actualMicrousd: number*10 });
       remote.editByTitle(title, encodeReadWeaveStateContent(record));
       recordPages.set(remote.noteIdByTitle(title), number);
     }
+    const older = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+      draft: LessonDraft; costEntries: GenerationCostEntry[];
+    };
+    older.draft.revision = 1;
+    older.costEntries = [costEntryFor(target, "obsolete-duplicate-cost")];
+    for (let index = 0; index < 5; index++) {
+      const response = await remote.fetch("http://readweave/create-note", { method: "POST", body: JSON.stringify({
+        parentNoteId: remote.noteIdByTitle("00 Course OS 结构化索引"), title: "Course OS draft record · page-1",
+        type: "code", mime: "application/json", content: encodeReadWeaveStateContent(older)
+      }) });
+      const noteId = ((await response.json()) as { note: { noteId: string } }).note.noteId;
+      await remote.fetch("http://readweave/attributes", { method: "POST", body: JSON.stringify({
+        noteId, name: "courseOsDraftRecordPageId", value: "page-1"
+      }) });
+      recordPages.set(noteId, 1);
+    }
     let active = 0;
     let peak = 0;
     const completed: number[] = [];
+    const searches: string[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === "/etapi/notes" && url.searchParams.get("search")?.startsWith("#courseOsDraftRecordPageId=")) {
+        searches.push(url.searchParams.get("search")!);
+        expect(url.searchParams.get("fastSearch")).toBe("true");
+        expect(url.searchParams.get("ancestorNoteId")).toBe("root");
+        expect(url.searchParams.get("ancestorDepth")).toBe("lt5");
+        expect(url.searchParams.has("limit")).toBe(false);
+      }
       const noteId = /\/notes\/([^/]+)\/content$/.exec(url.pathname)?.[1];
       const number = noteId ? recordPages.get(noteId) : undefined;
       if ((init?.method ?? "GET") !== "GET" || number === undefined) return remote.fetch(input, init);
@@ -1053,12 +1078,152 @@ describe("ReadWeave ETAPI adapter", () => {
     const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id });
     expect(peak).toBe(4);
     expect(active).toBe(0);
-    expect(completed).toHaveLength(9);
+    expect(completed).toHaveLength(14);
+    expect(searches).toEqual([target.pageIds.map(id => `#courseOsDraftRecordPageId="${id}"`).join(" OR ")]);
     expect(completed.indexOf(4)).toBeLessThan(completed.indexOf(1));
     expect(entries.filter(entry => entry.id.startsWith("batch-cost-")).map(entry => entry.actualMicrousd))
       .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(entries.find(entry => entry.id === "batch-shared-1")?.actualMicrousd).toBe(40);
     expect(entries.find(entry => entry.id === "batch-shared-2")?.actualMicrousd).toBe(80);
+    expect(entries.some(entry => entry.id === "obsolete-duplicate-cost")).toBe(false);
+  });
+
+  it("keeps escaped page IDs literal in scoped OR searches and never reads unrelated bodies", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    const escapedId = String.raw`page-"\ OR #courseOsDraftRecordPageId="unrelated-cost-page`;
+    target.pages = [escapedId, "plain-page"].map((id, index) => ({ ...structuredClone(target.pages[0]!), id, pageNumber: index + 1 }));
+    target.pageIds = target.pages.map(page => page.id);
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    for (const pageId of target.pageIds) await api.appendCostEntry({ ...costEntryFor(target, `literal-${pageId}`), pageId },
+      { ...context, idempotencyKey: `literal-${pageId}` });
+    const unrelated = releaseWithPage();
+    unrelated.id = "unrelated-cost-material";
+    unrelated.pages[0]!.id = "unrelated-cost-page";
+    unrelated.pageIds = ["unrelated-cost-page"];
+    await api.publishRelease(unrelated, { ...manifest, courseReleaseId: unrelated.id }, { ...context, idempotencyKey: unrelated.id });
+    await api.appendCostEntry({ ...costEntryFor(unrelated, "unrelated-literal-cost"), pageId: "unrelated-cost-page" },
+      { ...context, idempotencyKey: "unrelated-literal-cost" });
+    const unrelatedId = remote.noteIdByTitle("Course OS draft record · unrelated-cost-page");
+    const searches: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/etapi/notes" && url.searchParams.get("search")?.startsWith("#courseOsDraftRecordPageId=")) searches.push(url.searchParams.get("search")!);
+      return remote.fetch(input, init);
+    };
+    remote.requests.length = 0;
+    const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id });
+    expect(entries.map(entry => entry.pageId)).toEqual(target.pageIds);
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toContain('\\"');
+    expect(searches[0]).toContain('\\\\');
+    expect(remote.requests.some(request => request.path === `/notes/${unrelatedId}/content`)).toBe(false);
+  });
+
+  it("selects scoped duplicate costs by newest revision and note-ID tie break even with a warm cache", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    const historical = costEntryFor(target, "duplicate-history");
+    await api.appendCostEntry(historical, { ...context, idempotencyKey: historical.id });
+    const reader = new EtapiReadWeaveCourseApi(config);
+    await expect(reader.listCostEntries({ pageId: "page-1" })).resolves.toEqual([historical]);
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+      draft: LessonDraft; costEntries: GenerationCostEntry[];
+    };
+    record.draft.revision = 3;
+    const winner = costEntryFor(target, "duplicate-winner");
+    for (const [noteId, cost] of [["zz-duplicate", costEntryFor(target, "duplicate-loser")], ["aa-duplicate", winner]] as const) {
+      await remote.fetch("http://readweave/create-note", { method: "POST", body: JSON.stringify({
+        noteId, parentNoteId: remote.noteIdByTitle("00 Course OS 结构化索引"), title: "Course OS draft record · page-1",
+        type: "code", mime: "application/json", content: encodeReadWeaveStateContent({ ...record, costEntries: [historical, cost] })
+      }) });
+      await remote.fetch("http://readweave/attributes", { method: "POST", body: JSON.stringify({ noteId, name: "courseOsDraftRecordPageId", value: "page-1" }) });
+    }
+    await expect(reader.listCostEntries({ pageId: "page-1" })).resolves.toEqual([historical, winner]);
+  });
+
+  it("bounds unmatched-page recovery bodies to four and recovers only the missing page", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    target.pages.push({ ...structuredClone(target.pages[0]!), id: "page-2", pageNumber: 2 });
+    target.pageIds.push("page-2");
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    const costs = target.pageIds.map(pageId => ({ ...costEntryFor(target, `recovered-${pageId}`), pageId }));
+    for (const cost of costs) await api.appendCostEntry(cost, { ...context, idempotencyKey: cost.id });
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    await remote.fetch("http://readweave/attributes", { method: "POST", body: JSON.stringify({ noteId: recordId, name: "courseOsDraftRecordPageId", value: "wrong-page" }) });
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1"));
+    const recordIds = new Set([recordId, remote.noteIdByTitle("Course OS draft record · page-2")]);
+    for (let index = 0; index < 6; index++) {
+      const response = await remote.fetch("http://readweave/create-note", { method: "POST", body: JSON.stringify({
+        parentNoteId: remote.noteIdByTitle("00 Course OS 结构化索引"), title: "Course OS draft record · page-1",
+        type: "code", mime: "application/json", content: encodeReadWeaveStateContent(record)
+      }) });
+      recordIds.add(((await response.json()) as { note: { noteId: string } }).note.noteId);
+    }
+    let active = 0;
+    let peak = 0;
+    const recoveries: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const search = url.searchParams.get("search");
+      if (search?.startsWith('"Course OS draft record · ')) recoveries.push(search);
+      const noteId = /\/notes\/([^/]+)\/content$/.exec(url.pathname)?.[1];
+      if (!noteId || !recordIds.has(noteId) || (init?.method ?? "GET") !== "GET") return remote.fetch(input, init);
+      peak = Math.max(peak, ++active);
+      try { await new Promise(resolve => setTimeout(resolve, 10)); return await remote.fetch(input, init); }
+      finally { active--; }
+    };
+    const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id });
+    expect(entries).toEqual(costs);
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
+    expect(recoveries).toEqual(['"Course OS draft record · page-1"']);
+    expect(remote.countNotesByLabel("courseOsDraftRecordPageId", "page-1")).toBe(1);
+  });
+
+  it("propagates a scoped body deadline instead of substituting warmed cached costs", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const writer = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    await writer.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    const historical = costEntryFor(target, "deadline-history");
+    await writer.appendCostEntry(historical, { ...context, idempotencyKey: historical.id });
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let stall = false;
+    let stalledReads = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (stall && url.pathname === `/etapi/notes/${recordId}/content` && (init?.method ?? "GET") === "GET") {
+        stalledReads++;
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(init?.signal?.reason);
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      return remote.fetch(input, init);
+    };
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    await expect(reader.listCostEntries({ pageId: "page-1" })).resolves.toEqual([historical]);
+    stall = true;
+    await expect(withReadBudget({ timeoutMs: 80 }, () => reader.listCostEntries({ materialVersionId: target.id })))
+      .rejects.toThrow("READ_DEADLINE_EXCEEDED");
+    expect(stalledReads).toBe(1);
+    stall = false;
+    const fresh = costEntryFor(target, "deadline-fresh");
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] };
+    record.costEntries.push(fresh);
+    remote.editByTitle("Course OS draft record · page-1", encodeReadWeaveStateContent(record));
+    await expect(reader.listCostEntries({ pageId: "page-1" })).resolves.toEqual([historical, fresh]);
   });
 
   it("rejects scoped cost reads when the target durable record fails instead of returning an empty ledger", async () => {
@@ -3200,6 +3365,30 @@ function draftFor(pageRelease: CourseRelease, pageId = pageRelease.pages[0]!.id)
   };
 }
 
+function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; value: string }>; operator: "AND" | "OR" } | undefined {
+  const clause = /#([^\s=]+)\s*=\s*(?:"((?:\\[\s\S]|[^"\\])*)"|([^\s]+))/y;
+  const separator = /\s+(AND|OR)\s+/iy;
+  const labels: Array<{ name: string; value: string }> = [];
+  let offset = 0;
+  let operator: "AND" | "OR" | undefined;
+  while (offset < query.length) {
+    clause.lastIndex = offset;
+    const match = clause.exec(query);
+    if (!match) return undefined;
+    labels.push({ name: match[1]!.toLowerCase(), value: (match[2] ?? match[3]!).replace(/\\([\s\S])/g, "$1").toLowerCase() });
+    offset = clause.lastIndex;
+    if (offset === query.length) return { labels, operator: operator ?? "AND" };
+    separator.lastIndex = offset;
+    const join = separator.exec(query);
+    if (!join) return undefined;
+    const nextOperator = join[1]!.toUpperCase() as "AND" | "OR";
+    if (operator && operator !== nextOperator) return undefined;
+    operator = nextOperator;
+    offset = separator.lastIndex;
+  }
+  return undefined;
+}
+
 class FakeEtapi {
   private sequence = 0;
   failBranchDeleteCount = 0;
@@ -3213,8 +3402,8 @@ class FakeEtapi {
     this.requests.push({ path, method: init?.method ?? "GET", headers: Object.fromEntries(new Headers(init?.headers).entries()), body: typeof init?.body === "string" ? init.body : undefined });
     if (path === "/notes" && (init?.method ?? "GET") === "GET") {
       const query = url.searchParams.get("search") ?? "";
-      const labels = query.split(/\s+AND\s+/).map((clause) => /^#([^=]+)=(.*)$/.exec(clause));
-        const exactTitle = /^"([^"]+)"$/.exec(query)?.[1];
+      const labels = parseFakeLabelSearch(query);
+      const exactTitle = /^"((?:\\[\s\S]|[^"\\])*)"$/.exec(query)?.[1]?.replace(/\\([\s\S])/g, "$1");
       const ancestor = url.searchParams.get("ancestorNoteId");
       const isDescendant = (noteId: string): boolean => {
         if (!ancestor) return true;
@@ -3233,13 +3422,16 @@ class FakeEtapi {
         return false;
       };
         const results = [...this.notes.entries()].filter(([noteId, note]) => !note.deleted
-          && (labels.every((match) => match) ? labels.every((match) => note.labels[match![1]!] === match![2]!.replace(/^"|"$/g, "")) : exactTitle ? note.title.includes(exactTitle) : false)
+          && (labels ? labels.labels[labels.operator === "OR" ? "some" : "every"](({ name, value }) =>
+            Object.entries(note.labels).some(([key, actual]) => key.toLowerCase() === name && actual.toLowerCase() === value))
+            : exactTitle ? note.title.includes(exactTitle) : false)
           && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
       return Response.json({ results });
     }
     if (path === "/create-note" && init?.method === "POST") {
-      const body = JSON.parse(String(init.body)) as { parentNoteId: string; title: string; content: string; type?: string; mime?: string };
-      const noteId = `note${++this.sequence}`;
+      const body = JSON.parse(String(init.body)) as { parentNoteId: string; title: string; content: string; type?: string; mime?: string; noteId?: string };
+      const noteId = body.noteId ?? `note${this.sequence + 1}`;
+      this.sequence++;
       const branchId = `branch${this.sequence}`;
       this.notes.set(noteId, { title: body.title, content: body.content, labels: {}, type: body.type || "text", mime: body.mime || "text/html", parentBranchIds: [branchId], deleted: false });
       this.branches.set(branchId, { branchId, noteId, parentNoteId: body.parentNoteId, notePosition: 10 });

@@ -849,9 +849,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         ...mergeCostEntries(costIndex?.costEntries, state.costEntries)
           .filter(cost => cost.materialVersionId === release!.id && cost.pageId).map(cost => cost.pageId!)
       ])];
-      for (let offset = 0; offset < pageIds.length; offset += 4) {
-        const batch = await Promise.all(pageIds.slice(offset, offset + 4).map(pageId => this.findDraftPageRecord(pageId)));
-        for (const located of batch) costs = mergeCostEntries(costs, located?.record.costEntries);
+      const observedVersions = new Map(this.draftPageRecordVersions);
+      const records = new Map((await this.readDraftPageRecords(pageIds)).map(located => [located.record.pageId, located]));
+      for (const pageId of pageIds) {
+        let located = records.get(pageId);
+        // Only a newer record committed/observed during this fresh read may
+        // supersede its result. A missing remote record is not a cache hit.
+        const cached = this.draftPageRecordCache.get(pageId);
+        if (located && cached && cached.record.draft.revision > located.record.draft.revision
+          && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
+        located ??= await this.recoverUnlabelledDraftPageRecord(pageId, 4);
+        costs = mergeCostEntries(costs, located?.record.costEntries);
       }
     }
     return structuredClone(mergeCostEntries(costIndex?.costEntries, costs).filter((item) =>
@@ -2330,10 +2338,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
   }
 
-  private async readDraftPageRecords(pageId?: string): Promise<LocatedDraftPageRecord[]> {
+  private async readDraftPageRecords(pageId?: string | readonly string[]): Promise<LocatedDraftPageRecord[]> {
+    const pageIds = pageId === undefined ? undefined : new Set(typeof pageId === "string" ? [pageId] : pageId);
+    if (pageIds?.size === 0) return [];
     const observedVersions = new Map(this.draftPageRecordVersions);
-    const searches = pageId
-      ? [`#courseOsDraftRecordPageId="${pageId}"`]
+    const searches = pageIds
+      ? [[...pageIds].map(id => `#courseOsDraftRecordPageId=${quoteSearchValue(id)}`).join(" OR ")]
       : ['#courseOsType="draft_record"', '"Course OS draft record"'];
     const responses = await Promise.all(searches.map(async (search) => {
       const query = new URLSearchParams({
@@ -2348,11 +2358,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       .filter((note) => note.title.startsWith("Course OS draft record · "))
       .map((note) => [note.noteId, note])).values()];
     const located: LocatedDraftPageRecord[] = [];
-    for (let index = 0; index < notes.length; index += 8) {
-      const batch = await Promise.all(notes.slice(index, index + 8).map(async (note) => {
+    const concurrency = pageIds ? 4 : 8;
+    for (let index = 0; index < notes.length; index += concurrency) {
+      const batch = await Promise.all(notes.slice(index, index + concurrency).map(async (note) => {
         const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
         if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return undefined;
-        if (pageId && parsed.pageId !== pageId) return undefined;
+        if (pageIds && !pageIds.has(parsed.pageId)) return undefined;
         const located = {
           noteId: note.noteId,
           record: {
@@ -2396,18 +2407,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.recoverUnlabelledDraftPageRecord(pageId);
   }
 
-  private async recoverUnlabelledDraftPageRecord(pageId: string): Promise<LocatedDraftPageRecord | undefined> {
+  private async recoverUnlabelledDraftPageRecord(pageId: string, contentConcurrency?: number): Promise<LocatedDraftPageRecord | undefined> {
     const projection = await this.ensureWorkspace();
     const title = `Course OS draft record · ${pageId}`;
     const query = new URLSearchParams({
-      search: `"${title}"`,
+      search: quoteSearchValue(title),
       ancestorNoteId: projection.stateNoteId,
       ancestorDepth: "lt5",
       fastSearch: "true"
     });
     const results = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results
       .filter((note) => note.title === title);
-    const candidates = (await Promise.all(results.map(async (note) => {
+    const readCandidate = async (note: SearchResponse["results"][number]) => {
       const content = await this.getContent(note.noteId);
       let parsed: Partial<EtapiDraftPageRecord>;
       try {
@@ -2432,7 +2443,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           }
         } satisfies LocatedDraftPageRecord
       };
-    }))).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined);
+    };
+    const candidates: NonNullable<Awaited<ReturnType<typeof readCandidate>>>[] = [];
+    const concurrency = contentConcurrency ?? Math.max(1, results.length);
+    for (let offset = 0; offset < results.length; offset += concurrency) {
+      const batch = await Promise.all(results.slice(offset, offset + concurrency).map(readCandidate));
+      candidates.push(...batch.filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined));
+    }
     candidates.sort((left, right) => right.located.record.draft.revision - left.located.record.draft.revision
       || left.located.noteId.localeCompare(right.located.noteId));
     const selected = candidates[0];
@@ -2453,7 +2470,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async searchDraftRecordLabel(stateNoteId: string, name: string, value: string): Promise<Set<string>> {
     const query = new URLSearchParams({
-      search: `#${name}="${value}"`,
+      search: `#${name}=${quoteSearchValue(value)}`,
       ancestorNoteId: stateNoteId,
       ancestorDepth: "lt5",
       fastSearch: "true"
@@ -3441,6 +3458,11 @@ function normalizeState(input: Partial<EtapiState>, projection: ProjectionIndex)
     idempotency: input.idempotency ?? {},
     projections: input.projections ?? projection
   };
+}
+
+function quoteSearchValue(value: string): string {
+  // ReadWeave's search lexer escapes the next character, unlike JSON string escapes.
+  return `"${value.replace(/[\\"]/g, "\\$&")}"`;
 }
 
 function mergeCostEntries(...groups: Array<GenerationCostEntry[] | undefined>): GenerationCostEntry[] {
