@@ -209,7 +209,7 @@ interface SharedRead<T> {
 const draftPageWriteChains = new Map<string, Promise<void>>();
 
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
-const defaultSharedReadBudgetMs = 8_000;
+const backgroundSharedReadBudgetMs = 30_000;
 const maximumSharedReadBudgetMs = 180_000;
 
 function createSharedRead<T>(
@@ -229,7 +229,7 @@ function createSharedRead<T>(
     independent: options.independent ?? false,
     ...(maximumDeadline === undefined ? {} : {
       maximumDeadline,
-      ownerDeadline: Math.min(maximumDeadline, callerDeadline ?? startedAt + defaultSharedReadBudgetMs)
+      ownerDeadline: Math.min(maximumDeadline, callerDeadline ?? startedAt + backgroundSharedReadBudgetMs)
     })
   };
   const run = () => work(() => {
@@ -270,7 +270,12 @@ function joinSharedRead<T>(
     }
     return Promise.reject(readBudgetAbortError(signal, budget?.deadline));
   }
-  extendSharedReadDeadline(shared, budget?.deadline);
+  // A background consumer has no HTTP scope. It must not inherit the first
+  // foreground consumer's short deadline. Bound it from the shared start,
+  // so repeated joins cannot reset this operation's total waiting budget.
+  const backgroundDeadline = !budget && shared.maximumDeadline !== undefined
+    ? shared.maximumDeadline - maximumSharedReadBudgetMs + backgroundSharedReadBudgetMs : undefined;
+  extendSharedReadDeadline(shared, budget?.deadline ?? backgroundDeadline);
   shared.consumers += 1;
 
   return new Promise<T>((resolve, reject) => {

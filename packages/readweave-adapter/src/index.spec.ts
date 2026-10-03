@@ -184,6 +184,76 @@ it("lets another state-read consumer finish after the first consumer deadline ex
   expect(contentRequests).toBe(1);
 });
 
+it("keeps a background state read alive after a foreground consumer expires", async () => {
+  const remote = new FakeEtapi();
+  const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+  await new EtapiReadWeaveCourseApi(config).listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let started!: () => void;
+  const fetched = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  let aborts = 0;
+  let reads = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      reads++;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { aborts++; reject(init?.signal?.reason); };
+        init?.signal?.addEventListener("abort", abort, { once: true });
+        release = () => { init?.signal?.removeEventListener("abort", abort); resolve(); };
+        started();
+      });
+    }
+    return remote.fetch(input, init);
+  };
+  const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+  const foreground = withReadBudget({ timeoutMs: 100 }, () => reader.listCourses());
+  const expired = expect(foreground).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  await fetched;
+  const background = reader.listCourses();
+  await expired;
+  expect(aborts).toBe(0);
+  release();
+  await expect(background).resolves.toEqual([]);
+  expect(reads).toBe(1);
+});
+
+it("expires a background shared read within one thirty-second budget", async () => {
+  const remote = new FakeEtapi();
+  const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+  await new EtapiReadWeaveCourseApi(config).listCourses();
+  const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  let started!: () => void;
+  const fetched = new Promise<void>(resolve => { started = resolve; });
+  let aborts = 0;
+  let reads = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.pathname === `/etapi/notes/${stateNoteId}/content` && (init?.method ?? "GET") === "GET") {
+      reads++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => { aborts++; reject(init.signal!.reason); }, { once: true });
+        started();
+      });
+    }
+    return remote.fetch(input, init);
+  };
+  vi.useFakeTimers();
+  try {
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    const background = reader.listCourses();
+    const expired = expect(background).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+    await fetched;
+    await vi.advanceTimersByTimeAsync(8_001);
+    expect(aborts).toBe(0);
+    await vi.advanceTimersByTimeAsync(22_000);
+    await expired;
+    expect(aborts).toBe(1);
+    expect(reads).toBe(1);
+  } finally { vi.useRealTimers(); }
+});
+
 it("keeps a cold bootstrap shared while one state-read consumer cancels", async () => {
   const remote = new FakeEtapi();
   let bootstrapSearches = 0;
