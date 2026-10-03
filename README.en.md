@@ -74,8 +74,14 @@ Estimate peak disk use for this build, current images, and retained rollback ima
 
 The 2.4 closeout does not add multi-agent classrooms, voice, generated teaching decks, a paper track, public multi-user operation, LMS integration, or new infrastructure.
 
-The current engineering candidate is `engineering-baseline-candidate-20261002-r2`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
+The current engineering candidate is `engineering-baseline-candidate-20261002-r3`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
 
 ## 7. License
 
 Course OS source code is licensed under [Apache-2.0](LICENSE). ReadWeave runs as a separate service. Private course materials are not licensed by this repository.
+
+### Import progress and cleanup
+
+Uploads report transferred bytes separately from inspection and acceptance. A lost response is recovered with the original operation key. Conversion reports observed stages and page counts; overall completion counts successfully delivered pages, with failures reported separately. Ordinary drafts show “Draft”; revisions remain in history.
+
+Clearing failed tasks persistently dismisses terminal notifications without removing materials, costs, answers, or original request associations. Active or changed tasks are skipped. Emptying trash requires explicit confirmation and reference checks. Adapters without safe remote deletion report unsupported items instead of claiming that removing a local index deleted authority content.

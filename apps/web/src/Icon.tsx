@@ -9,7 +9,7 @@ export type IconName =
 
 export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props} data-icon-name={name}>
       {paths[name]}
     </svg>
   );
@@ -21,10 +21,10 @@ const paths: Record<IconName, ReactNode> = {
   arrowRight: <><path d="m9 18 6-6-6-6"/></>,
   book: <><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5z"/><path d="M4 6.5v13M8 7h8"/></>,
   check: <><path d="m5 12 4 4L19 6"/></>,
-  chevronDown: <><path d="m6 9 6 6 6-6"/></>,
-  chevronLeft: <><path d="m15 18-6-6 6-6"/></>,
-  chevronRight: <><path d="m9 18 6-6-6-6"/></>,
-  chevronUp: <><path d="m18 15-6-6-6 6"/></>,
+  chevronDown: <><path d="m8.5 5 7 7-7 7"/></>,
+  chevronLeft: <><path d="m8.5 5 7 7-7 7"/></>,
+  chevronRight: <><path d="m8.5 5 7 7-7 7"/></>,
+  chevronUp: <><path d="m8.5 5 7 7-7 7"/></>,
   cloud: <><path d="M17.5 19H7a5 5 0 1 1 1.1-9.9A6 6 0 0 1 19.8 11 4 4 0 0 1 17.5 19Z"/><path d="m9 13 3-3 3 3M12 10v6"/></>,
   command: <><path d="M9 6V5a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v14a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/></>,
   copy: <><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,

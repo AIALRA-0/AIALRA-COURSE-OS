@@ -127,8 +127,13 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-row:hover { background: var(--soft); }
 .tree-row.selected { background: var(--brand-soft); color: var(--brand-ink); }
 .tree-chevron { width: 16px; height: 28px; display: grid; place-items: center; color: var(--faint); }
-.tree-chevron svg { width: 12px; height: 12px; }
+.tree-chevron svg { width: 12px; height: 12px; flex: 0 0 12px; transform-origin: center; transition: transform 140ms ease; }
+.tree-chevron.is-open svg { transform: rotate(90deg); }
 .tree-chevron.empty { visibility: hidden; }
+svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: fill-box; transform-origin: center; transition: transform 140ms ease; }
+svg[data-icon-name="chevronDown"] { transform: rotate(90deg); }
+svg[data-icon-name="chevronLeft"] { transform: rotate(180deg); }
+svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
 .tree-kind { color: var(--muted); display: grid; place-items: center; }
 .tree-kind svg { width: 14px; height: 14px; }
 .tree-row.selected .tree-kind { color: var(--brand); }
@@ -1493,18 +1498,44 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-task-count { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--soft); color: var(--faint); text-align: center; font: 10px "IBM Plex Mono", monospace; }
 .tree-task-attention .tree-task-count { background: color-mix(in srgb, var(--red) 10%, var(--panel)); color: var(--red); }
 .tree-task-history, .tree-task-attention { min-width: 0; }
-.tree-task-history > summary, .tree-task-attention > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 9px; border-radius: 6px; color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer; list-style: none; }
+.tree-task-disclosure-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.tree-task-history > summary, .tree-task-attention > summary { min-width: 0; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 4px 9px; border-radius: 6px; color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer; list-style: none; }
 .tree-task-attention > summary { color: var(--red); }
+.tree-task-history > summary::marker, .tree-task-attention > summary::marker { content: ""; }
 .tree-task-history > summary::-webkit-details-marker, .tree-task-attention > summary::-webkit-details-marker { display: none; }
-.tree-task-history > summary::before, .tree-task-attention > summary::before { width: 12px; color: var(--faint); content: "›"; font-size: 15px; line-height: 1; }
-.tree-task-history[open] > summary::before, .tree-task-attention[open] > summary::before { content: "⌄"; }
+.task-technical-details > summary { min-height: 32px; display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 8px; list-style: none; cursor: pointer; }
+.task-technical-details > summary::marker { content: ""; }
+.task-technical-details > summary::-webkit-details-marker { display: none; }
+.task-technical-details > summary > svg[data-icon-name^="chevron"] { display: block; width: 14px; height: 14px; flex: 0 0 14px; transform: rotate(0deg); }
+.task-technical-details[open] > summary > svg[data-icon-name^="chevron"] { transform: rotate(90deg); }
+.tree-task-summary-chevron { width: 16px; height: 16px; display: grid; place-items: center; color: var(--faint); }
+.tree-task-summary-chevron svg { display: block; width: 13px; height: 13px; flex: 0 0 13px; }
+.tree-task-history[open] > summary .tree-task-summary-chevron svg, .tree-task-attention[open] > summary .tree-task-summary-chevron svg { transform: rotate(90deg); }
 .tree-task-history > summary:hover, .tree-task-history > summary:focus-visible, .tree-task-attention > summary:hover, .tree-task-attention > summary:focus-visible { background: var(--soft); outline: none; }
 .tree-task-history > .tree-task-list, .tree-task-attention > .tree-task-list { margin-top: 2px; }
+.tree-task-failure-label { min-width: 0; padding: 4px 9px; color: var(--red); font-size: 11px; font-weight: 600; }
+.tree-task-clear-failed { min-height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 3px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--red); font-size: 10px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.tree-task-clear-failed svg { width: 13px; height: 13px; flex: 0 0 13px; }
+.tree-task-clear-failed:hover, .tree-task-clear-failed:focus-visible { border-color: color-mix(in srgb, var(--red) 25%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--panel)); outline: none; }
+.tree-task-clear-failed:disabled { color: var(--faint); cursor: wait; }
 .tree-task-list { display: grid; gap: 3px; }
-.tree-task-row { width: 100%; min-width: 0; min-height: 48px; display: grid; grid-template-columns: 12px minmax(0, 1fr) 14px; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); text-align: left; cursor: pointer; }
+.tree-task-entry { min-width: 0; }
+.tree-task-row { width: 100%; min-width: 0; min-height: 48px; display: grid; grid-template-columns: 14px minmax(0, 1fr) 14px; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); text-align: left; cursor: pointer; }
 .tree-task-row:hover, .tree-task-row:focus-visible { border-color: var(--line); background: var(--soft); outline: none; }
 .tree-task-row.selected { border-color: color-mix(in srgb, var(--brand) 26%, var(--line)); background: var(--brand-soft); color: var(--brand-ink); }
-.tree-task-row > svg { width: 13px; height: 13px; color: var(--faint); }
+.tree-task-row > [data-icon-name="chevronRight"] { width: 14px; height: 14px; flex: 0 0 14px; color: var(--faint); }
+.tree-task-indicator { width: 14px; height: 14px; display: block; overflow: visible; color: var(--faint); }
+.tree-task-indicator.task-state-queued { color: var(--blue); background: transparent; }
+.tree-task-indicator.task-state-running { color: var(--blue); background: transparent; }
+.tree-task-indicator.task-state-completed { color: var(--green); background: transparent; }
+.tree-task-indicator.task-state-failed { color: var(--red); background: transparent; }
+.tree-task-indicator.task-state-cancelled, .tree-task-indicator.task-state-paused { color: var(--faint); background: transparent; }
+.tree-task-indicator.task-state-awaiting_review { color: var(--amber); background: transparent; }
+.tree-task-indicator[data-progress-stale="true"] { color: var(--amber); }
+.tree-task-indicator-track { fill: none; stroke: color-mix(in srgb, currentColor 22%, transparent); stroke-width: 1.8; }
+.tree-task-indicator-value { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; }
+.tree-task-indicator-indeterminate .tree-task-indicator-value { stroke-dasharray: 10 28; transform-box: fill-box; transform-origin: center; animation: tree-task-indeterminate 1.1s linear infinite; }
+@keyframes tree-task-indeterminate { to { transform: rotate(360deg); } }
 .tree-task-copy { min-width: 0; display: grid; gap: 3px; }
 .tree-task-copy strong { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .tree-task-copy small { min-width: 0; display: flex; align-items: center; gap: 5px; overflow: hidden; color: var(--muted); font-size: 10px; white-space: nowrap; }
@@ -1567,7 +1598,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
   .import-task-workspace dl { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .task-state-running, .import-progress.is-indeterminate i { animation: none; }
+  .task-state-running, .import-progress.is-indeterminate i, .tree-task-indicator-indeterminate .tree-task-indicator-value { animation: none; }
 }
 
 /* Keep learning notices in measured rows and let the workspace use the remainder. */

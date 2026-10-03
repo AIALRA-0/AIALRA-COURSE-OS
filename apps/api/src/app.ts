@@ -53,12 +53,12 @@ import type { WorkspaceTree } from "@course-os/contracts";
 import type { ReadingRuntime } from "./reading-runtime.js";
 import { selectMaterialRelease, toCourseReleaseIndex, withReadBudget } from "@course-os/readweave-adapter";
 import { COURSE_API_VERSION } from "@course-os/contracts";
-import { convertMaterial, FileConversionQueueClient, removeConversionOutput } from "@course-os/converter";
+import { convertMaterial, FileConversionQueueClient, removeConversionOutput, type ConversionProgressCallback } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import { ContentAddressedStore, inspectUpload } from "@course-os/storage";
+import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, type FailedTaskSelection } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type OperationalState } from "./store.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -78,7 +78,7 @@ export interface AppDependencies {
   operations: OperationalStore;
   readweave: ReadWeaveCourseApi;
   cas: ContentAddressedStore;
-  conversion: { enqueueAndWait(request: ConversionRequest): Promise<ConversionResult> };
+  conversion: { enqueueAndWait(request: ConversionRequest, onProgress?: ConversionProgressCallback): Promise<ConversionResult> };
   modelRouter?: ModelRouterClient;
   credentialVault?: SecretVault;
   reading?: ReadingRuntime;
@@ -415,9 +415,52 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  const trashDeleteOptions = (workspaceId: string) => ({
+    checkExternalReferences: async (scope: Parameters<NonNullable<import("@course-os/readweave-adapter").TrashDeleteOptions["checkExternalReferences"]>>[0]) => {
+      const state = await dependencies.operations.read();
+      return {
+        active: state.jobs.some(job => job.workspaceId === workspaceId && ["queued", "running", "pending_sync", "paused", "awaiting_review"].includes(job.state)
+          && (scope.releaseIds.includes(job.materialVersionId) || job.pageIds.some(id => scope.pageIds.includes(id))))
+          || state.imports.some(record => record.workspaceId === workspaceId && activeImports.get(dependencies.operations)?.has(record.id)
+            && Boolean(record.courseId && scope.courseIds.includes(record.courseId))),
+        answers: Object.values(state.selfRetellings).some(answer => answer.workspaceId === workspaceId && scope.pageIds.includes(answer.pageId))
+          || state.sessions.some(session => scope.releaseIds.includes(session.courseReleaseId))
+      };
+    }
+  });
+
+  app.post("/api/v1/trash:empty", async (request, response, next) => {
+    try {
+      const context = writeContext(request, requireIdempotencyKey(request));
+      const items = Array.isArray(request.body.items) ? request.body.items as { id: string; deletedAt: string }[] : [];
+      if (!items.length || items.length > 1000 || items.some(item => typeof item.id !== "string" || typeof item.deletedAt !== "string")) return sendError(request, response, 400, "TRASH_SELECTION_REQUIRED", "请确认本次回收站对象和数量", false);
+      const receipt = { cleared: [] as string[], skipped: [] as { id: string; reason: string }[], failed: [] as { id: string; reason: string }[] };
+      for (const item of [...new Map(items.map(item => [item.id, item])).values()]) {
+        const current = (await dependencies.readweave.listTrash()).find(candidate => candidate.id === item.id && candidate.workspaceId === context.workspaceId);
+        if (!current || !current.restoreAvailable || current.deletedAt !== item.deletedAt) { receipt.skipped.push({ id: item.id, reason: "对象已恢复、已清除或修订已变化" }); continue; }
+        try {
+          await dependencies.readweave.permanentlyDeleteTrash(item.id, { ...context, idempotencyKey: `${context.idempotencyKey}:${item.id}:${item.deletedAt}` }, item.deletedAt, {
+            ...trashDeleteOptions(context.workspaceId)
+          });
+          const remaining = (await dependencies.readweave.listTrash()).find(candidate => candidate.id === item.id && candidate.restoreAvailable);
+          if (remaining) receipt.failed.push({ id: item.id, reason: "权威删除尚未确认" }); else receipt.cleared.push(item.id);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "永久删除失败";
+          if (/UNSUPPORTED|PROTECTED|SHARED|CONFLICT|WORKSPACE|TRASH_CHANGED/.test(reason)) receipt.skipped.push({ id: item.id, reason }); else receipt.failed.push({ id: item.id, reason });
+        }
+      }
+      response.json(receipt);
+    } catch (error) { next(error); }
+  });
+
   app.delete("/api/v1/trash/:id", async (request, response, next) => {
     try {
-      await dependencies.readweave.permanentlyDeleteTrash(request.params.id, writeContext(request, requireIdempotencyKey(request)));
+      const context = writeContext(request, requireIdempotencyKey(request));
+      const expectedDeletedAt = request.header("X-Trash-Deleted-At");
+      const current = (await dependencies.readweave.listTrash()).find(item => item.id === request.params.id && item.workspaceId === context.workspaceId);
+      if (!current) return sendError(request, response, 404, "TRASH_NOT_FOUND", "没有找到这条回收站记录", false);
+      if (!expectedDeletedAt || current.deletedAt !== expectedDeletedAt || !current.restoreAvailable) return sendError(request, response, 409, "TRASH_CHANGED", "回收站对象已变化，请重新确认", false);
+      await dependencies.readweave.permanentlyDeleteTrash(request.params.id, context, expectedDeletedAt, trashDeleteOptions(context.workspaceId));
       response.status(204).end();
     } catch (error) { next(error); }
   });
@@ -1184,7 +1227,8 @@ export function createApp(dependencies: AppDependencies): Express {
       const existing = (await dependencies.operations.read()).idempotency[idempotencyKey];
       if (existing) {
         const replay = (await dependencies.operations.read()).imports.find((item) => item.id === existing.objectId);
-        if (replay) return response.status(200).json(replay);
+        if (replay && replay.workspaceId === (request.header("X-Workspace-Id") || "personal")) return response.status(200).json(replay);
+        return sendError(request, response, 409, "IDEMPOTENCY_CONFLICT", "操作标识已被其他请求使用", false);
       }
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       const cas = await dependencies.cas.put(request.file.buffer);
@@ -1297,12 +1341,44 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.get("/api/v1/import-operations/:key", async (request, response, next) => {
+    try {
+      const state = await dependencies.operations.read();
+      const association = state.idempotency[request.params.key];
+      const record = association?.kind === "import" ? state.imports.find(item => item.id === association.objectId && item.workspaceId === (request.header("X-Workspace-Id") || "personal")) : undefined;
+      if (!record) return sendError(request, response, 404, "IMPORT_NOT_ACCEPTED", "尚未找到已接单的同次导入", false);
+      response.json(record);
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/v1/imports:clear-failed", async (request, response, next) => {
+    try {
+      const context = writeContext(request, requireIdempotencyKey(request));
+      const taskIds = uniqueStrings(Array.isArray(request.body.taskIds) ? request.body.taskIds.filter((id: unknown): id is string => typeof id === "string") : []);
+      if (!taskIds.length || taskIds.length > 1000) return sendError(request, response, 400, "TASK_SELECTION_REQUIRED", "请选择具体的失败任务", false);
+      const fingerprints = request.body.fingerprints || {};
+      const selections: FailedTaskSelection[] = taskIds.map(id => ({ kind: id.startsWith("generation-job:") ? "job" : id.startsWith("generation-plan:") ? "plan" : "import", id: id.replace(/^generation-(?:job|plan):/, ""), fingerprint: String(fingerprints[id] || "") }));
+      if (selections.some(item => !/^[a-f0-9]{64}$/.test(item.fingerprint))) return sendError(request, response, 409, "TASK_SELECTION_STALE", "请刷新失败任务列表后再确认清除", false);
+      const receipt = await dependencies.operations.mutate(state => dismissFailedTasks(state, selections, {
+        ...context, hasActiveWrites: task => task.members.some(ref => ref.kind === "import" && activeImports.get(dependencies.operations)?.has(ref.id))
+      }));
+      const result = { cleared: [] as string[], skipped: [] as { id: string; reason: string }[], failed: [] as { id: string; reason: string }[], retainedEntities: true };
+      for (const item of receipt.results) {
+        const affected = taskIds.filter(id => (item.members ?? [item]).some(ref => ref.id === id.replace(/^generation-(?:job|plan):/, "")));
+        for (const id of affected) if (item.status === "skipped") result.skipped.push({ id, reason: item.reason || "TASK_CHANGED" }); else result.cleared.push(id);
+      }
+      response.json(result);
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/v1/imports", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const snapshot = await dependencies.operations.readTaskIndex();
+      const cleanupState = { ...snapshot, idempotency: snapshot.taskDismissals ?? {} };
+      const cleanupGroups = selectFailedTasks(cleanupState, workspaceId);
       const imports = snapshot.imports
-        .filter((item) => item.workspaceId === workspaceId)
+        .filter((item) => item.workspaceId === workspaceId && !isTaskDismissed(cleanupState, workspaceId, { kind: "import", id: item.id }))
         .map((item) => {
           const plan = snapshot.generationPlans.find((candidate) => candidate.id === item.generationPlanId);
           return {
@@ -1318,16 +1394,29 @@ export function createApp(dependencies: AppDependencies): Express {
             pageIds: item.pageIds,
             generationCompletedPageIds: plan?.retryOfPlanId ? item.generationCompletedPageIds : plan?.completedPageIds ?? item.generationCompletedPageIds,
             generationFailedPageIds: plan?.retryOfPlanId ? item.generationFailedPageIds : plan?.failedPageIds ?? item.generationFailedPageIds,
+            generationCoreCompletedPageIds: plan?.coreCompletedPageIds,
+            generationBridgeCompletedPageIds: plan?.bridgeCompletedPageIds,
+            conversionProgress: item.conversionProgress,
+            lastProgressAt: plan?.updatedAt ?? item.conversionProgress?.updatedAt ?? item.convertedAt ?? item.createdAt,
+            cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "import" && ref.id === item.id))?.fingerprint,
             createdAt: item.createdAt
           };
         });
       const independentJobs = snapshot.jobs
-        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId && !job.planId)
+        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId && !job.planId && !isTaskDismissed(cleanupState, workspaceId, { kind: "job", id: job.id }))
         .map((job) => {
           const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
-          return standaloneGenerationTaskRecord(job, relatedImport);
+          return { ...standaloneGenerationTaskRecord(job, relatedImport), cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "job" && ref.id === job.id))?.fingerprint };
         });
-      const tasks = [...imports, ...independentJobs]
+      const independentPlans = snapshot.generationPlans
+        .filter(plan => plan.workspaceId === workspaceId && !plan.sourceImportId && !isTaskDismissed(cleanupState, workspaceId, { kind: "plan", id: plan.id }))
+        .map(plan => ({ id: `generation-plan:${plan.id}`, workspaceId, state: "ready" as const, autoGenerate: true,
+          originalName: `材料生成任务 ${plan.id.slice(0, 6)}`, materialVersionId: plan.materialVersionId, generationPlanId: plan.id,
+          generationState: plan.state, pageIds: plan.pageIds, generationCompletedPageIds: plan.completedPageIds,
+          generationFailedPageIds: plan.failedPageIds, generationCoreCompletedPageIds: plan.coreCompletedPageIds,
+          generationBridgeCompletedPageIds: plan.bridgeCompletedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt,
+          cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "plan" && ref.id === plan.id))?.fingerprint }));
+      const tasks = [...imports, ...independentJobs, ...independentPlans]
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
       response.json(tasks);
     } catch (error) { next(error); }
@@ -1337,6 +1426,14 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const snapshot = await dependencies.operations.readTaskIndex();
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      if (request.params.id.startsWith("generation-plan:")) {
+        const plan = snapshot.generationPlans.find(item => item.id === request.params.id.slice("generation-plan:".length) && item.workspaceId === workspaceId && !item.sourceImportId);
+        if (!plan) return sendError(request, response, 404, "PLAN_NOT_FOUND", "没有找到这个生成计划", false);
+        response.json({ id: request.params.id, workspaceId, state: "ready", issues: [], autoGenerate: true, originalName: `材料生成任务 ${plan.id.slice(0, 6)}`,
+          materialVersionId: plan.materialVersionId, generationPlanId: plan.id, generationState: plan.state, pageIds: plan.pageIds,
+          generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt });
+        return;
+      }
       if (request.params.id.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
         const jobId = request.params.id.slice(STANDALONE_GENERATION_TASK_PREFIX.length);
         const job = snapshot.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId && !item.sourceImportId);
@@ -1367,19 +1464,14 @@ export function createApp(dependencies: AppDependencies): Express {
   app.delete("/api/v1/imports/:id", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const record = (await dependencies.operations.read()).imports.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
-      if (!record) return response.status(204).end();
-      if (!["failed", "rejected"].includes(record.state)) return sendError(request, response, 409, "IMPORT_DELETE_DENIED", "只能清理失败或被隔离的导入记录", false);
-      const sourceReleaseId = record.materialVersionId || `material-version:${record.id}`;
-      const sourceRelease = await dependencies.readweave.getRelease(sourceReleaseId);
-      if (sourceRelease?.lifecycle === "draft_source") {
-        await dependencies.readweave.removeDraftSource(sourceReleaseId, systemWriteContext(`cleanup-import:${record.id}`, record.workspaceId));
-      }
-      await dependencies.operations.mutate((state) => {
-        state.imports = state.imports.filter((item) => item.id !== record.id);
-        state.events = state.events.filter((event) => event.streamId !== record.id);
-        for (const [key, value] of Object.entries(state.idempotency)) if (value.objectId === record.id) delete state.idempotency[key];
-      });
+      const snapshot = await dependencies.operations.read();
+      if (isTaskDismissed(snapshot, workspaceId, { kind: "import", id: request.params.id })) return response.status(204).end();
+      const selected = selectFailedTasks(snapshot, workspaceId).find(group => group.members.some(ref => ref.kind === "import" && ref.id === request.params.id));
+      if (!selected) return sendError(request, response, 409, "IMPORT_DELETE_DENIED", "只能清除已结束且没有活动恢复的失败任务记录", false);
+      const receipt = await dependencies.operations.mutate(state => dismissFailedTasks(state, [selected], {
+        ...writeContext(request, requireIdempotencyKey(request)), hasActiveWrites: task => task.members.some(ref => ref.kind === "import" && activeImports.get(dependencies.operations)?.has(ref.id))
+      }));
+      if (receipt.results.some(item => item.status === "skipped")) return sendError(request, response, 409, "TASK_CHANGED", "任务状态已变化，未清除", false);
       response.status(204).end();
     } catch (error) { next(error); }
   });
@@ -1547,7 +1639,8 @@ export function createApp(dependencies: AppDependencies): Express {
         costUsd: roundGenerationMoney(planJobs.reduce((sum, item) => sum + item.spentUsd, 0))
       };
       const effectiveState = activeJobs.some(job => job.state === "running") ? "running" : plan.state;
-      response.json({ plan: { ...plan, state: effectiveState, progress }, currentJob, activeJobs, progress });
+      const failureReasons = [...new Set(planJobs.filter(job => job.state === "failed").map(job => job.lastErrorCode).filter((code): code is string => Boolean(code)))].map(code => describeGenerationError(code).safeMessage);
+      response.json({ plan: { ...plan, state: effectiveState, progress, failureReasons }, currentJob, activeJobs, progress });
     } catch (error) { next(error); }
   });
 
@@ -4918,6 +5011,49 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       return structuredClone(item);
     });
     if (!record) return;
+    const sameProgress = (left: NonNullable<ImportRecord["conversionProgress"]> | undefined,
+      right: NonNullable<ImportRecord["conversionProgress"]>) => Boolean(left
+        && left.stage === right.stage
+        && left.pageCount === right.pageCount
+        && left.completedPages === right.completedPages
+        && left.issue === right.issue);
+    let lastPersistedProgress = record.conversionProgress;
+    let lastProgressPersistedAt = lastPersistedProgress ? Date.now() : 0;
+    const persistConversionProgress = async (progress: Parameters<ConversionProgressCallback>[0], force = false): Promise<void> => {
+      if (progress.requestId !== importId || !Number.isInteger(progress.completedPages)
+        || progress.completedPages < 0 || progress.completedPages > 500
+        || (progress.pageCount !== undefined && (!Number.isInteger(progress.pageCount) || progress.pageCount < 1 || progress.pageCount > 500))
+        || (progress.pageCount !== undefined && progress.completedPages > progress.pageCount)
+        || !["queued", "preparing", "counting_pages", "rendering_pages", "extracting_text", "finalizing", "saving_pages", "completed", "failed"].includes(progress.stage)) return;
+      const updatedAt = typeof progress.updatedAt === "string" && !Number.isNaN(Date.parse(progress.updatedAt))
+        ? progress.updatedAt : new Date().toISOString();
+      const next: NonNullable<ImportRecord["conversionProgress"]> = {
+        stage: progress.stage,
+        ...(progress.pageCount === undefined ? {} : { pageCount: progress.pageCount }),
+        completedPages: progress.completedPages,
+        ...(progress.issue ? { issue: safeImportIssue(new Error(progress.issue)) } : {}),
+        updatedAt
+      };
+      const changed = !sameProgress(lastPersistedProgress, next);
+      if (!changed) return;
+      const stageChanged = lastPersistedProgress?.stage !== next.stage;
+      const isTerminal = next.stage === "completed" || next.stage === "failed";
+      const completedCount = next.pageCount !== undefined && next.completedPages === next.pageCount;
+      if (!force && !stageChanged && !isTerminal && !completedCount
+        && Date.now() - lastProgressPersistedAt < 500) return;
+      const updated = await dependencies.operations.mutate((state) => {
+        const item = state.imports.find((candidate) => candidate.id === importId && candidate.workspaceId === record.workspaceId);
+        if (!item || !["accepted", "processing", "syncing"].includes(item.state)) return false;
+        if (item.conversionProgress && Date.parse(item.conversionProgress.updatedAt) > Date.parse(next.updatedAt)) return false;
+        if (sameProgress(item.conversionProgress, next)) return false;
+        item.conversionProgress = next;
+        return true;
+      });
+      if (updated) {
+        lastPersistedProgress = next;
+        lastProgressPersistedAt = Date.now();
+      }
+    };
     const conversion = await dependencies.conversion.enqueueAndWait({
       id: importId,
       sourcePath: record.casPath,
@@ -4925,14 +5061,28 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       kind: record.kind,
       outputDir,
       createdAt: record.createdAt
-    });
+    }, (progress) => persistConversionProgress(progress));
     if (conversion.state !== "completed") throw new Error(conversion.issues[0] || "CONVERSION_FAILED");
+    await persistConversionProgress({
+      requestId: importId,
+      stage: "saving_pages",
+      pageCount: conversion.pages.length,
+      completedPages: 0,
+      updatedAt: new Date().toISOString()
+    }, true);
     const convertedPages: Array<{ page: CourseRelease["pages"][number]; bytes: Buffer; sha256: string; mediaType: "image/png" | "image/svg+xml" }> = [];
     for (const converted of conversion.pages) {
       const bytes = await readFile(converted.imagePath);
       const stored = await dependencies.cas.put(bytes);
       const page = createImportedPage(record.sha256, converted.pageNumber, converted.title, converted.text, stored.sha256);
       convertedPages.push({ page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType });
+      await persistConversionProgress({
+        requestId: importId,
+        stage: "saving_pages",
+        pageCount: conversion.pages.length,
+        completedPages: convertedPages.length,
+        updatedAt: new Date().toISOString()
+      });
       await dependencies.operations.mutate((state) => {
         dependencies.operations.appendEvent(state, importId, "conversion.page.completed", { pageId: page.id, pageNumber: page.pageNumber, title: page.title, imageSha256: stored.sha256 });
       });
@@ -5052,6 +5202,12 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     await dependencies.operations.mutate((state) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item) return;
+      item.conversionProgress = {
+        stage: "completed",
+        pageCount: conversion.pages.length,
+        completedPages: convertedPages.length,
+        updatedAt: new Date().toISOString()
+      };
       item.courseId = course.id;
       item.materialVersionId = materialVersionId;
       item.pageIds = sourceRelease.pageIds;
@@ -5076,6 +5232,13 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item || item.state === "ready") return;
       item.state = "failed";
+      item.conversionProgress = {
+        ...item.conversionProgress,
+        stage: "failed",
+        completedPages: item.conversionProgress?.completedPages ?? 0,
+        issue,
+        updatedAt: new Date().toISOString()
+      };
       if (!item.issues.includes(issue)) item.issues.push(issue);
       dependencies.operations.appendEvent(state, importId, "import.failed", { issue });
     });
@@ -5577,7 +5740,7 @@ function groupedCost(entries: GenerationCostEntry[], keyOf: (entry: GenerationCo
 export function createDefaultDependencies(dataDir: string, readweave: ReadWeaveCourseApi, modelRouter?: ModelRouterClient): AppDependencies {
   const conversion = process.env.COURSE_OS_CONVERSION_QUEUE_MODE === "file"
     ? new FileConversionQueueClient({ queueRoot: join(dataDir, "conversion-queue") })
-    : { enqueueAndWait: (request: ConversionRequest) => convertMaterial(request) };
+    : { enqueueAndWait: (request: ConversionRequest, onProgress?: ConversionProgressCallback) => convertMaterial(request, { onProgress }) };
   const operations = process.env.DATABASE_URL
     ? new PostgresOperationalStore({ connectionString: process.env.DATABASE_URL })
     : new OperationalStore(join(dataDir, "operations.json"));

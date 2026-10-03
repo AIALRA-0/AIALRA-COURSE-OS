@@ -132,10 +132,10 @@ export function summarizeImportProgress(
     ["core", "bodyCore", "bodyCoreProgress", "coreProgress", "teachingProgress"],
     ["completed", "done", "finished", "completedPages", "completedPageCount", "coreCompleted", "coreCompletedPageCount", "bodyCoreCompleted", "bodyCoreCompletedPageCount"],
     ["total", "totalPages", "pageCount", "totalPageCount", "coreTotal", "coreTotalPageCount", "bodyCoreTotal", "bodyCoreTotalPageCount"]
-  ) ?? countFromArrays(coreSources, ["coreCompletedPageIds", "bodyCoreCompletedPageIds"], ["pageIds"], ["coreTotal", "coreTotalPageCount"])
+  ) ?? countFromArrays(coreSources, ["coreCompletedPageIds", "bodyCoreCompletedPageIds", "generationCoreCompletedPageIds"], ["pageIds"], ["coreTotal", "coreTotalPageCount"])
     ?? (plan && plan.pageIds.length > 0 ? { completed: plan.completedPageIds.length, total: plan.pageIds.length }
       : record.generationJobId && record.pageIds?.length
-        ? { completed: (record.generationCompletedPageIds?.length ?? 0) + (record.generationFailedPageIds?.length ?? 0), total: record.pageIds.length }
+        ? { completed: new Set(record.generationCompletedPageIds ?? []).size, total: record.pageIds.length }
         : undefined);
 
   let crossPage = countFromSources(
@@ -257,10 +257,31 @@ export type ImportActivity = {
   busy: boolean;
   progressPercent?: number;
   progressScope?: string;
+  overall?: ProgressCount;
   lastActivityAt?: string;
   ageSeconds?: number;
   stale: boolean;
 };
+
+function conversionStageLabel(record: WebImportRecord): string {
+  const stage = asRecord(record.conversionProgress)?.stage;
+  return typeof stage === "string" ? ({ queued: "等待转换", preparing: "准备转换工具", counting_pages: "识别总页数", rendering_pages: "转换原图", extracting_text: "提取页面文字", finalizing: "核对转换结果", saving_pages: "保存原图", completed: "转换完成", failed: "转换失败" } as Record<string, string>)[stage] || "页面转换" : "页面转换";
+}
+
+/** Completed IDs mean the existing delivery contract is saved, not just processed. */
+export function deliveredPageProgress(record: WebImportRecord, plan?: WebGenerationPlan): ProgressCount | undefined {
+  const ids = record.pageIds?.length ? record.pageIds : plan?.pageIds;
+  const total = ids?.length || readNumber(asRecord(record.conversionProgress) ?? {}, ["totalPages", "total", "pageCount"]);
+  if (!total) return undefined;
+  if (record.autoGenerate === false || record.generationState === "not_requested") {
+    return { completed: record.state === "ready" ? new Set(ids ?? []).size : 0, total };
+  }
+  const failed = new Set([...(record.generationFailedPageIds ?? []), ...(plan?.failedPageIds ?? [])]);
+  const valid = ids ? new Set(ids) : undefined;
+  const saved = record.generationCompletedPageIds ?? plan?.completedPageIds ?? [];
+  const completed = new Set(saved.filter(id => !failed.has(id) && (!valid || valid.has(id)))).size;
+  return { completed: Math.min(total, completed), total };
+}
 
 function timestamp(sources: readonly unknown[], keys: readonly string[]): string | undefined {
   const values = sources.flatMap((value) => {
@@ -321,9 +342,9 @@ export function getImportActivity(
   const stage = record.state === "ready" && generationActivity
     ? stageLabels[generationActivity.stage]
     : record.state === "quarantined" || record.state === "accepted"
-    ? "安全检查与排队"
+    ? "等待转换"
     : record.state === "processing"
-      ? "页面转换"
+      ? conversionStageLabel(record)
       : record.state === "syncing"
         ? "写入课程草稿"
         : record.state !== "ready"
@@ -352,49 +373,15 @@ export function getImportActivity(
                         : planState === "awaiting_review" ? "等待检查"
                           : "生成任务状态未知";
 
-  let progressPercent = explicitPercent(nestedSources(record, plan));
-  let progressScope = progressPercent === undefined ? undefined : "整体流程";
-  if (record.state === "ready" && record.autoGenerate === false) { progressPercent = 100; progressScope = "材料导入"; }
-  if (plan && plan.pageIds.length > 0 && plan.coreCompletedPageIds && plan.bridgeCompletedPageIds) {
-    const total = plan.pageIds.length * 2;
-    const complete = plan.coreCompletedPageIds.length + plan.bridgeCompletedPageIds.length;
-    progressPercent = Math.round(Math.min(1, complete / total) * 100);
-    progressScope = "讲解生成";
-  } else if (record.state === "processing") {
-    const conversion = summarizeImportProgress(record, plan, activeJobs, costs).conversion;
-    if (conversion?.total) {
-      progressPercent = Math.round(Math.min(1, conversion.completed / conversion.total) * 100);
-      progressScope = "页面转换";
-    }
-  } else if (planState === "running" && plan?.coreCompletedPageIds?.length !== undefined) {
-    if (plan.coreCompletedPageIds.length < plan.pageIds.length) {
-      progressPercent = Math.round(Math.min(1, plan.coreCompletedPageIds.length / plan.pageIds.length) * 100);
-      progressScope = "正文讲解";
-    } else if (plan.bridgeCompletedPageIds) {
-      progressPercent = Math.round(Math.min(1, plan.bridgeCompletedPageIds.length / plan.pageIds.length) * 100);
-      progressScope = "跨页承接";
-    }
-  }
-  if (!plan && record.generationJobId) {
-    if (record.state === "ready" && record.generationState === "completed") {
-      progressPercent = 100;
-      progressScope = "讲解生成";
-    } else {
-      progressPercent = undefined;
-      progressScope = undefined;
-    }
-  }
-  if (planState === "completed") { progressPercent = 100; progressScope = "讲解生成"; }
-  if (plan?.retryOfPlanId && record.pageIds?.length && record.generationCompletedPageIds) {
-    progressPercent = Math.round(record.generationCompletedPageIds.length / record.pageIds.length * 100);
-    progressScope = "讲解生成";
-  }
-  if (state === "failed" || state === "cancelled" || state === "paused" || state === "awaiting_review") { progressPercent = undefined; progressScope = undefined; }
+  const overall = deliveredPageProgress(record, plan);
+  const progressPercent = overall ? Math.round(overall.completed / overall.total * 100) : undefined;
+  const progressScope = overall ? "总完成度" : undefined;
 
   const activitySources = nestedSources(record, plan);
   const lastActivityAt = generationActivity?.occurredAt;
   const resolvedLastActivityAt = lastActivityAt
-    ?? timestamp([...activitySources, ...activeJobs], ["lastProgressAt", "lastEventAt", "updatedAt", "convertedAt", "createdAt"])
+    ?? timestamp([record.conversionProgress], ["updatedAt"])
+    ?? timestamp([record, plan], ["lastProgressAt", "convertedAt", "createdAt"])
     ?? timestamp(costs, ["createdAt"]);
   const ageSeconds = resolvedLastActivityAt ? Math.max(0, Math.floor((now - Date.parse(resolvedLastActivityAt)) / 1000)) : undefined;
   return {
@@ -406,6 +393,7 @@ export function getImportActivity(
     busy,
     progressPercent,
     progressScope,
+    overall,
     lastActivityAt: resolvedLastActivityAt,
     ageSeconds,
     stale: busy && ageSeconds !== undefined && ageSeconds >= 120

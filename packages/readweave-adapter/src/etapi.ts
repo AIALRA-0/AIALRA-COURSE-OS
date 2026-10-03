@@ -34,6 +34,7 @@ import type {
 import type { CourseReleaseIndex, MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
 import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings, toCourseReleaseIndex } from "./index.js";
 import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
+import { trashDeleteIdempotencyKey, type TrashDeleteOptions } from "./trash-safety.js";
 
 const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
 
@@ -1421,36 +1422,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return result;
   }
 
-  async permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext): Promise<void> {
-    const state = await this.readState();
-    const item = state.trash.find((candidate) => candidate.id === trashId);
-    if (item?.readweaveNoteId) throw new Error("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
-    await this.mutate(async (state) => {
-      if (state.idempotency[context.idempotencyKey]) return;
-      const index = state.trash.findIndex((candidate) => candidate.id === trashId);
-      if (index < 0) return;
-      const item = state.trash[index]!;
-      state.trash.splice(index, 1);
-      if (item.nodeKind === "course") {
-        const releaseIds = new Set(state.releases.filter((release) => release.courseId === item.nodeId).map((release) => release.id));
-        const removedDrafts = state.drafts.filter((draft) => draft.courseId === item.nodeId);
-        for (const draft of removedDrafts) {
-          const pageRecord = await this.findDraftPageRecord(draft.pageId);
-          if (pageRecord) {
-            await this.deleteNote(pageRecord.noteId);
-            this.draftPageRecordCache.delete(draft.pageId);
-          }
-        }
-        state.courses = state.courses.filter((course) => course.id !== item.nodeId);
-        state.releases = state.releases.filter((release) => release.courseId !== item.nodeId);
-        state.drafts = state.drafts.filter((draft) => draft.courseId !== item.nodeId);
-        state.questions = state.questions.filter((question) => !releaseIds.has(question.courseReleaseId));
-        state.questionSelections = state.questionSelections.filter((selection) => !releaseIds.has(selection.courseReleaseId));
-        state.questionAttempts = state.questionAttempts.filter((attempt) => !releaseIds.has(attempt.courseReleaseId));
-        state.treeNodes = state.treeNodes.filter((node) => node.id !== item.nodeId && node.parentId !== item.nodeId);
-      } else state.treeNodes = state.treeNodes.filter((node) => node.id !== item.nodeId);
-      state.idempotency[context.idempotencyKey] = { kind: "permanent_delete", objectId: trashId };
-    }, context);
+  async permanentlyDeleteTrash(_trashId: string, context: IdempotentWriteContext, _expectedDeletedAt?: string, _options: TrashDeleteOptions = {}): Promise<void> {
+    trashDeleteIdempotencyKey(context);
+    if (context.workspaceId !== this.workspaceId) throw new Error("READWEAVE_TRASH_WORKSPACE_MISMATCH");
+    // ETAPI delete is recoverable note deletion, not an authoritative purge.
+    // Even virtual nodes can own page-note projections; removing the index
+    // would falsely report permanent deletion and orphan those projections.
+    throw new Error("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
   }
 
   async getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined> {

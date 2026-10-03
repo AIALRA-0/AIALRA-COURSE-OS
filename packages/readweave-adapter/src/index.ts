@@ -28,6 +28,8 @@ import type {
 } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, selectMaterialRelease, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
+import { assertTrashReferencesSafe, trashDeleteIdempotencyKey, trashDeleteReplay, trashDeleteScope, type TrashDeleteOptions } from "./trash-safety.js";
+export * from "./trash-safety.js";
 
 export { selectMaterialRelease };
 
@@ -121,7 +123,7 @@ export interface ReadWeaveCourseApi {
   trashTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<TrashRecord>;
   listTrash(): Promise<TrashRecord[]>;
   restoreTrash(trashId: string, context: IdempotentWriteContext, options?: { restoreMode?: "original" | "root" }): Promise<CourseTreeNode>;
-  permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext): Promise<void>;
+  permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string, options?: TrashDeleteOptions): Promise<void>;
   getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined>;
   getDeepLink(noteId: string): Promise<ReadWeaveDeepLink | undefined>;
   getWorkspaceSettings(): Promise<WorkspaceSettings>;
@@ -434,27 +436,30 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.readBackTreeNode(saved.id, saved);
   }
 
-  async permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext): Promise<void> {
+  async permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string, options: TrashDeleteOptions = {}): Promise<void> {
+    options = { ...options, expectedDeletedAt };
     await this.mutate(async (state) => {
-      const replay = state.idempotency[context.idempotencyKey];
-      if (replay) return;
+      if (trashDeleteReplay(state, trashId, context, options)) return;
       const index = state.trash.findIndex((candidate) => candidate.id === trashId);
-      if (index < 0) return;
+      if (index < 0) throw new Error("READWEAVE_TRASH_NOT_FOUND");
       const item = state.trash[index]!;
-      if (item.nodeKind === "course") {
-        const releaseIds = new Set(state.releases.filter((release) => release.courseId === item.nodeId).map((release) => release.id));
-        state.courses = state.courses.filter((course) => course.id !== item.nodeId);
-        state.releases = state.releases.filter((release) => release.courseId !== item.nodeId);
-        state.drafts = state.drafts.filter((draft) => draft.courseId !== item.nodeId);
-        state.questions = state.questions.filter((question) => !releaseIds.has(question.courseReleaseId));
-        state.questionSelections = state.questionSelections.filter((selection) => !releaseIds.has(selection.courseReleaseId));
-        state.questionAttempts = state.questionAttempts.filter((attempt) => !releaseIds.has(attempt.courseReleaseId));
-        state.treeNodes = state.treeNodes.filter((node) => node.id !== item.nodeId && node.parentId !== item.nodeId);
-      } else {
-        state.treeNodes = state.treeNodes.filter((node) => node.id !== item.nodeId);
-      }
-      state.trash.splice(index, 1);
-      state.idempotency[context.idempotencyKey] = { kind: "permanent_delete", objectId: trashId };
+      const scope = trashDeleteScope(state, item, context, options);
+      await assertTrashReferencesSafe(state, scope, options);
+      const releaseIds = new Set(scope.releaseIds);
+      const nodeIds = new Set(scope.nodeIds);
+      const materials = new Set(state.treeNodes.filter(node => nodeIds.has(node.id)).map(node => node.materialId ?? node.id));
+      state.courses = state.courses.filter(course => !scope.courseIds.includes(course.id));
+      state.releases = state.releases.filter(release => !releaseIds.has(release.id));
+      state.manifests = state.manifests.filter(manifest => !releaseIds.has(manifest.courseReleaseId));
+      state.drafts = state.drafts.filter(draft => !scope.courseIds.includes(draft.courseId)
+        && !releaseIds.has(draft.sourceReleaseId) && !nodeIds.has(draft.moduleId)
+        && !materials.has(stableMaterialId(draft.courseId, draft.moduleId)));
+      state.questions = state.questions.filter(question => !releaseIds.has(question.courseReleaseId));
+      state.treeNodes = state.treeNodes.filter(node => !nodeIds.has(node.id));
+      state.trash = state.trash.filter(record => record.id !== trashId && !nodeIds.has(record.nodeId));
+      // CAS bytes and learning/cost/idempotency records are never collected here.
+      // Shared source images remain readable from every surviving material.
+      state.idempotency[trashDeleteIdempotencyKey(context)] = { kind: "permanent_delete", objectId: JSON.stringify([trashId, options.expectedDeletedAt, options.expectedSnapshotHash]) };
     });
   }
 
@@ -1230,8 +1235,11 @@ export class HttpReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.readBackTreeNode(saved.id, saved);
   }
 
-  async permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext): Promise<void> {
-    await this.request<unknown>(`/trash/${encodeURIComponent(trashId)}`, { method: "DELETE", headers: this.writeHeaders(context) });
+  async permanentlyDeleteTrash(_trashId: string, context: IdempotentWriteContext, _expectedDeletedAt?: string, _options: TrashDeleteOptions = {}): Promise<void> {
+    trashDeleteIdempotencyKey(context);
+    // The legacy HTTP protocol cannot attest to snapshot/reference checks.
+    // Do not send a destructive request until the authority supports them.
+    throw new Error("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
   }
 
   async getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined> {

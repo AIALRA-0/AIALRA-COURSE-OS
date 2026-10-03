@@ -491,6 +491,13 @@ export interface ImportRecord {
   generationCompletedPageIds?: Identifier[];
   generationFailedPageIds?: Identifier[];
   generationState?: JobState | GenerationPlanState | "not_requested";
+  conversionProgress?: {
+    stage: "queued" | "preparing" | "counting_pages" | "rendering_pages" | "extracting_text" | "finalizing" | "saving_pages" | "completed" | "failed";
+    pageCount?: number;
+    completedPages: number;
+    issue?: string;
+    updatedAt: ISODateTime;
+  };
   sensitivity: "private" | "restricted" | "public";
   state: "quarantined" | "accepted" | "processing" | "syncing" | "ready" | "rejected" | "failed";
   issues: string[];

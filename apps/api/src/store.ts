@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, OrderedEvent, ReviewPlan, ReviewSession, SearchProviderConfig, SearchRoutePolicy, SelfRetelling } from "@course-os/contracts";
-import { writeJsonAtomic } from "@course-os/storage";
+import { advanceTaskIncarnation, pickTaskDismissals, reconcileTaskDismissals, writeJsonAtomic } from "@course-os/storage";
 import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
@@ -27,7 +27,9 @@ export interface OperationalState {
   idempotency: Record<string, { kind: string; objectId: string }>;
 }
 
-export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans">;
+export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationPlans"> & {
+  taskDismissals?: ReturnType<typeof pickTaskDismissals>;
+};
 export type ModelSettings = Pick<OperationalState, "modelProviders" | "modelRoutePolicy">;
 
 export interface GenerationPlanDetailRead {
@@ -103,8 +105,20 @@ export class OperationalStore {
 
   /** Read only the fields needed by the task tree and import detail screens. */
   async readTaskIndex(): Promise<TaskIndex> {
-    const state = await this.read();
-    return { imports: state.imports, jobs: state.jobs, generationPlans: state.generationPlans };
+    let value: Partial<OperationalState>;
+    try {
+      value = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<OperationalState>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { imports: [], jobs: [], generationPlans: [] };
+      throw error;
+    }
+    const taskDismissals = pickTaskDismissals(value.idempotency);
+    return {
+      imports: Array.isArray(value.imports) ? value.imports : [],
+      jobs: Array.isArray(value.jobs) ? value.jobs : [],
+      generationPlans: Array.isArray(value.generationPlans) ? value.generationPlans : [],
+      ...(Object.keys(taskDismissals).length ? { taskDismissals } : {})
+    };
   }
 
   /** Read only one workspace plan, its jobs, and events used by its detail response. */
@@ -139,7 +153,9 @@ export class OperationalStore {
     this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
       const state = await this.read();
       const before = state.events.length;
+      const previousTasks = { imports: state.imports.map(record => ({ ...record })), generationPlans: state.generationPlans.map(record => ({ ...record })), jobs: state.jobs.map(record => ({ ...record })) };
       result = await change(state);
+      reconcileTaskDismissals(state, previousTasks);
       emitted.push(...state.events.slice(before));
       await writeJsonAtomic(this.statePath, state);
     });
@@ -275,6 +291,11 @@ export class PostgresOperationalStore extends OperationalStore {
     const result = await this.pool.query<TaskIndex & { relationalJobs: GenerationJob[] }>(
       `SELECT state->'imports' AS imports, state->'jobs' AS jobs,
         state->'generationPlans' AS "generationPlans",
+        (SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
+         FROM jsonb_each(CASE WHEN jsonb_typeof(state->'idempotency') = 'object'
+           THEN state->'idempotency' ELSE '{}'::jsonb END) AS entry(key, value)
+         WHERE entry.key LIKE 'course-os:task-dismissal:v1:%'
+           AND entry.value->>'kind' = 'taskdismissal') AS "taskDismissals",
         COALESCE((SELECT jsonb_agg(job_data ORDER BY created_at, id) FROM generation_jobs WHERE job_data IS NOT NULL), '[]'::jsonb) AS "relationalJobs"
        FROM operational_state WHERE id = 1`
     );
@@ -283,7 +304,8 @@ export class PostgresOperationalStore extends OperationalStore {
     return {
       imports: Array.isArray(row.imports) ? row.imports : [],
       jobs: mergeGenerationJobs(Array.isArray(row.jobs) ? row.jobs : [], row.relationalJobs ?? []),
-      generationPlans: Array.isArray(row.generationPlans) ? row.generationPlans : []
+      generationPlans: Array.isArray(row.generationPlans) ? row.generationPlans : [],
+      ...(Object.keys(row.taskDismissals ?? {}).length ? { taskDismissals: row.taskDismissals } : {})
     };
   }
 
@@ -457,8 +479,10 @@ export class PostgresOperationalStore extends OperationalStore {
         "SELECT page_id, checkpoint FROM generation_job_checkpoints WHERE job_id = $1 ORDER BY page_id", [jobId]
       );
       const context = postgresGenerationJobMutationContext(job, eventRows.rows, checkpointRows.rows);
+      const previousJob = { ...job };
       const result = await change(job, context);
       if (job.id !== jobId) throw new Error("GENERATION_JOB_ID_IMMUTABLE");
+      advanceTaskIncarnation(job, previousJob);
       await updateGenerationJob(client, job);
       for (const pending of context.pendingEvents) {
         const inserted = await client.query<{ id: string }>(
@@ -529,6 +553,7 @@ export class PostgresOperationalStore extends OperationalStore {
       const before = structuredClone(state);
       const beforeEvents = state.events.length;
       result = await change(state);
+      reconcileTaskDismissals(state, before);
       await persistChangedGenerationJobs(client, before.jobs, state.jobs);
       await persistChangedCheckpoints(client, before.generationCheckpoints, state.generationCheckpoints, state.jobs);
       emitted = state.events.slice(beforeEvents);

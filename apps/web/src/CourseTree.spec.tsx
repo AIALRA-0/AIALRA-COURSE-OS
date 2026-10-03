@@ -2,7 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseTreeNode } from "@course-os/contracts";
-import { buildCourseTreeSearchResults, CourseTree, moveSearchIndex, resolveCourseTreeSearchActivation, resolveSearchInputKeyAction, type CourseTreeSearchMaterial } from "./CourseTree.js";
+import { buildCourseTreeSearchResults, CourseTree, failedCourseTreeTaskIds, moveSearchIndex, resolveCourseTreeSearchActivation, resolveSearchInputKeyAction, type CourseTreeSearchMaterial } from "./CourseTree.js";
+import { Icon } from "./Icon.js";
 
 describe("CourseTree background task entries", () => {
   it("places a persisted import under its course rather than in the unrelated task section", () => {
@@ -24,7 +25,7 @@ describe("CourseTree background task entries", () => {
     const markup = renderToStaticMarkup(createElement(CourseTree, {
       tree: { workspaceId: "workspace-1", title: "课程空间", courses: [], rootMaterials: [], updatedAt: "2026-09-22T10:00:00.000Z" },
       backgroundTasks: [
-        { id: "task-running", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running" },
+        { id: "task-running", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running", progress: { percent: 25, completed: 2, total: 8 } },
         { id: "task-queued", title: "Queued.pdf", detail: "排队中 · 0/8 页", state: "queued" },
         { id: "task-done", title: "Completed.pdf", detail: "已完成 · 8/8 页", state: "completed" },
         { id: "generation-job:task-failed", title: "Failed.pptx", detail: "失败 · 1/8 页", state: "failed" },
@@ -40,11 +41,12 @@ describe("CourseTree background task entries", () => {
 
     expect(markup).toContain('data-action="tree-open-task"');
     expect(markup).toContain('data-task-state="running"');
-    expect(markup).toContain('class="task-state-dot task-state-running"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-determinate task-state-running"');
     expect(markup).toContain('data-task-state="completed"');
-    expect(markup).toContain('class="task-state-dot task-state-queued"');
-    expect(markup).toContain('class="task-state-dot task-state-failed"');
-    expect(markup).toContain('class="task-state-dot task-state-cancelled"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-static task-state-queued"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-static task-state-failed"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-static task-state-cancelled"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-determinate task-state-running" data-progress-mode="determinate" data-progress-percent="25"');
     expect(markup).toContain('<span class="task-state-label task-state-running">正在处理</span>');
     expect(markup).toContain('<span class="task-state-label task-state-completed">已完成</span>');
     expect(markup).toContain('<span class="task-state-label task-state-failed">失败</span>');
@@ -66,7 +68,7 @@ describe("CourseTree background task entries", () => {
     }));
     expect(markup).toContain('data-task-id="generation-job:job-1"');
     expect(markup).toContain('class="tree-task-section"');
-    expect(markup).toContain('class="task-state-dot task-state-running"');
+    expect(markup).toContain('class="tree-task-indicator tree-task-indicator-indeterminate task-state-running"');
     expect(markup.indexOf("EE680")).toBeLessThan(markup.indexOf("生成任务 abc123"));
   });
 
@@ -102,6 +104,46 @@ describe("CourseTree background task entries", () => {
     expect(markup.indexOf('data-task-id="task-running"')).toBeLessThan(historyStart);
     expect(markup).not.toContain('<details class="tree-task-history" open');
     expect(markup).not.toContain('<details class="tree-task-attention" aria-label="需处理" open');
+    expect(markup).not.toContain('data-action="tree-clear-failed-tasks"');
+  });
+
+  it("animates only unknown fresh running progress and sends a deduplicated failed-only clear request", () => {
+    const failedTasks = [
+      { id: "failed-1", title: "First failed.pdf", detail: "失败", state: "failed" as const },
+      { id: "failed-2", title: "Second failed.pdf", detail: "失败", state: "failed" as const },
+      { id: "done-1", title: "Completed.pdf", detail: "已完成", state: "completed" as const }
+    ];
+    expect(failedCourseTreeTaskIds([...failedTasks, { ...failedTasks[1]! }])).toEqual(["failed-1", "failed-2"]);
+
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "课程空间", courses: [], rootMaterials: [], updatedAt: "2026-09-22T10:00:00.000Z" },
+      backgroundTasks: [
+        { id: "running-unknown", title: "Unknown.pdf", detail: "正在处理", state: "running", progress: { indeterminate: true } },
+        { id: "running-stale", title: "Stale.pdf", detail: "正在处理", state: "running", progress: { indeterminate: true, stale: true } },
+        { id: "failed-static", title: "Failed.pdf", detail: "失败", state: "failed", unresolved: true, progress: { indeterminate: true } },
+        ...failedTasks.slice(0, 2)
+      ],
+      onClearFailed: vi.fn(),
+      clearFailedBusy: true,
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+    const taskButton = (taskId: string) => {
+      const taskMarker = `data-task-id="${taskId}"`;
+      const markerIndex = markup.indexOf(taskMarker);
+      const rowStart = markup.lastIndexOf('<button type="button" class="tree-task-row', markerIndex);
+      const rowEnd = markup.indexOf("</button>", markerIndex) + "</button>".length;
+      return markup.slice(rowStart, rowEnd);
+    };
+    expect(taskButton("running-unknown")).toContain('data-progress-mode="indeterminate"');
+    expect(taskButton("running-stale")).toContain('data-progress-mode="stale"');
+    expect(taskButton("failed-static")).toContain('data-progress-mode="static"');
+    expect(markup).toContain('class="tree-task-clear-failed" data-action="tree-clear-failed-tasks" disabled="" aria-busy="true" aria-label="清除失败任务（3）"');
+
+    const disclosureRow = markup.indexOf('class="tree-task-disclosure-row"');
+    const attentionEnd = markup.indexOf("</details>", disclosureRow);
+    const clearAction = markup.indexOf('class="tree-task-clear-failed"', disclosureRow);
+    expect(disclosureRow).toBeGreaterThanOrEqual(0);
+    expect(clearAction).toBeGreaterThan(attentionEnd);
   });
 });
 
@@ -130,7 +172,8 @@ describe("CourseTree search navigation", () => {
 
     expect(results.map(({ node }) => node.pageId)).toEqual(["page-current"]);
     expect(results[0]?.node.releaseId).toBe("release-current");
-    expect(results[0]?.detail).toContain("v4");
+    expect(results[0]?.detail).toContain("草稿");
+    expect(results[0]?.detail).not.toContain("v4");
     expect(buildCourseTreeSearchResults(treeNodes, "trash", searchMaterials)).toHaveLength(0);
     expect(buildCourseTreeSearchResults(treeNodes, "archived", searchMaterials)).toHaveLength(0);
   });
@@ -179,9 +222,45 @@ describe("CourseTree search navigation", () => {
     }));
 
     expect(markup).toContain("已发布 v8");
-    expect(markup).toContain("草稿 v4");
+    expect(markup).toContain("草稿");
+    expect(markup).not.toContain("草稿 v4");
+    expect(markup).not.toContain("材料版本：草稿 v4");
     expect(markup).toContain("材料状态：需要审核");
     expect(markup).not.toContain('aria-label="状态：已发布"');
     expect(markup).not.toContain('aria-label="材料版本：已发布 v0"');
+    const courseButtonStart = markup.indexOf('<button class="tree-main-button"');
+    const courseButtonEnd = markup.indexOf("</button>", courseButtonStart);
+    expect(markup.slice(courseButtonStart, courseButtonEnd)).not.toContain('class="status-dot');
+  });
+
+  it("retains a revision label on a historical draft page", () => {
+    const historicalDraft = {
+      ...currentMaterial,
+      children: [{ id: "old-draft-page", kind: "page", title: "Archived draft page", pageId: "old-draft-page", releaseId: "release-old-draft", children: [] }]
+    } as unknown as CourseTreeNode;
+    const results = buildCourseTreeSearchResults([historicalDraft], "Archived draft page", [
+      { materialNodeId: historicalDraft.id, releaseId: "release-old-draft", version: 3, lifecycle: "draft_source", pages: [{ id: "old-draft-page", pageNumber: 2, title: "Archived draft page" }] }
+    ]);
+    expect(results[0]?.detail).toContain("草稿 v3");
+  });
+
+  it("retains the published revision label on a historical page", () => {
+    const historicalPage = {
+      ...currentMaterial,
+      children: [{ id: "published-history-page", kind: "page", title: "Published history page", pageId: "published-history-page", releaseId: "release-published-history", children: [] }]
+    } as unknown as CourseTreeNode;
+    const results = buildCourseTreeSearchResults([historicalPage], "Published history page", [
+      { materialNodeId: historicalPage.id, releaseId: "release-published-history", version: 6, lifecycle: "published", pages: [{ id: "published-history-page", pageNumber: 4, title: "Published history page" }] }
+    ]);
+    expect(results[0]?.detail).toContain("已发布 v6");
+  });
+});
+
+describe("shared directional chevron icon", () => {
+  it("uses the same SVG path for each direction so CSS can rotate one centered icon", () => {
+    const names = ["chevronRight", "chevronDown", "chevronLeft", "chevronUp"] as const;
+    const paths = names.map((name) => renderToStaticMarkup(createElement(Icon, { name })).match(/<path d="([^"]+)"/)?.[1]);
+    expect(new Set(paths).size).toBe(1);
+    expect(paths[0]).toBe("m8.5 5 7 7-7 7");
   });
 });

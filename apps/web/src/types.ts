@@ -9,7 +9,7 @@ export type ImportTaskSummary = Pick<ImportRecord,
 > & Partial<Pick<ImportRecord,
   "courseId" | "parentNodeId" | "autoGenerate" | "generationJobId" | "materialVersionId" | "generationState" | "pageIds" |
   "generationCompletedPageIds" | "generationFailedPageIds"
->> & { updatedAt?: string };
+>> & { updatedAt?: string; lastProgressAt?: string; conversionProgress?: ImportRecord["conversionProgress"]; cleanupFingerprint?: string; generationCoreCompletedPageIds?: string[]; generationBridgeCompletedPageIds?: string[] };
 
 /** API 可能先返回尚未进入共享契约的渐进发布字段。 */
 export type WebGenerationPlan = GenerationPlan & Record<string, unknown>;

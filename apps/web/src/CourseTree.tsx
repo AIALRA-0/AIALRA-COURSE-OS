@@ -3,7 +3,15 @@ import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-
 import { Icon } from "./Icon.js";
 import { importTaskStateLabel, type ImportTaskState } from "./import-progress.js";
 
-export type CourseTreeTask = { id: string; courseId?: string; parentNodeId?: string; title: string; detail: string; state: ImportTaskState; unresolved?: boolean };
+export interface CourseTreeTaskProgress {
+  percent?: number;
+  completed?: number;
+  total?: number;
+  indeterminate?: boolean;
+  stale?: boolean;
+}
+
+export type CourseTreeTask = { id: string; courseId?: string; parentNodeId?: string; title: string; detail: string; state: ImportTaskState; unresolved?: boolean; progress?: CourseTreeTaskProgress };
 
 export interface CourseTreeActions {
   createModule?: (course: CourseTreeNode) => void;
@@ -47,13 +55,15 @@ const treeStatusPresentation = {
   conflict: { icon: "warning", label: "存在冲突", visibleLabel: "冲突" }
 } as const;
 
-export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
+export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, onClearFailed, clearFailedBusy = false, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
   selectedTaskId?: string;
   backgroundTasks?: CourseTreeTask[];
   searchMaterials?: CourseTreeSearchMaterial[];
   onSelectTask?: (taskId: string) => void;
+  onClearFailed?: (requestedIds: string[]) => void;
+  clearFailedBusy?: boolean;
   collapsed?: boolean;
   onCollapse?: () => void;
   sidebarWidth?: number;
@@ -288,7 +298,7 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
       {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={Boolean(query.trim())} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query.trim())} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
       {!query.trim() && tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={false} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={false} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
       </nav>
-      <TaskRows tasks={backgroundTasks} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
+      <TaskRows tasks={backgroundTasks} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} onClearFailed={onClearFailed} clearFailedBusy={clearFailedBusy} />
     </div>
 
     <div className="sidebar-footer">
@@ -319,24 +329,41 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   </aside>;
 }
 
-function TaskRows({ tasks, query, selectedTaskId, onSelectTask }: {
+function TaskRows({ tasks, query, selectedTaskId, onSelectTask, onClearFailed, clearFailedBusy }: {
   tasks: CourseTreeTask[]; query: string; selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
+  onClearFailed?: (requestedIds: string[]) => void;
+  clearFailedBusy: boolean;
 }) {
   const needle = query.trim().toLocaleLowerCase();
   const matchesQuery = (task: CourseTreeTask) => !needle || `${task.title} ${task.detail}`.toLocaleLowerCase().includes(needle);
   const current = tasks.filter((task) => task.state === "queued" || task.state === "running" || task.state === "paused" || task.state === "awaiting_review").filter(matchesQuery);
   const needsAttention = tasks.filter((task) => task.state === "failed" && task.unresolved === true).filter(matchesQuery);
   const history = needle ? [] : tasks.filter((task) => task.state === "completed" || task.state === "cancelled" || task.state === "failed").filter(matchesQuery);
+  const failedIds = failedCourseTreeTaskIds(tasks);
   if (current.length + needsAttention.length + history.length === 0) return null;
   return <section className="tree-task-section" aria-label="后台任务">
     {current.length > 0 && <TaskGroup title="当前任务" tasks={current} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />}
-    {needsAttention.length > 0 && <details className="tree-task-attention" aria-label="需处理" open={Boolean(query)}>
-      <summary><span>需处理的更新</span><span className="tree-task-count">{needsAttention.length}</span></summary>
-      <TaskList tasks={needsAttention} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
-    </details>}
+    {(needsAttention.length > 0 || (failedIds.length > 0 && onClearFailed)) && <div className="tree-task-disclosure-row">
+      {needsAttention.length > 0
+        ? <details className="tree-task-attention" aria-label="需处理" open={Boolean(query)}>
+          <summary><span className="tree-task-summary-chevron" aria-hidden="true"><Icon name="chevronRight" /></span><span>需处理的更新</span><span className="tree-task-count">{needsAttention.length}</span></summary>
+          <TaskList tasks={needsAttention} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
+        </details>
+        : failedIds.length > 0 && onClearFailed && <span className="tree-task-failure-label">失败任务</span>}
+      {onClearFailed && failedIds.length > 0 && <button
+        type="button"
+        className="tree-task-clear-failed"
+        data-action="tree-clear-failed-tasks"
+        disabled={clearFailedBusy}
+        aria-busy={clearFailedBusy || undefined}
+        aria-label={`清除失败任务（${failedIds.length}）`}
+        title={clearFailedBusy ? "正在清除失败任务" : "清除全部当前失败任务"}
+        onClick={() => onClearFailed(failedIds)}
+      ><Icon name="trash" /><span>清除失败</span><span className="tree-task-count">{failedIds.length}</span></button>}
+    </div>}
     {history.length > 0 && <details className="tree-task-history" open={Boolean(query)}>
-      <summary><span>历史记录</span><span className="tree-task-count">{history.length}</span></summary>
+      <summary><span className="tree-task-summary-chevron" aria-hidden="true"><Icon name="chevronRight" /></span><span>历史记录</span><span className="tree-task-count">{history.length}</span></summary>
       <TaskList tasks={history} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
     </details>}
   </section>;
@@ -359,20 +386,69 @@ function TaskList({ tasks, selectedTaskId, onSelectTask }: {
     const detail = task.detail.trim().startsWith(stateLabel)
       ? task.detail.trim().slice(stateLabel.length).replace(/^\s*(?:[·:：—-]\s*)?/, "").trim()
       : task.detail;
-    const summary = detail ? `${stateLabel} · ${detail}` : stateLabel;
-    return <button
-      type="button"
-      className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
-      data-action="tree-open-task"
-      data-task-id={task.id}
-      data-task-state={task.state}
-      key={task.id}
-      onClick={() => onSelectTask?.(task.id)}
-      aria-current={selectedTaskId === task.id ? "page" : undefined}
-      aria-label={`${task.title}，${summary}`}
-      title={`${task.title} · ${summary}`}
-    ><span className={`task-state-dot task-state-${task.state}`} aria-hidden="true" /><span className="tree-task-copy"><strong>{task.title}</strong><small><span className={`task-state-label task-state-${task.state}`}>{stateLabel}</span><span>{detail}</span></small></span><Icon name="chevronRight" /></button>;
+    const progress = courseTreeTaskProgressLabel(task.progress);
+    const progressPercent = courseTreeTaskProgressPercent(task.progress);
+    const visibleProgress = progress && !detail.includes(progress) ? progress : undefined;
+    const summary = [stateLabel, visibleProgress, detail].filter(Boolean).join(" · ");
+    return <div className="tree-task-entry" key={task.id}>
+      <button
+        type="button"
+        className={`tree-task-row ${selectedTaskId === task.id ? "selected" : ""}`}
+        data-action="tree-open-task"
+        data-task-id={task.id}
+        data-task-state={task.state}
+        onClick={() => onSelectTask?.(task.id)}
+        aria-current={selectedTaskId === task.id ? "page" : undefined}
+        aria-label={`${task.title}，${summary}`}
+        title={`${task.title} · ${summary}`}
+      ><TaskProgressIndicator task={task} percent={progressPercent} /><span className="tree-task-copy"><strong>{task.title}</strong><small><span className={`task-state-label task-state-${task.state}`}>{stateLabel}</span>{visibleProgress && <span className="tree-task-progress">{visibleProgress}</span>}<span>{detail}</span></small></span><Icon name="chevronRight" /></button>
+    </div>;
   })}</div>;
+}
+
+function courseTreeTaskProgressLabel(progress?: CourseTreeTaskProgress): string | undefined {
+  if (!progress) return undefined;
+  const hasCount = Number.isFinite(progress.completed) && Number.isFinite(progress.total)
+    && progress.total! > 0 && progress.completed! >= 0 && progress.completed! <= progress.total!;
+  const percent = validProgressPercent(progress.percent);
+  return hasCount ? `${progress.completed}/${progress.total}` : percent === undefined ? undefined : `${percent}%`;
+}
+
+function courseTreeTaskProgressPercent(progress?: CourseTreeTaskProgress): number | undefined {
+  if (!progress) return undefined;
+  const percent = validProgressPercent(progress.percent);
+  if (percent !== undefined) return percent;
+  if (!Number.isFinite(progress.completed) || !Number.isFinite(progress.total)
+    || progress.total! <= 0 || progress.completed! < 0 || progress.completed! > progress.total!) return undefined;
+  return Math.round(progress.completed! / progress.total! * 100);
+}
+
+function validProgressPercent(value?: number): number | undefined {
+  return Number.isFinite(value) && value! >= 0 && value! <= 100 ? Math.round(value!) : undefined;
+}
+
+function TaskProgressIndicator({ task, percent }: { task: CourseTreeTask; percent?: number }) {
+  const stale = task.progress?.stale === true;
+  const indeterminate = task.state === "running" && percent === undefined && !stale && task.progress?.indeterminate !== false;
+  const mode = percent !== undefined ? "determinate" : indeterminate ? "indeterminate" : stale ? "stale" : "static";
+  const radius = 6;
+  const circumference = 2 * Math.PI * radius;
+  const dashLength = percent === undefined ? 0 : circumference * percent / 100;
+  return <svg
+    className={`tree-task-indicator tree-task-indicator-${mode} task-state-${task.state}`}
+    data-progress-mode={mode}
+    data-progress-percent={percent}
+    data-progress-stale={stale || undefined}
+    viewBox="0 0 16 16"
+    aria-hidden="true"
+  >
+    <circle className="tree-task-indicator-track" cx="8" cy="8" r={radius} />
+    <circle className="tree-task-indicator-value" cx="8" cy="8" r={radius} transform="rotate(-90 8 8)" style={mode === "indeterminate" ? undefined : { strokeDasharray: `${dashLength} ${circumference}` }} />
+  </svg>;
+}
+
+export function failedCourseTreeTaskIds(tasks: readonly CourseTreeTask[]): string[] {
+  return [...new Set(tasks.filter((task) => task.state === "failed").map((task) => task.id))];
 }
 
 function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSearch, depth, expanded, selectedPageId, focusedNodeId, onFocus, onToggle, onSelectPage, onOpenMenu, forceOpen, actions, draggingNodeId, pointerDraggingNodeId, dropTargetId, onDragStart, onPointerDragStart, onDragOver, onDrop, onDragEnd }: {
@@ -427,7 +503,7 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
     <div className={`tree-row ${selected ? "selected" : ""} ${focusedNodeId === node.id ? "focused" : ""} ${dropTargetId === node.id ? "drop-target" : ""}`} data-depth={depth} data-node-kind={node.kind} style={{ "--tree-depth-px": `${depth * 20}px` } as CSSProperties} onContextMenu={(event) => onOpenMenu(node, event)} onDragOver={(event) => { if (!draggingNodeId || draggingNodeId === node.id) return; const source = flattenTree(allNodes).find(({ node: candidate }) => candidate.id === draggingNodeId)?.node; if (!source || !isValidDrop(source, node)) return; event.preventDefault(); event.dataTransfer.dropEffect = node.kind === "trash" ? "move" : "move"; onDragOver(node); }} onDrop={(event) => { event.preventDefault(); onDrop(node); }}>
       {draggable && <span className="tree-drag-handle" data-action="tree-drag" role="img" aria-label={`拖动 ${node.title}`} title="拖动到其他课程或调整顺序；键盘请使用 Alt+上/下箭头" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onFocus(node.id); setPointerCaptureSafe(event.currentTarget, event.pointerId); onPointerDragStart(node); }}><Icon name="grip" /></span>}
       <button className="tree-main-button" data-action={`tree-open-${node.kind}`} onClick={activate} onFocus={() => onFocus(node.id)} onKeyDown={onKeyDown} aria-current={selected ? "page" : undefined} aria-expanded={hasChildren ? open : undefined} title={node.subtitle ? `${node.title} — ${node.subtitle}` : node.title}>
-        <span className={`tree-chevron ${hasChildren ? "" : "empty"}`} aria-hidden="true"><Icon name={open ? "chevronDown" : "chevronRight"} /></span>
+        <span className={`tree-chevron ${hasChildren ? "" : "empty"} ${open ? "is-open" : ""}`} aria-hidden="true"><Icon name="chevronRight" /></span>
         <span className={`tree-kind kind-${node.kind}`}><Icon name={node.kind === "course" ? "book" : node.kind === "trash" ? "trash" : node.kind === "material" ? "layers" : node.kind === "section" ? "folder" : node.kind === "module" ? "layers" : node.kind === "release" ? "publish" : "document"} /></span>
         <span className="tree-copy"><strong>{node.title}</strong></span>
         {publication && <span className={`status-dot status-${publication.status}`} role="img" aria-label={`材料版本：${publication.label}`} title={publication.label}><Icon name={treeStatusPresentation[publication.status].icon} /><span>{publication.label}</span></span>}
@@ -600,7 +676,9 @@ function materialPublication(node: CourseTreeNode, material?: CourseTreeSearchMa
     : material?.lifecycle === "draft_source" ? "draft"
       : node.status === "published" || node.status === "draft" ? node.status : undefined;
   if (!status) return undefined;
-  const version = material?.version ?? node.revision;
+  const currentReleaseId = node.currentReleaseId ?? node.releaseId;
+  const historical = Boolean(material && currentReleaseId && material.releaseId !== currentReleaseId);
+  const version = status === "published" || historical ? material?.version ?? node.revision : undefined;
   return { status, label: `${status === "published" ? "已发布" : "草稿"}${version === undefined ? "" : ` v${version}`}` };
 }
 

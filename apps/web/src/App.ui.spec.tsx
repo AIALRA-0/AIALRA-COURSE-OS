@@ -126,7 +126,7 @@ describe("saved lesson navigation", () => {
 
     expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
     expect(appSource).toContain("imageResources={imageResources} rightCollapsed={rightCollapsed}");
-    expect(appSource).toContain("<div className=\"visual-column\">{contentTerminalError\n        ? <div className=\"empty-inline\" role=\"alert\">");
+    expect(appSource).toMatch(/<div className="visual-column">\{contentTerminalError\s*\? <div className="empty-inline" role="alert">/);
     expect(appSource).toContain(": <SlideViewer imageUrl={page.imageUrl}");
     expect(appSource).toContain("const canShowContent = contentReady && !contentTerminalError;");
     expect(appSource).toContain("{canShowContent ? <Suspense");
@@ -733,7 +733,7 @@ describe("formal page focus reconciliation", () => {
     const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     expect(source).toContain("formalRead.loadInitial();");
     expect(source).toContain('window.addEventListener("focus", formalRead.onFocus)');
-    expect(source).toContain("if (failure.terminal) {\n          pageCacheInvalidationEpoch.current += 1;");
+    expect(source).toMatch(/if \(failure\.terminal\) \{\s*pageCacheInvalidationEpoch\.current \+= 1;/);
     expect(source).toContain("readPage: () => readLessonOnce(lessonRequests.current, release.id, indexedPage.id)");
   });
 

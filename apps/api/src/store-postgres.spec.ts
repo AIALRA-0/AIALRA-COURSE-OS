@@ -4,11 +4,12 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
-import type { GenerationJob, GenerationPlan, LearningSession, OrderedEvent } from "@course-os/contracts";
+import type { GenerationJob, GenerationPlan, ImportRecord, LearningSession, OrderedEvent } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY, OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
+import { dismissFailedTasks, isTaskDismissed, selectFailedTasks } from "@course-os/storage";
 
 const connectionString = process.env.COURSE_OS_TEST_DATABASE_URL;
 if (connectionString && !new URL(connectionString).pathname.toLowerCase().includes("test")) {
@@ -121,6 +122,151 @@ describe("OperationalStore self-retelling reads", () => {
   });
 });
 
+describe("TaskIndex dismissal projection", () => {
+  it("resurfaces a new identical import failure after a persisted recovery transition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-dismiss-recovery-"));
+    try {
+      const store = new OperationalStore(join(directory, "operations.json"));
+      const record: ImportRecord = { id: "synthetic-failed-import", workspaceId: "personal", originalName: "synthetic.pdf", mediaType: "application/pdf",
+        kind: "pdf", sizeBytes: 10, sha256: "synthetic", casPath: "synthetic", source: "synthetic", license: "synthetic", sensitivity: "private",
+        state: "failed", generationState: "queued", issues: ["SYNTHETIC_FAILURE"], createdAt: "2026-10-03T00:00:00.000Z" };
+      await store.mutate(state => { state.imports.push(record); });
+      const context = { workspaceId: "personal", actor: "test-actor", idempotencyKey: "clear-synthetic-import", hasActiveWrites: () => false };
+      const selected = selectFailedTasks(await store.readTaskIndex(), "personal");
+      await store.mutate(state => dismissFailedTasks(state, selected, context));
+      expect(selectFailedTasks(await store.readTaskIndex(), "personal")).toEqual([]);
+      await store.mutate(state => { state.imports[0]!.state = "processing"; });
+      await store.mutate(state => { state.imports[0]!.state = "failed"; });
+      expect(selectFailedTasks(await store.readTaskIndex(), "personal")).toHaveLength(1);
+      const stale = await store.mutate(state => dismissFailedTasks(state, selected, { ...context, idempotencyKey: "old-confirmation-new-key" }));
+      expect(stale.results[0]).toMatchObject({ status: "skipped", reason: "TASK_CHANGED" });
+      // Replaying the old confirmation returns its receipt, without hiding the new failure.
+      await store.mutate(state => dismissFailedTasks(state, selected, context));
+      expect(selectFailedTasks(await store.readTaskIndex(), "personal")).toHaveLength(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("rejects an unused old confirmation across an identical failure cycle with a fixed clock and after reopening", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-dismiss-incarnation-"));
+    const at = "2026-10-03T00:00:00.000Z";
+    const fixedClock = vi.spyOn(Date.prototype, "toISOString").mockReturnValue(at);
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const record: ImportRecord = { id: "same-failure-import", workspaceId: "personal", originalName: "synthetic.pdf", mediaType: "application/pdf",
+        kind: "pdf", sizeBytes: 10, sha256: "synthetic", casPath: "synthetic", source: "synthetic", license: "synthetic", sensitivity: "private",
+        state: "failed", generationState: "queued", issues: ["SAME_FAILURE"], createdAt: at };
+      Object.assign(record, { updatedAt: at });
+      await store.mutate(state => { state.imports.push(record); });
+      const oldConfirmation = selectFailedTasks(await store.readTaskIndex(), "personal");
+      // The old confirmation has never been submitted; request replay cannot protect it.
+      await store.mutate(state => { state.imports[0]!.state = "processing"; });
+      const reopened = new OperationalStore(path);
+      await reopened.mutate(state => { state.imports[0]!.state = "failed"; });
+      const current = selectFailedTasks(await reopened.readTaskIndex(), "personal");
+      expect(current[0]!.fingerprint).not.toBe(oldConfirmation[0]!.fingerprint);
+      const persisted = JSON.parse(await readFile(path, "utf8")) as { imports: Array<ImportRecord & { taskIncarnation: number; updatedAt: string }> };
+      expect(persisted.imports[0]).toMatchObject({ state: "failed", updatedAt: at, taskIncarnation: 2 });
+      const context = { workspaceId: "personal", actor: "test-actor", idempotencyKey: "unused-old-confirmation", hasActiveWrites: () => false };
+      expect((await reopened.mutate(state => dismissFailedTasks(state, oldConfirmation, context))).results[0])
+        .toMatchObject({ status: "skipped", reason: "TASK_CHANGED" });
+      expect(selectFailedTasks(await reopened.readTaskIndex(), "personal")).toHaveLength(1);
+      expect((await reopened.mutate(state => dismissFailedTasks(state, current, { ...context, idempotencyKey: "new-confirmation" }))).results[0]?.status).toBe("dismissed");
+    } finally {
+      fixedClock.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("protects standalone jobs across row-scoped recovery and same-state stale projections", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-job-dismiss-incarnation-"));
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const job = { ...makeJob(randomUUID()), state: "failed" as const };
+      await store.mutate(state => { state.jobs.push(job); });
+      const oldConfirmation = selectFailedTasks(await store.readTaskIndex(), job.workspaceId);
+      await store.mutateGenerationJob(job.id, current => { current.state = "running"; });
+      const reopened = new OperationalStore(path);
+      await reopened.mutateGenerationJob(job.id, current => { current.state = "failed"; });
+      // All public job fields, including timestamps and attempt, are restored.
+      await reopened.mutate(state => { state.jobs[0] = { ...job }; });
+      const stored = JSON.parse(await readFile(path, "utf8")) as { jobs: Array<GenerationJob & { taskIncarnation: number }> };
+      expect(stored.jobs[0]).toMatchObject({ ...job, taskIncarnation: 2 });
+      const context = { workspaceId: job.workspaceId, actor: "test-actor", idempotencyKey: "stale-job-confirmation", hasActiveWrites: () => false };
+      expect((await reopened.mutate(state => dismissFailedTasks(state, oldConfirmation, context))).results[0])
+        .toMatchObject({ status: "skipped", reason: "TASK_CHANGED" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("protects generation plans across identical failed/running/failed snapshots", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-plan-dismiss-incarnation-"));
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const at = "2026-10-03T00:00:00.000Z";
+      const plan: GenerationPlan = { id: "plan-incarnation", workspaceId: "personal", materialVersionId: "synthetic", qualityMode: "balanced", language: "zh-CN",
+        writingPolicySnapshotId: "synthetic", pageIds: ["synthetic-page"], completedPageIds: [], failedPageIds: ["synthetic-page"], jobIds: [],
+        budgetUsd: 0, spentUsd: 0, holdForReview: false, state: "failed", createdAt: at, updatedAt: at };
+      await store.mutate(state => { state.generationPlans.push(plan); });
+      const oldConfirmation = selectFailedTasks(await store.readTaskIndex(), "personal");
+      await store.mutate(state => { state.generationPlans[0]!.state = "running"; });
+      const reopened = new OperationalStore(path);
+      await reopened.mutate(state => { state.generationPlans[0]!.state = "failed"; });
+      expect((await reopened.mutate(state => dismissFailedTasks(state, oldConfirmation, {
+        workspaceId: "personal", actor: "test-actor", idempotencyKey: "stale-plan-confirmation", hasActiveWrites: () => false
+      }))).results[0]).toMatchObject({ status: "skipped", reason: "TASK_CHANGED" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("reopens only task markers, without normalizing full operational state or exposing original request keys", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-task-dismiss-index-"));
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const job = { ...makeJob(randomUUID()), state: "failed" as const };
+      await store.mutate(state => {
+        state.jobs.push(job);
+        state.idempotency["original-request"] = { kind: "job", objectId: job.id };
+        store.appendEvent(state, job.id, "generation.cost.recorded", { syntheticCost: 0.01 });
+      });
+      const selected = selectFailedTasks(await store.readTaskIndex(), job.workspaceId);
+      const context = { workspaceId: job.workspaceId, actor: "test-actor", idempotencyKey: "clear-failed", hasActiveWrites: () => false };
+      const receipt = await store.mutate(state => dismissFailedTasks(state, selected, context));
+      const reopened = new OperationalStore(path);
+      const fullRead = vi.spyOn(reopened, "read").mockRejectedValue(new Error("FULL_OPERATIONAL_READ_NOT_ALLOWED"));
+      try {
+        const index = await reopened.readTaskIndex();
+        expect(fullRead).not.toHaveBeenCalled();
+        expect(index.jobs).toEqual([job]);
+        expect(Object.values(index.taskDismissals ?? {}).map(entry => entry.kind)).toEqual(["taskdismissal"]);
+        expect(JSON.stringify(index)).not.toContain("original-request");
+        expect(JSON.stringify(index)).not.toContain("syntheticCost");
+        expect(isTaskDismissed(index, job.workspaceId, { kind: "job", id: job.id })).toBe(true);
+      } finally { fullRead.mockRestore(); }
+      expect(await reopened.mutate(state => dismissFailedTasks(state, selected, context))).toEqual(receipt);
+      const saved = await reopened.read();
+      expect(saved.events).toHaveLength(1);
+      expect(saved.idempotency["original-request"]).toEqual({ kind: "job", objectId: job.id });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("selects only per-task markers in PostgreSQL SQL and keeps legacy marker-free TaskIndex shape", async () => {
+    // Test the read method without initializing or connecting to any database.
+    const store = Object.create(PostgresOperationalStore.prototype) as PostgresOperationalStore;
+    const query = vi.fn().mockResolvedValue({ rows: [{ imports: [], jobs: [], generationPlans: [], relationalJobs: [], taskDismissals: {} }] });
+    Object.assign(store, { ready: Promise.resolve(), pool: { query } });
+    expect(await store.readTaskIndex()).toEqual({ imports: [], jobs: [], generationPlans: [] });
+    const sql = query.mock.calls[0]![0] as string;
+    expect(sql).toContain("entry.value->>'kind' = 'taskdismissal'");
+    expect(sql).toContain("entry.key LIKE 'course-os:task-dismissal:v1:%'");
+    expect(sql).not.toMatch(/SELECT\s+state\s+FROM/i);
+    expect(sql).not.toContain("state->'events'");
+    expect(sql).not.toContain("state->'selfRetellings'");
+    expect(sql).not.toContain("state->'generationCheckpoints'");
+  });
+});
+
 interface PostgresFixture {
   pool: pg.Pool;
   store: PostgresOperationalStore;
@@ -129,6 +275,40 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("advances job incarnations under the row lock and rejects a stale failure confirmation", async () => {
+    const job = { ...makeJob(randomUUID()), state: "failed" as const };
+    const fixture = await startFixture([job]);
+    try {
+      const oldConfirmation = selectFailedTasks(await fixture.store.readTaskIndex(), job.workspaceId).filter(task => task.id === job.id);
+      await fixture.store.mutateGenerationJob(job.id, current => { current.state = "running"; });
+      await fixture.store.mutateGenerationJob(job.id, current => { current.state = "failed"; });
+      const rows = await fixture.pool.query<{ job_data: GenerationJob & { taskIncarnation: number } }>("SELECT job_data FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(rows.rows[0]!.job_data).toMatchObject({ ...job, taskIncarnation: 2 });
+      expect((await fixture.store.mutate(state => dismissFailedTasks(state, oldConfirmation, {
+        workspaceId: job.workspaceId, actor: "test-actor", idempotencyKey: `old-confirmation:${job.id}`, hasActiveWrites: () => false
+      }))).results[0]).toMatchObject({ status: "skipped", reason: "TASK_CHANGED" });
+    } finally { await stopFixture(fixture); }
+  });
+  it("persists dismissal markers in existing JSON state while retaining relational jobs, costs and idempotency", async () => {
+    const job = { ...makeJob(randomUUID()), state: "failed" as const };
+    const fixture = await startFixture([job]);
+    try {
+      await fixture.store.mutate(state => { state.idempotency[`original:${job.id}`] = { kind: "job", objectId: job.id }; });
+      const selected = selectFailedTasks(await fixture.store.readTaskIndex(), job.workspaceId).filter(task => task.id === job.id);
+      expect(selected).toHaveLength(1);
+      const context = { workspaceId: job.workspaceId, actor: "test-actor", idempotencyKey: `dismiss:${job.id}`, hasActiveWrites: () => false };
+      const receipt = await fixture.store.mutate(state => dismissFailedTasks(state, selected, context));
+      expect(receipt.results[0]?.status).toBe("dismissed");
+      const index = await fixture.store.readTaskIndex();
+      expect(isTaskDismissed(index, job.workspaceId, { kind: "job", id: job.id })).toBe(true);
+      expect(Object.values(index.taskDismissals ?? {}).every(entry => entry.kind === "taskdismissal")).toBe(true);
+      const persisted = await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id = 1");
+      expect(persisted.rows[0]!.state.idempotency[`original:${job.id}`]).toEqual({ kind: "job", objectId: job.id });
+      const relational = await fixture.pool.query<{ job_data: GenerationJob }>("SELECT job_data FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(relational.rows[0]?.job_data).toMatchObject({ id: job.id, state: "failed", spentUsd: job.spentUsd });
+      expect(await fixture.store.mutate(state => dismissFailedTasks(state, selected, context))).toEqual(receipt);
+    } finally { await stopFixture(fixture); }
+  });
   it("merges one job's legacy events with relational events taking precedence by ID", async () => {
     const job = makeJob(randomUUID());
     const fixture = await startFixture([job]);

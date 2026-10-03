@@ -72,6 +72,39 @@ async function seededReplicaDraftApp() {
 }
 
 describe("Course OS API", () => {
+  it("clears selected terminal failures persistently without deleting evidence or request associations", async () => {
+    const { app, operations, readweave, release } = await seededApp();
+    const item: ImportRecord = { id: "failed-record", workspaceId: "personal", originalName: "broken.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8,
+      sha256: "synthetic", casPath: "/synthetic/quarantine", source: "user_upload", license: "private", sensitivity: "private", state: "rejected", generationState: "queued", issues: ["INVALID_PDF"], createdAt: "2026-10-01T00:00:00Z" };
+    await operations.mutate(state => { state.imports.push(item, { ...item, id: "active-import", state: "processing" }); state.idempotency["original-upload"] = { kind: "import", objectId: item.id }; });
+    const before = JSON.stringify(await readweave.getRelease(release.id));
+    const listed = (await request(app).get("/api/v1/imports").expect(200)).body;
+    const fingerprint = listed.find((task: { id: string }) => task.id === item.id).cleanupFingerprint;
+    const action = () => request(app).post("/api/v1/imports:clear-failed").set("Idempotency-Key", "clear-selected").send({ taskIds: [item.id], fingerprints: { [item.id]: fingerprint } }).expect(200);
+    expect((await action()).body.cleared).toEqual([item.id]);
+    expect((await action()).body.cleared).toEqual([item.id]);
+    expect((await request(app).get("/api/v1/imports")).body.map((task: { id: string }) => task.id)).toEqual(["active-import"]);
+    await request(app).get(`/api/v1/imports/${item.id}`).expect(200);
+    expect((await operations.read()).idempotency["original-upload"]).toEqual({ kind: "import", objectId: item.id });
+    expect(JSON.stringify(await readweave.getRelease(release.id))).toBe(before);
+    const recovered = await request(app).get("/api/v1/import-operations/original-upload").expect(200);
+    expect(recovered.body.id).toBe(item.id);
+    await request(app).get("/api/v1/import-operations/original-upload").set("X-Workspace-Id", "other").expect(404);
+  });
+
+  it("does not clear a failed task that changed after confirmation or a new failure outside the selection", async () => {
+    const { app, operations } = await seededApp();
+    const record: ImportRecord = { id: "failed-before-confirmation", workspaceId: "personal", originalName: "source.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 8,
+      sha256: "synthetic", casPath: "/synthetic/quarantine", source: "user_upload", license: "private", sensitivity: "private", state: "failed", issues: [], createdAt: "2026-10-01T00:00:00Z" };
+    await operations.mutate(state => { state.imports.push(record); });
+    const listed = (await request(app).get("/api/v1/imports")).body[0];
+    await operations.mutate(state => { state.imports[0]!.state = "processing"; state.imports.push({ ...record, id: "new-failure" }); });
+    const result = await request(app).post("/api/v1/imports:clear-failed").set("Idempotency-Key", "race-clear").send({ taskIds: [record.id], fingerprints: { [record.id]: listed.cleanupFingerprint } }).expect(200);
+    expect(result.body.cleared).toEqual([]);
+    expect(result.body.skipped).toHaveLength(1);
+    expect((await request(app).get("/api/v1/imports")).body).toHaveLength(2);
+  });
+
   it("restores import tasks from the server without leaking another workspace or a private path", async () => {
     const { app, operations } = await seededApp();
     const base: ImportRecord = {
@@ -858,6 +891,48 @@ describe("Course OS API", () => {
     expect((await request(app).get("/healthz").expect(200)).body.status).toBe("ok");
   }, 45_000);
 
+  it("persists truthful conversion stage and saved-page progress on the import task", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-api-import-progress-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    const dependencies = createDefaultDependencies(root, readweave);
+    let reportPageCount!: () => void;
+    let continueConversion!: () => void;
+    const pageCountReported = new Promise<void>((resolve) => { reportPageCount = resolve; });
+    const conversionGate = new Promise<void>((resolve) => { continueConversion = resolve; });
+    dependencies.conversion = { enqueueAndWait: async (input, onProgress) => {
+      const startedAt = new Date().toISOString();
+      const publish = async (stage: "rendering_pages" | "finalizing" | "completed", completedPages: number, pageCount?: number) => {
+        await onProgress?.({ requestId: input.id, stage, ...(pageCount === undefined ? {} : { pageCount }), completedPages, updatedAt: new Date().toISOString() });
+      };
+      await publish("rendering_pages", 0, 2);
+      reportPageCount();
+      await conversionGate;
+      await mkdir(input.outputDir, { recursive: true });
+      const pages = await Promise.all([1, 2].map(async (pageNumber) => {
+        const imagePath = join(input.outputDir, `page-${pageNumber}.svg`);
+        await writeFile(imagePath, `<svg xmlns="http://www.w3.org/2000/svg"><text>Page ${pageNumber}</text></svg>`);
+        return { pageNumber, title: `Page ${pageNumber}`, text: `Source page ${pageNumber}`, imagePath, imageMediaType: "image/svg+xml" as const };
+      }));
+      await publish("finalizing", 2, 2);
+      const completedAt = new Date().toISOString();
+      await publish("completed", 2, 2);
+      return { requestId: input.id, state: "completed" as const, pages, issues: [], startedAt, completedAt };
+    } };
+    const app = createApp(dependencies);
+    const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "import-progress-persist")
+      .field("autoGenerate", "false").attach("file", Buffer.from("# Progress source\nOne\ntwo"), { filename: "progress.md", contentType: "text/markdown" }).expect(201);
+
+    await pageCountReported;
+    const processing = await request(app).get(`/api/v1/imports/${accepted.body.id}`).expect(200);
+    expect(processing.body).toMatchObject({ state: "processing", conversionProgress: { stage: "rendering_pages", pageCount: 2, completedPages: 0 } });
+    continueConversion();
+    const ready = await waitForImport(app, accepted.body.id);
+    expect(ready).toMatchObject({ state: "ready", conversionProgress: { stage: "completed", pageCount: 2, completedPages: 2 } });
+    expect(Object.keys(ready.conversionProgress).sort()).toEqual(["completedPages", "pageCount", "stage", "updatedAt"]);
+    expect((await dependencies.operations.read()).imports.find((item) => item.id === accepted.body.id)?.conversionProgress)
+      .toMatchObject({ stage: "completed", pageCount: 2, completedPages: 2 });
+  }, 45_000);
+
   it("imports an inserted slide through the upload API without rewriting unrelated teaching drafts", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-api-incremental-upload-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
@@ -1269,16 +1344,17 @@ describe("Course OS API", () => {
     });
   });
 
-  it("removes an exact rejected import without affecting other records", async () => {
+  it("dismisses an exact rejected import while retaining its request and evidence", async () => {
     const app = await testApp();
     const rejected = await request(app)
       .post("/api/v1/imports")
       .set("Idempotency-Key", "rejected-import")
       .attach("file", Buffer.from("not a pdf"), { filename: "broken.pdf", contentType: "application/pdf" })
       .expect(422);
-    await request(app).delete(`/api/v1/imports/${rejected.body.id}`).expect(204);
-    await request(app).get(`/api/v1/imports/${rejected.body.id}`).expect(404);
-    await request(app).delete(`/api/v1/imports/${rejected.body.id}`).expect(204);
+    await request(app).delete(`/api/v1/imports/${rejected.body.id}`).set("Idempotency-Key", "dismiss-rejected").expect(204);
+    await request(app).get(`/api/v1/imports/${rejected.body.id}`).expect(200);
+    expect((await request(app).get("/api/v1/imports")).body).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: rejected.body.id })]));
+    await request(app).delete(`/api/v1/imports/${rejected.body.id}`).set("Idempotency-Key", "dismiss-rejected").expect(204);
   });
 
   it("rejects a job over the hard budget", async () => {

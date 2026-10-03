@@ -28,9 +28,32 @@ export interface ProcessResult {
 
 export type ProcessRunner = (command: string, args: string[], options: { cwd: string; timeoutMs: number }) => Promise<ProcessResult>;
 
+export type ConversionProgressStage = "queued" | "preparing" | "counting_pages" | "rendering_pages" | "extracting_text" | "finalizing" | "saving_pages" | "completed" | "failed";
+
+export interface ConversionProgressSnapshot {
+  requestId: string;
+  stage: ConversionProgressStage;
+  pageCount?: number;
+  /** Pages with a complete conversion artifact, never files still being written. */
+  completedPages: number;
+  issue?: string;
+  updatedAt: string;
+}
+
+export type ConversionProgressCallback = (snapshot: ConversionProgressSnapshot) => void | Promise<void>;
+
+export interface ConversionProgressUpdate {
+  pageCount?: number;
+  completedPages?: number;
+  issue?: string;
+}
+
+export type ConversionProgressReporter = (stage: ConversionProgressStage, update?: ConversionProgressUpdate) => Promise<void>;
+
 export interface ConvertOptions {
   binaries?: Partial<ConverterBinaries>;
   runProcess?: ProcessRunner;
+  onProgress?: ConversionProgressCallback;
 }
 
 export interface FileConversionQueueOptions extends ConvertOptions {
@@ -42,26 +65,72 @@ export interface FileConversionQueueOptions extends ConvertOptions {
 
 export class FileConversionQueueClient {
   private readonly pendingDir: string;
+  private readonly processingDir: string;
   private readonly resultsDir: string;
+  private readonly progressDir: string;
 
   constructor(private readonly options: FileConversionQueueOptions) {
     this.pendingDir = join(options.queueRoot, "pending");
+    this.processingDir = join(options.queueRoot, "processing");
     this.resultsDir = join(options.queueRoot, "results");
+    this.progressDir = join(options.queueRoot, "progress");
   }
 
-  async enqueueAndWait(request: ConversionRequest): Promise<ConversionResult> {
-    await Promise.all([mkdir(this.pendingDir, { recursive: true }), mkdir(this.resultsDir, { recursive: true })]);
-    const resultPath = join(this.resultsDir, `${safeId(request.id)}.json`);
+  async enqueueAndWait(request: ConversionRequest, onProgress?: ConversionProgressCallback): Promise<ConversionResult> {
+    const id = safeId(request.id);
+    await Promise.all([
+      mkdir(this.pendingDir, { recursive: true }),
+      mkdir(this.processingDir, { recursive: true }),
+      mkdir(this.resultsDir, { recursive: true }),
+      mkdir(this.progressDir, { recursive: true })
+    ]);
+    const resultPath = join(this.resultsDir, `${id}.json`);
+    const pendingPath = join(this.pendingDir, `${id}.json`);
+    const processingPath = join(this.processingDir, `${id}.json`);
+    const progressPath = join(this.progressDir, `${id}.json`);
+    let lastSent: ConversionProgressSnapshot | undefined;
+    const emit = async (snapshot: ConversionProgressSnapshot) => {
+      if (lastSent && sameProgress(lastSent, snapshot)) return;
+      lastSent = snapshot;
+      try { await onProgress?.(structuredClone(snapshot)); } catch { /* Progress observers cannot fail conversion work. */ }
+    };
     const existing = await readJsonIfPresent<ConversionResult>(resultPath);
-    if (existing) return existing;
-    await writeJsonAtomic(join(this.pendingDir, `${safeId(request.id)}.json`), request);
+    if (existing) {
+      const progress = await this.readProgressAt(progressPath, request.id);
+      await emit(progress ? terminalProgressFromResult(existing, progress) : terminalProgressFromResult(existing));
+      return existing;
+    }
+    const pending = await pathExists(pendingPath);
+    const processing = await pathExists(processingPath);
+    if (!pending && !processing) {
+      await writeJsonAtomic(pendingPath, request);
+      await emit({ requestId: request.id, stage: "queued", completedPages: 0, updatedAt: new Date().toISOString() });
+    } else {
+      const progress = await this.readProgressAt(progressPath, request.id);
+      await emit(progress ?? { requestId: request.id, stage: "queued", completedPages: 0, updatedAt: new Date().toISOString() });
+    }
     const deadline = Date.now() + (this.options.resultTimeoutMs ?? 12 * 60 * 1000);
     while (Date.now() < deadline) {
+      const progress = await this.readProgressAt(progressPath, request.id);
+      if (progress) await emit(progress);
       const result = await readJsonIfPresent<ConversionResult>(resultPath);
-      if (result) return result;
+      if (result) {
+        await emit(terminalProgressFromResult(result, progress ?? lastSent));
+        return result;
+      }
       await delay(this.options.pollIntervalMs ?? 250);
     }
     throw new Error("CONVERSION_RESULT_TIMEOUT");
+  }
+
+  async getProgressSnapshot(requestId: string): Promise<ConversionProgressSnapshot | undefined> {
+    const id = safeId(requestId);
+    return this.readProgressAt(join(this.progressDir, `${id}.json`), requestId);
+  }
+
+  private async readProgressAt(path: string, requestId: string): Promise<ConversionProgressSnapshot | undefined> {
+    const value = await readJsonIfPresent<unknown>(path);
+    return validateProgressSnapshot(value, requestId);
   }
 }
 
@@ -69,18 +138,21 @@ export class FileConversionQueueWorker {
   private readonly pendingDir: string;
   private readonly processingDir: string;
   private readonly resultsDir: string;
+  private readonly progressDir: string;
 
   constructor(private readonly options: FileConversionQueueOptions) {
     this.pendingDir = join(options.queueRoot, "pending");
     this.processingDir = join(options.queueRoot, "processing");
     this.resultsDir = join(options.queueRoot, "results");
+    this.progressDir = join(options.queueRoot, "progress");
   }
 
   async runOnce(): Promise<boolean> {
     await Promise.all([
       mkdir(this.pendingDir, { recursive: true }),
       mkdir(this.processingDir, { recursive: true }),
-      mkdir(this.resultsDir, { recursive: true })
+      mkdir(this.resultsDir, { recursive: true }),
+      mkdir(this.progressDir, { recursive: true })
     ]);
     await this.recoverStaleProcessing();
     const name = (await readdir(this.pendingDir)).filter((item) => item.endsWith(".json")).sort()[0];
@@ -93,14 +165,40 @@ export class FileConversionQueueWorker {
       return false;
     }
     const request = JSON.parse(await readFile(processingPath, "utf8")) as ConversionRequest;
-    const result = await convertMaterial(request, this.options).catch((error): ConversionResult => ({
+    let lastProgress: ConversionProgressSnapshot = {
+      requestId: request.id,
+      stage: "preparing",
+      completedPages: 0,
+      updatedAt: new Date().toISOString()
+    };
+    const progressPath = join(this.progressDir, `${safeId(request.id)}.json`);
+    const publishProgress: ConversionProgressCallback = async (snapshot) => {
+      lastProgress = snapshot;
+      await writeJsonAtomic(progressPath, snapshot);
+      try { await this.options.onProgress?.(structuredClone(snapshot)); } catch { /* Progress observers cannot fail conversion work. */ }
+    };
+    await publishProgress(lastProgress);
+    const result = await convertMaterial(request, { ...this.options, onProgress: publishProgress }).catch(async (error): Promise<ConversionResult> => {
+      const failed: ConversionProgressSnapshot = {
+        ...lastProgress,
+        stage: "failed",
+        issue: safeErrorCode(error),
+        updatedAt: new Date().toISOString()
+      };
+      await publishProgress(failed);
+      return {
       requestId: request.id,
       state: "failed",
       pages: [],
-      issues: [safeErrorCode(error)],
+      issues: [failed.issue!],
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString()
-    }));
+      };
+    });
+    if (result.state === "completed" && lastProgress.stage !== "completed") {
+      await publishProgress({ requestId: request.id, stage: "completed", pageCount: result.pages.length,
+        completedPages: result.pages.length, updatedAt: result.completedAt });
+    }
     await writeJsonAtomic(join(this.resultsDir, `${safeId(request.id)}.json`), result);
     await rm(processingPath, { force: true });
     return true;
@@ -140,29 +238,51 @@ export class FileConversionQueueWorker {
 
 export async function convertMaterial(request: ConversionRequest, options: ConvertOptions = {}): Promise<ConversionResult> {
   const startedAt = new Date().toISOString();
-  const sourcePath = resolve(request.sourcePath);
-  const outputDir = resolve(request.outputDir);
-  const source = await stat(sourcePath);
-  if (!source.isFile()) throw new Error("CONVERSION_SOURCE_NOT_FILE");
-  await rm(outputDir, { recursive: true, force: true });
-  await mkdir(outputDir, { recursive: true });
-  const binaries = resolveBinaries(options.binaries);
-  const runProcess = options.runProcess ?? defaultProcessRunner;
-  const pages = request.kind === "syllabus"
-    ? await convertSyllabus(sourcePath, outputDir)
-    : await convertPagedDocument(request.kind, sourcePath, outputDir, binaries, runProcess);
-  if (pages.length === 0) throw new Error("CONVERSION_NO_PAGES");
-  return {
-    requestId: request.id,
-    state: "completed",
-    pages,
-    issues: [],
-    startedAt,
-    completedAt: new Date().toISOString()
+  let currentPageCount: number | undefined;
+  let completedPages = 0;
+  const report: ConversionProgressReporter = async (stage, update = {}) => {
+    currentPageCount = update.pageCount ?? currentPageCount;
+    completedPages = update.completedPages ?? completedPages;
+    const snapshot: ConversionProgressSnapshot = {
+      requestId: request.id,
+      stage,
+      ...(currentPageCount === undefined ? {} : { pageCount: currentPageCount }),
+      completedPages,
+      ...(update.issue ? { issue: update.issue } : {}),
+      updatedAt: new Date().toISOString()
+    };
+    try { await options.onProgress?.(snapshot); } catch { /* Progress observers cannot fail conversion work. */ }
   };
+  try {
+    await report("preparing");
+    const sourcePath = resolve(request.sourcePath);
+    const outputDir = resolve(request.outputDir);
+    const source = await stat(sourcePath);
+    if (!source.isFile()) throw new Error("CONVERSION_SOURCE_NOT_FILE");
+    await rm(outputDir, { recursive: true, force: true });
+    await mkdir(outputDir, { recursive: true });
+    const binaries = resolveBinaries(options.binaries);
+    const runProcess = options.runProcess ?? defaultProcessRunner;
+    const pages = request.kind === "syllabus"
+      ? await convertSyllabus(sourcePath, outputDir, report)
+      : await convertPagedDocument(request.kind, sourcePath, outputDir, binaries, runProcess, report);
+    if (pages.length === 0) throw new Error("CONVERSION_NO_PAGES");
+    await report("completed", { pageCount: pages.length, completedPages: pages.length });
+    return {
+      requestId: request.id,
+      state: "completed",
+      pages,
+      issues: [],
+      startedAt,
+      completedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    await report("failed", { issue: safeErrorCode(error) });
+    throw error;
+  }
 }
 
-async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, outputDir: string, binaries: ConverterBinaries, runProcess: ProcessRunner): Promise<ConvertedPage[]> {
+async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, outputDir: string, binaries: ConverterBinaries, runProcess: ProcessRunner, report: ConversionProgressReporter): Promise<ConvertedPage[]> {
   let pdfPath = sourcePath;
   let pptxTitles: string[] = [];
   if (kind === "pptx") {
@@ -180,20 +300,27 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
     pdfPath = join(outputDir, "source.pdf");
     await assertFile(pdfPath, "CONVERSION_PPTX_PDF_MISSING");
   }
+  await report("counting_pages");
   const info = await runProcess(binaries.pdfinfo, [pdfPath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
   const pageCount = parsePageCount(info.stdout);
   if (pageCount < 1 || pageCount > MAX_PAGES) throw new Error("CONVERSION_PAGE_COUNT_INVALID");
+  await report("rendering_pages", { pageCount, completedPages: 0 });
   const imagePrefix = join(outputDir, "page");
   const textPath = join(outputDir, "document.txt");
   await runProcess(binaries.pdftoppm, ["-png", "-r", "144", pdfPath, imagePrefix], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+  const imageFiles = (await readdir(outputDir))
+    .filter((name) => /^page-\d+\.png$/i.test(name))
+    .sort((left, right) => pageNumberFromFile(left) - pageNumberFromFile(right));
+  if (imageFiles.length !== pageCount || imageFiles.some((name, index) => pageNumberFromFile(name) !== index + 1)) {
+    throw new Error("CONVERSION_RENDER_PAGE_MISMATCH");
+  }
+  for (const name of imageFiles) await assertPngArtifact(join(outputDir, name));
+  await report("extracting_text", { pageCount, completedPages: 0 });
   await runProcess(binaries.pdftotext, ["-layout", pdfPath, textPath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
   const textStat = await stat(textPath);
   if (textStat.size > MAX_EXTRACTED_TEXT_BYTES) throw new Error("CONVERSION_EXTRACTED_TEXT_TOO_LARGE");
   const pageTexts = (await readFile(textPath, "utf8")).split("\f");
-  const imageFiles = (await readdir(outputDir))
-    .filter((name) => /^page-\d+\.png$/i.test(name))
-    .sort((left, right) => pageNumberFromFile(left) - pageNumberFromFile(right));
-  if (imageFiles.length !== pageCount) throw new Error("CONVERSION_RENDER_PAGE_MISMATCH");
+  await report("finalizing", { pageCount, completedPages: pageCount });
   return imageFiles.map((name, index) => {
     const text = normalizeExtractedText(pageTexts[index] ?? "");
     return {
@@ -206,18 +333,24 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
   });
 }
 
-async function convertSyllabus(sourcePath: string, outputDir: string): Promise<ConvertedPage[]> {
+async function convertSyllabus(sourcePath: string, outputDir: string, report: ConversionProgressReporter): Promise<ConvertedPage[]> {
   const bytes = await readFile(sourcePath);
   const text = decodeText(bytes);
   const logicalPages = paginateText(text);
   const pages: ConvertedPage[] = [];
+  await report("rendering_pages", { pageCount: logicalPages.length, completedPages: 0 });
   for (let index = 0; index < logicalPages.length; index += 1) {
     const pageNumber = index + 1;
     const pageText = logicalPages[index]!;
     const imagePath = join(outputDir, `page-${pageNumber}.svg`);
     await writeFile(imagePath, renderTextPage(pageText, pageNumber), "utf8");
+    await assertNonEmptyFile(imagePath, "CONVERSION_PAGE_ARTIFACT_INVALID");
     pages.push({ pageNumber, title: inferTitle(pageText, pageNumber), text: pageText, imagePath, imageMediaType: "image/svg+xml" });
+    if (pageNumber % 8 === 0 || pageNumber === logicalPages.length) {
+      await report("rendering_pages", { pageCount: logicalPages.length, completedPages: pageNumber });
+    }
   }
+  await report("finalizing", { pageCount: logicalPages.length, completedPages: logicalPages.length });
   return pages;
 }
 
@@ -318,6 +451,48 @@ async function assertFile(path: string, code: string): Promise<void> {
   }
 }
 
+async function assertNonEmptyFile(path: string, code: string): Promise<void> {
+  try {
+    const details = await stat(path);
+    if (!details.isFile() || details.size === 0) throw new Error(code);
+  } catch {
+    throw new Error(code);
+  }
+}
+
+async function assertPngArtifact(path: string): Promise<void> {
+  try {
+    const bytes = await readFile(path);
+    const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (bytes.length < 33 || !bytes.subarray(0, 8).equals(signature)) throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+    let offset = 8;
+    let hasHeader = false;
+    let hasImageData = false;
+    while (offset + 12 <= bytes.length) {
+      const chunkLength = bytes.readUInt32BE(offset);
+      const chunkType = bytes.toString("ascii", offset + 4, offset + 8);
+      const nextOffset = offset + 12 + chunkLength;
+      if (nextOffset > bytes.length) throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+      if (offset === 8 && (chunkType !== "IHDR" || chunkLength !== 13
+        || bytes.readUInt32BE(offset + 8) === 0 || bytes.readUInt32BE(offset + 12) === 0)) {
+        throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+      }
+      if (chunkType === "IHDR") hasHeader = true;
+      if (chunkType === "IDAT" && chunkLength > 0) hasImageData = true;
+      if (chunkType === "IEND") {
+        if (chunkLength !== 0 || nextOffset !== bytes.length || !hasHeader || !hasImageData) {
+          throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+        }
+        return;
+      }
+      offset = nextOffset;
+    }
+    throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+  } catch {
+    throw new Error("CONVERSION_PAGE_ARTIFACT_INVALID");
+  }
+}
+
 async function readJsonIfPresent<T>(path: string): Promise<T | undefined> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as T;
@@ -325,6 +500,58 @@ async function readJsonIfPresent<T>(path: string): Promise<T | undefined> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+const conversionProgressStages: ConversionProgressStage[] = [
+  "queued", "preparing", "counting_pages", "rendering_pages", "extracting_text", "finalizing", "saving_pages", "completed", "failed"
+];
+
+function validateProgressSnapshot(value: unknown, requestId: string): ConversionProgressSnapshot | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Partial<ConversionProgressSnapshot>;
+  if (candidate.requestId !== requestId || !conversionProgressStages.includes(candidate.stage as ConversionProgressStage)
+    || !Number.isInteger(candidate.completedPages) || (candidate.completedPages ?? -1) < 0 || (candidate.completedPages ?? 501) > MAX_PAGES
+    || typeof candidate.updatedAt !== "string" || Number.isNaN(Date.parse(candidate.updatedAt))) return undefined;
+  if (candidate.pageCount !== undefined && (!Number.isInteger(candidate.pageCount) || candidate.pageCount < 1 || candidate.pageCount > MAX_PAGES)) return undefined;
+  if (candidate.pageCount !== undefined && candidate.completedPages! > candidate.pageCount) return undefined;
+  if (candidate.issue !== undefined && (typeof candidate.issue !== "string" || !/^[A-Z0-9_:-]{1,240}$/u.test(candidate.issue))) return undefined;
+  return {
+    requestId,
+    stage: candidate.stage as ConversionProgressStage,
+    ...(candidate.pageCount === undefined ? {} : { pageCount: candidate.pageCount }),
+    completedPages: candidate.completedPages!,
+    ...(candidate.issue === undefined ? {} : { issue: candidate.issue }),
+    updatedAt: candidate.updatedAt
+  };
+}
+
+function sameProgress(left: ConversionProgressSnapshot, right: ConversionProgressSnapshot): boolean {
+  return left.requestId === right.requestId && left.stage === right.stage && left.pageCount === right.pageCount
+    && left.completedPages === right.completedPages && left.issue === right.issue;
+}
+
+function terminalProgressFromResult(result: ConversionResult, previous?: ConversionProgressSnapshot): ConversionProgressSnapshot {
+  const completed = result.state === "completed";
+  const pageCount = completed ? result.pages.length : previous?.pageCount;
+  const completedPages = completed ? result.pages.length : previous?.completedPages ?? 0;
+  return {
+    requestId: result.requestId,
+    stage: completed ? "completed" : "failed",
+    ...(pageCount === undefined ? {} : { pageCount }),
+    completedPages,
+    ...(!completed && result.issues[0] ? { issue: safeErrorCode(new Error(result.issues[0])) } : {}),
+    updatedAt: result.completedAt
+  };
 }
 
 function safeId(value: string): string {

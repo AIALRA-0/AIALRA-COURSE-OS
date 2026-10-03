@@ -30,7 +30,7 @@ describe("multi-material conversion fixtures", () => {
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7", "utf8");
       if (command === "pdfinfo") return { stdout: `Pages:          ${fixture.expectedPages}\n`, stderr: "" };
       if (command === "pdftoppm") {
-        await Promise.all(Array.from({ length: fixture.expectedPages }, (_, index) => writeFile(join(options.cwd, `page-${index + 1}.png`), Buffer.from([0x89, 0x50, 0x4e, 0x47]))));
+        await Promise.all(Array.from({ length: fixture.expectedPages }, (_, index) => writeFile(join(options.cwd, `page-${index + 1}.png`), testPng())));
       }
       if (command === "pdftotext") {
         await writeFile(args.at(-1)!, Array.from({ length: fixture.expectedPages }, (_, index) => `${fixture.titlePrefix} page ${index + 1}\f`).join(""), "utf8");
@@ -56,4 +56,23 @@ async function imageDigests(pages: Array<{ imagePath: string }>): Promise<string
 
 function testBinaries() {
   return { pdfinfo: "pdfinfo", pdftoppm: "pdftoppm", pdftotext: "pdftotext", soffice: "soffice", python: "python", pptxInspector: "inspect.py" };
+}
+
+function testPng(): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    return Buffer.concat([length, Buffer.from(type, "ascii"), data, Buffer.alloc(4)]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 6;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", Buffer.from([1])),
+    chunk("IEND", Buffer.alloc(0))
+  ]);
 }

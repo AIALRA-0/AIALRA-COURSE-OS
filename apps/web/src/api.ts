@@ -58,6 +58,34 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const WORKSPACE_ID = "personal";
 const READ_REQUEST_TIMEOUT_MS = 10_000;
 
+export type TaskClearReceipt = { cleared: string[]; skipped: { id: string; reason: string }[]; failed: { id: string; reason: string }[] };
+
+// Upload has its own acceptance deadline; a lost response is recovered with the same key.
+function uploadImport(body: FormData, key: string, onUpload?: (sent: number, total?: number) => void, onUploaded?: () => void): Promise<ImportRecord> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/api/v1/imports`);
+    xhr.timeout = 60_000;
+    xhr.setRequestHeader("Idempotency-Key", key);
+    xhr.setRequestHeader("X-Request-Id", requestId());
+    xhr.setRequestHeader("X-Workspace-Id", WORKSPACE_ID);
+    xhr.setRequestHeader("X-Actor", "personal-user");
+    xhr.setRequestHeader("X-Schema-Version", "2.4.0");
+    xhr.upload.onprogress = event => onUpload?.(event.loaded, event.lengthComputable ? event.total : undefined);
+    xhr.upload.onload = () => onUploaded?.();
+    xhr.onerror = xhr.ontimeout = () => reject(new ApiRequestError("接单结果尚未确认；请恢复同次导入，不要重复创建任务", "IMPORT_RESULT_UNKNOWN", 0, true));
+    xhr.onload = () => {
+      let payload: unknown;
+      try { payload = JSON.parse(xhr.responseText); } catch { reject(new ApiRequestError("接单响应无法确认，请恢复同次导入", "IMPORT_RESULT_UNKNOWN", xhr.status, true)); return; }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(payload as ImportRecord); return; }
+      const problem = asProblem(payload);
+      const record = payload as ImportRecord;
+      reject(new ApiRequestError(problem?.error?.message || record.issues?.join(" · ") || `HTTP ${xhr.status}`, problem?.error?.code || (record.state === "rejected" ? "IMPORT_REJECTED" : "HTTP_ERROR"), xhr.status, Boolean(problem?.error?.retryable)));
+    };
+    xhr.send(body);
+  });
+}
+
 export class ApiRequestError extends Error {
   constructor(
     message: string,
@@ -267,7 +295,7 @@ export const api = {
   }),
   permanentlyDeleteTrash: (item: TrashRecord) => request<void>(`/api/v1/trash/${encodeURIComponent(item.id)}`, {
     method: "DELETE",
-    headers: { "Idempotency-Key": crypto.randomUUID() }
+    headers: { "Idempotency-Key": crypto.randomUUID(), "X-Trash-Deleted-At": item.deletedAt }
   }),
   deepLink: (noteId: string, options?: ApiRequestOptions) => request<ReadWeaveDeepLink>(`/api/v1/readweave/links/${encodeURIComponent(noteId)}`, { signal: options?.signal }),
   settings: (options?: ApiRequestOptions) => request<WorkspaceSettings>("/api/v1/settings", { signal: options?.signal }),
@@ -363,7 +391,7 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseReleaseId })
   }),
-  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean; previousMaterialVersionId?: string } = {}) => {
+  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean; previousMaterialVersionId?: string; operationKey?: string; onUpload?: (sent: number, total?: number) => void; onUploaded?: () => void } = {}) => {
     const body = new FormData();
     body.append("file", file);
     body.append("source", "course-os-studio");
@@ -374,8 +402,16 @@ export const api = {
     if (options.parentNodeId) body.append("parentNodeId", options.parentNodeId);
     if (options.previousMaterialVersionId) body.append("previousMaterialVersionId", options.previousMaterialVersionId);
     body.append("autoGenerate", String(options.autoGenerate !== false));
-    return request<ImportRecord>("/api/v1/imports", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
+    const operationKey = options.operationKey || crypto.randomUUID();
+    return uploadImport(body, operationKey, options.onUpload, options.onUploaded);
   },
+  recoverImport: (operationKey: string) => request<ImportRecord>(`/api/v1/import-operations/${encodeURIComponent(operationKey)}`),
+  clearFailedTasks: (taskIds: string[], operationKey: string, fingerprints: Record<string, string>) => request<TaskClearReceipt>("/api/v1/imports:clear-failed", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey }, body: JSON.stringify({ taskIds, fingerprints })
+  }),
+  emptyTrash: (items: TrashRecord[], operationKey: string) => request<TaskClearReceipt>("/api/v1/trash:empty", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey }, body: JSON.stringify({ items: items.map(item => ({ id: item.id, deletedAt: item.deletedAt })) })
+  }),
   importTasks: (options?: ApiRequestOptions) => request<ImportTaskSummary[]>("/api/v1/imports", { signal: options?.signal }),
   importRecord: (importId: string, options?: ApiRequestOptions) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`, { signal: options?.signal }),
   createGenerationJob: (materialVersionId: string, pageIds: string[], budgetUsd: number) => request<GenerationJob>("/api/v1/generation-jobs", {

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
@@ -48,6 +48,18 @@ function cost(stage: GenerationCostEntry["stage"], createdAt: string, values: Pa
 }
 
 describe("import progress summary", () => {
+  it("counts successful delivery once, excluding failed and unrelated pages", () => {
+    const source = record({ state: "ready", autoGenerate: true, generationState: "failed", pageIds: ["p1", "p2", "p3", "p4"], generationCompletedPageIds: ["p1", "p1", "p2", "foreign"], generationFailedPageIds: ["p2", "p3"] });
+    expect(deliveredPageProgress(source)).toEqual({ completed: 1, total: 4 });
+    expect(getImportActivity(source, undefined, [], []).progressPercent).toBe(25);
+  });
+  it("does not disguise recent heartbeats as fresh work or invent progress without a total", () => {
+    const source = record({ state: "processing", createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:10:00Z", lastProgressAt: "2026-10-01T00:01:00Z" });
+    const activity = getImportActivity(source, undefined, [], [], Date.parse("2026-10-01T00:10:00Z"));
+    expect(activity.progressPercent).toBeUndefined();
+    expect(activity.ageSeconds).toBe(540);
+    expect(activity.stale).toBe(true);
+  });
   it("keeps the completed conversion count visible after automatic generation starts", () => {
     const result = summarizeImportProgress(
       record({ id: "import-1", state: "ready", generationJobId: "job-1", pageIds: ["p1", "p2", "p3", "p4"], issues: [] }),
@@ -262,7 +274,7 @@ describe("import progress summary", () => {
       stageStatus: "started",
       phase: "explanation",
       phaseStatus: "started",
-      progressPercent: undefined,
+      progressPercent: 50,
       lastActivityAt: "2026-09-22T10:00:45.000Z",
       ageSeconds: 15,
       stale: false
@@ -284,7 +296,7 @@ describe("import progress summary", () => {
       updatedAt: "2026-09-22T10:00:00.000Z"
     }), undefined, [], [], Date.parse("2026-09-22T10:00:30.000Z"));
 
-    expect(activity.progressPercent).toBeUndefined();
+    expect(activity.progressPercent).toBe(0);
     expect(activity.stage).toBe("生成页面讲解");
   });
 
@@ -310,7 +322,7 @@ describe("import progress summary", () => {
       stageCode: undefined,
       phase: undefined,
       progressPercent: 100,
-      lastActivityAt: "2026-09-22T10:01:00.000Z"
+      lastActivityAt: undefined
     });
   });
 
@@ -340,7 +352,7 @@ describe("import progress summary", () => {
     }), undefined, [], [], Date.parse("2026-09-22T10:01:00.000Z"));
 
     expect(pendingSync).toMatchObject({ stage: "正文讲解", phase: "opening", lastActivityAt: activity.occurredAt });
-    expect(queued).toMatchObject({ stage: "等待生成任务启动", phase: undefined, lastActivityAt: "2026-09-22T10:00:00.000Z" });
+    expect(queued).toMatchObject({ stage: "等待生成任务启动", phase: undefined, lastActivityAt: undefined });
   });
 
   it("maps all standalone job terminal states to distinct task states and truthful stages", () => {
@@ -373,7 +385,7 @@ describe("import progress summary", () => {
     expect(getImportActivity(task, undefined, [], [], 0)).toMatchObject({
       stage: "材料导入完成",
       progressPercent: 100,
-      progressScope: "材料导入"
+      progressScope: "总完成度"
     });
     expect(importProgressTitle(task, undefined, false)).toBe("材料导入完成，尚未生成讲解");
   });
@@ -388,8 +400,8 @@ describe("import progress summary", () => {
     );
 
     expect(result.stage).toBe("生成页面讲解");
-    expect(result.progressPercent).toBeUndefined();
-    expect(result.ageSeconds).toBe(30);
+    expect(result.progressPercent).toBe(0);
+    expect(result.ageSeconds).toBeUndefined();
     expect(result.stale).toBe(false);
   });
 
@@ -398,6 +410,7 @@ describe("import progress summary", () => {
       record({
         state: "processing",
         progress: { conversion: { completed: 3, total: 8 } },
+        conversionProgress: { pageCount: 8, completedPages: 3 },
         updatedAt: "2026-09-22T10:00:00.000Z"
       }),
       undefined,
@@ -406,8 +419,8 @@ describe("import progress summary", () => {
       Date.parse("2026-09-22T10:00:10.000Z")
     );
     expect(result.stage).toBe("页面转换");
-    expect(result.progressPercent).toBe(38);
-    expect(result.progressScope).toBe("页面转换");
+    expect(result.progressPercent).toBe(0);
+    expect(result.progressScope).toBe("总完成度");
   });
 
   it("uses actual completed core and bridge page counts and flags a stale heartbeat", () => {
@@ -427,10 +440,10 @@ describe("import progress summary", () => {
     );
 
     expect(result.stage).toBe("生成跨页承接");
-    expect(result.progressPercent).toBe(75);
-    expect(result.ageSeconds).toBe(240);
-    expect(result.stale).toBe(true);
-    expect(formatActivityAge(result.ageSeconds)).toBe("4 分钟前");
+    expect(result.progressPercent).toBe(0);
+    expect(result.ageSeconds).toBeUndefined();
+    expect(result.stale).toBe(false);
+    expect(formatActivityAge(240)).toBe("4 分钟前");
   });
 
   it("shows the newest active plan job stage and phase while preserving counter progress", () => {
@@ -487,8 +500,8 @@ describe("import progress summary", () => {
       stageStatus: "started",
       phase: "explanation",
       phaseStatus: "started",
-      progressPercent: 85,
-      progressScope: "讲解生成",
+      progressPercent: 0,
+      progressScope: "总完成度",
       lastActivityAt: "2026-09-22T10:59:50.000Z",
       ageSeconds: 10
     });
@@ -497,14 +510,14 @@ describe("import progress summary", () => {
   it("marks a completed plan complete and keeps failed progress from implying success", () => {
     const completed = getImportActivity(
       record({ state: "ready", autoGenerate: true }),
-      plan({ id: "plan-1", state: "completed", pageIds: ["p1"] }), [], [], 0
+      plan({ id: "plan-1", state: "completed", pageIds: ["p1"], completedPageIds: ["p1"] }), [], [], 0
     );
     const failed = getImportActivity(
       record({ state: "ready", autoGenerate: true }),
       plan({ id: "plan-2", state: "failed", pageIds: ["p1"] }), [], [], 0
     );
     expect(completed.progressPercent).toBe(100);
-    expect(failed.progressPercent).toBeUndefined();
+    expect(failed.progressPercent).toBe(0);
     expect(failed.stage).toBe("生成失败");
   });
 
