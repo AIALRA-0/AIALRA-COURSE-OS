@@ -1753,9 +1753,8 @@ describe("ReadWeave ETAPI adapter", () => {
         revision: saved.revision + 1,
         page: { blocks: [expect.objectContaining({ id: "block-1", markdown: "ReadWeave 外部编辑后的内容" })] }
       });
-      // The single full clone is the existing post-write cache update; live
-      // reconciliation itself must not add another workspace-wide clone.
-      expect(wholeStateClones).toBe(1);
+      // Both reconciliation and its cache commit must avoid whole-state clones.
+      expect(wholeStateClones).toBe(0);
     } finally {
       cloneSpy.mockRestore();
     }
@@ -2405,6 +2404,171 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(reopened.listDrafts()).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ pageId: "page-1", revision: 1 })
     ]));
+  });
+
+  it("saves pages without cloning whole state and preserves old snapshots across interleaved commits", async () => {
+    const remote = new FakeEtapi();
+    let blocked!: () => void;
+    const firstBlocked = new Promise<void>(resolve => { blocked = resolve; });
+    let release!: () => void;
+    const firstGate = new Promise<void>(resolve => { release = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (init?.method === "POST" && new URL(String(input)).pathname.endsWith("/create-note")
+        && JSON.parse(String(init.body)).title === "Course OS draft record · page-1") {
+        blocked();
+        await firstGate;
+      }
+      return response;
+    };
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const source = releaseWithPage();
+    source.pages.push({ ...structuredClone(source.pages[0]!), id: "page-2", pageNumber: 2, title: "second copy-on-write page" });
+    source.pageIds.push("page-2");
+    await api.registerDraftSource(source, context);
+    const before = Reflect.get(api, "stateCache").state;
+    const unrelated = draftFor(source);
+    unrelated.id = "draft:unrelated-heavy";
+    unrelated.pageId = "unrelated-heavy";
+    unrelated.page = { ...unrelated.page, id: unrelated.pageId, blocks: [{ ...unrelated.page.blocks[0]!, markdown: "synthetic unrelated body ".repeat(100000) }] };
+    before.drafts.push(unrelated);
+    before.idempotency["unrelated-receipt"] = { kind: "attempt", objectId: "unrelated-attempt" };
+    const beforeText = JSON.stringify(before);
+    Object.freeze(before.drafts);
+    Object.freeze(before.idempotency);
+    Object.freeze(before.projections.drafts);
+    const nativeClone = globalThis.structuredClone;
+    const clone = vi.spyOn(globalThis, "structuredClone").mockImplementation((value, options) => {
+      if (value === before || (Array.isArray(value) && value.includes(unrelated))
+        || (value !== null && typeof value === "object" && "drafts" in value
+          && Array.isArray(value.drafts) && value.drafts.includes(unrelated))) throw new Error("WHOLE_STATE_CLONE_FORBIDDEN");
+      return nativeClone(value, options);
+    });
+    const first = draftFor(source);
+    first.page.blocks[0]!.markdown = "synthetic first saved page";
+    const second = draftFor(source, "page-2");
+    second.page.blocks[0]!.markdown = "synthetic second saved page";
+    const firstCost = costEntryFor(source, "copy-first-cost");
+    const secondCost = { ...costEntryFor(source, "copy-second-cost"), pageId: "page-2" };
+    const firstContext = { ...context, idempotencyKey: "copy-first-save" };
+    let firstSave: Promise<LessonDraft> | undefined;
+    try {
+      firstSave = api.saveDraftWithCost(first, 0, firstContext, firstCost);
+      await firstBlocked;
+      await expect(api.saveDraftWithCost(second, 0, { ...context, idempotencyKey: "copy-second-save" }, secondCost))
+        .resolves.toMatchObject({ pageId: "page-2", revision: 1 });
+      const intermediate = Reflect.get(api, "stateCache").state;
+      const intermediateText = JSON.stringify(intermediate);
+      release();
+      const saved = await firstSave;
+      expect(saved).toMatchObject({ pageId: "page-1", revision: 1 });
+      const after = Reflect.get(api, "stateCache").state;
+      expect(JSON.stringify(before)).toBe(beforeText);
+      expect(JSON.stringify(intermediate)).toBe(intermediateText);
+      expect(after.drafts.find((item: LessonDraft) => item.pageId === unrelated.pageId)).toBe(unrelated);
+      expect(after.releases).toBe(before.releases);
+      expect(after.questionAttempts).toBe(before.questionAttempts);
+      expect(after.idempotency["unrelated-receipt"]).toEqual(before.idempotency["unrelated-receipt"]);
+      expect(after.drafts.filter((item: LessonDraft) => source.pageIds.includes(item.pageId)).map((item: LessonDraft) => item.revision)).toEqual([1, 1]);
+      const writes = remote.requests.filter(item => item.method !== "GET").length;
+      await expect(api.saveDraftWithCost(first, 0, firstContext, firstCost)).resolves.toEqual(saved);
+      expect(remote.requests.filter(item => item.method !== "GET")).toHaveLength(writes);
+    } finally {
+      release();
+      await firstSave?.catch(() => undefined);
+      clone.mockRestore();
+    }
+    const reopened = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch });
+    await expect(reopened.getDraftSnapshotByPage("page-1")).resolves.toMatchObject({ revision: 1, page: { blocks: [{ markdown: first.page.blocks[0]!.markdown }] } });
+    await expect(reopened.getDraftSnapshotByPage("page-2")).resolves.toMatchObject({ revision: 1, page: { blocks: [{ markdown: second.page.blocks[0]!.markdown }] } });
+    expect((await reopened.listCostEntries({ materialVersionId: source.id })).map(item => item.id).sort()).toEqual([firstCost.id, secondCost.id].sort());
+  });
+
+  it("preserves a newer same-page record observed while an older write readback is in flight", async () => {
+    const remote = new FakeEtapi();
+    let recordId = "";
+    let armed = false;
+    let written = false;
+    let blocked!: () => void;
+    const readbackBlocked = new Promise<void>(resolve => { blocked = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const response = await remote.fetch(input, init);
+      if (armed && url.pathname.endsWith(`/notes/${recordId}/content`)) {
+        if (init?.method === "PUT") written = true;
+        else if (written && (init?.method ?? "GET") === "GET") {
+          armed = false;
+          blocked();
+          await gate;
+        }
+      }
+      return response;
+    };
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const source = releaseWithPage();
+    await api.registerDraftSource(source, context);
+    await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "newer-record-initial" });
+    recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    armed = true;
+    const olderSave = api.saveDraft(draftFor(source), 1, { ...context, idempotencyKey: "newer-record-older-write" });
+    try {
+      await readbackBlocked;
+      const newer = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+        draft: LessonDraft; idempotency: Record<string, { kind: string; objectId: string }>;
+      };
+      newer.draft.revision = 3;
+      newer.draft.page.blocks[0]!.markdown = "synthetic newer authoritative record";
+      newer.draft.contentHash = createHash("sha256").update(JSON.stringify(newer.draft.page)).digest("hex");
+      newer.idempotency["newer-authority-receipt"] = { kind: "draft", objectId: newer.draft.id };
+      remote.editByTitle("Course OS draft record · page-1", encodeReadWeaveStateContent(newer));
+      await (api as unknown as { findDraftPageRecord(pageId: string): Promise<unknown> }).findDraftPageRecord("page-1");
+      const beforeCommit = Reflect.get(api, "stateCache").state;
+      const beforeCommitText = JSON.stringify(beforeCommit);
+      release();
+      await expect(olderSave).resolves.toMatchObject({ revision: 2 });
+      expect(JSON.stringify(beforeCommit)).toBe(beforeCommitText);
+      const after = Reflect.get(api, "stateCache").state;
+      expect(after.drafts.find((item: LessonDraft) => item.pageId === "page-1")).toMatchObject({ revision: 3, contentHash: newer.draft.contentHash });
+      expect(after.idempotency["newer-authority-receipt"]).toEqual(newer.idempotency["newer-authority-receipt"]);
+      await expect(api.getDraftSnapshotByPage("page-1")).resolves.toMatchObject({ revision: 3 });
+      await expect(new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch }).getDraftSnapshotByPage("page-1"))
+        .resolves.toMatchObject({ revision: 3 });
+    } finally { release(); await olderSave.catch(() => undefined); }
+  });
+
+  it.each(["pageId", "revision", "contentHash", "pageHash"] as const)("rejects page-record readback with mismatched %s and preserves the durable receipt", async (field) => {
+    const remote = new FakeEtapi();
+    let recordId = "";
+    let corruptReadback = true;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const response = await remote.fetch(input, init);
+      if (init?.method === "POST" && url.pathname.endsWith("/create-note")
+        && JSON.parse(String(init.body)).title === "Course OS draft record · page-1") {
+        recordId = ((await response.clone().json()) as { note: { noteId: string } }).note.noteId;
+      } else if (recordId && corruptReadback && (init?.method ?? "GET") === "GET" && url.pathname.endsWith(`/notes/${recordId}/content`)) {
+        const record = decodeReadWeaveStateContent(await response.text()) as { pageId: string; draft: LessonDraft };
+        if (field === "pageId") record.pageId = "wrong-page";
+        else if (field === "revision") record.draft.revision += 1;
+        else if (field === "contentHash") record.draft.contentHash = "wrong-hash";
+        else record.draft.page.title = "wrong-page-content";
+        return new Response(encodeReadWeaveStateContent(record), { status: 200 });
+      }
+      return response;
+    };
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const source = releaseWithPage();
+    await api.registerDraftSource(source, context);
+    await expect(api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: `strict-readback-${field}` }))
+      .rejects.toThrow("READWEAVE_DRAFT_RECORD_READBACK_FAILED");
+    corruptReadback = false;
+    await expect(new EtapiReadWeaveCourseApi(config).getDraftSnapshotByPage("page-1")).resolves.toMatchObject({ revision: 1 });
+    expect(remote.countActiveNotesByTitle("Course OS draft record · page-1")).toBe(1);
   });
 
   it("serializes same-page saves and records a stale revision conflict", async () => {

@@ -998,13 +998,31 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {
     return this.withDraftPageLock(draft.pageId, context, async () => {
-      const state = structuredClone(await this.readStateReference(true));
+      const reference = await this.readStateReference(true, false);
       const located = await this.findDraftPageRecord(draft.pageId);
-      if (located) this.mergeDraftPageRecord(state, located.record);
       const previous = located?.record;
-      let current = previous?.draft ?? state.drafts.find((item) => item.pageId === draft.pageId);
-      let projection = previous?.projection ?? (current ? state.projections.drafts[current.id] : undefined);
-      const replay = previous?.idempotency[context.idempotencyKey] ?? state.idempotency[context.idempotencyKey];
+      const currentReference = previous?.draft ?? reference.drafts.find(item => item.pageId === draft.pageId);
+      const replay = previous?.idempotency[context.idempotencyKey] ?? reference.idempotency[context.idempotencyKey];
+      const replayReference = replay && currentReference?.id !== replay.objectId
+        ? reference.drafts.find(item => item.id === replay.objectId) : undefined;
+      const selectedDrafts = [currentReference, replayReference].filter((item): item is LessonDraft => !!item);
+      const pageContext = this.createDraftPageReadContext(reference, currentReference ?? replayReference ?? draft, previous);
+      const courseIds = new Set([draft.courseId, ...selectedDrafts.map(item => item.courseId)]);
+      const sourceIds = new Set([draft.sourceReleaseId, ...selectedDrafts.map(item => item.sourceReleaseId)]);
+      const state: EtapiState = {
+        ...reference, ...pageContext,
+        drafts: selectedDrafts.map(item => structuredClone(item)),
+        releases: reference.releases.filter(item => sourceIds.has(item.id)),
+        projections: {
+          ...reference.projections, ...pageContext.projections,
+          courses: Object.fromEntries([...courseIds].filter(id => reference.projections.courses[id])
+            .map(id => [id, structuredClone(reference.projections.courses[id]!)]))
+        }
+      };
+      const fallbackState = (): EtapiState => ({ ...reference, projections: { ...reference.projections,
+        courses: { ...reference.projections.courses, ...state.projections.courses } } });
+      let current = state.drafts.find(item => item.pageId === draft.pageId);
+      let projection = current ? state.projections.drafts[current.id] : undefined;
       if (replay) {
         const existing = current?.id === replay.objectId
           ? current
@@ -1013,7 +1031,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         projection = projection ?? state.projections.drafts[existing.id] ?? await this.ensureDraftProjection(state, existing, sourceAsset);
         if (!previous) {
           const migrated = this.makeDraftPageRecord(state, existing, projection);
-          await this.writeDraftPageRecord(migrated, undefined, state);
+          await this.writeDraftPageRecord(migrated, undefined, fallbackState());
         }
         if (cost) await this.writeContext.run(context, () => this.ensureCostNoteOnce(projection!.sectionNoteIds.quality, cost));
         return structuredClone(existing);
@@ -1027,7 +1045,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const conflict = this.createConflict(draft, expectedRevision, conflictDraft);
         const record = this.makeDraftPageRecord(state, conflictDraft, conflictProjection, previous);
         record.conflicts = [...record.conflicts.filter((item) => item.id !== conflict.id), conflict];
-        await this.writeDraftPageRecord(record, located?.noteId, state);
+        await this.writeDraftPageRecord(record, located?.noteId, fallbackState());
         this.draftReadCache.delete(draft.pageId);
         throw new Error(`READWEAVE_REVISION_CONFLICT:${conflict.id}`);
       };
@@ -1072,7 +1090,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (cost && !record.costEntries.some((item) => item.id === cost.id)) record.costEntries.push(structuredClone(cost));
       record.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
       if (cost) record.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
-      await this.writeDraftPageRecord(record, located?.noteId, state);
+      await this.writeDraftPageRecord(record, located?.noteId, fallbackState());
       return saved;
     }).catch((error: unknown) => {
       this.invalidateStateCache();
@@ -2564,10 +2582,39 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           conflicts: structuredClone(record.conflicts)
         }
       };
-      this.cacheDraftPageRecord(located);
+      const base = this.stateCache?.state ?? fallbackState;
+      const cached = this.draftPageRecordCache.get(record.pageId);
+      const newerRecord = cached && cached.record.draft.revision > record.draft.revision ? cached : undefined;
+      const latestDraft = base.drafts.find(item => item.pageId === record.pageId);
+      let committed = newerRecord?.record ?? located.record;
+      if (newerRecord) committed = { ...committed,
+        costEntries: mergeCostEntries(record.costEntries, committed.costEntries),
+        idempotency: { ...record.idempotency, ...committed.idempotency },
+        conflicts: [...new Map([...record.conflicts, ...committed.conflicts].map(item => [item.id, item])).values()] };
+      if (latestDraft && latestDraft.revision > committed.draft.revision) {
+        const latest = this.createDraftPageReadContext(base, latestDraft);
+        committed = { ...committed, draft: structuredClone(latestDraft),
+          projection: latest.projections.drafts[latestDraft.id] ?? committed.projection,
+          costEntries: mergeCostEntries(committed.costEntries, latest.costEntries),
+          idempotency: { ...committed.idempotency, ...latest.idempotency },
+          conflicts: [...new Map([...committed.conflicts, ...latest.conflicts].map(item => [item.id, item])).values()] };
+      }
+      const next: EtapiState = { ...base, drafts: [...base.drafts], idempotency: { ...base.idempotency },
+        projections: { ...base.projections, drafts: { ...base.projections.drafts } } };
+      const courseId = record.draft.courseId;
+      const incomingCourse = fallbackState.projections.courses[courseId];
+      const currentCourse = base.projections.courses[courseId];
+      if (incomingCourse && incomingCourse !== currentCourse) {
+        next.projections.courses = { ...base.projections.courses, [courseId]: {
+          ...incomingCourse, ...currentCourse,
+          modules: { ...incomingCourse.modules, ...currentCourse?.modules },
+          moduleBranchIds: { ...incomingCourse.moduleBranchIds, ...currentCourse?.moduleBranchIds },
+          childBranchIds: { ...incomingCourse.childBranchIds, ...currentCourse?.childBranchIds }
+        } };
+      }
+      this.mergeDraftPageRecord(next, committed);
+      this.cacheDraftPageRecord({ noteId: newerRecord?.noteId ?? savedNoteId, record: committed });
       this.lastWriteAt = new Date().toISOString();
-      const next = structuredClone(this.stateCache?.state ?? fallbackState);
-      this.mergeDraftPageRecord(next, record);
       this.stateVersion += 1;
       this.stateCache = { state: next, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       this.draftReadCache.delete(record.pageId);
