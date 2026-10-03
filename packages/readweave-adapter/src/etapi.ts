@@ -844,9 +844,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         ...mergeCostEntries(costIndex?.costEntries, state.costEntries)
           .filter(cost => cost.materialVersionId === release!.id && cost.pageId).map(cost => cost.pageId!)
       ])];
-      for (const pageId of pageIds) {
-        const located = await this.findDraftPageRecord(pageId);
-        costs = mergeCostEntries(costs, located?.record.costEntries);
+      for (let offset = 0; offset < pageIds.length; offset += 4) {
+        const batch = await Promise.all(pageIds.slice(offset, offset + 4).map(pageId => this.findDraftPageRecord(pageId)));
+        for (const located of batch) costs = mergeCostEntries(costs, located?.record.costEntries);
       }
     }
     return structuredClone(mergeCostEntries(costIndex?.costEntries, costs).filter((item) =>

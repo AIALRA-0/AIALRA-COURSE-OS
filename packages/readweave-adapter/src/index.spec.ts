@@ -942,6 +942,55 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(sorted(await new EtapiReadWeaveCourseApi(config).listCostEntries())).toEqual(sorted([first, second, other, legacy, compact, orphan]));
   });
 
+  it("bounds scoped cost record reads to four and merges in page order despite reversed completion", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const target = releaseWithPage();
+    const template = target.pages[0]!;
+    target.pages = Array.from({ length: 9 }, (_, index) => ({ ...structuredClone(template),
+      id: `page-${index+1}`, pageNumber: index+1, title: `bounded cost page ${index+1}` }));
+    target.pageIds = target.pages.map(page => page.id);
+    await api.publishRelease(target, { ...manifest, courseReleaseId: target.id }, context);
+    const recordPages = new Map<string, number>();
+    for (let number = 1; number <= 9; number++) {
+      const cost = { ...costEntryFor(target, `batch-cost-${number}`), pageId: `page-${number}`, actualMicrousd: number };
+      await api.appendCostEntry(cost, { ...context, idempotencyKey: cost.id });
+      const title = `Course OS draft record · page-${number}`;
+      const record = decodeReadWeaveStateContent(remote.contentByTitle(title)) as { costEntries: GenerationCostEntry[] };
+      if (number <= 8) record.costEntries.push({ ...costEntryFor(target, `batch-shared-${number <= 4 ? 1 : 2}`),
+        pageId: number <= 4 ? "page-1" : "page-5", actualMicrousd: number*10 });
+      remote.editByTitle(title, encodeReadWeaveStateContent(record));
+      recordPages.set(remote.noteIdByTitle(title), number);
+    }
+    let active = 0;
+    let peak = 0;
+    const completed: number[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const noteId = /\/notes\/([^/]+)\/content$/.exec(url.pathname)?.[1];
+      const number = noteId ? recordPages.get(noteId) : undefined;
+      if ((init?.method ?? "GET") !== "GET" || number === undefined) return remote.fetch(input, init);
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        await new Promise(resolve => setTimeout(resolve, (3-(number-1)%4)*20));
+        const response = await remote.fetch(input, init);
+        completed.push(number);
+        return response;
+      } finally { active -= 1; }
+    };
+    const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id });
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
+    expect(completed).toHaveLength(9);
+    expect(completed.indexOf(4)).toBeLessThan(completed.indexOf(1));
+    expect(entries.filter(entry => entry.id.startsWith("batch-cost-")).map(entry => entry.actualMicrousd))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(entries.find(entry => entry.id === "batch-shared-1")?.actualMicrousd).toBe(40);
+    expect(entries.find(entry => entry.id === "batch-shared-2")?.actualMicrousd).toBe(80);
+  });
+
   it("rejects scoped cost reads when the target durable record fails instead of returning an empty ledger", async () => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
