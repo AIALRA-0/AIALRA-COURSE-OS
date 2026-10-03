@@ -1,0 +1,23 @@
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_3139702f1e7170 1756-1757,2541-2571
+  s_e8850ef125fb32::t_b6652ac1101b10 2409-2540,2572-2573
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_671df3323e2f17 1001,1004-1018,1020-1025,1034,1048,1093,2585-2616
+  s_e8850ef125fb32::t_066af5e4a4833b 1019
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8daf127877c1188773e728e1d1728396d0a051c1",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
