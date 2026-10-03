@@ -1817,7 +1817,7 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
     : activity.stageStatus === "started" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已开始"
       : activity.stageStatus === "completed" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已完成"
         : "尚未调用模型";
-  const statusDetail = record.state !== "ready" ? importInfo.detail : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : awaitingPlanDetails ? "正在读取生成进度" : `${currentStage}${stageCount}${activeDetail}`;
+  const statusDetail = record.state !== "ready" ? `${currentStage}${stageCount}` : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : awaitingPlanDetails ? "正在读取生成进度" : `${currentStage}${stageCount}${activeDetail}`;
   const indeterminate = progress === undefined && (activity.busy || awaitingPlanDetails) && (!activity.stale || awaitingPlanDetails);
   const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
   const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model
@@ -1852,7 +1852,7 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
 function progressScopeLabel(scope?: string): string { return scope && scope !== "整体流程" ? `${scope} ` : ""; }
 
 function importStatus(state: ImportRecord["state"]): { title: string; detail: string } {
-  if (state === "accepted" || state === "quarantined") return { title: "材料已进入处理队列", detail: "等待安全检查和转换状态更新" };
+  if (state === "accepted" || state === "quarantined") return { title: "材料已进入处理队列", detail: "文件检查已完成，等待转换器领取" };
   if (state === "processing") return { title: "正在转换材料", detail: "正在等待转换页面计数更新" };
   if (state === "syncing") return { title: "正在保存课程材料", detail: "正在等待 ReadWeave 写入状态更新" };
   if (state === "ready") return { title: "材料已导入", detail: "材料可以打开学习或继续生成讲解" };
