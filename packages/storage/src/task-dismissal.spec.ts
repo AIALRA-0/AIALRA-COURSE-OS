@@ -88,11 +88,20 @@ describe("persistent failed-task dismissal", () => {
     }
   });
 
-  it("blocks another active job writing the same material or pages, even without a plan relation", async () => {
+  it("dismisses an ended failure without changing independent active work on the same material and page", async () => {
     const s = state();
+    const independentPlan = task("independent-review", { state: "awaiting_review", jobIds: ["independent-completed"] });
+    const completedJob = task("independent-completed", { state: "completed", planId: independentPlan.id });
+    s.generationPlans.push(independentPlan);
+    s.jobs.push(completedJob);
     s.jobs.push(task("independent-active", { state: "pending_sync" }));
+    const before = structuredClone(s);
     expect((await dismissFailedTasks(s, selectFailedTasks(s, "personal"), context)).results[0])
-      .toMatchObject({ reason: "TASK_ACTIVE" });
+      .toMatchObject({ status: "dismissed" });
+    expect({ ...s, idempotency: before.idempotency }).toEqual(before);
+    expect(isTaskDismissed(s, "personal", { kind: "plan", id: "plan-1" })).toBe(true);
+    expect(filterDismissedTasks(s, "personal").generationPlans).toEqual([independentPlan]);
+    expect(filterDismissedTasks(s, "personal").jobs).toEqual([completedJob, before.jobs.at(-1)]);
   });
 
   it("rejects workspace mismatch and excludes completed, rejected and currently running tasks", async () => {

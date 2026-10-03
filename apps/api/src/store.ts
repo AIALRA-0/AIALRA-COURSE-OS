@@ -32,6 +32,15 @@ export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationP
 };
 export type ModelSettings = Pick<OperationalState, "modelProviders" | "modelRoutePolicy">;
 
+export type ImportMutationState = Pick<OperationalState, "imports" | "idempotency">;
+export interface ImportOperationRead {
+  association?: OperationalState["idempotency"][string];
+  record?: ImportRecord;
+}
+export interface ImportMutationContext {
+  appendEvent<T>(streamId: string, type: string, payload: T): void;
+}
+
 export interface GenerationPlanDetailRead {
   plan?: GenerationPlan;
   jobs: GenerationJob[];
@@ -95,6 +104,41 @@ export class OperationalStore {
   async readModelSettings(): Promise<ModelSettings> {
     const state = await this.read();
     return { modelProviders: state.modelProviders, modelRoutePolicy: state.modelRoutePolicy };
+  }
+
+  async getImport(id: string, workspaceId: string): Promise<ImportRecord | undefined> {
+    return (await this.read()).imports.find(item => item.id === id && item.workspaceId === workspaceId);
+  }
+
+  async readImportByOperation(key: string, workspaceId: string): Promise<ImportOperationRead> {
+    const state = await this.read();
+    const association = state.idempotency[key];
+    const record = association?.kind === "import"
+      ? state.imports.find(item => item.id === association.objectId && item.workspaceId === workspaceId) : undefined;
+    return { association, record };
+  }
+
+  async readImportGenerationPlan(id: string, workspaceId: string): Promise<GenerationPlan | undefined> {
+    const state = await this.read();
+    const record = state.imports.find(item => item.id === id && item.workspaceId === workspaceId);
+    if (!record) return undefined;
+    return state.generationPlans.find(plan => plan.id === record.generationPlanId && plan.workspaceId === workspaceId)
+      ?? state.generationPlans.filter(plan => plan.sourceImportId === id && plan.workspaceId === workspaceId)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  }
+
+  /** Conversion writes may change imports and request associations, never job/history projections. */
+  async mutateImports<T>(change: (state: ImportMutationState, context: ImportMutationContext) => T | Promise<T>): Promise<T> {
+    return this.mutate(async state => {
+      const scope: ImportMutationState = { imports: state.imports, idempotency: state.idempotency };
+      const result = await change(scope, { appendEvent: (streamId, type, payload) => {
+        assertImportEvent(scope, streamId, type);
+        this.appendEvent(state, streamId, type, payload);
+      } });
+      state.imports = scope.imports;
+      state.idempotency = scope.idempotency;
+      return result;
+    });
   }
 
   async readSelfRetellings(workspaceId: string, releaseId?: string): Promise<SelfRetelling[]> {
@@ -267,6 +311,54 @@ export class PostgresOperationalStore extends OperationalStore {
        FROM operational_state WHERE id = 1`
     );
     return normalizeModelSettings(result.rows[0]);
+  }
+
+  override async getImport(id: string, workspaceId: string): Promise<ImportRecord | undefined> {
+    await this.ready;
+    const result = await this.pool.query<{ record: ImportRecord }>(
+      `SELECT entry.record FROM operational_state,
+       jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS entry(record)
+       WHERE operational_state.id = 1 AND entry.record->>'id' = $1
+         AND entry.record->>'workspaceId' = $2 LIMIT 1`, [id, workspaceId]
+    );
+    return result.rows[0]?.record;
+  }
+
+  override async readImportByOperation(key: string, workspaceId: string): Promise<ImportOperationRead> {
+    await this.ready;
+    const result = await this.pool.query<ImportOperationRead>(
+      `SELECT state->'idempotency'->$1 AS association,
+         (SELECT entry.record FROM jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS entry(record)
+          WHERE state->'idempotency'->$1->>'kind' = 'import'
+            AND entry.record->>'id' = state->'idempotency'->$1->>'objectId'
+            AND entry.record->>'workspaceId' = $2 LIMIT 1) AS record
+       FROM operational_state WHERE id = 1`, [key, workspaceId]
+    );
+    return { association: result.rows[0]?.association ?? undefined, record: result.rows[0]?.record ?? undefined };
+  }
+
+  override async readImportGenerationPlan(id: string, workspaceId: string): Promise<GenerationPlan | undefined> {
+    await this.ready;
+    const result = await this.pool.query<{ plan: GenerationPlan }>(
+      `SELECT entry.plan FROM operational_state,
+       jsonb_array_elements(COALESCE(state->'generationPlans', '[]'::jsonb)) AS entry(plan),
+       jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS source(record)
+       WHERE operational_state.id = 1 AND source.record->>'id' = $1
+         AND source.record->>'workspaceId' = $2 AND entry.plan->>'workspaceId' = $2
+         AND (entry.plan->>'id' = source.record->>'generationPlanId' OR entry.plan->>'sourceImportId' = $1)
+       ORDER BY (entry.plan->>'id' = source.record->>'generationPlanId') DESC NULLS LAST,
+         entry.plan->>'createdAt' DESC LIMIT 1`, [id, workspaceId]
+    );
+    return result.rows[0]?.plan;
+  }
+
+  override async mutateImports<T>(change: (state: ImportMutationState, context: ImportMutationContext) => T | Promise<T>): Promise<T> {
+    let result!: T;
+    this.postgresWriteChain = this.postgresWriteChain.catch(() => undefined).then(async () => {
+      result = await this.writePostgresImports(change);
+    });
+    await this.postgresWriteChain;
+    return result;
   }
 
   override async readSelfRetellings(workspaceId: string, releaseId?: string): Promise<SelfRetelling[]> {
@@ -577,6 +669,70 @@ export class PostgresOperationalStore extends OperationalStore {
     for (const event of emitted) this.bus.emit(event.streamId, event);
     return result;
   }
+
+  private async writePostgresImports<T>(change: (state: ImportMutationState, context: ImportMutationContext) => T | Promise<T>): Promise<T> {
+    await this.ready;
+    const client = await this.pool.connect();
+    const emitted: OrderedEvent[] = [];
+    let result!: T;
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<ImportMutationState>(
+        `SELECT state->'imports' AS imports, state->'idempotency' AS idempotency
+         FROM operational_state WHERE id = 1 FOR UPDATE`
+      );
+      if (!locked.rows[0]) throw new Error("OPERATIONAL_STATE_MISSING");
+      const scope: ImportMutationState = {
+        imports: locked.rows[0].imports ?? [], idempotency: locked.rows[0].idempotency ?? {}
+      };
+      const beforeImports = structuredClone(scope.imports);
+      const beforeImportJson = JSON.stringify(scope.imports);
+      const beforeIdempotencyJson = JSON.stringify(scope.idempotency);
+      result = await change(scope, { appendEvent: (streamId, type, payload) => {
+        assertImportEvent(scope, streamId, type);
+        emitted.push({ id: 0, streamId, type, payload, occurredAt: new Date().toISOString() });
+      } });
+      const previous = new Map(beforeImports.map(record => [record.id, record]));
+      for (const record of scope.imports) {
+        const before = previous.get(record.id);
+        if (before) advanceTaskIncarnation(record, before);
+      }
+      const importsJson = JSON.stringify(scope.imports);
+      const idempotencyJson = JSON.stringify(scope.idempotency);
+      const values: string[] = [];
+      let expression = "state";
+      if (importsJson !== beforeImportJson) {
+        values.push(importsJson);
+        expression = `jsonb_set(${expression}, '{imports}', $${values.length}::jsonb)`;
+      }
+      if (idempotencyJson !== beforeIdempotencyJson) {
+        values.push(idempotencyJson);
+        expression = `jsonb_set(${expression}, '{idempotency}', $${values.length}::jsonb)`;
+      }
+      for (const event of emitted) {
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO ordered_events (stream_id, event_type, payload, occurred_at)
+           VALUES ($1, $2, $3::jsonb, $4::timestamptz) RETURNING id`,
+          [event.streamId, event.type, JSON.stringify(event.payload), event.occurredAt]
+        );
+        event.id = Number(inserted.rows[0]!.id);
+      }
+      if (values.length) await client.query(
+        `UPDATE operational_state SET state = ${expression}, updated_at = now() WHERE id = 1`, values
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+    for (const event of emitted) this.bus.emit(event.streamId, event);
+    return result;
+  }
+}
+
+function assertImportEvent(state: ImportMutationState, streamId: string, type: string): void {
+  if (!state.imports.some(record => record.id === streamId)
+    || !/^(import|conversion|readweave)\./.test(type)) throw new Error("IMPORT_EVENT_SCOPE_INVALID");
 }
 
 interface PendingGenerationEvent {

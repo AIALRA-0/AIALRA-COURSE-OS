@@ -277,11 +277,7 @@ export async function dismissFailedTasks(state: TaskCleanupState & { idempotency
     else if (!failed(members)) reason = "TASK_NOT_FAILED";
     else if (task.fingerprint !== selection.fingerprint) reason = "TASK_CHANGED";
     else {
-      const all = entries(state);
-      const activeReference = all.some(entry => entry.record.workspaceId === context.workspaceId && active(entry, Date.parse(now))
-        && (task.members.some(ref => key(ref) === key(entry.ref))
-          || (entry.record.materialVersionId && task.materialVersionIds.includes(entry.record.materialVersionId))
-          || entry.record.pageIds?.some(id => task.pageIds.includes(id))));
+      const activeReference = members.some(entry => active(entry, Date.parse(now)));
       if (activeReference || await context.hasActiveWrites(task)) reason = "TASK_ACTIVE";
     }
     if (reason) { receipt.results.push({ ...selection, status: "skipped", reason }); continue; }

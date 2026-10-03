@@ -79,6 +79,33 @@ describe("OperationalStore learning session mutation", () => {
   });
 });
 
+describe("scoped import storage", () => {
+  it("keeps File import events, operation replay and recovery incarnations after reopening", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-import-scope-"));
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const record = makeImport(randomUUID());
+      const emitted: OrderedEvent[] = [];
+      store.bus.on(record.id, event => emitted.push(event));
+      await store.mutateImports((state, context) => {
+        expect(Object.keys(state).sort()).toEqual(["idempotency", "imports"]);
+        state.imports.push(record);
+        state.idempotency["import-operation"] = { kind: "import", objectId: record.id };
+        context.appendEvent(record.id, "import.accepted", { synthetic: true });
+      });
+      expect(emitted).toHaveLength(1);
+      expect(await store.readImportByOperation("import-operation", record.workspaceId)).toMatchObject({ record });
+      expect((await store.readImportByOperation("import-operation", "other")).record).toBeUndefined();
+      await store.mutateImports(state => { state.imports[0]!.state = "processing"; });
+      const reopened = new OperationalStore(path);
+      await reopened.mutateImports(state => { state.imports[0]!.state = "failed"; });
+      expect(await reopened.getImport(record.id, record.workspaceId)).toMatchObject({ state: "failed", taskIncarnation: 2 });
+      expect(await reopened.readGenerationJobEvents(record.id)).toHaveLength(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
 describe("OperationalStore model settings projection", () => {
   it("returns only model settings with the established defaults", async () => {
     const directory = await mkdtemp(join(tmpdir(), "course-os-model-settings-"));
@@ -275,6 +302,122 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("scopes import writes, rolls back events, and preserves history, markers and unrelated associations", async () => {
+    const job = { ...makeJob(randomUUID()), state: "failed" as const };
+    const fixture = await startFixture([job], true);
+    const record = makeImport(job.id);
+    try {
+      await fixture.store.mutate(state => {
+        state.imports.push(record);
+        state.idempotency["unrelated-operation"] = { kind: "job", objectId: job.id };
+      });
+      const baseline = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      const emitted: OrderedEvent[] = [];
+      fixture.store.bus.on(record.id, event => emitted.push(event));
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_FORBIDDEN"));
+      await fixture.store.mutateImports((state, context) => {
+        expect(Object.keys(state).sort()).toEqual(["idempotency", "imports"]);
+        state.imports.find(item => item.id === record.id)!.state = "processing";
+        state.idempotency["scoped-import-operation"] = { kind: "import", objectId: record.id };
+        context.appendEvent(record.id, "conversion.started", { synthetic: true });
+      });
+      expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({ state: "processing", taskIncarnation: 1 });
+      expect(await fixture.store.getImport(record.id, "other")).toBeUndefined();
+      expect(await fixture.store.readImportByOperation("scoped-import-operation", record.workspaceId)).toMatchObject({ record: { id: record.id } });
+      expect(await fixture.store.readImportByOperation("scoped-import-operation", "other")).toMatchObject({ association: { kind: "import" }, record: undefined });
+      expect(await fixture.store.readImportByOperation("unrelated-operation", record.workspaceId)).toEqual({ association: { kind: "job", objectId: job.id }, record: undefined });
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]!.id).toBeGreaterThan(0);
+      expect(await fixture.store.readGenerationJobEvents(record.id)).toContainEqual(emitted[0]);
+      const persisted = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect({ ...persisted, imports: baseline.imports, idempotency: baseline.idempotency }).toEqual(baseline);
+      await expect(fixture.store.mutateImports((state, context) => {
+        state.imports.find(item => item.id === record.id)!.state = "failed";
+        context.appendEvent(record.id, "import.failed", { synthetic: true });
+        throw new Error("ROLLBACK_SYNTHETIC");
+      })).rejects.toThrow("ROLLBACK_SYNTHETIC");
+      await expect(fixture.store.mutateImports((_state, context) => context.appendEvent(record.id, "generation.cost.recorded", {})))
+        .rejects.toThrow("IMPORT_EVENT_SCOPE_INVALID");
+      expect(emitted).toHaveLength(1);
+      expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({ state: "processing", taskIncarnation: 1 });
+      fullRead.mockRestore();
+      await fixture.store.mutateImports(state => { state.imports.find(item => item.id === record.id)!.state = "failed"; });
+      const selected = selectFailedTasks(await fixture.store.readTaskIndex(), record.workspaceId).filter(task => task.id === record.id);
+      const cleanupContext = { workspaceId: record.workspaceId, actor: "synthetic", idempotencyKey: "scoped-import-dismiss", hasActiveWrites: () => false };
+      await fixture.store.mutate(state => dismissFailedTasks(state, selected, cleanupContext));
+      await fixture.store.mutateImports(state => { state.imports.find(item => item.id === record.id)!.state = "processing"; });
+      await fixture.store.mutateImports(state => { state.imports.find(item => item.id === record.id)!.state = "failed"; });
+      expect(isTaskDismissed(await fixture.store.readTaskIndex(), record.workspaceId, { kind: "import", id: record.id })).toBe(false);
+      expect((await fixture.store.mutate(state => dismissFailedTasks(state, selected, { ...cleanupContext, idempotencyKey: "stale-scoped-import" }))).results[0])
+        .toMatchObject({ reason: "TASK_CHANGED" });
+    } finally { await stopFixture(fixture); }
+  });
+
+  it("serializes scoped imports with the same global row lock and concurrent idempotency replay", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    const blocker = await fixture.pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM operational_state WHERE id=1 FOR UPDATE");
+      const record = makeImport(job.id);
+      let callbackEntered = false;
+      const create = () => fixture.store.mutateImports((state, context) => {
+        callbackEntered = true;
+        const existing = state.idempotency["same-import-key"];
+        if (existing) return state.imports.find(item => item.id === existing.objectId)!;
+        state.imports.push(record);
+        state.idempotency["same-import-key"] = { kind: "import", objectId: record.id };
+        context.appendEvent(record.id, "import.accepted", {});
+        return record;
+      });
+      const first = create();
+      const replay = create();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(callbackEntered).toBe(false);
+      const session = makeSession(randomUUID());
+      await blocker.query("UPDATE operational_state SET state=jsonb_set(state,'{sessions}',COALESCE(state->'sessions','[]'::jsonb)||$1::jsonb) WHERE id=1", [JSON.stringify(session)]);
+      await blocker.query("COMMIT");
+      expect((await Promise.all([first, replay])).map(item => item.id)).toEqual([record.id, record.id]);
+      expect(await fixture.store.findLearningSession(session.id)).toEqual(session);
+      expect(await fixture.store.readGenerationJobEvents(record.id)).toHaveLength(1);
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+      await stopFixture(fixture);
+    }
+  });
+
+  it("measures scoped imports against full mutation with bounded synthetic history", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    const record = makeImport(job.id);
+    try {
+      const state = { ...structuredClone(EMPTY), imports: [record], jobs: [job],
+        events: Array.from({ length: 45306 }, (_, i) => ({ id: i + 1, streamId: job.id, type: "synthetic.history", payload: { text: "x".repeat(280) }, occurredAt: job.createdAt })),
+        generationCheckpoints: { [`${job.id}:page-1`]: { ...makeCheckpoint("bounded-history"), evidence: "x".repeat(3000000) } } };
+      await fixture.pool.query("UPDATE operational_state SET state=$1::jsonb WHERE id=1", [JSON.stringify(state)]);
+      await fixture.pool.query("INSERT INTO ordered_events (stream_id,event_type,payload,occurred_at) SELECT $1,'synthetic.history',jsonb_build_object('text',repeat('x',280)),now() FROM generate_series(1,41365)", [job.id]);
+      const beforeBytes = (await fixture.pool.query("SELECT octet_length(state::text)::int AS bytes FROM operational_state WHERE id=1")).rows[0].bytes;
+      let started = performance.now();
+      await fixture.store.mutate(current => { current.imports[0]!.state = "processing"; });
+      const fullMutationMs = performance.now() - started;
+      const before = (await fixture.pool.query("SELECT md5((state-'imports'-'idempotency')::text) AS hash FROM operational_state WHERE id=1")).rows[0].hash;
+      started = performance.now();
+      await fixture.store.mutateImports((current, context) => {
+        current.imports[0]!.state = "syncing";
+        context.appendEvent(record.id, "readweave.sync.started", { synthetic: true });
+      });
+      const scopedMutationMs = performance.now() - started;
+      started = performance.now();
+      await fixture.store.getImport(record.id, record.workspaceId);
+      const scopedReadMs = performance.now() - started;
+      const after = (await fixture.pool.query("SELECT md5((state-'imports'-'idempotency')::text) AS hash FROM operational_state WHERE id=1")).rows[0].hash;
+      expect(after).toBe(before);
+      console.log(JSON.stringify({ probe: "scoped-import-isolated-pg", beforeBytes, fullMutationMs, scopedMutationMs, scopedReadMs, restUnchanged: after === before }));
+    } finally { await stopFixture(fixture); }
+  }, 60000);
+
   it("advances job incarnations under the row lock and rejects a stale failure confirmation", async () => {
     const job = { ...makeJob(randomUUID()), state: "failed" as const };
     const fixture = await startFixture([job]);
@@ -597,6 +740,12 @@ function makeJob(id: string): GenerationJob {
     createdAt: at,
     updatedAt: at
   };
+}
+
+function makeImport(id: string): ImportRecord {
+  return { id, workspaceId: "scoped-import-spec", originalName: "synthetic.pdf", mediaType: "application/pdf", kind: "pdf", sizeBytes: 10,
+    sha256: "synthetic", casPath: "synthetic", source: "synthetic", license: "synthetic", sensitivity: "private", state: "accepted",
+    autoGenerate: false, generationState: "not_requested", issues: [], createdAt: new Date().toISOString() };
 }
 
 function makeSession(id: string): LearningSession {

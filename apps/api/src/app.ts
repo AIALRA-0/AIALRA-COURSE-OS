@@ -235,7 +235,17 @@ export function createApp(dependencies: AppDependencies): Express {
       response.once("finish", finish);
       response.once("close", finish);
       next();
-    })).catch(error => { if (!response.headersSent && !response.destroyed) next(error); });
+    })).catch(error => {
+      if (response.headersSent || response.writableEnded || response.destroyed) return;
+      const code = error instanceof Error ? error.message : "";
+      if (code === "READ_DEADLINE_EXCEEDED" || code === "READ_CANCELLED") {
+        console.error(JSON.stringify({ event: "api.error", requestId: responseRequestId(request), method: request.method, path: request.path, error: code }));
+        const mapped = mapApiError(code);
+        sendError(request, response, mapped.status, mapped.code, mapped.message, mapped.retryable);
+        return;
+      }
+      next(error);
+    });
   });
 
   // Liveness must stay independent of the remote course store. Its authority
@@ -1228,15 +1238,14 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       if (!request.file) return sendError(request, response, 400, "FILE_REQUIRED", "请选择要导入的文件", false);
       const idempotencyKey = requireIdempotencyKey(request);
-      const existing = (await dependencies.operations.read()).idempotency[idempotencyKey];
-      if (existing) {
-        const replay = (await dependencies.operations.read()).imports.find((item) => item.id === existing.objectId);
-        if (replay && replay.workspaceId === (request.header("X-Workspace-Id") || "personal")) return response.status(200).json(replay);
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      const existing = await dependencies.operations.readImportByOperation(idempotencyKey, workspaceId);
+      if (existing.association) {
+        if (existing.record) return response.status(200).json(existing.record);
         return sendError(request, response, 409, "IDEMPOTENCY_CONFLICT", "操作标识已被其他请求使用", false);
       }
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       const cas = await dependencies.cas.put(request.file.buffer);
-      const workspaceId = request.header("X-Workspace-Id") || "personal";
       const incrementalFromMaterialVersionId = asOptionalString(request.body.previousMaterialVersionId);
       const previousSource = incrementalFromMaterialVersionId
         ? await getWorkspaceRelease(dependencies.readweave, incrementalFromMaterialVersionId, workspaceId)
@@ -1253,13 +1262,20 @@ export function createApp(dependencies: AppDependencies): Express {
       const source = canonicalImportSource(String(request.body.source || "user_upload"));
       const requestedAutoGenerate = String(request.body.autoGenerate ?? "true").toLowerCase() !== "false";
       let deduplicated = false;
-      let record: ImportRecord = await dependencies.operations.mutate((state) => {
+      let record: ImportRecord = await dependencies.operations.mutateImports((state, context) => {
+        const association = state.idempotency[idempotencyKey];
+        if (association) {
+          const replay = association.kind === "import" ? state.imports.find(item => item.id === association.objectId && item.workspaceId === workspaceId) : undefined;
+          if (!replay) throw new Error("IDEMPOTENCY_CONFLICT");
+          deduplicated = true;
+          return structuredClone(replay);
+        }
         const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256
           && item.incrementalFromMaterialVersionId === incrementalFromMaterialVersionId && canonicalImportSource(item.source) === source);
         if (duplicate) {
           deduplicated = true;
           state.idempotency[idempotencyKey] = { kind: "import", objectId: duplicate.id };
-          dependencies.operations.appendEvent(state, duplicate.id, "import.deduplicated", { sha256: duplicate.sha256, source: duplicate.source });
+          context.appendEvent(duplicate.id, "import.deduplicated", { sha256: duplicate.sha256, source: duplicate.source });
           return structuredClone(duplicate);
         }
         const now = new Date().toISOString();
@@ -1289,19 +1305,12 @@ export function createApp(dependencies: AppDependencies): Express {
         };
         state.imports.push(item);
         state.idempotency[idempotencyKey] = { kind: "import", objectId: item.id };
-        dependencies.operations.appendEvent(state, item.id, inspection.accepted ? "import.accepted" : "import.rejected", { sha256: item.sha256, issues: item.issues, deduplicated: cas.deduplicated });
+        context.appendEvent(item.id, inspection.accepted ? "import.accepted" : "import.rejected", { sha256: item.sha256, issues: item.issues, deduplicated: cas.deduplicated });
         return item;
       });
       if (record.state === "accepted") queueMicrotask(() => processImport(record.id, dependencies).catch(() => undefined));
       if (deduplicated && requestedAutoGenerate && record.state === "ready" && record.materialVersionId && record.pageIds?.length) {
-        const snapshot = await dependencies.operations.read();
-        const exactPlan = record.generationPlanId
-          ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId)
-          : undefined;
-        const latestPlan = snapshot.generationPlans
-          .filter((item) => item.sourceImportId === record.id)
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-        const previousPlan = exactPlan ?? latestPlan;
+        const previousPlan = await dependencies.operations.readImportGenerationPlan(record.id, record.workspaceId);
         if (!previousPlan || ["failed", "cancelled"].includes(previousPlan.state)) {
           const completed = new Set(previousPlan?.completedPageIds ?? []);
           const pendingPageIds = record.pageIds.filter((pageId) => !completed.has(pageId));
@@ -1322,7 +1331,7 @@ export function createApp(dependencies: AppDependencies): Express {
               writingPolicySnapshotId: writingPolicy.policySnapshotId,
               holdForReview: false
             }, dependencies);
-            record = await dependencies.operations.mutate((state) => {
+            record = await dependencies.operations.mutateImports((state, context) => {
               const item = state.imports.find((candidate) => candidate.id === record.id);
               if (!item) return record;
               item.autoGenerate = true;
@@ -1332,7 +1341,7 @@ export function createApp(dependencies: AppDependencies): Express {
               item.generationCompletedPageIds = generationPlan.plan.completedPageIds;
               item.generationFailedPageIds = generationPlan.plan.failedPageIds;
               item.generationState = generationPlan.plan.state;
-              dependencies.operations.appendEvent(state, item.id, "import.generation_restarted", {
+              context.appendEvent(item.id, "import.generation_restarted", {
                 previousPlanId: previousPlan?.id, generationPlanId: generationPlan.plan.id, pageCount: pendingPageIds.length
               });
               return structuredClone(item);
@@ -1346,10 +1355,11 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/import-operations/:key", async (request, response, next) => {
+    const operationKey = request.params.key;
+    const workspaceId = request.header("X-Workspace-Id") || "personal";
     try {
-      const state = await dependencies.operations.read();
-      const association = state.idempotency[request.params.key];
-      const record = association?.kind === "import" ? state.imports.find(item => item.id === association.objectId && item.workspaceId === (request.header("X-Workspace-Id") || "personal")) : undefined;
+      const { record } = await dependencies.operations.readImportByOperation(operationKey, workspaceId);
+      if (response.headersSent || response.writableEnded || response.destroyed) return;
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_ACCEPTED", "尚未找到已接单的同次导入", false);
       response.json(record);
     } catch (error) { next(error); }
@@ -1428,30 +1438,36 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/imports/:id", async (request, response, next) => {
+    const importId = request.params.id;
+    const workspaceId = request.header("X-Workspace-Id") || "personal";
     try {
-      const snapshot = await dependencies.operations.readTaskIndex();
-      const workspaceId = request.header("X-Workspace-Id") || "personal";
-      if (request.params.id.startsWith("generation-plan:")) {
-        const plan = snapshot.generationPlans.find(item => item.id === request.params.id.slice("generation-plan:".length) && item.workspaceId === workspaceId && !item.sourceImportId);
+      if (importId.startsWith("generation-plan:")) {
+        const snapshot = await dependencies.operations.readTaskIndex();
+        if (response.headersSent || response.writableEnded || response.destroyed) return;
+        const plan = snapshot.generationPlans.find(item => item.id === importId.slice("generation-plan:".length) && item.workspaceId === workspaceId && !item.sourceImportId);
         if (!plan) return sendError(request, response, 404, "PLAN_NOT_FOUND", "没有找到这个生成计划", false);
-        response.json({ id: request.params.id, workspaceId, state: "ready", issues: [], autoGenerate: true, originalName: `材料生成任务 ${plan.id.slice(0, 6)}`,
+        response.json({ id: importId, workspaceId, state: "ready", issues: [], autoGenerate: true, originalName: `材料生成任务 ${plan.id.slice(0, 6)}`,
           materialVersionId: plan.materialVersionId, generationPlanId: plan.id, generationState: plan.state, pageIds: plan.pageIds,
           generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt });
         return;
       }
-      if (request.params.id.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
-        const jobId = request.params.id.slice(STANDALONE_GENERATION_TASK_PREFIX.length);
+      if (importId.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
+        const snapshot = await dependencies.operations.readTaskIndex();
+        if (response.headersSent || response.writableEnded || response.destroyed) return;
+        const jobId = importId.slice(STANDALONE_GENERATION_TASK_PREFIX.length);
         const job = snapshot.jobs.find((item) => item.id === jobId && item.workspaceId === workspaceId && !item.sourceImportId);
         if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
         const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
         response.json(standaloneGenerationTaskRecord(job, relatedImport, true));
         return;
       }
-      const record = snapshot.imports.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
+      const record = await dependencies.operations.getImport(importId, workspaceId);
+      if (response.headersSent || response.writableEnded || response.destroyed) return;
       if (!record) return sendError(request, response, 404, "IMPORT_NOT_FOUND", "没有找到这次材料导入", false);
-      const plan = (record.generationPlanId ? snapshot.generationPlans.find((item) => item.id === record.generationPlanId) : undefined)
-        ?? snapshot.generationPlans.filter((item) => item.sourceImportId === record.id)
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      const plan = record.generationPlanId || record.generationJobId || record.autoGenerate
+        ? await dependencies.operations.readImportGenerationPlan(importId, workspaceId)
+        : undefined;
+      if (response.headersSent || response.writableEnded || response.destroyed) return;
       if (plan) {
         const jobId = plan.currentJobId || plan.lastJobId;
         response.json({ ...record, generationPlanId: plan.id, generationJobId: jobId,
@@ -1461,8 +1477,7 @@ export function createApp(dependencies: AppDependencies): Express {
           generationState: plan.retryOfPlanId ? record.generationState : plan.state });
         return;
       }
-      const job = snapshot.jobs.find((item) => item.id === record.generationJobId || item.sourceImportId === record.id);
-      response.json(job ? { ...record, generationJobId: job.id, generationState: job.state } : record);
+      response.json(record);
     } catch (error) { next(error); }
   });
 
@@ -2643,6 +2658,11 @@ export function createApp(dependencies: AppDependencies): Express {
   app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
     const raw = error instanceof Error ? error.message : "UNKNOWN_ERROR";
     console.error(JSON.stringify({ event: "api.error", requestId: responseRequestId(request), method: request.method, path: request.path, error: raw.slice(0, 2000) }));
+    if (response.headersSent) {
+      if (!response.writableEnded && !response.destroyed) response.destroy();
+      return;
+    }
+    if (response.writableEnded || response.destroyed) return;
     const mapped = mapApiError(raw);
     const details = raw.includes("REVISION_CONFLICT") ? { conflictId: raw.slice(raw.indexOf(":") + 1) } : undefined;
     sendError(request, response, mapped.status, mapped.code, mapped.message, mapped.retryable, details);
@@ -5010,11 +5030,11 @@ async function processImport(importId: string, dependencies: AppDependencies): P
   running.add(importId);
   const outputDir = join(dependencies.dataDir, "conversions", importId);
   try {
-    const record = await dependencies.operations.mutate((state) => {
+    const record = await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item || item.state === "ready" || item.state === "rejected") return undefined;
       item.state = "processing";
-      dependencies.operations.appendEvent(state, importId, "conversion.started", { kind: item.kind, originalName: item.originalName });
+      context.appendEvent(importId, "conversion.started", { kind: item.kind, originalName: item.originalName });
       return structuredClone(item);
     });
     if (!record) return;
@@ -5048,7 +5068,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       const completedCount = next.pageCount !== undefined && next.completedPages === next.pageCount;
       if (!force && !stageChanged && !isTerminal && !completedCount
         && Date.now() - lastProgressPersistedAt < 500) return;
-      const updated = await dependencies.operations.mutate((state) => {
+      const updated = await dependencies.operations.mutateImports((state, context) => {
         const item = state.imports.find((candidate) => candidate.id === importId && candidate.workspaceId === record.workspaceId);
         if (!item || !["accepted", "processing", "syncing"].includes(item.state)) return false;
         if (item.conversionProgress && Date.parse(item.conversionProgress.updatedAt) > Date.parse(next.updatedAt)) return false;
@@ -5090,8 +5110,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         completedPages: convertedPages.length,
         updatedAt: new Date().toISOString()
       });
-      await dependencies.operations.mutate((state) => {
-        dependencies.operations.appendEvent(state, importId, "conversion.page.completed", { pageId: page.id, pageNumber: page.pageNumber, title: page.title, imageSha256: stored.sha256 });
+      await dependencies.operations.mutateImports((state, context) => {
+        context.appendEvent(importId, "conversion.page.completed", { pageId: page.id, pageNumber: page.pageNumber, title: page.title, imageSha256: stored.sha256 });
       });
     }
     const treeNodes = await dependencies.readweave.listTreeNodes();
@@ -5139,10 +5159,10 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     }) : undefined;
     if (prepared && prepared.insertedPageIds.length === 0) throw new Error("INCREMENTAL_NO_NEW_PAGES");
     if (prepared) sourceRelease = prepared.sourceRelease;
-    await dependencies.operations.mutate((state) => {
+    await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (item) item.state = "syncing";
-      dependencies.operations.appendEvent(state, importId, "readweave.sync.started", { materialVersionId, pages: convertedPages.length });
+      context.appendEvent(importId, "readweave.sync.started", { materialVersionId, pages: convertedPages.length });
     });
     const existingSource = await dependencies.readweave.getRelease(materialVersionId);
     if (existingSource) {
@@ -5189,8 +5209,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         }
       );
       savedDrafts.push(saved);
-      await dependencies.operations.mutate((state) => {
-        dependencies.operations.appendEvent(state, importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
+      await dependencies.operations.mutateImports((state, context) => {
+        context.appendEvent(importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
     }
     const generationPageIds = prepared?.generationPageIds ?? sourceRelease.pageIds;
@@ -5206,7 +5226,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       writingPolicySnapshotId: writingPolicy.policySnapshotId,
       holdForReview: false
     }, dependencies) : undefined;
-    await dependencies.operations.mutate((state) => {
+    await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item) return;
       item.conversionProgress = {
@@ -5227,7 +5247,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       item.generationCompletedPageIds = generationPlan?.plan.completedPageIds;
       item.generationFailedPageIds = generationPlan?.plan.failedPageIds;
       item.generationState = generationPlan?.plan.state || "not_requested";
-      dependencies.operations.appendEvent(state, importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds,
+      context.appendEvent(importId, "import.ready", { courseId: course.id, materialVersionId, pageIds: item.pageIds, draftIds: item.draftIds,
         insertedPageIds: prepared?.insertedPageIds, affectedPageIds: generationPageIds,
         regeneratedPageIds: generationPlan ? generationPageIds : [], preservedPageIds: prepared?.preservedPageIds,
         generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
@@ -5235,7 +5255,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     if (generationPlan) startCreatedGenerationPlanJobs(generationPlan, dependencies);
   } catch (error) {
     const issue = safeImportIssue(error);
-    await dependencies.operations.mutate((state) => {
+    await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item || item.state === "ready") return;
       item.state = "failed";
@@ -5247,7 +5267,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         updatedAt: new Date().toISOString()
       };
       if (!item.issues.includes(issue)) item.issues.push(issue);
-      dependencies.operations.appendEvent(state, importId, "import.failed", { issue });
+      context.appendEvent(importId, "import.failed", { issue });
     });
   } finally {
     running.delete(importId);

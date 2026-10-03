@@ -168,6 +168,97 @@ describe("Course OS API", () => {
     await request(app).get("/api/v1/imports/import-other").set("X-Workspace-Id", "personal").expect(404);
     expect((await request(app).get("/api/v1/imports").set("X-Workspace-Id", "other").expect(200)).body).toHaveLength(1);
   });
+  it("loads ordinary import details with workspace-scoped exact reads", async () => {
+    const { app, operations } = await seededApp();
+    const record: ImportRecord = {
+      id: "b7e369a0-403e-4a89-884e-6576858a2f88", workspaceId: "personal", originalName: "Lecture.pdf", mediaType: "application/pdf", kind: "pdf",
+      sizeBytes: 10, sha256: "sha", casPath: "/synthetic/source.pdf", source: "user_upload", license: "private_course_material",
+      sensitivity: "private", state: "processing", issues: [], createdAt: "2026-09-22T10:00:00.000Z"
+    };
+    await operations.mutate((state) => { state.imports.push(record); });
+    const getImport = vi.spyOn(operations, "getImport");
+    const readTaskIndex = vi.spyOn(operations, "readTaskIndex");
+
+    const detail = await request(app).get(`/api/v1/imports/${record.id}`).expect(200);
+
+    expect(detail.body).toMatchObject({ id: record.id, workspaceId: "personal", state: "processing" });
+    expect(getImport).toHaveBeenCalledWith(record.id, "personal");
+    expect(readTaskIndex).not.toHaveBeenCalled();
+  });
+  it("keeps live generation-plan fields on ordinary import details without a task-index read", async () => {
+    const { app, operations } = await seededApp();
+    const createdAt = "2026-09-22T10:00:00.000Z";
+    const plan: GenerationPlan = {
+      id: "plan-for-import-detail", workspaceId: "personal", materialVersionId: "material-version-detail",
+      qualityMode: "balanced", language: "zh-CN", writingPolicySnapshotId: "writing-policy:test",
+      pageIds: ["page-1", "page-2"], completedPageIds: ["page-1"], failedPageIds: [],
+      coreCompletedPageIds: ["page-1"], bridgeCompletedPageIds: [], jobIds: ["detail-job"], activeJobIds: ["detail-job"],
+      currentJobId: "detail-job", maxConcurrency: 1, budgetUsd: 1, spentUsd: 0, holdForReview: false,
+      state: "running", createdAt, updatedAt: "2026-09-22T10:01:00.000Z"
+    };
+    const record: ImportRecord = {
+      id: "b7e369a0-403e-4a89-884e-6576858a2f88", workspaceId: "personal", originalName: "Lecture.pdf", mediaType: "application/pdf", kind: "pdf",
+      sizeBytes: 10, sha256: "sha", casPath: "/synthetic/source.pdf", source: "user_upload", license: "private_course_material",
+      sensitivity: "private", state: "ready", autoGenerate: true, generationPlanId: plan.id,
+      issues: [], createdAt
+    };
+    await operations.mutate((state) => { state.imports.push(record); state.generationPlans.push(plan); });
+    const readTaskIndex = vi.spyOn(operations, "readTaskIndex");
+
+    const detail = await request(app).get(`/api/v1/imports/${record.id}`).expect(200);
+
+    expect(detail.body).toMatchObject({
+      id: record.id, generationPlanId: plan.id, generationJobId: "detail-job", generationJobIds: ["detail-job"],
+      generationCompletedPageIds: ["page-1"], generationFailedPageIds: [], generationState: "running"
+    });
+    expect(readTaskIndex).not.toHaveBeenCalled();
+  });
+  it("returns one read-deadline response when import record reads finish after the deadline", async () => {
+    const { app, operations } = await seededApp();
+    const originalGetImport = operations.getImport.bind(operations);
+    let releaseReads!: () => void;
+    let signalReadsStarted!: () => void;
+    let signalReadsFinished!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseReads = resolve; });
+    const readsStarted = new Promise<void>((resolve) => { signalReadsStarted = resolve; });
+    const readsFinished = new Promise<void>((resolve) => { signalReadsFinished = resolve; });
+    let readCount = 0;
+    let finishedReadCount = 0;
+    vi.spyOn(operations, "getImport").mockImplementation(async (id, workspaceId) => {
+      const currentRead = ++readCount;
+      if (readCount === 2) signalReadsStarted();
+      try {
+        await readGate;
+        if (currentRead === 2) throw new Error("LATE_IMPORT_READ_FAILURE");
+        return await originalGetImport(id, workspaceId);
+      } finally {
+        finishedReadCount += 1;
+        if (finishedReadCount === 2) signalReadsFinished();
+      }
+    });
+    const loggedErrors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fastLateRead = request(app).get("/api/v1/imports/late-import-success").then((response) => response);
+    const failedLateRead = request(app).get("/api/v1/imports/late-import-error").then((response) => response);
+
+    try {
+      await readsStarted;
+      const [successResponse, errorResponse] = await Promise.all([fastLateRead, failedLateRead]);
+      expect(successResponse.status).toBe(504);
+      expect(successResponse.body).toMatchObject({ error: { code: "READ_DEADLINE_EXCEEDED" } });
+      expect(errorResponse.status).toBe(504);
+      expect(errorResponse.body).toMatchObject({ error: { code: "READ_DEADLINE_EXCEEDED" } });
+    } finally {
+      releaseReads();
+    }
+
+    await readsFinished;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const errorLogText = JSON.stringify(loggedErrors.mock.calls);
+    expect(loggedErrors).toHaveBeenCalledTimes(3);
+    expect(errorLogText.match(/READ_DEADLINE_EXCEEDED/gu)).toHaveLength(2);
+    expect(errorLogText).toContain("LATE_IMPORT_READ_FAILURE");
+    expect(errorLogText).not.toContain("startsWith");
+  }, 15_000);
   it("returns a workspace-scoped latest stage and ignores historical phase fields", async () => {
     const { app, operations } = await seededApp();
     const job: GenerationJob = {
