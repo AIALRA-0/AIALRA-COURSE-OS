@@ -421,74 +421,59 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   override async readGenerationPlanDetail(id: string, workspaceId: string): Promise<GenerationPlanDetailRead> {
-    await this.ready;
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const planResult = await client.query<{ plan: GenerationPlan | null }>(
-      `SELECT entry.plan
-       FROM operational_state,
-            jsonb_array_elements(COALESCE(state->'generationPlans', '[]'::jsonb)) AS entry(plan)
-       WHERE operational_state.id = 1 AND entry.plan->>'id' = $1 AND entry.plan->>'workspaceId' = $2
-       LIMIT 1`, [id, workspaceId]
-      );
-      const plan = planResult.rows[0]?.plan;
-      if (!plan) {
-        await client.query("COMMIT");
-        return { jobs: [], events: [] };
-      }
-      const selectedIds = [...new Set([...(plan.jobIds ?? []), plan.currentJobId, plan.lastJobId]
-        .filter((jobId): jobId is string => Boolean(jobId)))];
-      const [legacyResult, relationalResult] = await Promise.all([
-        client.query<{ job: GenerationJob }>(
-        `SELECT entry.job
-         FROM operational_state,
-              jsonb_array_elements(COALESCE(state->'jobs', '[]'::jsonb)) WITH ORDINALITY AS entry(job, position)
-         WHERE operational_state.id = 1
-           AND (entry.job->>'planId' = $1 OR entry.job->>'id' = ANY($2::text[]))
-         ORDER BY entry.position`, [plan.id, selectedIds]
-        ),
-        client.query<{ job_data: GenerationJob }>(
-        `SELECT job_data FROM generation_jobs
-         WHERE job_data->>'planId' = $1 OR id::text = ANY($2::text[])
-         ORDER BY created_at, id`, [plan.id, selectedIds]
-        )
-      ]);
-      const jobs = mergeGenerationJobs(legacyResult.rows.map(row => row.job), relationalResult.rows.map(row => row.job_data));
-      const planJobIds = [...new Set(jobs.filter(job => job.planId === plan.id).map(job => job.id))];
-      const [legacyEventsResult, relationalEventsResult] = await Promise.all([
-        client.query<{ event: OrderedEvent }>(
-        `SELECT entry.event
-         FROM operational_state,
-              jsonb_array_elements(COALESCE(state->'events', '[]'::jsonb)) AS entry(event)
-         WHERE operational_state.id = 1
-           AND entry.event->>'streamId' = ANY($1::text[])
-           AND entry.event->>'type' = ANY($2::text[])`,
-        [planJobIds, [...generationPlanDetailEventTypes]]
-        ),
-        client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
-        `SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events
-         WHERE stream_id = ANY($1::text[]) AND event_type = ANY($2::text[]) ORDER BY id`,
-        [planJobIds, [...generationPlanDetailEventTypes]]
-        )
-      ]);
-      const baseEvents = legacyEventsResult.rows.map(row => row.event);
-      const eventMap = new Map(baseEvents.map(event => [event.id, event]));
-      for (const row of relationalEventsResult.rows) {
-        const event: OrderedEvent = {
-          id: Number(row.id), streamId: row.stream_id, type: row.event_type,
-          occurredAt: new Date(row.occurred_at).toISOString(), payload: row.payload
-        };
-        eventMap.set(event.id, event);
-      }
-      await client.query("COMMIT");
-      return { plan, jobs, events: [...eventMap.values()].sort((left, right) => left.id - right.id) };
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    const result = await this.readQuery<{
+      plan: GenerationPlan;
+      legacyJobs: GenerationJob[];
+      canonicalJobs: GenerationJob[];
+      legacyEvents: OrderedEvent[];
+      relationalEvents: Array<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>;
+    }>(
+      `WITH source AS MATERIALIZED (
+         SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1
+       ), selected_plan AS MATERIALIZED (
+         SELECT entry.plan FROM source,
+           jsonb_array_elements(COALESCE(state->'generationPlans', '[]'::jsonb)) AS entry(plan)
+         WHERE entry.plan->>'id' = $1 AND entry.plan->>'workspaceId' = $2 LIMIT 1
+       ), selected_ids AS MATERIALIZED (
+         SELECT job_id FROM (
+           SELECT jsonb_array_elements_text(COALESCE(plan->'jobIds', '[]'::jsonb)) AS job_id FROM selected_plan
+           UNION SELECT plan->>'currentJobId' FROM selected_plan
+           UNION SELECT plan->>'lastJobId' FROM selected_plan
+         ) ids WHERE job_id IS NOT NULL AND job_id <> ''
+       ), legacy_jobs AS MATERIALIZED (
+         SELECT entry.job, entry.position FROM source, selected_plan,
+           jsonb_array_elements(COALESCE(state->'jobs', '[]'::jsonb)) WITH ORDINALITY AS entry(job, position)
+         WHERE entry.job->>'planId' = plan->>'id' OR entry.job->>'id' IN (SELECT job_id FROM selected_ids)
+       ), canonical_jobs AS MATERIALIZED (
+         SELECT job_data AS job, created_at, id FROM generation_jobs, selected_plan
+         WHERE job_data->>'planId' = plan->>'id' OR id::text IN (SELECT job_id FROM selected_ids)
+       ), target_job_ids AS MATERIALIZED (
+         SELECT DISTINCT job->>'id' AS job_id FROM (
+           SELECT job FROM canonical_jobs
+           UNION ALL SELECT legacy.job FROM legacy_jobs legacy
+             WHERE NOT EXISTS (SELECT 1 FROM canonical_jobs canonical WHERE canonical.job->>'id' = legacy.job->>'id')
+         ) merged, selected_plan WHERE job->>'planId' = plan->>'id'
+       )
+       SELECT plan,
+         COALESCE((SELECT jsonb_agg(job ORDER BY position) FROM legacy_jobs), '[]'::jsonb) AS "legacyJobs",
+         COALESCE((SELECT jsonb_agg(job ORDER BY created_at, id) FROM canonical_jobs), '[]'::jsonb) AS "canonicalJobs",
+         COALESCE((SELECT jsonb_agg(entry.event ORDER BY entry.position) FROM source,
+           jsonb_array_elements(COALESCE(state->'events', '[]'::jsonb)) WITH ORDINALITY AS entry(event, position)
+           WHERE entry.event->>'streamId' IN (SELECT job_id FROM target_job_ids)
+             AND entry.event->>'type' = ANY($3::text[])), '[]'::jsonb) AS "legacyEvents",
+         COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id::text, 'stream_id', stream_id,
+           'event_type', event_type, 'payload', payload, 'occurred_at', occurred_at) ORDER BY id)
+           FROM ordered_events WHERE stream_id IN (SELECT job_id FROM target_job_ids)
+             AND event_type = ANY($3::text[])), '[]'::jsonb) AS "relationalEvents"
+       FROM selected_plan`, [id, workspaceId, [...generationPlanDetailEventTypes]]
+    );
+    const row = result.rows[0];
+    if (!row) return { jobs: [], events: [] };
+    return {
+      plan: row.plan,
+      jobs: mergeGenerationJobs(row.legacyJobs, row.canonicalJobs),
+      events: mergeOrderedEvents(row.legacyEvents, row.relationalEvents)
+    };
   }
 
   override async readGenerationJobEvents(jobId: string): Promise<OrderedEvent[]> {

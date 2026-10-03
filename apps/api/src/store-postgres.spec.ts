@@ -667,18 +667,65 @@ postgresDescribe("PostgreSQL operational job storage", () => {
         context.appendEvent("generation.stage.started", { stage: "teach", unrelated: true });
       });
       const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_READ"));
+      const query = vi.spyOn(fixture.store as unknown as { readQuery(text: string, values: unknown[]): Promise<unknown> }, "readQuery");
       const detail = await fixture.store.readGenerationPlanDetail(planId, selectedJob.workspaceId);
+      expect(query).toHaveBeenCalledOnce();
+      expect(query.mock.calls[0]![0]).toContain("WITH source AS MATERIALIZED");
       expect(detail.plan?.id).toBe(planId);
       expect(detail.jobs.map((job) => job.id)).toEqual([selectedJob.id]);
       expect(detail.events).toHaveLength(1);
       expect(detail.events[0]?.streamId).toBe(selectedJob.id);
-      expect((await fixture.store.readGenerationPlanDetail(planId, "other-workspace")).plan).toBeUndefined();
+      expect(await fixture.store.readGenerationPlanDetail(planId, "other-workspace")).toEqual({ jobs: [], events: [] });
+      expect(await fixture.store.readGenerationPlanDetail(randomUUID(), selectedJob.workspaceId)).toEqual({ jobs: [], events: [] });
       expect(fullRead).not.toHaveBeenCalled();
       fullRead.mockRestore();
     } finally {
       await stopFixture(fixture);
     }
-  });
+  }, 15000);
+
+  it("preserves plan detail legacy order, canonical precedence and event eligibility after job merging", async () => {
+    const planId = randomUUID();
+    const legacyJob = { ...makeJob(randomUUID()), planId };
+    const canonicalJob = { ...makeJob(randomUUID()), planId };
+    const redirectedJob = { ...makeJob(randomUUID()), planId };
+    const linkedJob = { ...makeJob(randomUUID()), planId: randomUUID() };
+    const fixture = await startFixture([legacyJob, redirectedJob, canonicalJob, linkedJob]);
+    const now = new Date().toISOString();
+    const plan: GenerationPlan = {
+      id: planId, workspaceId: legacyJob.workspaceId, materialVersionId: legacyJob.materialVersionId,
+      qualityMode: "quality", language: "zh-CN", writingPolicySnapshotId: "policy-test",
+      pageIds: ["page-1"], completedPageIds: [], failedPageIds: [], jobIds: [canonicalJob.id, ""],
+      currentJobId: linkedJob.id, lastJobId: redirectedJob.id,
+      budgetUsd: 1, spentUsd: 0, holdForReview: false, state: "running", createdAt: now, updatedAt: now
+    };
+    try {
+      await fixture.store.mutate(state => { state.generationPlans.push(plan); });
+      await fixture.store.mutateGenerationJob(canonicalJob.id, (_job, context) => {
+        context.appendEvent("generation.stage.started", { authority: "canonical" });
+      });
+      const relationalEvent = (await fixture.store.readGenerationJobEvents(canonicalJob.id))[0]!;
+      const changedCanonical = { ...canonicalJob, attempt: 3, cancelRequested: true };
+      const changedRedirected = { ...redirectedJob, planId: randomUUID(), attempt: 2 };
+      await fixture.pool.query("UPDATE generation_jobs SET job_data=$2::jsonb WHERE id=$1", [canonicalJob.id, JSON.stringify(changedCanonical)]);
+      await fixture.pool.query("UPDATE generation_jobs SET job_data=$2::jsonb WHERE id=$1", [redirectedJob.id, JSON.stringify(changedRedirected)]);
+      await fixture.pool.query("DELETE FROM generation_jobs WHERE id=$1", [legacyJob.id]);
+      const baseId = Number((await fixture.pool.query("SELECT COALESCE(MAX(id),0)::text AS id FROM ordered_events")).rows[0].id)+10;
+      const legacyEvent: OrderedEvent = { id: baseId, streamId: legacyJob.id, type: "generation.stage.completed", occurredAt: now, payload: { authority: "legacy" } };
+      const events: OrderedEvent[] = [
+        { ...relationalEvent, payload: { authority: "stale-json" } }, legacyEvent,
+        { ...legacyEvent, id: baseId+1, streamId: linkedJob.id },
+        { ...legacyEvent, id: baseId+2, streamId: redirectedJob.id },
+        { ...legacyEvent, id: baseId+3, type: "job.queued" }
+      ];
+      await fixture.pool.query("UPDATE operational_state SET state=jsonb_set(jsonb_set(state,'{jobs}',$1::jsonb),'{events}',$2::jsonb) WHERE id=1",
+        [JSON.stringify([legacyJob, redirectedJob, linkedJob]), JSON.stringify(events)]);
+      const detail = await fixture.store.readGenerationPlanDetail(planId, legacyJob.workspaceId);
+      expect(detail.plan).toEqual(plan);
+      expect(detail.jobs).toEqual([legacyJob, changedRedirected, linkedJob, changedCanonical]);
+      expect(detail.events).toEqual([relationalEvent, legacyEvent]);
+    } finally { await stopFixture(fixture); }
+  }, 15000);
 
   it("updates one session without changing the generation projection", async () => {
     const fixture = await startFixture([]);
