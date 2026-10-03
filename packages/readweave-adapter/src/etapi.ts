@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
-import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
+import { promisify } from "node:util";
+import { brotliCompress, brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { assertReadBudgetActive, currentReadBudget, readBudgetAbortError, withIndependentReadBudget, type ReadBudget } from "./read-budget.js";
 import { decodeReadWeaveStateContent, decodeReadWeaveStateContentAsync } from "./state-decoder.js";
 import type {
@@ -37,12 +38,22 @@ import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeN
 import { trashDeleteIdempotencyKey, type TrashDeleteOptions } from "./trash-safety.js";
 
 const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
+const brotliCompressAsync = promisify(brotliCompress);
 
 export function encodeReadWeaveStateContent(state: unknown): string {
   const plain = JSON.stringify(state);
   if (Buffer.byteLength(plain) < 1_000_000) return plain;
   const hash = createHash("sha256").update(plain).digest("hex");
   const compressed = brotliCompressSync(plain, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 2 } });
+  return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
+}
+
+/** Preserve the snapshot format while moving online compression off the event loop. */
+export async function encodeReadWeaveStateContentAsync(state: unknown): Promise<string> {
+  const plain = JSON.stringify(state);
+  if (Buffer.byteLength(plain) < 1_000_000) return plain;
+  const hash = createHash("sha256").update(plain).digest("hex");
+  const compressed = await brotliCompressAsync(plain, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 2 } });
   return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
 }
 
@@ -2500,7 +2511,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     fallbackState: EtapiState
   ): Promise<string> {
     try {
-      const content = encodeReadWeaveStateContent(record);
+      const content = await encodeReadWeaveStateContentAsync(record);
       let savedNoteId = noteId;
       if (savedNoteId) {
         await this.putContent(savedNoteId, content);
@@ -2556,7 +2567,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
       let content: string;
       try {
-        content = encodeReadWeaveStateContent(state);
+        content = await encodeReadWeaveStateContentAsync(state);
       } finally {
         if (timingEnabled) encodeMs = Math.round(performance.now() - encodeStartedAt);
       }
@@ -2766,7 +2777,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const note = await this.createNote(
       state.projections.courseRootNoteId,
       "01 Course OS 学习活动索引",
-      encodeReadWeaveStateContent(this.activityState(state)),
+      await encodeReadWeaveStateContentAsync(this.activityState(state)),
       "code",
       "application/json",
       { courseOsActivityIndex: this.workspaceId, courseOsType: "activity_index" }
@@ -2784,7 +2795,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     try {
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
       const activity = this.activityState(state);
-      const content = encodeReadWeaveStateContent(activity);
+      const content = await encodeReadWeaveStateContentAsync(activity);
       const putStartedAt = timingEnabled ? performance.now() : 0;
       await this.putContent(noteId, content);
       const putFinishedAt = timingEnabled ? performance.now() : 0;
@@ -2893,7 +2904,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async writeActivityIndex(noteId: string, activity: EtapiActivityState): Promise<void> {
     const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     const encodeStartedAt = timingEnabled ? performance.now() : 0;
-    const content = encodeReadWeaveStateContent(activity);
+    const content = await encodeReadWeaveStateContentAsync(activity);
     const putStartedAt = timingEnabled ? performance.now() : 0;
     try {
       await this.putContent(noteId, content);
