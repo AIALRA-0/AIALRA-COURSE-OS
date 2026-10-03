@@ -1,0 +1,21 @@
+apps/api/src/app.ts
+  s_b96a0a043d57e0::t_3872ad1b4a89c6 61,1377-1379,1382,1407,1413
+packages/storage/src/task-dismissal.ts
+  s_b96a0a043d57e0::t_76dcff4048458c 200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b6223f4a62e2d2ef823f2ff8a2c2fbe74702140",
+  "prompts": {},
+  "sessions": {
+    "s_b96a0a043d57e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ef78-8f0b-7ab2-b080-156cce31dc79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
