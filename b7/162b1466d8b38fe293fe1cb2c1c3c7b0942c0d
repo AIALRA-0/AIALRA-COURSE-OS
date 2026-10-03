@@ -1,0 +1,30 @@
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_0113e0bf05a901 1692-1701,1707,1716-1723,1736-1737,1755-1757,1767,1771,1799,1802,1846-1847
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_6c56c4fe697038 8,38-85
+  s_36a381ab4bccf9::t_7e319cdad751cc 86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b7162b1466d8b38fe293fe1cb2c1c3c7b0942c0d",
+  "prompts": {},
+  "sessions": {
+    "s_36a381ab4bccf9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a1a6-6503-79c1-8d40-f56fe9691ee6",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
