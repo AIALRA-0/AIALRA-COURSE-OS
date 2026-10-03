@@ -1,0 +1,24 @@
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_ab3c2158e67481 616
+  s_e8850ef125fb32::t_b426cf2e6aea3e 618
+apps/api/src/server.ts
+  s_e8850ef125fb32::t_b426cf2e6aea3e 199-208
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_ab3c2158e67481 314-326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "982fe9c1c074b4073861e4dc824d6cf92a5ee30a",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
