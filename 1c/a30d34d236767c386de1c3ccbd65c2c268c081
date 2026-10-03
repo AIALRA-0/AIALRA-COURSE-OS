@@ -1,0 +1,30 @@
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_f17e9616164ee6 1,830-849,851-1085
+  s_e8850ef125fb32::t_37b373fd1d7368 850
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_5e3286cf619ca5 37,151,153-155,269,382-383,385-389,761-768,776,778,780-820,822-858
+  s_e8850ef125fb32::t_297b63b2646541 38-42,152,381,384,760,769-775,779
+  s_e8850ef125fb32::t_a65c9a3edbbae2 777,821,1053-1054,1057-1059,1063,1083
+README.en.md
+  s_e8850ef125fb32::t_0756b471eaa3a4 77
+README.md
+  s_e8850ef125fb32::t_59cd5201d505d1 83
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_7127b292ed2c62 63,3445,3488,3538-3539,3565,3617,3621,3656,3666,3674,3688
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ca30d34d236767c386de1c3ccbd65c2c268c081",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
