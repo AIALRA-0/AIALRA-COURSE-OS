@@ -1689,11 +1689,22 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
   </div>;
 }
 
+export function beginImportCostRead<T>(inFlight: Map<string, Promise<unknown>>, key: string, read: () => Promise<T>, isCurrent: () => boolean, onSuccess: (value: T) => void, onFailure: () => void): void {
+  if (inFlight.has(key)) return;
+  const pending = Promise.resolve().then(read);
+  inFlight.set(key, pending);
+  void pending.then(
+    (value) => { if (isCurrent()) onSuccess(value); },
+    () => { if (isCurrent()) onFailure(); }
+  ).finally(() => { if (inFlight.get(key) === pending) inFlight.delete(key); });
+}
+
 function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose }: { importId: string; taskTitle?: string; onReady: (record: ImportRecord) => void; onProgress: () => void; onClose: () => void }) {
   const [record, setRecord] = useState<WebImportRecord>();
   const [plan, setPlan] = useState<WebGenerationPlan>();
   const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
   const [costs, setCosts] = useState<GenerationCostEntry[]>([]);
+  const [costReadUnavailable, setCostReadUnavailable] = useState(false);
   const [error, setError] = useState("");
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryError, setRetryError] = useState("");
@@ -1702,6 +1713,14 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
   useEffect(() => {
     let cancelled = false;
     let timer = 0;
+    let activeCostKey: string | undefined;
+    const costReadsInFlight = new Map<string, Promise<unknown>>();
+    const readCosts = (key: string, read: () => Promise<{ entries: GenerationCostEntry[] }>) => {
+      activeCostKey = key;
+      beginImportCostRead(costReadsInFlight, key, read, () => !cancelled && activeCostKey === key,
+        (result) => { setCosts(result.entries); setCostReadUnavailable(false); },
+        () => setCostReadUnavailable(true));
+    };
     const refresh = async () => {
       try {
         const updated = await api.importRecord(importId);
@@ -1714,10 +1733,8 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
         }
         const standaloneJobId = standaloneGenerationJobId(importId);
         if (standaloneJobId) {
-          const [job, costResult] = await Promise.all([
-            api.generationJob(standaloneJobId),
-            api.costs({ jobId: standaloneJobId }).catch(() => ({ entries: [], rollups: [] }))
-          ]);
+          readCosts(`job:${standaloneJobId}`, () => api.costs({ jobId: standaloneJobId }));
+          const job = await api.generationJob(standaloneJobId);
           if (cancelled) return;
           setRecord({
             ...updated,
@@ -1729,32 +1746,29 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
           });
           setPlan(undefined);
           setActiveJobs(["queued", "running", "pending_sync"].includes(job.state) ? [job] : []);
-          setCosts(costResult.entries);
           const processed = job.completedPageIds.length + job.failedPageIds.length;
           if (processed > progressRef.current) {
             progressRef.current = processed;
             onProgress();
           }
         } else if (updated.generationPlanId) {
-          const [planResult, costResult] = await Promise.all([
-            api.generationPlan(updated.generationPlanId),
-            updated.materialVersionId
-              ? api.costs({ materialVersionId: updated.materialVersionId })
-              : Promise.resolve({ entries: [] as GenerationCostEntry[], rollups: [] })
-          ]);
+          if (updated.materialVersionId) readCosts(`material:${updated.materialVersionId}`, () => api.costs({ materialVersionId: updated.materialVersionId! }));
+          else activeCostKey = undefined;
+          const planResult = await api.generationPlan(updated.generationPlanId);
           if (cancelled) return;
           setPlan(planResult.plan);
           setActiveJobs(planResult.activeJobs ?? (planResult.currentJob && ["queued", "running", "pending_sync"].includes(planResult.currentJob.state) ? [planResult.currentJob] : []));
-          setCosts(costResult.entries);
           const processed = planResult.plan.completedPageIds.length + planResult.plan.failedPageIds.length;
           if (processed > progressRef.current) {
             progressRef.current = processed;
             onProgress();
           }
         } else {
+          activeCostKey = undefined;
           setPlan(undefined);
           setActiveJobs([]);
           setCosts([]);
+          setCostReadUnavailable(false);
         }
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取后台任务进度");
@@ -1782,10 +1796,10 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
       setRetryingFailed(false);
     }
   };
-  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} />;
+  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} />;
 }
 
-function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, retryingFailed, onRetryFailed, onClose }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void }) {
+function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void }) {
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
@@ -1829,7 +1843,8 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, error, ret
       : summary.concurrency?.limit !== undefined
         ? `—/${summary.concurrency.limit}`
         : "—";
-  const cost = summary.costUsd === undefined ? awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用" : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
+  const confirmedCost = summary.costUsd === undefined ? undefined : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
+  const cost = costReadUnavailable ? confirmedCost ? `${confirmedCost}（成本暂不可读，显示上次确认值）` : "成本暂不可读" : confirmedCost ?? (awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用");
   const progressLabel = failedState ? "生成失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"
       : `${progressScopeLabel(activity.progressScope)}${progress}%${activity.overall ? ` · ${activity.overall.completed}/${activity.overall.total}` : ""}`;

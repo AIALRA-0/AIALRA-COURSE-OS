@@ -5,7 +5,7 @@ import type { CourseRelease, LearningSession, LessonDraft, PageLesson, Workspace
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./api.js";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, beginFormalPageLoad, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, type CandidatePreviewState, type SharedReadLease } from "./App.js";
+import { beginCandidatePreviewLoad, beginFormalPageLoad, beginImportCostRead, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -32,6 +32,56 @@ describe("workspace tree and incremental import UI inputs", () => {
 
     expect(handlers).toHaveLength(2);
     expect(handlers.every((handler) => handler.includes("rememberImport(record)") && handler.includes("trackImport(record.id)"))).toBe(true);
+  });
+});
+
+describe("import activity cost reads", () => {
+  it("does not block plan publication, deduplicates a slow cost read, and preserves confirmed costs on rejection", async () => {
+    const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const dock = source.slice(source.indexOf("function ImportActivityDock"), source.indexOf("function ImportProgress"));
+    expect(dock).not.toContain("Promise.all");
+    expect(dock.indexOf("readCosts(`material:")).toBeLessThan(dock.indexOf("const planResult = await api.generationPlan"));
+    expect(dock).toContain("setPlan(planResult.plan)");
+    expect(dock).toContain("setActiveJobs(planResult.activeJobs");
+    expect(dock).toContain("timer = window.setTimeout(() => void refresh(), 2000)");
+
+    const response = deferred<{ entries: string[] }>();
+    const inFlight = new Map<string, Promise<unknown>>();
+    const confirmedCosts = ["confirmed-cost"];
+    let visibleCosts = confirmedCosts;
+    let costUnavailable = false;
+    const read = vi.fn(() => response.promise);
+    const publishCosts = (result: { entries: string[] }) => { visibleCosts = result.entries; costUnavailable = false; };
+    const markCostUnavailable = () => { costUnavailable = true; };
+    beginImportCostRead(inFlight, "material:v1", read, () => true, publishCosts, markCostUnavailable);
+    beginImportCostRead(inFlight, "material:v1", read, () => true, publishCosts, markCostUnavailable);
+    let planPublished = false;
+    await Promise.resolve().then(() => { planPublished = true; });
+    expect(planPublished).toBe(true);
+    expect(visibleCosts).toBe(confirmedCosts);
+    await flushPromises();
+    expect(read).toHaveBeenCalledOnce();
+
+    response.reject(new Error("504 cost timeout"));
+    await flushPromises();
+    expect(costUnavailable).toBe(true);
+    expect(visibleCosts).toBe(confirmedCosts);
+    expect(source).toContain("成本暂不可读");
+    expect(source).toContain("显示上次确认值");
+  });
+
+  it("ignores a late cost response after the activity view has left", async () => {
+    const response = deferred<string>();
+    const inFlight = new Map<string, Promise<unknown>>();
+    let active = true;
+    const publish = vi.fn();
+    const fail = vi.fn();
+    beginImportCostRead(inFlight, "job:j1", () => response.promise, () => active, publish, fail);
+    active = false;
+    response.resolve("late result");
+    await flushPromises();
+    expect(publish).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
   });
 });
 
