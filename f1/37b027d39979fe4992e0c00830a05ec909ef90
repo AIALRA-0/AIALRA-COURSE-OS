@@ -1,0 +1,127 @@
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_0ab3df2e102c8c 5,156,158,482,485,556
+  s_e8850ef125fb32::t_8a42498d55004b 30-32,108-121,294-298,307-308
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_dca90f9990e81c 1506-1510
+  s_e8850ef125fb32::t_49ac52e3b09a25 130-131,133-136,1501-1502,1504,1511-1513,1516-1520,1522-1523,1526-1538,1601
+packages/readweave-adapter/src/index.ts
+  s_e8850ef125fb32::t_cca7806f3c6148 31-32,442,444,446-461,1239-1242
+  s_e8850ef125fb32::t_1ecd6827e41e6a 126,439-440,462,1238
+packages/storage/src/task-dismissal.spec.ts
+  s_e8850ef125fb32::t_6ed038e79f5ef9 82-90
+  s_e8850ef125fb32::t_5a83b78bf66769 1-81,91-116
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_8ff1012a805442 138,260
+  s_e8850ef125fb32::t_3e204cccab5a49 135,266-285,345,347,376-378,383-384,396
+packages/storage/src/task-dismissal.ts
+  s_e8850ef125fb32::t_0ab3df2e102c8c 23,212-216,223-225,227-232
+  s_e8850ef125fb32::t_6ed038e79f5ef9 1-22,25-150,152-211,249-293
+  s_e8850ef125fb32::t_339c37f8924e8c 24,151
+  s_e8850ef125fb32::t_0ee96a526cfdc1 217-222
+  s_e8850ef125fb32::t_0b7b07f8b074c1 233-234
+  s_e8850ef125fb32::t_8a42498d55004b 226,235-248
+packages/storage/src/index.ts
+  s_e8850ef125fb32::t_6b95aab99d0d0a 4
+apps/web/src/Icon.tsx
+  s_e8850ef125fb32::t_6a0227e49fb77f 12,24-27
+packages/converter/src/index.ts
+  s_e8850ef125fb32::t_729fc81c828dba 31-52,56,68,70,74,76,79-96,98-111,114-115,117-120,125-134,141,147,154-155,168-189,193,196-201,241-254,256-282,285,303,307,318,323,336,341,347,349-351,353
+  s_e8850ef125fb32::t_055824c28b8464 314-317,454-495,505-539,541-555
+  s_e8850ef125fb32::t_6f85774697a74e 540
+  s_e8850ef125fb32::t_72b7a4ee62be62 311-313,556
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_689043a2e01769 246-256
+  s_e8850ef125fb32::t_ffbc9dc99363f7 44,46-48,71,116,124,140
+  s_e8850ef125fb32::t_ac0213f18f6c11 5-6,28,49,107-115,117-123,125-139,141-146,175-176,225-227,231-245,257-264
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_1ecd6827e41e6a 1425
+  s_e8850ef125fb32::t_cca7806f3c6148 37,1426-1431
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_cf12cd982e7c82 916
+  s_e8850ef125fb32::t_891899d317fe10 894-897,902-907,910-915,917-924,929-935,1347,1354-1357
+  s_e8850ef125fb32::t_0213d47596b881 75-107
+  s_e8850ef125fb32::t_386888c2292394 898-901,908-909,925-928
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_f3ecb2f9e5a144 1107,1114-1115,1127,1835,1843-1846,1953
+  s_e8850ef125fb32::t_e352cffe31238e 3,906-908,910-923,1044-1045,1077,1091,1638-1639,1641-1642,1645-1649,1651-1666,1669,1682,1685-1686
+  s_e8850ef125fb32::t_e6ef08c95327c0 1943-1952
+  s_e8850ef125fb32::t_d086cc6e57898b 1808
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_cadcc4a34c0b3c 494-500
+AGENTS.md
+  s_e8850ef125fb32::t_ac06059bd8c3cc 1-19
+packages/readweave-adapter/src/trash-safety.spec.ts
+  s_e8850ef125fb32::t_64675b5914eef3 67,69
+  s_e8850ef125fb32::t_c1e2f3675289df 1-66,68,70-79,97-123,125-131
+  s_e8850ef125fb32::t_efa0e1bf5c8506 124
+  s_e8850ef125fb32::t_ec2622fcc35c0b 80-96
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_0ee96a526cfdc1 181-221,278-291
+  s_e8850ef125fb32::t_8a42498d55004b 7,126-140,143-148
+  s_e8850ef125fb32::t_0b7b07f8b074c1 141-142
+  s_e8850ef125fb32::t_efa0e1bf5c8506 12,125,222-269,292-311
+  s_e8850ef125fb32::t_339c37f8924e8c 149-180
+packages/readweave-adapter/src/trash-safety.ts
+  s_e8850ef125fb32::t_fccd46d9ea7d21 1-15,17-25,28-37,39-44,46-51,55-62,71-100,102-107,114,117-118,121-138,140-142,144-147,149,151-160
+  s_e8850ef125fb32::t_21bc1fdc6c7b15 108-111,120
+  s_e8850ef125fb32::t_75000fccdd4a10 38,63-70,101,112-113,115-116,119
+  s_e8850ef125fb32::t_1ecd6827e41e6a 16,26-27,45,52-54,139,143,148,150
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_9c1fa16f67d538 4,51-62,277,299,325,355,388,403-404,413,422-423,443-446,503-504,513,520
+apps/web/src/api.ts
+  s_e8850ef125fb32::t_abfe76c6d8f225 61-88
+  s_e8850ef125fb32::t_69120cf1184256 394,405-406,408,411-414
+  s_e8850ef125fb32::t_c22f5873407fc8 409-410
+  s_e8850ef125fb32::t_440b75856ea1ac 298
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_4e5af4bfe7efe2 5014-5035,5037-5050,5066,5079,5235
+  s_e8850ef125fb32::t_2d2571fb0cff20 418-427,439-449,1467-1468
+  s_e8850ef125fb32::t_cd8bb8685ad4d0 56,81
+  s_e8850ef125fb32::t_317fa496fb58ec 1406,1409,1411-1413,1429-1430
+  s_e8850ef125fb32::t_6f85774697a74e 5036,5064
+  s_e8850ef125fb32::t_4fd3e257b0ad26 61,450-455,458-463,1230-1231,1344-1373,1378-1379,1381,1397-1401,1414-1419,1431-1436,1469-1474,1642-1643,5051-5056,5067-5072,5080-5085,5205-5210,5236-5241
+  s_e8850ef125fb32::t_2c224830162668 428-438
+  s_e8850ef125fb32::t_6456cb6c839541 5743
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_e35d077d5174d2 446
+  s_e8850ef125fb32::t_02dcaf18c785a2 6,8-9,12-14,366,389,393-403,405,409-412,452-453,506,679-681
+  s_e8850ef125fb32::t_7d60431049e891 7,10-11,58,65-66,301,332,335-336,343,347-364,390,413-445,447-451
+  s_e8850ef125fb32::t_fbdc86a8fca43c 391-392,404
+packages/converter/src/index.spec.ts
+  s_e8850ef125fb32::t_3e3332ac27f904 5,28-29,43-122,140-162
+packages/converter/src/multi-materials.spec.ts
+  s_e8850ef125fb32::t_c8a4bab6f77bff 33,60-77
+  s_5acd167c2115aa::t_de8260153affe3 78
+apps/web/src/types.ts
+  s_e8850ef125fb32::t_91fbb04a1c37b1 12
+README.en.md
+  s_e8850ef125fb32::t_5364d8b7be0993 77,82-87
+README.md
+  s_e8850ef125fb32::t_4049e60965b0d7 83,88-93
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_017604c659ac8c 129,736
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f137b027d39979fe4992e0c00830a05ec909ef90",
+  "prompts": {},
+  "sessions": {
+    "s_5acd167c2115aa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a21-3e91-7be2-8cf4-5616c2bcfc48",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
