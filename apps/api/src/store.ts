@@ -613,9 +613,9 @@ export class PostgresOperationalStore extends OperationalStore {
     await this.pool.end();
   }
 
-  /** Bound pool wait and server execution by the caller's remaining read deadline. */
+  /** Foreground reads inherit their deadline; recovery has a separate finite budget. */
   private async readQuery<R extends pg.QueryResultRow>(text: string, values: unknown[] = []): Promise<pg.QueryResult<R>> {
-    return withReadBudget({ timeoutMs: 8000 }, async () => {
+    return withReadBudget({ timeoutMs: currentReadBudget() ? 8000 : 30000 }, async () => {
       const budget = currentReadBudget()!;
       const abortError = () => {
         const reason = budget.signal.reason;

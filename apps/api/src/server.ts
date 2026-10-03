@@ -196,8 +196,16 @@ export async function startApiServer(): Promise<void> {
       listeningServer.once("error", handleError);
     });
     process.stdout.write(`Course OS API listening at http://${host}:${port}; reading ${reading?.status().ready ? "ready" : "not ready"}\n`);
-    void resumeIncompleteImports(dependencies);
-    void resumeIncompleteJobs(dependencies);
+    void resumeIncompleteImports(dependencies).catch(error => {
+      const code = error instanceof Error && /^(READ_DEADLINE_EXCEEDED|READ_CANCELLED)$/.test(error.message)
+        ? error.message : "RECOVERY_FAILED";
+      process.stderr.write(`Course OS API startup import recovery failed: ${code}; pending state retained\n`);
+    });
+    void resumeIncompleteJobs(dependencies).catch(error => {
+      const code = error instanceof Error && /^(READ_DEADLINE_EXCEEDED|READ_CANCELLED)$/.test(error.message)
+        ? error.message : "RECOVERY_FAILED";
+      process.stderr.write(`Course OS API startup job recovery failed: ${code}; pending state retained\n`);
+    });
 
     let shutdownPromise: Promise<void> | undefined;
     const shutdown = (): Promise<void> => {

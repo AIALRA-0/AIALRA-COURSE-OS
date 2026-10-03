@@ -311,6 +311,19 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("gives background recovery its own finite budget while retaining a shorter foreground deadline", async () => {
+    const store = new PostgresOperationalStore({ connectionString: connectionString!, max: 1 });
+    await store.whenReady();
+    try {
+      const reader = store as unknown as { readQuery(text: string): Promise<pg.QueryResult> };
+      await expect(reader.readQuery("SELECT pg_sleep(8.1)"))
+        .resolves.toHaveProperty("rowCount", 1);
+      await expect(withReadBudget({ timeoutMs: 300 }, () => reader.readQuery("SELECT pg_sleep(2)")))
+        .rejects.toThrow("READ_DEADLINE_EXCEEDED");
+      await expect(store.getImport("missing-synthetic-import", "synthetic")).resolves.toBeUndefined();
+    } finally { await store.close(); }
+  }, 20000);
+
   it("bounds a real read query in PostgreSQL and leaves the next read usable", async () => {
     const store = new PostgresOperationalStore({ connectionString: connectionString!, max: 1 });
     await store.whenReady();
