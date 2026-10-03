@@ -1,0 +1,37 @@
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_747490b4acee6f 82-108,305-420,745-748
+  s_e8850ef125fb32::t_b5272f0b86a499 749-750
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_3f353e726b55d0 174,186-213
+  s_e8850ef125fb32::t_f1bf63c0bf55f0 171,173,175-185,214-218,227,232-233
+  s_e8850ef125fb32::t_28b81170750c52 172,219-226,228-231,234-255,261
+  s_e8850ef125fb32::t_6f75feda888a3d 256-260
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_a19b0eb5bfef78 35-43,109-120,130-143,316-337,353-363,672-735
+  s_e8850ef125fb32::t_d71ba68b79c267 121-129,338-352
+packages/storage/src/task-dismissal.spec.ts
+  s_e8850ef125fb32::t_c0523ae0edcb8c 91,93-96,98,100-104
+packages/storage/src/task-dismissal.ts
+  s_e8850ef125fb32::t_c0523ae0edcb8c 280
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_ea0f7712a45bbb 242
+  s_e8850ef125fb32::t_063567d8d1f861 238-241,243-248,1241-1244,1265-1272,1278,1308,1313,1334,1344,1441-1442,1444-1447,1449,1454-1457,1464-1465,1470,1480,2661-2665,5033,5037,5071,5113-5114,5162,5165,5212-5213,5229,5250,5258,5270
+  s_e8850ef125fb32::t_e449df134845d8 1358-1359,1361-1362
+  s_e8850ef125fb32::t_4a5788c1ae0637 1467-1469
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b7724ccd4b083c1a01b20edafcaaa30769ecc337",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
