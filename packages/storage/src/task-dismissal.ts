@@ -197,6 +197,7 @@ export function isTaskDismissed(state: TaskCleanupState, workspaceId: string, re
 /** Compute relationships once for list/history/search, preserving original entity records. */
 export function filterDismissedTasks<T extends TaskCleanupState>(state: T, workspaceId: string): T {
   const saved = markers(state);
+  if (!Object.keys(saved).length) return state;
   const hidden = new Set<string>();
   for (const members of groups(state)) {
     if (!members.every(entry => entry.record.workspaceId === workspaceId) || !failed(members)) continue;

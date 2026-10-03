@@ -58,7 +58,7 @@ import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurr
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
-import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, type FailedTaskSelection } from "@course-os/storage";
+import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, filterDismissedTasks, type FailedTaskSelection } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type OperationalState } from "./store.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -1374,11 +1374,12 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/imports", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const snapshot = await dependencies.operations.readTaskIndex();
-      const cleanupState = { ...snapshot, idempotency: snapshot.taskDismissals ?? {} };
+      const rawSnapshot = await dependencies.operations.readTaskIndex();
+      const cleanupState = { ...rawSnapshot, idempotency: rawSnapshot.taskDismissals ?? {} };
+      const snapshot = filterDismissedTasks(cleanupState, workspaceId);
       const cleanupGroups = selectFailedTasks(cleanupState, workspaceId);
       const imports = snapshot.imports
-        .filter((item) => item.workspaceId === workspaceId && !isTaskDismissed(cleanupState, workspaceId, { kind: "import", id: item.id }))
+        .filter((item) => item.workspaceId === workspaceId)
         .map((item) => {
           const plan = snapshot.generationPlans.find((candidate) => candidate.id === item.generationPlanId);
           return {
@@ -1403,13 +1404,13 @@ export function createApp(dependencies: AppDependencies): Express {
           };
         });
       const independentJobs = snapshot.jobs
-        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId && !job.planId && !isTaskDismissed(cleanupState, workspaceId, { kind: "job", id: job.id }))
+        .filter((job) => job.workspaceId === workspaceId && !job.sourceImportId && !job.planId)
         .map((job) => {
           const relatedImport = snapshot.imports.find((item) => item.workspaceId === workspaceId && item.materialVersionId === job.materialVersionId);
           return { ...standaloneGenerationTaskRecord(job, relatedImport), cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "job" && ref.id === job.id))?.fingerprint };
         });
       const independentPlans = snapshot.generationPlans
-        .filter(plan => plan.workspaceId === workspaceId && !plan.sourceImportId && !isTaskDismissed(cleanupState, workspaceId, { kind: "plan", id: plan.id }))
+        .filter(plan => plan.workspaceId === workspaceId && !plan.sourceImportId)
         .map(plan => ({ id: `generation-plan:${plan.id}`, workspaceId, state: "ready" as const, autoGenerate: true,
           originalName: `材料生成任务 ${plan.id.slice(0, 6)}`, materialVersionId: plan.materialVersionId, generationPlanId: plan.id,
           generationState: plan.state, pageIds: plan.pageIds, generationCompletedPageIds: plan.completedPageIds,
