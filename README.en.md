@@ -74,7 +74,7 @@ Estimate peak disk use for this build, current images, and retained rollback ima
 
 The 2.4 closeout does not add multi-agent classrooms, voice, generated teaching decks, a paper track, public multi-user operation, LMS integration, or new infrastructure.
 
-The current engineering candidate is `engineering-baseline-candidate-20261002-r3`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Isolated engineering checks do not replace authenticated public learning acceptance, which remains pending. The candidate tag does not certify daily-use stability or teaching quality.
+The current engineering candidate is `engineering-baseline-candidate-20261002-r3`. Teaching quality iteration, writing policy changes, and batch regeneration of failed pages are paused at the user's request pending new writing rules. Existing content and failure evidence are retained; an ungenerated page is distinct from a read failure. Authenticated public reading, authoritative answer saving, and refresh restoration have been exercised. Task reads timed out during continuous imports, so complete stability acceptance has not passed. Isolated checks do not replace public flows. The candidate tag does not certify daily-use stability or teaching quality.
 
 ## 7. License
 

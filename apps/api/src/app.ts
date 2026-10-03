@@ -60,7 +60,7 @@ import { classifyGenerationFailure, describeGenerationError } from "./generation
 import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, filterDismissedTasks, type FailedTaskSelection } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
-import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type OperationalState } from "./store.js";
+import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type GenerationTaskMutationState, type OperationalState } from "./store.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, probeProviderConnection, providerRouterFromSettings, teachingPackageSchema, withCurrentDeepSeekModels, type ModelRouterClient, type ProviderConnection, type TeachingPackage, type TeachingGenerationResult } from "./model-router.js";
 import { SecretVault } from "./secret-vault.js";
@@ -3442,7 +3442,7 @@ function generationJobRecord(input: PersistGenerationJobInput, now = new Date().
 }
 
 async function persistGenerationJob(input: PersistGenerationJobInput, dependencies: AppDependencies): Promise<{ job: GenerationJob; created: boolean }> {
-  return dependencies.operations.mutate((state) => {
+  return dependencies.operations.mutateGenerationTasks((state) => {
     const replay = state.idempotency[input.idempotencyKey];
     if (replay) {
       const existing = state.jobs.find((item) => item.id === replay.objectId);
@@ -3485,7 +3485,7 @@ function generationPlanConcurrency(): number {
 }
 
 async function createGenerationPlan(input: CreateGenerationPlanInput, dependencies: AppDependencies): Promise<GenerationPlanResult> {
-  const persisted = await dependencies.operations.mutate((state) => {
+  const persisted = await dependencies.operations.mutateGenerationTasks((state) => {
     const replay = state.idempotency[input.idempotencyKey];
     if (replay) {
       if (replay.kind !== "generation_plan") throw new Error("GENERATION_PLAN_IDEMPOTENCY_CONFLICT");
@@ -3535,8 +3535,8 @@ async function createGenerationPlan(input: CreateGenerationPlanInput, dependenci
   });
   const queued = await queueGenerationPlanJobs(persisted.plan.id, dependencies);
   const plan = await getGenerationPlanSnapshot(persisted.plan.id, dependencies) || persisted.plan;
-  const snapshot = await dependencies.operations.read();
-  const job = queued[0]?.job || (plan.currentJobId ? snapshot.jobs.find((item) => item.id === plan.currentJobId) : plan.lastJobId ? snapshot.jobs.find((item) => item.id === plan.lastJobId) : undefined);
+  const jobId = plan.currentJobId || plan.lastJobId;
+  const job = queued[0]?.job || (jobId ? await dependencies.operations.readGenerationJob(jobId) : undefined);
   return { plan, job, jobs: queued.map((item) => item.job), createdJobIds: queued.filter((item) => item.created).map((item) => item.job.id), created: persisted.created, jobCreated: queued.some((item) => item.created) };
 }
 
@@ -3562,7 +3562,7 @@ async function queueGenerationPlanJobs(planId: string, dependencies: AppDependen
     await settleGenerationPlan(plan.id, dependencies);
     return [];
   }
-  return dependencies.operations.mutate((state) => {
+  return dependencies.operations.mutateGenerationTasks((state) => {
     const current = state.generationPlans.find((item) => item.id === plan.id);
     if (!current || ["awaiting_review", "completed", "cancelled", "failed"].includes(current.state)) return [];
     const currentActive = state.jobs.filter((item) => item.planId === current.id && ["queued", "running", "pending_sync"].includes(item.state));
@@ -3614,11 +3614,11 @@ async function queueGenerationPlanJobs(planId: string, dependencies: AppDependen
       syncImportGenerationPlan(state, current);
     }
     return queued;
-  });
+  }, { planId });
 }
 
 async function settleGenerationPlan(planId: string, dependencies: AppDependencies): Promise<void> {
-  await dependencies.operations.mutate((state) => {
+  await dependencies.operations.mutateGenerationTasks((state) => {
     const plan = state.generationPlans.find((item) => item.id === planId);
     if (!plan) return;
     const jobs = state.jobs.filter((item) => item.planId === plan.id);
@@ -3653,7 +3653,7 @@ async function settleGenerationPlan(planId: string, dependencies: AppDependencie
     else plan.state = "completed";
     syncImportGenerationPlan(state, plan);
     dependencies.operations.appendEvent(state, plan.id, `plan.${plan.state}`, { completedPageIds: plan.completedPageIds, failedPageIds: plan.failedPageIds, spentUsd: plan.spentUsd, remainingPages: remaining.length, activeJobIds: plan.activeJobIds });
-  });
+  }, { planId, readEvents: true });
 }
 
 async function advanceGenerationPlanForJob(jobId: string, dependencies: AppDependencies): Promise<void> {
@@ -3663,7 +3663,7 @@ async function advanceGenerationPlanForJob(jobId: string, dependencies: AppDepen
   const plan = snapshot.generationPlans.find((item) => item.id === job.planId);
   if (!plan) return;
   if (job.state === "cancelled") {
-    await dependencies.operations.mutate((state) => {
+    await dependencies.operations.mutateGenerationTasks((state) => {
       const current = state.generationPlans.find((item) => item.id === job.planId);
       if (!current) return;
       current.state = "cancelled";
@@ -3671,7 +3671,7 @@ async function advanceGenerationPlanForJob(jobId: string, dependencies: AppDepen
       current.updatedAt = new Date().toISOString();
       syncImportGenerationPlan(state, current);
       dependencies.operations.appendEvent(state, current.id, "plan.cancelled", { jobId });
-    });
+    }, { planId: job.planId });
     return;
   }
   await settleGenerationPlan(plan.id, dependencies);
@@ -3685,7 +3685,7 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function syncImportGenerationPlan(state: OperationalState, plan: GenerationPlan): void {
+function syncImportGenerationPlan(state: GenerationTaskMutationState, plan: GenerationPlan): void {
   if (!plan.sourceImportId) return;
   const record = state.imports.find((item) => item.id === plan.sourceImportId);
   if (!record) return;

@@ -34,6 +34,12 @@ export type TaskIndex = Pick<OperationalState, "imports" | "jobs" | "generationP
 export type ModelSettings = Pick<OperationalState, "modelProviders" | "modelRoutePolicy">;
 
 export type ImportMutationState = Pick<OperationalState, "imports" | "idempotency">;
+export type GenerationTaskMutationState = Pick<OperationalState, "imports" | "jobs" | "generationPlans" | "idempotency" | "events">;
+export interface GenerationTaskMutationScope {
+  planId?: string;
+  jobId?: string;
+  readEvents?: boolean;
+}
 export interface ImportOperationRead {
   association?: OperationalState["idempotency"][string];
   record?: ImportRecord;
@@ -140,6 +146,11 @@ export class OperationalStore {
       state.idempotency = scope.idempotency;
       return result;
     });
+  }
+
+  /** Historical events are needed only when settling the supplied plan. */
+  async mutateGenerationTasks<T>(change: (state: GenerationTaskMutationState) => T | Promise<T>, _scope?: GenerationTaskMutationScope): Promise<T> {
+    return this.mutate(change);
   }
 
   async readSelfRetellings(workspaceId: string, releaseId?: string): Promise<SelfRetelling[]> {
@@ -255,7 +266,7 @@ export class OperationalStore {
     return job ? { job, result } : undefined;
   }
 
-  appendEvent<T>(state: OperationalState, streamId: string, type: string, payload: T): OrderedEvent<T> {
+  appendEvent<T>(state: Pick<OperationalState, "events">, streamId: string, type: string, payload: T): OrderedEvent<T> {
     const event: OrderedEvent<T> = {
       id: state.events.length === 0 ? 1 : (state.events.at(-1)?.id ?? 0) + 1,
       streamId,
@@ -362,6 +373,15 @@ export class PostgresOperationalStore extends OperationalStore {
     let result!: T;
     this.postgresWriteChain = this.postgresWriteChain.catch(() => undefined).then(async () => {
       result = await this.writePostgresImports(change);
+    });
+    await this.postgresWriteChain;
+    return result;
+  }
+
+  override async mutateGenerationTasks<T>(change: (state: GenerationTaskMutationState) => T | Promise<T>, scope?: GenerationTaskMutationScope): Promise<T> {
+    let result!: T;
+    this.postgresWriteChain = this.postgresWriteChain.catch(() => undefined).then(async () => {
+      result = await this.writePostgresGenerationTasks(change, scope);
     });
     await this.postgresWriteChain;
     return result;
@@ -737,6 +757,105 @@ export class PostgresOperationalStore extends OperationalStore {
     return result;
   }
 
+  private async writePostgresGenerationTasks<T>(change: (state: GenerationTaskMutationState) => T | Promise<T>, target?: GenerationTaskMutationScope): Promise<T> {
+    await this.ready;
+    const client = await this.pool.connect();
+    let emitted: OrderedEvent[] = [];
+    let result!: T;
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query("SELECT id FROM operational_state WHERE id = 1 FOR UPDATE");
+      if (!locked.rows[0]) throw new Error("OPERATIONAL_STATE_MISSING");
+      // Workers lock only their own job. Wait for the selected plan/job, never
+      // unrelated pages, then project its latest lease/fence. Keep lock order stable.
+      if (target?.planId || target?.jobId) await client.query(
+        `SELECT id FROM generation_jobs
+         WHERE job_data->>'planId' = $1 OR id::text = $2 ORDER BY id FOR UPDATE`,
+        [target.planId ?? null, target.jobId ?? null]
+      );
+      const canonical = await client.query<{ job_data: GenerationJob }>(
+        "SELECT job_data FROM generation_jobs WHERE job_data IS NOT NULL ORDER BY id"
+      );
+      const eventPlanId = target?.readEvents ? target.planId : undefined;
+      const projected = await client.query<GenerationTaskMutationState>(
+        `WITH source AS MATERIALIZED (
+           SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1
+         ), target_jobs AS MATERIALIZED (
+           SELECT job_data->>'id' AS id FROM generation_jobs WHERE job_data->>'planId' = $1
+           UNION ALL SELECT job->>'id' FROM source,
+             jsonb_array_elements(COALESCE(state->'jobs', '[]'::jsonb)) AS entry(job)
+             WHERE job->>'planId' = $1 AND NOT EXISTS (
+               SELECT 1 FROM generation_jobs WHERE job_data->>'id' = job->>'id' AND job_data IS NOT NULL
+             )
+         )
+         SELECT state->'imports' AS imports, state->'jobs' AS jobs,
+           state->'generationPlans' AS "generationPlans", state->'idempotency' AS idempotency,
+           CASE WHEN $1::text IS NULL THEN '[]'::jsonb ELSE COALESCE((
+             SELECT jsonb_agg(event ORDER BY position) FROM
+               jsonb_array_elements(COALESCE(state->'events', '[]'::jsonb)) WITH ORDINALITY AS entry(event, position)
+             WHERE event->>'streamId' IN (SELECT id FROM target_jobs)
+               AND event->>'type' = ANY($2::text[])
+           ), '[]'::jsonb) END AS events FROM source`,
+        [eventPlanId ?? null, [...generationPlanDetailEventTypes]]
+      );
+      const row = projected.rows[0]!;
+      const legacyJobs = row.jobs ?? [];
+      const scope: GenerationTaskMutationState = {
+        imports: row.imports ?? [], jobs: mergeGenerationJobs(legacyJobs, canonical.rows.map(item => item.job_data)),
+        generationPlans: row.generationPlans ?? [], idempotency: row.idempotency ?? {}, events: []
+      };
+      if (eventPlanId) {
+        const streams = scope.jobs.filter(job => job.planId === eventPlanId).map(job => job.id);
+        const relational = await client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
+          `SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events
+           WHERE stream_id = ANY($1::text[]) AND event_type = ANY($2::text[]) ORDER BY id`,
+          [streams, [...generationPlanDetailEventTypes]]
+        );
+        scope.events = mergeOrderedEvents(row.events ?? [], relational.rows);
+      }
+      const before = structuredClone({ imports: scope.imports, jobs: scope.jobs, generationPlans: scope.generationPlans });
+      const beforeJson = { imports: JSON.stringify(scope.imports), generationPlans: JSON.stringify(scope.generationPlans), idempotency: JSON.stringify(scope.idempotency) };
+      const beforeEvents = scope.events.length;
+      result = await change(scope);
+      reconcileTaskDismissals(scope, before);
+      await persistChangedGenerationJobs(client, before.jobs, scope.jobs, true);
+      emitted = scope.events.slice(beforeEvents);
+      for (const event of emitted) {
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO ordered_events (stream_id, event_type, payload, occurred_at)
+           VALUES ($1, $2, $3::jsonb, $4::timestamptz) RETURNING id`,
+          [event.streamId, event.type, JSON.stringify(event.payload), event.occurredAt]
+        );
+        event.id = Number(inserted.rows[0]!.id);
+      }
+      const values: string[] = [];
+      let expression = "state";
+      for (const field of ["imports", "generationPlans", "idempotency"] as const) {
+        const json = JSON.stringify(scope[field]);
+        if (json !== beforeJson[field]) {
+          values.push(json);
+          expression = `jsonb_set(${expression}, '{${field}}', $${values.length}::jsonb)`;
+        }
+      }
+      const previousJobs = new Map(before.jobs.map(job => [job.id, JSON.stringify(job)]));
+      const changedJobs = new Map(scope.jobs.filter(job => previousJobs.get(job.id) !== JSON.stringify(job)).map(job => [job.id, job]));
+      const updatedLegacyJobs = legacyJobs.map(job => changedJobs.get(job.id) ?? job);
+      if (updatedLegacyJobs.some((job, index) => job !== legacyJobs[index])) {
+        values.push(JSON.stringify(updatedLegacyJobs));
+        expression = `jsonb_set(${expression}, '{jobs}', $${values.length}::jsonb)`;
+      }
+      if (values.length) await client.query(
+        `UPDATE operational_state SET state = ${expression}, updated_at = now() WHERE id = 1`, values
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+    for (const event of emitted) this.bus.emit(event.streamId, event);
+    return result;
+  }
+
   private async writePostgresImports<T>(change: (state: ImportMutationState, context: ImportMutationContext) => T | Promise<T>): Promise<T> {
     await this.ready;
     const client = await this.pool.connect();
@@ -931,14 +1050,17 @@ function generationJobValues(job: GenerationJob): unknown[] {
 async function persistChangedGenerationJobs(
   client: pg.PoolClient,
   before: GenerationJob[],
-  after: GenerationJob[]
+  after: GenerationJob[],
+  rejectConflicts = false
 ): Promise<void> {
   const oldJobs = new Map(before.map(job => [job.id, job]));
-  for (const job of after) {
+  // Acquire only changed rows, in a consistent order for scoped task writers.
+  const ordered = rejectConflicts ? [...after].sort((left, right) => left.id.localeCompare(right.id)) : after;
+  for (const job of ordered) {
     const previous = oldJobs.get(job.id);
     if (previous && JSON.stringify(previous) === JSON.stringify(job)) continue;
     const values = generationJobValues(job);
-    await client.query(
+    const persisted = await client.query(
       `INSERT INTO generation_jobs (
          id, workspace_id, idempotency_key, material_version_id, state, budget_usd, spent_usd,
          page_ids, completed_page_ids, failed_page_ids, attempt, cancel_requested,
@@ -958,6 +1080,7 @@ async function persistChangedGenerationJobs(
        WHERE generation_jobs.job_data IS NOT DISTINCT FROM $17::jsonb OR generation_jobs.job_data IS NULL`,
       [...values, previous ? JSON.stringify(previous) : null]
     );
+    if (rejectConflicts && persisted.rowCount !== 1) throw new Error(`GENERATION_JOB_WRITE_CONFLICT:${job.id}`);
   }
 }
 

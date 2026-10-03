@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -825,6 +825,262 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       await stopFixture(fixture);
     }
   });
+});
+
+postgresDescribe("scoped generation tasks", () => {
+  it("persists replay once, reopens canonical jobs and preserves all history and checkpoint bytes", async () => {
+    const original = makeJob(randomUUID());
+    const fixture = await startFixture([original], true);
+    const added = makeJob(randomUUID());
+    fixture.jobs.push(added);
+    let reopened: PostgresOperationalStore | undefined;
+    try {
+      // Large synthetic history is persisted in both formats, but never belongs
+      // to the metadata mutation scope. Generate it in SQL, not in the reader.
+      await fixture.pool.query(`WITH inserted AS (
+        INSERT INTO ordered_events(stream_id,event_type,payload,occurred_at)
+        SELECT $1, 'synthetic.history', jsonb_build_object('body',repeat('h',1000000)), now()
+        FROM generate_series(1,19)
+        RETURNING id,stream_id,event_type,payload,occurred_at
+      ) UPDATE operational_state SET state=jsonb_set(state,'{events}',
+        COALESCE(state->'events','[]'::jsonb) || (SELECT jsonb_agg(jsonb_build_object(
+          'id',id,'streamId',stream_id,'type',event_type,'payload',payload,'occurredAt',occurred_at)
+          ORDER BY id) FROM inserted)) WHERE id=1`, [original.id]);
+      await fixture.pool.query(`UPDATE operational_state SET state=jsonb_set(state,'{generationCheckpoints}',
+        COALESCE(state->'generationCheckpoints','{}'::jsonb) || jsonb_build_object($1::text,
+          jsonb_set($2::jsonb,'{content,chapterBridgeMarkdown}',to_jsonb(repeat('c',3000000))))) WHERE id=1`,
+        [`${original.id}:heavy-page`, JSON.stringify(makeCheckpoint("synthetic-heavy"))]);
+      await fixture.pool.query(`INSERT INTO generation_job_checkpoints(job_id,page_id,checkpoint)
+        SELECT $1,'heavy-page',state->'generationCheckpoints'->$2 FROM operational_state WHERE id=1`,
+        [original.id, `${original.id}:heavy-page`]);
+      const size = await fixture.pool.query(`SELECT octet_length((state->'events')::text) AS events,
+        octet_length((state->'generationCheckpoints')::text) AS checkpoints
+        FROM operational_state WHERE id=1`);
+      expect(size.rows[0].events).toBeGreaterThan(19000000);
+      expect(size.rows[0].checkpoints).toBeGreaterThan(3000000);
+      const baseline = await fixture.pool.query(`SELECT
+        md5((state - 'imports' - 'generationPlans' - 'idempotency')::text) AS rest,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(c) ORDER BY job_id, page_id), '[]'::jsonb)::text)
+          FROM generation_job_checkpoints c) AS checkpoints,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text)
+          FROM ordered_events e WHERE stream_id=$1) AS events
+        FROM operational_state WHERE id=1`, [original.id]);
+      const emissions: OrderedEvent[] = [];
+      fixture.store.bus.on(added.id, event => emissions.push(event));
+      const fullRead = vi.spyOn(fixture.store, "read").mockRejectedValue(new Error("FULL_STATE_FORBIDDEN"));
+      const persist = () => fixture.store.mutateGenerationTasks(state => {
+        expect(Object.keys(state).sort()).toEqual(["events", "generationPlans", "idempotency", "imports", "jobs"]);
+        expect(state.events).toEqual([]);
+        expect(state.jobs.find(job => job.id === original.id)).toEqual(original);
+        const key = `synthetic-task:${added.id}`;
+        if (state.idempotency[key]) return false;
+        state.jobs.push(added);
+        state.idempotency[key] = { kind: "job", objectId: added.id };
+        fixture.store.appendEvent(state, added.id, "job.queued", { synthetic: true });
+        return true;
+      });
+      expect(await persist()).toBe(true);
+      expect(await persist()).toBe(false);
+      expect(fullRead).not.toHaveBeenCalled();
+      fullRead.mockRestore();
+      expect(emissions).toHaveLength(1);
+      expect((await fixture.store.readGenerationJobEvents(added.id))).toHaveLength(1);
+      const after = await fixture.pool.query(`SELECT
+        md5((state - 'imports' - 'generationPlans' - 'idempotency')::text) AS rest,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(c) ORDER BY job_id, page_id), '[]'::jsonb)::text)
+          FROM generation_job_checkpoints c) AS checkpoints,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text)
+          FROM ordered_events e WHERE stream_id=$1) AS events
+        FROM operational_state WHERE id=1`, [original.id]);
+      expect(after.rows).toEqual(baseline.rows);
+      reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
+      await reopened.whenReady();
+      expect(await reopened.readGenerationJob(added.id)).toEqual(added);
+      expect(await reopened.mutateGenerationTasks(state => Boolean(state.idempotency[`synthetic-task:${added.id}`]))).toBe(true);
+      const sizes = await fixture.pool.query(`SELECT
+        octet_length(state::text) AS "stateBytes",
+        octet_length((state->'events')::text) AS "legacyEventBytes",
+        octet_length((state->'generationCheckpoints')::text) AS "legacyCheckpointBytes",
+        octet_length(jsonb_build_object('imports',state->'imports','jobs',state->'jobs',
+          'generationPlans',state->'generationPlans','idempotency',state->'idempotency')::text) AS "taskFieldBytes",
+        (SELECT COALESCE(sum(octet_length(job_data::text)),0)::int FROM generation_jobs) AS "canonicalJobBytes",
+        (SELECT COALESCE(sum(octet_length(payload::text)),0)::int FROM ordered_events) AS "relationalEventPayloadBytes",
+        (SELECT COALESCE(sum(octet_length(checkpoint::text)),0)::int FROM generation_job_checkpoints) AS "relationalCheckpointBytes"
+        FROM operational_state WHERE id=1`);
+      const scopedStart = performance.now();
+      await fixture.store.mutateGenerationTasks(state => {
+        state.idempotency[`synthetic-bench-scoped:${added.id}`] = { kind: "job", objectId: added.id };
+      });
+      const scopedMs = performance.now()-scopedStart;
+      const fullStart = performance.now();
+      await fixture.store.mutate(state => {
+        state.idempotency[`synthetic-bench-full:${added.id}`] = { kind: "job", objectId: added.id };
+      });
+      const fullMs = performance.now()-fullStart;
+      // One scoped and one existing full mutation, same association change.
+      // Record measurements without a hardware-dependent timing assertion.
+      const benchmark = { fixture: "isolated-synthetic-19MB-events-3MB-checkpoints",
+        measurements: 1, scopedMs, fullMs, ...sizes.rows[0] };
+      console.info("scoped generation task benchmark", JSON.stringify(benchmark));
+      const benchmarkPath = process.env.COURSE_OS_TASK_BENCH_OUTPUT;
+      if (benchmarkPath) await writeFile(benchmarkPath, JSON.stringify(benchmark,null,2)+"\n", "utf8");
+    } finally { await reopened?.close(); await stopFixture(fixture); }
+  }, 30000);
+
+  it("loads only selected plan streams and event types with canonical events and jobs taking precedence", async () => {
+    const planId = randomUUID();
+    const selected = { ...makeJob(randomUUID()), planId };
+    const unrelated = { ...makeJob(randomUUID()), planId: randomUUID() };
+    const redirected = { ...makeJob(randomUUID()), planId };
+    const fixture = await startFixture([selected, unrelated, redirected]);
+    try {
+      await fixture.store.mutateGenerationJob(selected.id, (_job, context) => {
+        context.appendEvent("generation.page.core_saved", { pageId: "canonical-page" });
+        context.appendEvent("job.running", { synthetic: true });
+      });
+      await fixture.store.mutateGenerationJob(redirected.id, job => { job.planId = unrelated.planId; });
+      const canonical = (await fixture.store.readGenerationJobEvents(selected.id))[0]!;
+      const ids = await fixture.pool.query<{ id: string }>("SELECT nextval(pg_get_serial_sequence('ordered_events','id'))::text AS id FROM generate_series(1,3)");
+      const legacyOnly: OrderedEvent = { ...canonical, id: Number(ids.rows[0]!.id), type: "generation.cost.recorded", payload: { provider: "synthetic", model: "synthetic" } };
+      const excluded = [
+        { ...legacyOnly, id: Number(ids.rows[1]!.id), streamId: unrelated.id },
+        { ...legacyOnly, id: Number(ids.rows[2]!.id), streamId: redirected.id }
+      ];
+      await fixture.pool.query(`UPDATE operational_state SET state=jsonb_set(state,'{events}',
+        COALESCE(state->'events','[]'::jsonb) || $1::jsonb) WHERE id=1`,
+        [JSON.stringify([{ ...canonical, payload: { pageId: "stale-page" } }, legacyOnly, ...excluded])]);
+      await fixture.store.mutateGenerationTasks(state => {
+        expect(state.events).toEqual([canonical, legacyOnly]);
+        expect(state.jobs.find(job => job.id === redirected.id)?.planId).toBe(unrelated.planId);
+        fixture.store.appendEvent(state, selected.id, "generation.page.completed", { pageId: "canonical-page", bridgeCompleted: true });
+      }, { planId, readEvents: true });
+      await fixture.store.mutateGenerationTasks(state => {
+        expect(state.events).toHaveLength(3);
+        expect(state.events.map(event => event.payload)).not.toContainEqual({ pageId: "stale-page" });
+      }, { planId, readEvents: true });
+    } finally { await stopFixture(fixture); }
+  }, 15000);
+
+  it("rolls back changed jobs and staged events when a concurrent worker advances its fence", async () => {
+    const [first, job] = [makeJob(randomUUID()), makeJob(randomUUID())].sort((left,right) => left.id.localeCompare(right.id));
+    const fixture = await startFixture([first!, job!]);
+    let release!: () => void;
+    let entered!: () => void;
+    const taskEntered = new Promise<void>(resolve => { entered = resolve; });
+    const taskRelease = new Promise<void>(resolve => { release = resolve; });
+    let task: Promise<unknown> | undefined;
+    const conflictKey = `synthetic-conflict:${job!.id}`;
+    const emissions: OrderedEvent[] = [];
+    fixture.store.bus.on(job!.id, event => emissions.push(event));
+    try {
+      task = fixture.store.mutateGenerationTasks(async state => {
+        state.jobs.find(item => item.id === first!.id)!.cancelRequested = true;
+        state.jobs.find(item => item.id === job!.id)!.cancelRequested = true;
+        state.idempotency[conflictKey] = { kind: "job", objectId: job!.id };
+        fixture.store.appendEvent(state, job!.id, "synthetic.task.staged", { synthetic: true });
+        entered();
+        await taskRelease;
+      });
+      const rejected = expect(task).rejects.toThrow(`GENERATION_JOB_WRITE_CONFLICT:${job!.id}`);
+      await taskEntered;
+      await fixture.store.mutateGenerationJob(job!.id, current => {
+        current.state = "running";
+        current.attempt = 2;
+        current.lease = { owner: "synthetic-worker", fenceToken: 7, expiresAt: new Date(Date.now()+60000).toISOString() };
+      });
+      release();
+      await rejected;
+      expect(await fixture.store.readGenerationJob(first!.id)).toEqual(first);
+      expect(await fixture.store.readGenerationJob(job!.id)).toMatchObject({ attempt: 2, cancelRequested: false, lease: { fenceToken: 7 } });
+      expect(emissions).toEqual([]);
+      expect(await fixture.store.readGenerationJobEvents(job!.id)).toEqual([]);
+      expect(await fixture.store.mutateGenerationTasks(state => Boolean(state.idempotency[conflictKey]))).toBe(false);
+      await fixture.store.mutateGenerationTasks(state => {
+        state.jobs.find(item => item.id === job!.id)!.cancelRequested = true;
+      });
+      expect(await fixture.store.readGenerationJob(job!.id)).toMatchObject({ attempt: 2, cancelRequested: true, lease: { fenceToken: 7 } });
+      const legacy = await fixture.pool.query<{ job: GenerationJob }>(`SELECT entry.job FROM operational_state,
+        jsonb_array_elements(state->'jobs') AS entry(job) WHERE entry.job->>'id'=$1`, [job!.id]);
+      expect(legacy.rows[0]!.job).toMatchObject({ attempt: 2, cancelRequested: true, lease: { fenceToken: 7 } });
+    } finally { release(); await task?.catch(() => undefined); await stopFixture(fixture); }
+  }, 15000);
+
+  it("waits only for the selected worker and sees its latest lease fence before the callback", async () => {
+    const job = { ...makeJob(randomUUID()), planId: randomUUID() };
+    const fixture = await startFixture([job]);
+    const blockerPool = new pg.Pool({ connectionString, max: 1 });
+    const blocker = await blockerPool.connect();
+    let task: Promise<unknown> | undefined;
+    let transactionOpen = false;
+    const originalQuery = pg.Client.prototype.query;
+    const query = vi.spyOn(pg.Client.prototype,"query");
+    let lockSent!: () => void;
+    const selectedLock = new Promise<void>(resolve => { lockSent = resolve; });
+    query.mockImplementation((function(this: pg.Client, ...args: unknown[]) {
+      // Signal after the real row-lock query is submitted. The worker is still
+      // uncommitted, so the task must wait and then read the committed fence.
+      const result = Reflect.apply(originalQuery, this, args);
+      if (typeof args[0] === "string" && args[0].includes("WHERE job_data->>'planId' = $1 OR id::text = $2")) lockSent();
+      return result;
+    }) as typeof pg.Client.prototype.query);
+    try {
+      await blocker.query("BEGIN");
+      transactionOpen = true;
+      const latest = { ...job, attempt: 4, state: "running" as const,
+        lease: { owner: "synthetic-selected-worker", fenceToken: 11, expiresAt: new Date(Date.now()+60000).toISOString() } };
+      await blocker.query("UPDATE generation_jobs SET job_data=$2::jsonb WHERE id=$1", [job.id,JSON.stringify(latest)]);
+      task = fixture.store.mutateGenerationTasks(state => {
+        const current = state.jobs.find(item => item.id === job.id)!;
+        expect(current).toEqual(latest);
+        current.cancelRequested = true;
+      }, { planId: job.planId });
+      await selectedLock;
+      await blocker.query("COMMIT");
+      transactionOpen = false;
+      await task;
+      expect(await fixture.store.readGenerationJob(job.id)).toMatchObject({ attempt: 4, cancelRequested: true, lease: { fenceToken: 11 } });
+    } finally {
+      if (transactionOpen) await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await task?.catch(() => undefined);
+      query.mockRestore();
+      await blockerPool.end();
+      await stopFixture(fixture);
+    }
+  }, 15000);
+
+  it("commits task and page B mutations while page A remains row locked", async () => {
+    const [jobA, jobB] = [{ ...makeJob(randomUUID()), planId: randomUUID() }, { ...makeJob(randomUUID()), planId: randomUUID() }];
+    const fixture = await startFixture([jobA, jobB]);
+    const blockerPool = new pg.Pool({ connectionString, max: 1 });
+    const blocker = await blockerPool.connect();
+    let timer: NodeJS.Timeout | undefined;
+    let mutation: Promise<unknown> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM generation_jobs WHERE id=$1 FOR UPDATE", [jobA.id]);
+      mutation = fixture.store.mutateGenerationTasks(state => {
+        state.jobs.find(item => item.id === jobB.id)!.cancelRequested = true;
+        state.idempotency[`synthetic-independent:${jobB.id}`] = { kind: "job", objectId: jobB.id };
+        fixture.store.appendEvent(state,jobB.id,"synthetic.task.independent", { synthetic: true });
+        return "committed";
+      }, { planId: jobB.planId }).then(async result => {
+        await fixture.store.mutateGenerationJob(jobB.id, current => { current.attempt = 3; });
+        return result;
+      });
+      const timeout = new Promise<string>(resolve => { timer = setTimeout(() => resolve("PAGE_A_BLOCKED_B"), 3000); });
+      expect(await Promise.race([mutation,timeout])).toBe("committed");
+      expect(await fixture.store.readGenerationJob(jobB.id)).toMatchObject({ attempt: 3, cancelRequested: true });
+      expect(await fixture.store.readGenerationJob(jobA.id)).toEqual(jobA);
+    } finally {
+      if (timer) clearTimeout(timer);
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await mutation?.catch(() => undefined);
+      await blockerPool.end();
+      await stopFixture(fixture);
+    }
+  }, 15000);
 });
 
 async function startFixture(jobs: GenerationJob[], includeLegacyProgress = false): Promise<PostgresFixture> {
