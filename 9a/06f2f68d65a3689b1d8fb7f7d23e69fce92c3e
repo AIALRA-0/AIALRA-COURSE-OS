@@ -1,0 +1,21 @@
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_884eb98799d12d 670,672-673,678-679,685-728
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_f3ee924c72a643 424-476
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a06f2f68d65a3689b1d8fb7f7d23e69fce92c3e",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
