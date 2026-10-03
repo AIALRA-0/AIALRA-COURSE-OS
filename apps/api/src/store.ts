@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, LearningSession, ModelProviderConfig, ModelRoutePolicy, OrderedEvent, ReviewPlan, ReviewSession, SearchProviderConfig, SearchRoutePolicy, SelfRetelling } from "@course-os/contracts";
 import { advanceTaskIncarnation, pickTaskDismissals, reconcileTaskDismissals, writeJsonAtomic } from "@course-os/storage";
+import { currentReadBudget, withReadBudget } from "@course-os/readweave-adapter";
 import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
@@ -314,8 +315,7 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   override async getImport(id: string, workspaceId: string): Promise<ImportRecord | undefined> {
-    await this.ready;
-    const result = await this.pool.query<{ record: ImportRecord }>(
+    const result = await this.readQuery<{ record: ImportRecord }>(
       `SELECT entry.record FROM operational_state,
        jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS entry(record)
        WHERE operational_state.id = 1 AND entry.record->>'id' = $1
@@ -325,8 +325,7 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   override async readImportByOperation(key: string, workspaceId: string): Promise<ImportOperationRead> {
-    await this.ready;
-    const result = await this.pool.query<ImportOperationRead>(
+    const result = await this.readQuery<ImportOperationRead>(
       `SELECT state->'idempotency'->$1 AS association,
          (SELECT entry.record FROM jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS entry(record)
           WHERE state->'idempotency'->$1->>'kind' = 'import'
@@ -338,13 +337,16 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   override async readImportGenerationPlan(id: string, workspaceId: string): Promise<GenerationPlan | undefined> {
-    await this.ready;
-    const result = await this.pool.query<{ plan: GenerationPlan }>(
-      `SELECT entry.plan FROM operational_state,
-       jsonb_array_elements(COALESCE(state->'generationPlans', '[]'::jsonb)) AS entry(plan),
-       jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS source(record)
-       WHERE operational_state.id = 1 AND source.record->>'id' = $1
-         AND source.record->>'workspaceId' = $2 AND entry.plan->>'workspaceId' = $2
+    const result = await this.readQuery<{ plan: GenerationPlan }>(
+      `WITH source AS MATERIALIZED (
+         SELECT state->'generationPlans' AS plans,
+           (SELECT record FROM jsonb_array_elements(COALESCE(state->'imports', '[]'::jsonb)) AS records(record)
+            WHERE record->>'id' = $1 AND record->>'workspaceId' = $2 LIMIT 1) AS record
+         FROM operational_state WHERE id = 1
+       )
+       SELECT entry.plan FROM source,
+         jsonb_array_elements(COALESCE(source.plans, '[]'::jsonb)) AS entry(plan)
+       WHERE source.record IS NOT NULL AND entry.plan->>'workspaceId' = $2
          AND (entry.plan->>'id' = source.record->>'generationPlanId' OR entry.plan->>'sourceImportId' = $1)
        ORDER BY (entry.plan->>'id' = source.record->>'generationPlanId') DESC NULLS LAST,
          entry.plan->>'createdAt' DESC LIMIT 1`, [id, workspaceId]
@@ -379,8 +381,7 @@ export class PostgresOperationalStore extends OperationalStore {
   }
 
   override async readTaskIndex(): Promise<TaskIndex> {
-    await this.ready;
-    const result = await this.pool.query<TaskIndex & { relationalJobs: GenerationJob[] }>(
+    const result = await this.readQuery<TaskIndex & { relationalJobs: GenerationJob[] }>(
       `SELECT state->'imports' AS imports, state->'jobs' AS jobs,
         state->'generationPlans' AS "generationPlans",
         (SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
@@ -610,6 +611,69 @@ export class PostgresOperationalStore extends OperationalStore {
   async close(): Promise<void> {
     await this.ready.catch(() => undefined);
     await this.pool.end();
+  }
+
+  /** Bound pool wait and server execution by the caller's remaining read deadline. */
+  private async readQuery<R extends pg.QueryResultRow>(text: string, values: unknown[] = []): Promise<pg.QueryResult<R>> {
+    return withReadBudget({ timeoutMs: 8000 }, async () => {
+      const budget = currentReadBudget()!;
+      const abortError = () => {
+        const reason = budget.signal.reason;
+        return reason instanceof Error && /^(READ_CANCELLED|READ_DEADLINE_EXCEEDED)$/.test(reason.message)
+          ? reason : new Error(Date.now() >= budget.deadline! ? "READ_DEADLINE_EXCEEDED" : "READ_CANCELLED");
+      };
+      const assertActive = () => {
+        if (budget.signal.aborted || Date.now() >= budget.deadline!) throw abortError();
+      };
+      const wait = <T>(work: Promise<T>, late?: (value: T) => void): Promise<T> => new Promise((resolve, reject) => {
+        let abandoned = false;
+        const onAbort = () => { abandoned = true; reject(abortError()); };
+        budget.signal.addEventListener("abort", onAbort, { once: true });
+        if (budget.signal.aborted) onAbort();
+        work.then(value => {
+          budget.signal.removeEventListener("abort", onAbort);
+          if (abandoned) late?.(value);
+          else resolve(value);
+        }, error => {
+          budget.signal.removeEventListener("abort", onAbort);
+          if (!abandoned) reject(error);
+        });
+      });
+      assertActive();
+      await wait(this.ready);
+      assertActive();
+      const client = await wait(this.pool.connect(), late => late.release());
+      let released = false;
+      const release = (destroy = false) => {
+        if (released) return;
+        released = true;
+        client.release(destroy);
+      };
+      // Destroy only this read-owned client on disconnect; statement_timeout bounds server work too.
+      const onAbort = () => release(true);
+      budget.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        assertActive();
+        await client.query("BEGIN READ ONLY");
+        assertActive();
+        const remaining = Math.max(1, Math.floor(budget.deadline! - Date.now() - 25));
+        await client.query(`SET LOCAL statement_timeout = ${remaining}`);
+        assertActive();
+        const result = await client.query<R>(text, values);
+        assertActive();
+        await client.query("COMMIT");
+        assertActive();
+        return result;
+      } catch (error) {
+        if (!released) await client.query("ROLLBACK").catch(() => { release(true); });
+        if (budget.signal.aborted || Date.now() >= budget.deadline!) throw abortError();
+        if ((error as { code?: string }).code === "57014") throw new Error("READ_DEADLINE_EXCEEDED");
+        throw error;
+      } finally {
+        budget.signal.removeEventListener("abort", onAbort);
+        release();
+      }
+    });
   }
 
   private async initialize(): Promise<void> {

@@ -10,6 +10,7 @@ import { EMPTY, OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 import { dismissFailedTasks, isTaskDismissed, selectFailedTasks } from "@course-os/storage";
+import { withReadBudget } from "@course-os/readweave-adapter";
 
 const connectionString = process.env.COURSE_OS_TEST_DATABASE_URL;
 if (connectionString && !new URL(connectionString).pathname.toLowerCase().includes("test")) {
@@ -281,10 +282,18 @@ describe("TaskIndex dismissal projection", () => {
   it("selects only per-task markers in PostgreSQL SQL and keeps legacy marker-free TaskIndex shape", async () => {
     // Test the read method without initializing or connecting to any database.
     const store = Object.create(PostgresOperationalStore.prototype) as PostgresOperationalStore;
-    const query = vi.fn().mockResolvedValue({ rows: [{ imports: [], jobs: [], generationPlans: [], relationalJobs: [], taskDismissals: {} }] });
-    Object.assign(store, { ready: Promise.resolve(), pool: { query } });
+    const query = vi.fn().mockImplementation(async (sql: string) => ({ rows: sql.startsWith("SELECT")
+      ? [{ imports: [], jobs: [], generationPlans: [], relationalJobs: [], taskDismissals: {} }] : [] }));
+    const release = vi.fn();
+    const connect = vi.fn().mockResolvedValue({ query, release });
+    Object.assign(store, { ready: Promise.resolve(), pool: { connect } });
     expect(await store.readTaskIndex()).toEqual({ imports: [], jobs: [], generationPlans: [] });
-    const sql = query.mock.calls[0]![0] as string;
+    expect(connect).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]![0]).toBe("BEGIN READ ONLY");
+    expect(query.mock.calls[1]![0]).toMatch(/^SET LOCAL statement_timeout = \d+$/);
+    expect(query.mock.calls.at(-1)![0]).toBe("COMMIT");
+    expect(release).toHaveBeenCalledExactlyOnceWith(false);
+    const sql = query.mock.calls.find(([text]) => text.startsWith("SELECT"))![0] as string;
     expect(sql).toContain("entry.value->>'kind' = 'taskdismissal'");
     expect(sql).toContain("entry.key LIKE 'course-os:task-dismissal:v1:%'");
     expect(sql).not.toMatch(/SELECT\s+state\s+FROM/i);
@@ -302,6 +311,47 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("bounds a real read query in PostgreSQL and leaves the next read usable", async () => {
+    const store = new PostgresOperationalStore({ connectionString: connectionString!, max: 1 });
+    await store.whenReady();
+    try {
+      const reader = store as unknown as { readQuery(text: string): Promise<pg.QueryResult> };
+      const started = performance.now();
+      await expect(withReadBudget({ timeoutMs: 300 }, () => reader.readQuery("SELECT pg_sleep(2)")))
+        .rejects.toThrow("READ_DEADLINE_EXCEEDED");
+      expect(performance.now() - started).toBeLessThan(1200);
+      await expect(store.getImport("missing-synthetic-import", "synthetic")).resolves.toBeUndefined();
+      const pool = (store as unknown as { pool: pg.Pool }).pool;
+      const timeout = await pool.query("SHOW statement_timeout");
+      expect(timeout.rows[0].statement_timeout).toBe("0");
+      expect(pool.waitingCount).toBe(0);
+      console.log(JSON.stringify({ probe: "pg-read-budget-sleep", elapsedMs: performance.now() - started, nextReadUsable: true }));
+    } finally { await store.close(); }
+  }, 15000);
+
+  it("bounds pool queue wait and releases a client acquired after the request expires", async () => {
+    const store = new PostgresOperationalStore({ connectionString: connectionString!, max: 1 });
+    await store.whenReady();
+    const pool = (store as unknown as { pool: pg.Pool }).pool;
+    const held = await pool.connect();
+    let heldReleased = false;
+    try {
+      await expect(withReadBudget({ timeoutMs: 100 }, () => store.getImport("missing", "synthetic")))
+        .rejects.toThrow("READ_DEADLINE_EXCEEDED");
+      held.release();
+      heldReleased = true;
+      await expect(store.readImportByOperation("missing", "synthetic"))
+        .resolves.toEqual({ association: undefined, record: undefined });
+      await expect(store.readImportGenerationPlan("missing", "synthetic")).resolves.toBeUndefined();
+      expect(await store.readTaskIndex()).toHaveProperty("imports");
+      expect(pool.waitingCount).toBe(0);
+      expect(pool.idleCount).toBe(1);
+    } finally {
+      if (!heldReleased) held.release();
+      await store.close();
+    }
+  }, 15000);
+
   it("scopes import writes, rolls back events, and preserves history, markers and unrelated associations", async () => {
     const job = { ...makeJob(randomUUID()), state: "failed" as const };
     const fixture = await startFixture([job], true);

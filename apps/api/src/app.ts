@@ -1389,6 +1389,7 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const rawSnapshot = await dependencies.operations.readTaskIndex();
+      if (response.headersSent || response.writableEnded || response.destroyed) return;
       const cleanupState = { ...rawSnapshot, idempotency: rawSnapshot.taskDismissals ?? {} };
       const snapshot = filterDismissedTasks(cleanupState, workspaceId);
       const cleanupGroups = selectFailedTasks(cleanupState, workspaceId);
