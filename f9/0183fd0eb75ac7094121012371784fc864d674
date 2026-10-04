@@ -1,0 +1,36 @@
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_4a51bc42b70944 422
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_816f32b3883fd4 1316-1327,5119-5120,5130,5165
+  s_e8850ef125fb32::t_27466432902561 1290-1293,1338,5206-5211
+  s_e8850ef125fb32::t_db9ca3188ee19d 5176,5190
+apps/api/src/pdf-layout.spec.ts
+  s_e8850ef125fb32::t_19b4e660e54604 21-47
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_89468b3effc43f 48-49
+  s_e8850ef125fb32::t_19b4e660e54604 27-28
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_db9ca3188ee19d 1122-1128,1130,1135-1137,1149
+  s_e8850ef125fb32::t_89468b3effc43f 1134
+  s_e8850ef125fb32::t_37d36906a169c8 1138-1140
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_27466432902561 310,312-317,1659
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_dec23101083f56 291,301,320,330,360
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f90183fd0eb75ac7094121012371784fc864d674",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
