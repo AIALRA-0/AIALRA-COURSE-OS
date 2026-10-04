@@ -61,10 +61,10 @@ const READ_REQUEST_TIMEOUT_MS = 10_000;
 export type TaskClearReceipt = { cleared: string[]; skipped: { id: string; reason: string }[]; failed: { id: string; reason: string }[] };
 
 // Upload has its own acceptance deadline; a lost response is recovered with the same key.
-function uploadImport(body: FormData, key: string, onUpload?: (sent: number, total?: number) => void, onUploaded?: () => void): Promise<ImportRecord> {
+function uploadImport<T = ImportRecord>(body: FormData, key: string, onUpload?: (sent: number, total?: number) => void, onUploaded?: () => void, path = "/api/v1/imports"): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE}/api/v1/imports`);
+    xhr.open("POST", `${API_BASE}${path}`);
     xhr.timeout = 60_000;
     xhr.setRequestHeader("Idempotency-Key", key);
     xhr.setRequestHeader("X-Request-Id", requestId());
@@ -73,11 +73,13 @@ function uploadImport(body: FormData, key: string, onUpload?: (sent: number, tot
     xhr.setRequestHeader("X-Schema-Version", "2.4.0");
     xhr.upload.onprogress = event => onUpload?.(event.loaded, event.lengthComputable ? event.total : undefined);
     xhr.upload.onload = () => onUploaded?.();
-    xhr.onerror = xhr.ontimeout = () => reject(new ApiRequestError("接单结果尚未确认；请恢复同次导入，不要重复创建任务", "IMPORT_RESULT_UNKNOWN", 0, true));
+    xhr.onerror = xhr.ontimeout = () => reject(path === "/api/v1/imports:inspect"
+      ? new ApiRequestError("版式检查未完成；可以重新检查，尚未创建导入任务", "PDF_INSPECTION_UNAVAILABLE", 0, true)
+      : new ApiRequestError("接单结果尚未确认；请恢复同次导入，不要重复创建任务", "IMPORT_RESULT_UNKNOWN", 0, true));
     xhr.onload = () => {
       let payload: unknown;
       try { payload = JSON.parse(xhr.responseText); } catch { reject(new ApiRequestError("接单响应无法确认，请恢复同次导入", "IMPORT_RESULT_UNKNOWN", xhr.status, true)); return; }
-      if (xhr.status >= 200 && xhr.status < 300) { resolve(payload as ImportRecord); return; }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(payload as T); return; }
       const problem = asProblem(payload);
       const record = payload as ImportRecord;
       reject(new ApiRequestError(problem?.error?.message || record.issues?.join(" · ") || `HTTP ${xhr.status}`, problem?.error?.code || (record.state === "rejected" ? "IMPORT_REJECTED" : "HTTP_ERROR"), xhr.status, Boolean(problem?.error?.retryable)));
@@ -391,7 +393,13 @@ export const api = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify({ baseReleaseId })
   }),
-  importMaterial: (file: File, courseId?: string, options: { qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean; previousMaterialVersionId?: string; operationKey?: string; onUpload?: (sent: number, total?: number) => void; onUploaded?: () => void } = {}) => {
+  inspectPdf: (file: File, layout: import("@course-os/contracts").PdfLayoutSelection = { mode: "auto" }) => {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("pdfLayout", JSON.stringify(layout));
+    return uploadImport<import("@course-os/contracts").PdfLayoutInspection>(body, crypto.randomUUID(), undefined, undefined, "/api/v1/imports:inspect");
+  },
+  importMaterial: (file: File, courseId?: string, options: { pdfLayout?: import("@course-os/contracts").PdfLayoutSelection; qualityMode?: string; language?: string; parentNodeId?: string; autoGenerate?: boolean; previousMaterialVersionId?: string; operationKey?: string; onUpload?: (sent: number, total?: number) => void; onUploaded?: () => void } = {}) => {
     const body = new FormData();
     body.append("file", file);
     body.append("source", "course-os-studio");
@@ -402,6 +410,7 @@ export const api = {
     if (options.parentNodeId) body.append("parentNodeId", options.parentNodeId);
     if (options.previousMaterialVersionId) body.append("previousMaterialVersionId", options.previousMaterialVersionId);
     body.append("autoGenerate", String(options.autoGenerate !== false));
+    if (options.pdfLayout) body.append("pdfLayout", JSON.stringify(options.pdfLayout));
     const operationKey = options.operationKey || crypto.randomUUID();
     return uploadImport(body, operationKey, options.onUpload, options.onUploaded);
   },

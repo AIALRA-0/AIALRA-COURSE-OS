@@ -79,7 +79,7 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   const [searchOpen, setSearchOpen] = useState(false);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const rootNodes = useMemo(() => [...(tree?.courses ?? []), ...(tree?.rootMaterials ?? [])], [tree]);
-  const searchableNodes = useMemo(() => addSearchPageNodes(rootNodes, searchMaterials, Boolean(query.trim()), selectedPageId), [rootNodes, searchMaterials, query, selectedPageId]);
+  const searchableNodes = useMemo(() => addSearchPageNodes(rootNodes, searchMaterials, Boolean(query.trim())), [rootNodes, searchMaterials, query]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(rootNodes.flatMap((node) => [node.id, ...collectExpandable(node)])));
   const [menu, setMenu] = useState<TreeMenuState>();
   const [focusedNodeId, setFocusedNodeId] = useState<string>();
@@ -119,12 +119,15 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
 
   useEffect(() => {
     if (!selectedPageId) return;
-    const selectedNode = flattenSearchableTree(searchableNodes).find((node) => node.pageId === selectedPageId);
+    const selectedPageNode = query.trim()
+      ? flattenSearchableTree(searchableNodes).find((node) => node.pageId === selectedPageId)
+      : undefined;
+    const selectedNode = selectedPageNode ?? findCurrentMaterialForPage(rootNodes, searchMaterials, selectedPageId);
     if (!selectedNode) return;
     const path = findTreePath(searchableNodes, selectedNode.id);
     setExpanded((current) => new Set([...current, ...path.map((node) => node.id)]));
     setPendingScrollNodeId(selectedNode.id);
-  }, [selectedPageId, searchableNodes]);
+  }, [selectedPageId, searchableNodes, rootNodes, searchMaterials, query]);
 
   useEffect(() => {
     const close = () => setMenu(undefined);
@@ -478,13 +481,15 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
 }) {
   const hasChildren = node.children.length > 0;
   const open = forceOpen || expanded.has(node.id);
-  const selected = Boolean(node.pageId && node.pageId === selectedPageId);
+  const materialInfo = node.kind === "material" ? searchMaterials.find((item) => item.materialNodeId === node.id && item.releaseId === (node.currentReleaseId ?? node.releaseId)) : undefined;
+  const selected = Boolean(node.pageId && node.pageId === selectedPageId)
+    || Boolean(node.kind === "material" && selectedPageId && materialInfo?.pages.some((page) => page.id === selectedPageId));
   const can = (capability: TreeNodeCapability) => Boolean(node.capabilities?.includes(capability));
   const activate = () => {
     if (searchActive) { onActivateSearch(node); return; }
     onFocus(node.id);
     if (node.pageId && node.releaseId) onSelectPage(node.releaseId, node.pageId);
-    else if (node.kind === "material" && actions?.openMaterial) actions.openMaterial(node);
+    else if (node.kind === "material" && actions?.openMaterial) actions.openMaterial(node, { restoreReadingPosition: true });
     else if (node.kind === "trash" && actions?.openTrash) actions.openTrash();
     else if (hasChildren) onToggle(node.id);
   };
@@ -496,7 +501,6 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && can("reorder")) { event.preventDefault(); actions?.reorder?.(node, event.key === "ArrowUp" ? "up" : "down"); }
   };
   const draggable = isDraggableNode(node);
-  const materialInfo = node.kind === "material" ? searchMaterials.find((item) => item.materialNodeId === node.id && item.releaseId === (node.currentReleaseId ?? node.releaseId)) : undefined;
   const publication = node.kind === "material" ? materialPublication(node, materialInfo) : undefined;
   const runtime = node.kind === "material" ? materialRuntimeStatus(node.status) : undefined;
   return <div className="tree-node" data-node-id={node.id} data-dragging={draggingNodeId === node.id || pointerDraggingNodeId === node.id ? "true" : undefined} draggable={draggable} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", node.id); onDragStart(node); }} onDragEnd={onDragEnd}>
@@ -554,14 +558,13 @@ function MenuItem({ actionId, icon, label, onClick, danger = false, disabled = f
 
 function collectExpandable(node: CourseTreeNode): string[] { return node.children.flatMap((child) => [child.id, ...collectExpandable(child)]); }
 
-function addSearchPageNodes(nodes: CourseTreeNode[], searchMaterials: CourseTreeSearchMaterial[], includeAllPages: boolean, selectedPageId?: string): CourseTreeNode[] {
+function addSearchPageNodes(nodes: CourseTreeNode[], searchMaterials: CourseTreeSearchMaterial[], includeAllPages: boolean): CourseTreeNode[] {
   return nodes.map((node) => {
-    const children = addSearchPageNodes(node.children, searchMaterials, includeAllPages, selectedPageId);
+    const children = addSearchPageNodes(node.children, searchMaterials, includeAllPages);
     if (node.kind !== "material") return { ...node, children };
     const material = findCurrentSearchMaterial(node, searchMaterials);
     if (!material) return { ...node, children };
-    const pages = material.pages
-      .filter((page) => includeAllPages || page.id === selectedPageId)
+    const pages = (includeAllPages ? material.pages : [])
       .filter((page) => !children.some((child) => child.pageId === page.id))
       .map((page): CourseTreeNode => ({
         id: page.id,
@@ -580,6 +583,11 @@ function addSearchPageNodes(nodes: CourseTreeNode[], searchMaterials: CourseTree
 function findCurrentSearchMaterial(node: CourseTreeNode, searchMaterials: CourseTreeSearchMaterial[]): CourseTreeSearchMaterial | undefined {
   const currentReleaseId = node.currentReleaseId ?? node.releaseId;
   return searchMaterials.find((item) => item.materialNodeId === node.id && item.releaseId === currentReleaseId);
+}
+
+function findCurrentMaterialForPage(nodes: CourseTreeNode[], searchMaterials: CourseTreeSearchMaterial[], pageId: string): CourseTreeNode | undefined {
+  return flattenTree(nodes).find(({ node }) => node.kind === "material"
+    && findCurrentSearchMaterial(node, searchMaterials)?.pages.some((page) => page.id === pageId))?.node;
 }
 
 function isSearchableNode(node: CourseTreeNode): boolean {

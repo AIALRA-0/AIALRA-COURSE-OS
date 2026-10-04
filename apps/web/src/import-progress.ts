@@ -206,17 +206,226 @@ export function standaloneGenerationJobId(taskId: string): string | undefined {
     : undefined;
 }
 
-export function getImportTaskState(record: Pick<WebImportRecord, "state" | "generationState" | "autoGenerate">): ImportTaskState {
-  const state = record.generationState;
-  if (record.state === "failed" || record.state === "rejected" || state === "failed") return "failed";
+export type ImportTaskAction = "open_draft" | "generate" | "retry_failed";
+
+export type ImportTaskStatus = {
+  state: ImportTaskState;
+  fact: string;
+  action?: ImportTaskAction;
+};
+
+export type ImportTaskPollMode = "active" | "idle" | "stopped";
+
+function jobState(job: GenerationJob): string | undefined {
+  const value = asRecord(job)?.state;
+  return typeof value === "string" ? value : undefined;
+}
+
+function jobMatchesRecord(job: GenerationJob, record: Pick<WebImportRecord, "id" | "generationJobId">): boolean {
+  const standaloneId = typeof record.id === "string" ? standaloneGenerationJobId(record.id) : undefined;
+  return job.id === record.generationJobId || job.id === standaloneId;
+}
+
+function currentTaskJob(record: Pick<WebImportRecord, "id" | "generationJobId">, jobs: readonly GenerationJob[]): GenerationJob | undefined {
+  const matched = jobs.find(job => jobMatchesRecord(job, record));
+  if (matched) return matched;
+  return [...jobs].reverse().find(job => ["queued", "running", "pending_sync", "paused"].includes(jobState(job) ?? ""))
+    ?? jobs.at(-1);
+}
+
+export function getImportTaskState(
+  record: Pick<WebImportRecord, "state" | "generationState" | "autoGenerate" | "id" | "generationJobId">,
+  plan?: WebGenerationPlan,
+  jobs: readonly GenerationJob[] = []
+): ImportTaskState {
+  const importState = record.state;
+  if (importState === "failed" || importState === "rejected") return "failed";
+  if (importState === "processing" || importState === "syncing") return "running";
+  if (importState === "accepted" || importState === "quarantined") return "queued";
+
+  const activeJob = jobs.find(job => ["running", "pending_sync"].includes(jobState(job) ?? ""));
+  const queuedJob = jobs.find(job => jobState(job) === "queued");
+  const pausedJob = jobs.find(job => jobState(job) === "paused");
+  if (activeJob) return "running";
+  if (queuedJob) return "queued";
+  if (pausedJob) return "paused";
+
+  const planState = typeof plan?.state === "string" ? plan.state : undefined;
+  const state = planState ?? record.generationState;
+  if (state === "failed") return "failed";
   if (state === "cancelled") return "cancelled";
   if (state === "paused") return "paused";
   if (state === "awaiting_review") return "awaiting_review";
   if (state === "completed") return "completed";
-  if (state === "running" || state === "pending_sync" || record.state === "processing" || record.state === "syncing") return "running";
-  if (state === "queued" || record.state === "accepted" || record.state === "quarantined") return "queued";
+  if (state === "running" || state === "pending_sync") return "running";
+  if (state === "queued") return "queued";
   if (record.state === "ready" && (record.autoGenerate === false || state === "not_requested")) return "completed";
   return record.state === "ready" ? "queued" : "running";
+}
+
+type TaskPageCounts = { total: number; completed: number; failed: number };
+
+function taskPageCounts(record: WebImportRecord, plan?: WebGenerationPlan, jobs: readonly GenerationJob[] = []): TaskPageCounts {
+  const recordPages = Array.isArray(record.pageIds) ? record.pageIds.filter((id): id is string => typeof id === "string") : [];
+  const planPages = Array.isArray(plan?.pageIds) ? plan.pageIds : [];
+  const retryPlan = Boolean(plan?.retryOfPlanId);
+  const allPageIds = retryPlan ? recordPages : planPages.length > 0 ? planPages : recordPages;
+  const totalIds = new Set([...allPageIds, ...jobs.flatMap(job => Array.isArray(job.pageIds) ? job.pageIds : [])]);
+  const completedIds = new Set([
+    ...(Array.isArray(record.generationCompletedPageIds) ? record.generationCompletedPageIds : []),
+    ...(Array.isArray(plan?.completedPageIds) ? plan.completedPageIds : []),
+    ...jobs.flatMap(job => Array.isArray(job.completedPageIds) ? job.completedPageIds : [])
+  ]);
+  const failedIds = new Set([
+    ...(Array.isArray(record.generationFailedPageIds) ? record.generationFailedPageIds : []),
+    ...(Array.isArray(plan?.failedPageIds) ? plan.failedPageIds : []),
+    ...jobs.flatMap(job => Array.isArray(job.failedPageIds) ? job.failedPageIds : [])
+  ]);
+  const activeIds = new Set(jobs.filter(job => ["queued", "running", "pending_sync"].includes(jobState(job) ?? "")
+    || plan?.activeJobIds?.includes(job.id)).flatMap(job => Array.isArray(job.pageIds) ? job.pageIds : []));
+  const failed = [...failedIds].filter(id => !completedIds.has(id) && !activeIds.has(id));
+  const completed = [...completedIds].filter(id => !failedIds.has(id));
+  return {
+    total: totalIds.size || Math.max(completed.length + failed.length, 0),
+    completed: completed.length,
+    failed: failed.length
+  };
+}
+
+function hasGenerationEvidence(record: WebImportRecord, plan?: WebGenerationPlan, jobs: readonly GenerationJob[] = []): boolean {
+  return Boolean(plan || jobs.length || record.generationJobId || record.generationPlanId
+    || (record.generationState && record.generationState !== "not_requested"));
+}
+
+export function getImportTaskStatus(
+  record: WebImportRecord,
+  plan?: WebGenerationPlan,
+  jobs: readonly GenerationJob[] = [],
+  retryingFailed = false
+): ImportTaskStatus {
+  const state = getImportTaskState(record, plan, jobs);
+  if (record.state === "failed" || record.state === "rejected") return { state, fact: "材料导入失败" };
+  if (record.state !== "ready") {
+    return { state, fact: state === "queued" ? "材料正在等待转换" : "材料正在导入" };
+  }
+
+  const hasGeneration = hasGenerationEvidence(record, plan, jobs);
+  if (!hasGeneration && (record.autoGenerate === false || record.generationState === "not_requested")) {
+    return { state, fact: "材料已导入，讲解未生成", action: "generate" };
+  }
+  if (retryingFailed) return { state, fact: "正在重试失败页面" };
+
+  const counts = taskPageCounts(record, plan, jobs);
+  if (counts.failed > 0) {
+    const fact = counts.completed > 0
+      ? `讲解部分生成：${counts.completed}/${counts.total || "?"} 页已生成，${counts.failed} 页失败`
+      : `讲解生成失败：${counts.failed} 页失败${counts.total ? `（共 ${counts.total} 页）` : ""}`;
+    return { state, fact, ...(state === "failed" ? { action: "retry_failed" as const } : {}) };
+  }
+
+  if (state === "awaiting_review") {
+    const allPagesSaved = counts.total > 0 && counts.completed >= counts.total;
+    return allPagesSaved
+      ? { state, fact: "讲解草稿已生成，可阅读；尚未发布", action: "open_draft" }
+      : { state, fact: "任务状态需同步；当前没有可确认的待办项" };
+  }
+  if (state === "paused") return { state, fact: "讲解生成已暂停" };
+  if (state === "cancelled") return { state, fact: "讲解生成已取消" };
+  if (state === "queued") return { state, fact: "讲解任务排队中" };
+  if (state === "running") return { state, fact: "正在生成讲解" };
+
+  if (state === "failed") return { state, fact: "讲解生成失败；失败页面数量暂不可核对" };
+  if (state === "completed") {
+    if (counts.total > 0 && counts.completed < counts.total) {
+      return { state, fact: `任务状态需同步；已保存 ${counts.completed}/${counts.total} 页讲解` };
+    }
+    return { state, fact: "讲解草稿已生成，可阅读；尚未发布", action: "open_draft" };
+  }
+  return { state, fact: "讲解生成状态暂不可核对" };
+}
+
+export function getImportTaskPollingMode(
+  record: Pick<WebImportRecord, "state" | "generationState" | "autoGenerate" | "id" | "generationJobId">,
+  plan?: WebGenerationPlan,
+  jobs: readonly GenerationJob[] = []
+): ImportTaskPollMode {
+  if (record.state === "failed" || record.state === "rejected") return "stopped";
+  if (record.state === "accepted" || record.state === "quarantined" || record.state === "processing" || record.state === "syncing") return "active";
+  const state = getImportTaskState(record, plan, jobs);
+  if (state === "queued" || state === "running") return "active";
+  if (state === "paused" || state === "awaiting_review") return "idle";
+  return "stopped";
+}
+
+export type ImportTaskTiming = {
+  state: ImportTaskState;
+  phase: "queued" | "running" | "paused" | "awaiting_review" | "ended";
+  attempt?: number;
+  elapsedSeconds?: number;
+  label: string;
+};
+
+function timestampMillis(source: unknown, key: "attemptStartedAt" | "endedAt"): number | undefined {
+  const value = asRecord(source)?.[key];
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatTaskDuration(seconds: number): string | undefined {
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  const total = Math.floor(seconds);
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (minutes < 60) return `${minutes} 分${remainder ? ` ${remainder} 秒` : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours} 小时${remainingMinutes ? ` ${remainingMinutes} 分` : ""}`;
+}
+
+export function getImportTaskTiming(
+  record: WebImportRecord,
+  plan?: WebGenerationPlan,
+  jobs: readonly GenerationJob[] = [],
+  now = Date.now()
+): ImportTaskTiming {
+  const state = getImportTaskState(record, plan, jobs);
+  const phase: ImportTaskTiming["phase"] = state === "queued" ? "queued"
+    : state === "running" ? "running"
+      : state === "paused" ? "paused"
+        : state === "awaiting_review" ? "awaiting_review" : "ended";
+  const job = currentTaskJob(record, jobs);
+  const generation = record.state === "ready" && hasGenerationEvidence(record, plan, jobs);
+
+  let timingSource: unknown = record;
+  if (generation && plan) {
+    timingSource = plan;
+    if ((phase === "running" || phase === "paused") && timestampMillis(plan, "attemptStartedAt") === undefined && job) timingSource = job;
+  } else if (generation && job) {
+    timingSource = job;
+  }
+
+  const attemptValue = asRecord(timingSource)?.attempt ?? asRecord(job)?.attempt;
+  const attempt = typeof attemptValue === "number" && Number.isInteger(attemptValue) && attemptValue > 0 ? attemptValue : undefined;
+  let elapsedSeconds: number | undefined;
+  if (phase !== "queued") {
+    const startedAt = timestampMillis(timingSource, "attemptStartedAt");
+    const stopped = phase !== "running";
+    const endedAt = stopped ? timestampMillis(timingSource, "endedAt") : Number.isFinite(now) ? now : undefined;
+    if (startedAt !== undefined && endedAt !== undefined && endedAt >= startedAt) {
+      elapsedSeconds = (endedAt - startedAt) / 1000;
+    }
+  }
+
+  const duration = elapsedSeconds === undefined ? undefined : formatTaskDuration(elapsedSeconds);
+  const normalIntervalNote = "（首轮含排队，重试从重新运行开始）";
+  const label = phase === "queued" ? "排队中"
+    : phase === "running" ? duration ? `本次耗时 ${duration}${normalIntervalNote}` : "运行中，耗时暂不可核对"
+      : phase === "paused" ? duration ? `本次耗时 ${duration}${normalIntervalNote}` : "已暂停，耗时未记录"
+        : phase === "awaiting_review" ? duration ? `本次耗时 ${duration}${normalIntervalNote}` : "耗时未记录"
+          : duration ? `本次耗时 ${duration}${normalIntervalNote}` : "已结束，耗时未记录";
+  return { state, phase, ...(attempt !== undefined ? { attempt } : {}), ...(elapsedSeconds !== undefined ? { elapsedSeconds } : {}), label };
 }
 
 export function importTaskStateLabel(state: ImportTaskState): string {
@@ -227,25 +436,12 @@ export function importTaskStateLabel(state: ImportTaskState): string {
     failed: "失败",
     cancelled: "已取消",
     paused: "已暂停",
-    awaiting_review: "待检查"
+    awaiting_review: "已停止，查看详情"
   } satisfies Record<ImportTaskState, string>)[state];
 }
 
 export function importProgressTitle(record: WebImportRecord, plan: WebGenerationPlan | undefined, retryingFailed: boolean): string {
-  const taskState = getImportTaskState(record);
-  const planState = plan?.state;
-  const failed = taskState === "failed" || planState === "failed";
-  const cancelled = taskState === "cancelled" || planState === "cancelled";
-  if (record.autoGenerate === false || record.generationState === "not_requested") return "材料导入完成，尚未生成讲解";
-  if (retryingFailed) return "正在重试失败页面";
-  if (failed) return "讲解生成失败";
-  if (cancelled) return "生成任务已取消";
-  if (taskState === "paused") return "生成任务已暂停";
-  if (taskState === "awaiting_review") return "等待检查";
-  if (planState === "completed" || taskState === "completed") return "全部讲解已经生成";
-  if (record.generationJobId && taskState === "queued") return "生成任务排队中";
-  if (record.generationJobId && taskState === "running") return "正在生成讲解";
-  return plan ? "正在后台并行生成讲解" : "正在建立生成队列";
+  return getImportTaskStatus(record, plan, [], retryingFailed).fact;
 }
 
 export type ImportActivity = {
@@ -315,7 +511,7 @@ export function getImportActivity(
   costs: readonly GenerationCostEntry[],
   now = Date.now()
 ): ImportActivity {
-  const state = getImportTaskState(record);
+  const state = getImportTaskState(record, plan, activeJobs);
   const planState = plan?.state;
   const generationIsActive = record.generationState === "running" || record.generationState === "pending_sync";
   const generationActivity = planState === "running"
@@ -351,7 +547,8 @@ export function getImportActivity(
           ? "导入已停止"
         : record.generationState === "failed" ? "生成失败"
           : record.generationState === "cancelled" ? "生成已取消"
-            : record.generationState === "paused" ? "生成已暂停"
+              : record.generationState === "paused" ? "生成已暂停"
+                : state === "awaiting_review" ? getImportTaskStatus(record, plan, activeJobs).fact
               : record.generationState === "completed" ? "全部页面生成完成"
                 : record.generationJobId && record.generationState === "pending_sync" ? "写入课程草稿"
                   : record.generationJobId && record.generationState === "queued" ? "等待生成任务启动"
@@ -370,7 +567,7 @@ export function getImportActivity(
                   : planState === "completed" ? "全部页面生成完成"
                     : planState === "failed" ? "生成失败"
                       : planState === "cancelled" ? "生成已取消"
-                        : planState === "awaiting_review" ? "等待检查"
+                      : planState === "awaiting_review" ? getImportTaskStatus(record, plan, activeJobs).fact
                           : "生成任务状态未知";
 
   const overall = deliveredPageProgress(record, plan);

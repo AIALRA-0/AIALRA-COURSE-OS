@@ -92,6 +92,23 @@ function tree(workspaceId: string, courseId: string, releaseId: string, moduleId
   };
 }
 
+function treeWithMovedMaterial(workspaceId: string, sourceCourseId: string, targetCourseId: string, sourceRelease: CourseRelease): WorkspaceTree {
+  const materialId = `material:${sourceRelease.courseId}:${sourceRelease.moduleId}`;
+  return {
+    workspaceId, title: `Tree ${workspaceId}`, treeVersion: "2.4.0",
+    courses: [
+      { id: sourceCourseId, kind: "course", title: `Course ${sourceCourseId}`, children: [] },
+      {
+        id: targetCourseId, kind: "course", title: `Course ${targetCourseId}`, children: [{
+          id: materialId, materialId, kind: "material", title: sourceRelease.moduleTitle,
+          parentId: targetCourseId, releaseId: sourceRelease.id, currentReleaseId: sourceRelease.id, children: []
+        }]
+      }
+    ],
+    updatedAt: stamp
+  };
+}
+
 function input(courses: CourseProject[], releases: CourseRelease[], workspaceId = "workspace-a", trash: TrashRecord[] = []): ReadingReplicaInput {
   const firstCourse = courses.find((item) => item.workspaceId === workspaceId) ?? courses[0]!;
   const firstRelease = releases.find((item) => item.courseId === firstCourse?.id) ?? releases[0];
@@ -362,6 +379,105 @@ describe("ReadingReplica", () => {
     await replica.updateMetadata({ courses: [course("course-a", "workspace-a", "archived"), course("course-b", "workspace-b")] });
     expect(await replica.listCourses("workspace-a")).toEqual([]);
     await expect(replica.getPageSource("workspace-a", "same-page", releaseA.id)).resolves.toBeUndefined();
+  });
+
+  it("keeps a moved material readable after its original course is archived", async () => {
+    const root = await temporaryRoot();
+    const replica = new ReadingReplica(root, "authority:moved-material-archived-owner");
+    await replica.initialize();
+    const source = release("release-moved-owner");
+    const target = course("course-target");
+    const movedTree = treeWithMovedMaterial("workspace-a", "course-a", target.id, source);
+    await replica.replace({
+      courses: [course(), target], releases: [source], drafts: [], tree: movedTree, trash: []
+    });
+
+    const catalogPath = join(root, "reading-replica", "catalog.json");
+    const readSnapshotPointers = async () => {
+      const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as {
+        payload: { releases: Array<{ index: { id: string }; pages: Array<{ pageId: string; snapshot?: { pageHash: string; snapshotHash: string } }> }> }
+      };
+      return catalog.payload.releases.find((item) => item.index.id === source.id)!.pages[0]!.snapshot;
+    };
+    const beforeArchive = await readSnapshotPointers();
+    expect(beforeArchive).toMatchObject({ pageHash: expect.any(String), snapshotHash: expect.any(String) });
+
+    await replica.updateMetadata({ courses: [course("course-a", "workspace-a", "archived"), target] });
+
+    const indexes = await replica.listIndexes("workspace-a");
+    expect(indexes.map((item) => item.id)).toEqual([source.id]);
+    expect(indexes[0]?.pageIds).toEqual(source.pageIds);
+    expect(indexes[0]?.pages.map((item) => item.id)).toEqual(source.pages.map((item) => item.id));
+    const saved = await replica.getPageSource("workspace-a", source.pages[0]!.id, source.id);
+    expect(saved?.page.imageUrl).toBe(source.pages[0]!.imageUrl);
+    expect(saved?.page.blocks[0]?.markdown).toBe("Saved lesson body for Page page-a");
+    expect(await readSnapshotPointers()).toEqual(beforeArchive);
+  });
+
+  it("does not make an archived course release visible when its material was not moved", async () => {
+    const root = await temporaryRoot();
+    const replica = new ReadingReplica(root, "authority:archived-owner-not-moved");
+    await replica.initialize();
+    const source = release("release-still-in-archived-course");
+    await replica.replace({
+      courses: [course("course-a", "workspace-a", "archived")], releases: [source], drafts: [],
+      tree: tree("workspace-a", "course-a", source.id), trash: []
+    });
+
+    expect(await replica.listIndexes("workspace-a")).toEqual([]);
+    await expect(replica.getPageSource("workspace-a", source.pages[0]!.id, source.id)).resolves.toBeUndefined();
+  });
+
+  it("denies moved material when its target parent is missing, cross-workspace, or trashed", async () => {
+    const source = release("release-moved-parent-guard");
+    const cases: Array<{
+      name: string;
+      targetCourse?: CourseProject;
+      trash?: TrashRecord[];
+    }> = [
+      { name: "missing parent" },
+      { name: "cross-workspace parent", targetCourse: course("course-target", "workspace-b") },
+      {
+        name: "trashed parent",
+        targetCourse: course("course-target"),
+        trash: [{
+          id: "trash-target-course", workspaceId: "workspace-a", nodeId: "course-target", nodeKind: "course",
+          title: "Deleted target", deletedAt: stamp, deletedBy: "test", restoreAvailable: true
+        }]
+      },
+      {
+        name: "trashed material",
+        targetCourse: course("course-target"),
+        trash: [{
+          id: "trash-moved-material", workspaceId: "workspace-a", nodeId: `material:${source.courseId}:${source.moduleId}`,
+          nodeKind: "material", title: "Deleted material", deletedAt: stamp, deletedBy: "test", restoreAvailable: true
+        }]
+      },
+      {
+        name: "trashed original owner",
+        targetCourse: course("course-target"),
+        trash: [{
+          id: "trash-source-course", workspaceId: "workspace-a", nodeId: "course-a", nodeKind: "course",
+          title: "Deleted source course", deletedAt: stamp, deletedBy: "test", restoreAvailable: true
+        }]
+      }
+    ];
+
+    for (const item of cases) {
+      const root = await temporaryRoot();
+      const replica = new ReadingReplica(root, `authority:moved-parent-guard:${item.name.replaceAll(" ", "-")}`);
+      await replica.initialize();
+      const targetId = item.targetCourse?.id ?? "course-missing";
+      await replica.replace({
+        courses: [course("course-a", "workspace-a", "archived"), ...(item.targetCourse ? [item.targetCourse] : [])],
+        releases: [source], drafts: [],
+        tree: treeWithMovedMaterial("workspace-a", "course-a", targetId, source),
+        trash: item.trash ?? []
+      });
+
+      expect(await replica.listIndexes("workspace-a"), item.name).toEqual([]);
+      await expect(replica.getPageSource("workspace-a", source.pages[0]!.id, source.id), item.name).resolves.toBeUndefined();
+    }
   });
 
   it("deletes only unreferenced replica snapshots and leaves nearby source files intact", async () => {

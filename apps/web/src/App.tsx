@@ -3,7 +3,8 @@ import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry
 import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
 import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
-import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
 import { BoundedPagePrefetchQueue, ImageResourceCache, settlePagePrefetch } from "./reading-prefetch.js";
@@ -737,7 +738,7 @@ export function App() {
         const newlyReady = records.filter((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id));
         newlyReady.forEach((record) => metadataReadyImports.current.add(record.id));
         if (!initialPoll && newlyReady.length) void refreshMetadata().catch(() => undefined);
-        if (activeImportId || records.some((record) => ["queued", "running"].includes(getImportTaskState(record)))) nextPollMs = 4000;
+        if (records.some((record) => ["queued", "running"].includes(getImportTaskState(record)))) nextPollMs = 4000;
       } catch {
         // Keep the last visible task list during a transient connection failure.
       } finally {
@@ -875,6 +876,21 @@ export function App() {
       setReleases(items);
       setTaskRecords((current) => current.map((item) => item.id === record.id ? record : item));
     }).catch(() => undefined);
+  };
+
+  const openImported = async (record: ImportRecord, nextMode: "learn" | "studio" = "learn") => {
+    try {
+      const items = await api.releases();
+      const target = items.find(item => item.id === record.materialVersionId);
+      if (!target?.pages.length) { setToast("这个材料尚未取得可读取的页面"); return; }
+      const saved = localStorage.getItem(`course-os-last-page:${target.id}`);
+      const index = Math.max(0, target.pages.findIndex(page => page.id === saved));
+      setReleases(items);
+      trackImport(undefined);
+      setReleaseId(target.id);
+      setPageIndex(index);
+      setMode(nextMode);
+    } catch (reason) { setToast(reason instanceof Error ? reason.message : "无法打开材料"); }
   };
 
   const rememberImport = (record: ImportRecord) => {
@@ -1041,7 +1057,7 @@ export function App() {
   if (!release || !page) return <div className="product-shell" style={shellStyle}>
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
-       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
+       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
       <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
@@ -1078,9 +1094,9 @@ export function App() {
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
           {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.page && candidatePreview.notice && candidatePreview.generatedReady !== false && <p className="empty-inline" role="status">{candidatePreview.notice}{candidatePreview.unavailable && <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={() => setMode("studio")}>进入制作模式</button>}</p>}
-          {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
+          {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} unpublishedDraftRevision={pageCache.get(pageSnapshotCacheKey(release.id, page.id))?.unpublishedDraftRevision} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
-          </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
+          </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
@@ -1627,7 +1643,7 @@ export function StartupReadNotices({ releaseIndexError, releaseIndexLoading, onR
 
 function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }: { courses: WorkspaceTree["courses"]; releases: CourseRelease[]; parentNodeId?: string; onClose: () => void; onSubmitted: (record: ImportRecord) => void }) {
   const [file, setFile] = useState<File>();
-  const [courseId, setCourseId] = useState(courses[0]?.id || "");
+  const [courseId, setCourseId] = useState(courses.find(course => course.id === parentNodeId)?.id || "");
   const [previousMaterialVersionId, setPreviousMaterialVersionId] = useState("");
   const [qualityMode, setQualityMode] = useState(localStorage.getItem("course-os-budget") || "balanced");
   const [language, setLanguage] = useState(localStorage.getItem("course-os-language") || "zh-CN");
@@ -1637,12 +1653,28 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
   const updateSources = sourceReleasesForCourse(releases, courseId);
   const [uploadStatus, setUploadStatus] = useState("");
   const submitting = useRef(false);
+  const [pdfLayout, setPdfLayout] = useState<import("@course-os/contracts").PdfLayoutSelection>({ mode: "auto" });
+  const [pdfInspection, setPdfInspection] = useState<import("@course-os/contracts").PdfLayoutInspection>();
+  const [inspectingPdf, setInspectingPdf] = useState(false);
+  const [inspectionError, setInspectionError] = useState("");
+  const isPdf = Boolean(file && /\.pdf$/i.test(file.name));
+  useEffect(() => {
+    let current = true;
+    setPdfInspection(undefined);
+    setInspectionError("");
+    if (!file || !/\.pdf$/i.test(file.name)) { setInspectingPdf(false); return; }
+    setInspectingPdf(true);
+    void api.inspectPdf(file, pdfLayout).then(value => { if (current) setPdfInspection(value); },
+      reason => { if (current) setInspectionError(reason instanceof Error ? reason.message : "无法检查 PDF"); })
+      .finally(() => { if (current) setInspectingPdf(false); });
+    return () => { current = false; };
+  }, [file, pdfLayout]);
   const upload = async () => {
-    if (!file || submitting.current) return;
+    if (!file || submitting.current || (isPdf && (inspectingPdf || !pdfInspection))) return;
     submitting.current = true;
     setBusy(true);
     setError("");
-    const signature = JSON.stringify([file.name, file.size, file.lastModified, courseId, previousMaterialVersionId, qualityMode, language, autoGenerate, parentNodeId]);
+    const signature = JSON.stringify([file.name, file.size, file.lastModified, courseId, previousMaterialVersionId, qualityMode, language, autoGenerate, parentNodeId, pdfInspection?.fingerprint]);
     const storageKey = `course-os-import-operation:${signature}`;
     const savedKey = localStorage.getItem(storageKey);
     const operationKey = savedKey || crypto.randomUUID();
@@ -1660,7 +1692,7 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
         }
       }
       setUploadStatus("正在上传文件");
-      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate, previousMaterialVersionId: previousMaterialVersionId || undefined, operationKey,
+      const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate, pdfLayout: isPdf ? pdfLayout : undefined, previousMaterialVersionId: previousMaterialVersionId || undefined, operationKey,
         onUpload: (sent, total) => setUploadStatus(total ? `正在上传 ${Math.floor(sent / total * 100)}%` : "正在上传文件"),
         onUploaded: () => setUploadStatus("上传完成，等待文件检查与接单") });
       localStorage.removeItem(storageKey);
@@ -1673,17 +1705,18 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
       <header><div><span className="section-kicker">NEW MATERIAL</span><h2 id="import-title">导入课程材料</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
       <>
         <label className={`drop-zone ${file ? "has-file" : ""}`}>
-          <input type="file" accept=".pptx,.pdf,.md,.txt" onChange={(event) => setFile(event.target.files?.[0])} />
+          <input type="file" accept=".pptx,.pdf,.md,.txt" disabled={busy} onChange={(event) => { setPdfInspection(undefined); setInspectionError(""); setPdfLayout({ mode: "auto" }); setFile(event.target.files?.[0]); }} />
           <span className="drop-icon"><Icon name={file ? "check" : "upload"} /></span>
           <strong>{file ? file.name : "选择 PPTX、PDF 或 syllabus"}</strong>
           <p>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 将先执行安全检查` : "原始材料保持私有，上传后先隔离检查再进入解析"}</p>
           <span className="file-types">PPTX · PDF · MD · TXT</span>
         </label>
+        {isPdf && <PdfLayoutPreview inspection={pdfInspection} selection={pdfLayout} busy={inspectingPdf || busy} error={inspectionError} onChange={setPdfLayout} />}
         <div className="import-options"><label><span>目标课程</span><select value={courseId} onChange={(event) => { setCourseId(event.target.value); setPreviousMaterialVersionId(""); }}><option value="">暂不归类</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label><label><span>更新现有材料</span><select value={previousMaterialVersionId} disabled={!courseId || updateSources.length === 0} onChange={(event) => setPreviousMaterialVersionId(event.target.value)}><option value="">作为新材料导入</option>{updateSources.map((release) => <option key={release.id} value={release.id}>{release.moduleTitle} · 草稿 · {release.pages.length} 页</option>)}</select></label><label><span>生成质量</span><select value={qualityMode} onChange={(event) => setQualityMode(event.target.value)}><option value="economy">经济</option><option value="balanced">平衡</option><option value="quality">质量</option></select></label><label><span>内容语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
         <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
         {busy && <p role="status">{uploadStatus} · 关闭窗口不会取消已提交的导入</p>}
-        <footer><button className="quiet-button" onClick={onClose}>{busy ? "关闭窗口" : "取消"}</button><button className="primary-button" disabled={!file || busy} onClick={upload}><Icon name="sparkles" />{busy ? uploadStatus : "导入并开始解析"}</button></footer>
+        <footer><button className="quiet-button" onClick={onClose}>{busy ? "关闭窗口" : "取消"}</button><button className="primary-button" disabled={!file || busy || (isPdf && (inspectingPdf || !pdfInspection))} onClick={upload}><Icon name="sparkles" />{busy ? uploadStatus : "确认方案并导入"}</button></footer>
       </>
     </section>
   </div>;
@@ -1699,7 +1732,7 @@ export function beginImportCostRead<T>(inFlight: Map<string, Promise<unknown>>, 
   ).finally(() => { if (inFlight.get(key) === pending) inFlight.delete(key); });
 }
 
-function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose }: { importId: string; taskTitle?: string; onReady: (record: ImportRecord) => void; onProgress: () => void; onClose: () => void }) {
+function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose, onOpen }: { importId: string; taskTitle?: string; onReady: (record: ImportRecord) => void; onProgress: () => void; onClose: () => void; onOpen: (record: ImportRecord, mode?: "learn" | "studio") => void }) {
   const [record, setRecord] = useState<WebImportRecord>();
   const [plan, setPlan] = useState<WebGenerationPlan>();
   const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
@@ -1710,6 +1743,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
   const [retryError, setRetryError] = useState("");
   const readyNotified = useRef(false);
   const progressRef = useRef(0);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   useEffect(() => {
     let cancelled = false;
     let timer = 0;
@@ -1722,6 +1756,10 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
         () => setCostReadUnavailable(true));
     };
     const refresh = async () => {
+      if (refreshing || cancelled) return;
+      refreshing = true;
+      window.clearTimeout(timer);
+      let polling: ReturnType<typeof getImportTaskPollingMode> = "active";
       try {
         const updated = await api.importRecord(importId);
         if (cancelled) return;
@@ -1742,10 +1780,13 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
             generationCompletedPageIds: job.completedPageIds,
             generationFailedPageIds: job.failedPageIds,
             generationActivity: job.latestStageActivity,
+            attemptStartedAt: job.attemptStartedAt,
+            endedAt: job.endedAt,
             updatedAt: job.updatedAt
           });
           setPlan(undefined);
           setActiveJobs(["queued", "running", "pending_sync"].includes(job.state) ? [job] : []);
+          polling = getImportTaskPollingMode({ ...updated, generationState: job.state }, undefined, [job]);
           const processed = job.completedPageIds.length + job.failedPageIds.length;
           if (processed > progressRef.current) {
             progressRef.current = processed;
@@ -1758,6 +1799,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
           if (cancelled) return;
           setPlan(planResult.plan);
           setActiveJobs(planResult.activeJobs ?? (planResult.currentJob && ["queued", "running", "pending_sync"].includes(planResult.currentJob.state) ? [planResult.currentJob] : []));
+          polling = getImportTaskPollingMode(updated, planResult.plan, planResult.activeJobs ?? []);
           const processed = planResult.plan.completedPageIds.length + planResult.plan.failedPageIds.length;
           if (processed > progressRef.current) {
             progressRef.current = processed;
@@ -1769,16 +1811,21 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
           setActiveJobs([]);
           setCosts([]);
           setCostReadUnavailable(false);
+          polling = getImportTaskPollingMode(updated);
         }
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "无法读取后台任务进度");
       } finally {
-        if (!cancelled) timer = window.setTimeout(() => void refresh(), 2000);
+        refreshing = false;
+        if (!cancelled && polling !== "stopped") timer = window.setTimeout(() => void refresh(), polling === "idle" ? 60_000 : 2000);
       }
     };
+    let refreshing = false;
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
     void refresh();
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [importId]);
+    return () => { cancelled = true; window.clearTimeout(timer); window.removeEventListener("focus", onFocus); };
+  }, [importId, refreshNonce]);
   if (!record) return <section className="import-task-workspace" role="status"><header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>正在恢复任务状态</h2></div><button className="quiet-button" onClick={onClose}>返回课程</button></header><div className="import-activity-loading"><span className="loader" /><span>{error || "正在读取已保存的任务状态"}</span></div></section>;
   const retryFailed = async () => {
     if (!plan || retryingFailed || plan.state !== "failed" || plan.failedPageIds.length === 0) return;
@@ -1790,31 +1837,34 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose 
       setActiveJobs(result.jobs.filter((job) => ["queued", "running", "pending_sync"].includes(job.state)));
       progressRef.current = result.plan.completedPageIds.length + result.plan.failedPageIds.length;
       onProgress();
+      setRefreshNonce(value => value + 1);
     } catch (reason) {
       setRetryError(reason instanceof Error ? reason.message : "重试失败页面失败");
     } finally {
       setRetryingFailed(false);
     }
   };
-  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} />;
+  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} onOpen={() => onOpen(record)} onGenerate={() => onOpen(record, "studio")} />;
 }
 
-function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void }) {
+function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose, onOpen, onGenerate }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void; onOpen: () => void; onGenerate: () => void }) {
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
-  const taskState = getImportTaskState(record);
+  const taskState = getImportTaskState(record, plan, activeJobs);
   const terminalJob = !auto || Boolean(planState && ["awaiting_review", "completed", "failed", "cancelled"].includes(planState));
   const taskFinished = ["completed", "failed", "cancelled", "paused", "awaiting_review"].includes(taskState);
   const finished = ["failed", "rejected"].includes(record.state) || (record.state === "ready" && (terminalJob || taskFinished));
   const summary = summarizeImportProgress(record, plan, activeJobs, costs);
+  const taskStatus = getImportTaskStatus(record, plan, activeJobs, retryingFailed);
+  const timing = getImportTaskTiming(record, plan, activeJobs);
   const activity = getImportActivity(record, plan, activeJobs, costs);
   const awaitingPlanDetails = auto && Boolean(record.generationPlanId) && !plan;
   const failed = plan?.failedPageIds.length ?? record.generationFailedPageIds?.length ?? 0;
   const progress = activity.progressPercent;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || taskState === "failed";
   const cancelledState = planState === "cancelled" || taskState === "cancelled";
-  const statusTitle = record.state !== "ready" ? importInfo.title : importProgressTitle(record, plan, retryingFailed);
+  const statusTitle = record.state !== "ready" ? importInfo.title : taskStatus.fact;
   const currentPages = activeJobs.map((job) => {
     const sourceIndex = record.pageIds?.indexOf(job.pageIds[0] ?? "") ?? -1;
     return sourceIndex >= 0 ? sourceIndex + 1 : (job.batchIndex ?? 0) + 1;
@@ -1855,12 +1905,12 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUn
     <header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>{statusTitle}</h2></div><button className="quiet-button" data-action="close-import-task" onClick={onClose}>返回课程</button></header>
     <p className="import-activity-file">{taskTitle || record.originalName}</p>
     <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${activity.progressScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
-    <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "已超过 2 分钟没有可核对的工作进展；连接或心跳不代表工作完成" : `最近工作进展：${formatActivityAge(activity.ageSeconds)}`}</small><small>已用 {Math.max(0, Math.floor((Date.now() - Date.parse(record.createdAt)) / 1000))} 秒</small></span></div>
+    <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "已超过 2 分钟没有可核对的工作进展；连接或心跳不代表工作完成" : `最近工作进展：${formatActivityAge(activity.ageSeconds)}`}</small><small>{timing.label}</small></span></div>
     <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文核心完成</dt><dd>{auto ? formatProgressCount(summary.core) : "未启用"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
     <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>供应商 / 模型</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
     {Array.isArray(plan?.failureReasons) && plan.failureReasons.length > 0 && <p className="dialog-error" role="alert"><Icon name="warning" />{plan.failureReasons.filter((reason): reason is string => typeof reason === "string").join(" · ")}</p>}
     {(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}
-    <footer><span>{finished ? failedState ? "任务已结束，可查看失败页面" : cancelledState ? "任务已取消" : taskState === "awaiting_review" ? "任务等待检查" : taskState === "paused" ? "任务已暂停" : !auto || record.generationState === "not_requested" ? "材料导入完成，尚未生成讲解" : "任务已完成" : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
+    <footer><span>{finished ? failedState ? "任务已结束，可查看失败页面" : cancelledState ? "任务已取消" : taskState === "awaiting_review" ? taskStatus.fact : taskState === "paused" ? "任务已暂停" : !auto || record.generationState === "not_requested" ? "材料导入完成，尚未生成讲解" : "任务已完成" : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{taskStatus.action === "open_draft" && <button className="primary-button" data-action="open-task-lesson" onClick={onOpen}>打开讲解</button>}{taskStatus.action === "generate" && <button className="primary-button" data-action="open-task-generation" onClick={onGenerate}>打开材料与生成工具</button>}{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
   </section>;
 }
 

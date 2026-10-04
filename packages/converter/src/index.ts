@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { ConversionRequest, ConversionResult, ConvertedPage } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
@@ -263,6 +263,18 @@ export async function convertMaterial(request: ConversionRequest, options: Conve
     await mkdir(outputDir, { recursive: true });
     const binaries = resolveBinaries(options.binaries);
     const runProcess = options.runProcess ?? defaultProcessRunner;
+    if (request.kind === "pdf" && (request.purpose === "inspect" || request.pdfLayout)) {
+      const settings = join(outputDir, "layout-request.json");
+      await writeJsonAtomic(settings, { purpose: request.purpose ?? "convert", ...request.pdfLayout });
+      await report("counting_pages");
+      const result = await runProcess(binaries.python, [fileURLToPath(new URL("../../../scripts/pdf-handout.py", import.meta.url)), sourcePath, settings, outputDir], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+      const parsed = JSON.parse(result.stdout) as Pick<ConversionResult, "pages" | "inspection">;
+      if (!parsed.inspection || parsed.inspection.sourceSha256.length !== 64 || !Array.isArray(parsed.pages)) throw new Error("PDF_LAYOUT_RESULT_INVALID");
+      if (!request.purpose && (!parsed.pages.length || parsed.pages.length > MAX_PAGES)) throw new Error("CONVERSION_PAGE_COUNT_INVALID");
+      for (const page of parsed.pages) await assertPngArtifact(page.imagePath);
+      await report("completed", { pageCount: parsed.inspection.logicalPageCount, completedPages: request.purpose ? 0 : parsed.pages.length });
+      return { requestId: request.id, state: "completed", ...parsed, issues: [], startedAt, completedAt: new Date().toISOString() };
+    }
     const pages = request.kind === "syllabus"
       ? await convertSyllabus(sourcePath, outputDir, report)
       : await convertPagedDocument(request.kind, sourcePath, outputDir, binaries, runProcess, report);

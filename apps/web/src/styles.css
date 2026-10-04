@@ -724,7 +724,6 @@ svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
 .quality-badge.pass { background: color-mix(in srgb, var(--green) 13%, var(--panel)); color: var(--green); }
 .quality-badge.hold { background: color-mix(in srgb, var(--amber) 14%, var(--panel)); color: var(--amber); }
 .lesson-block { margin-top: 30px; padding: 0; color: var(--ink-soft); font-size: 1em; line-height: 1.82; }
-.lesson-block + .lesson-block { padding-top: 28px; border-top: 1px solid var(--line); }
 .lesson-section-title { grid-template-columns: 38px minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
 .lesson-section-title > span { width: 34px; height: 34px; border-radius: 9px; font-size: 11px; }
 .lesson-section-title > div { gap: 3px; }
@@ -1000,7 +999,6 @@ svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
   .lesson-section-title h3 { font-size: 18px; }
   .lesson-section-title small { font-size: 10px; }
   .lesson-block { margin-top: 25px; }
-  .lesson-block + .lesson-block { padding-top: 23px; }
   .code-line summary { grid-template-columns: 30px 1fr; }
   .code-line summary > span:last-child { grid-column: 2; }
   .code-line dl { padding-left: 12px; }
@@ -1227,18 +1225,23 @@ svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
 }
 
 .lesson-header { margin-bottom: 32px; }
+.explanation-panel > .lesson-header { border-bottom: 0; }
 .lesson-header h2 { font-size: clamp(25px, 2.4vw, 32px); font-weight: 700; }
 .lesson-block { margin-top: 31px; font-size: 1em; line-height: 1.78; }
-.lesson-block + .lesson-block { padding-top: 29px; border-top: 1px solid var(--line); }
 
 .section-learning_objectives,
 .section-prior_knowledge,
 .section-misconceptions {
-  padding: 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.explanation-panel > .lesson-block {
+  padding-top: 29px;
+  border-top: 1px solid var(--line);
 }
 
 .lesson-section-title {

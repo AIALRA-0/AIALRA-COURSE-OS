@@ -125,6 +125,21 @@ export class ReadingRuntime {
     finally { if (this.refreshInFlight === read) this.refreshInFlight = undefined; if (this.refreshController === controller) this.refreshController = undefined; }
   }
 
+  private async refreshMetadataProjection(includeIndexes: boolean): Promise<void> {
+    const [courses, indexes, nodes, trash] = await Promise.all([
+      this.authority.listCourses(),
+      includeIndexes ? this.authority.listReleaseIndexes() : Promise.resolve(undefined),
+      this.authority.listTreeNodes(),
+      this.authority.listTrash()
+    ]);
+    await this.replica.updateMetadata({
+      courses,
+      ...(indexes === undefined ? {} : { indexes }),
+      tree: this.buildTree(courses, nodes, trash, this.workspaceId),
+      trash
+    });
+  }
+
   async confirmPage(pageId: string, releaseId?: string): Promise<void> {
     try {
       await withReadBudget({ timeoutMs: 8_000 }, async () => {
@@ -168,12 +183,10 @@ export class ReadingRuntime {
             throw new Error("READING_CONFIRMED_WRITE_NOT_PROJECTED");
           }
         }
+        await this.refreshMetadataProjection(false);
       }
       else {
-        const [courses, indexes, nodes, trash] = await Promise.all([
-          this.authority.listCourses(), this.authority.listReleaseIndexes(), this.authority.listTreeNodes(), this.authority.listTrash()
-        ]);
-        await this.replica.updateMetadata({ courses, indexes, tree: this.buildTree(courses, nodes, trash, this.workspaceId), trash });
+        await this.refreshMetadataProjection(true);
       }
     } catch (error) {
       await this.unavailable(error);

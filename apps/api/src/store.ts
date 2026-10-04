@@ -8,6 +8,7 @@ import pg from "pg";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
 import { defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults, mergeCourseModelRoutePolicyDefaults } from "./provider-settings.js";
+import { applyTaskTimingEvent, isNewGenerationJobAttempt, taskTimingCollectionForEvent } from "./task-timing.js";
 
 export interface OperationalState {
   schemaVersion: "1.0.0";
@@ -47,6 +48,8 @@ export interface ImportOperationRead {
 export interface ImportMutationContext {
   appendEvent<T>(streamId: string, type: string, payload: T): void;
 }
+
+type TaskTimingState = Pick<OperationalState, "events"> & Partial<Pick<OperationalState, "imports" | "jobs" | "generationPlans">>;
 
 export interface GenerationPlanDetailRead {
   plan?: GenerationPlan;
@@ -138,9 +141,13 @@ export class OperationalStore {
   async mutateImports<T>(change: (state: ImportMutationState, context: ImportMutationContext) => T | Promise<T>): Promise<T> {
     return this.mutate(async state => {
       const scope: ImportMutationState = { imports: state.imports, idempotency: state.idempotency };
+      const previousImports = scope.imports.map(record => ({ id: record.id, state: record.state }));
       const result = await change(scope, { appendEvent: (streamId, type, payload) => {
         assertImportEvent(scope, streamId, type);
-        this.appendEvent(state, streamId, type, payload);
+        const previous = previousImports.find(record => record.id === streamId);
+        this.appendEvent(state, streamId, type, payload, {
+          restart: type === "conversion.started" && Boolean(previous && previous.state !== "accepted")
+        });
       } });
       state.imports = scope.imports;
       state.idempotency = scope.idempotency;
@@ -266,7 +273,13 @@ export class OperationalStore {
     return job ? { job, result } : undefined;
   }
 
-  appendEvent<T>(state: Pick<OperationalState, "events">, streamId: string, type: string, payload: T): OrderedEvent<T> {
+  appendEvent<T>(
+    state: TaskTimingState,
+    streamId: string,
+    type: string,
+    payload: T,
+    timingOptions: { restart?: boolean } = {}
+  ): OrderedEvent<T> {
     const event: OrderedEvent<T> = {
       id: state.events.length === 0 ? 1 : (state.events.at(-1)?.id ?? 0) + 1,
       streamId,
@@ -274,6 +287,7 @@ export class OperationalStore {
       occurredAt: new Date().toISOString(),
       payload
     };
+    maintainTaskTimingForEvent(state, event, timingOptions);
     state.events.push(event);
     return event;
   }
@@ -876,7 +890,13 @@ export class PostgresOperationalStore extends OperationalStore {
       const beforeIdempotencyJson = JSON.stringify(scope.idempotency);
       result = await change(scope, { appendEvent: (streamId, type, payload) => {
         assertImportEvent(scope, streamId, type);
-        emitted.push({ id: 0, streamId, type, payload, occurredAt: new Date().toISOString() });
+        const occurredAt = new Date().toISOString();
+        const previous = beforeImports.find(record => record.id === streamId);
+        const record = scope.imports.find(item => item.id === streamId);
+        if (record) applyTaskTimingEvent(record, type, occurredAt, {
+          restart: type === "conversion.started" && Boolean(previous && previous.state !== "accepted")
+        });
+        emitted.push({ id: 0, streamId, type, payload, occurredAt });
       } });
       const previous = new Map(beforeImports.map(record => [record.id, record]));
       for (const record of scope.imports) {
@@ -919,6 +939,21 @@ export class PostgresOperationalStore extends OperationalStore {
 function assertImportEvent(state: ImportMutationState, streamId: string, type: string): void {
   if (!state.imports.some(record => record.id === streamId)
     || !/^(import|conversion|readweave)\./.test(type)) throw new Error("IMPORT_EVENT_SCOPE_INVALID");
+}
+
+function maintainTaskTimingForEvent(
+  state: TaskTimingState,
+  event: Pick<OrderedEvent, "streamId" | "type" | "occurredAt" | "payload">,
+  options: { restart?: boolean } = {}
+): void {
+  const collection = taskTimingCollectionForEvent(event.type);
+  if (!collection) return;
+  const task = state[collection]?.find(item => item.id === event.streamId);
+  if (!task) return;
+  const restart = options.restart ?? (collection === "jobs"
+    ? isNewGenerationJobAttempt(state.jobs?.find(item => item.id === event.streamId)?.attempt ?? 0, event.streamId, state.events)
+    : false);
+  applyTaskTimingEvent(task, event.type, event.occurredAt, { restart });
 }
 
 interface PendingGenerationEvent {
@@ -979,6 +1014,9 @@ function postgresGenerationJobMutationContext(
     checkpointChanges,
     appendEvent<T>(type: string, payload: T) {
       const occurredAt = new Date().toISOString();
+      applyTaskTimingEvent(job, type, occurredAt, {
+        restart: isNewGenerationJobAttempt(job.attempt, job.id, events)
+      });
       const event: OrderedEvent<T> = {
         id: (events.at(-1)?.id ?? 0) + 1,
         streamId: job.id,

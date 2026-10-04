@@ -10,6 +10,18 @@ The complete license is retained in `apps/api/src/upstream/OPENMAIC-LICENSE.txt`
 Adaptation scope and differences are documented in
 `docs/teaching-upstream-adaptation.md`.
 
+## pypdfium2 and bundled PDFium
+
+The converter image pins pypdfium2==4.30.0 for PDF inspection and rasterization.
+The pypdfium2 project is available under either the Apache-2.0 or BSD-3-Clause
+license. Its wheel bundles PDFium and ships the applicable PDFium and bundled
+third-party license texts as
+pypdfium2-4.30.0.dist-info/LicenseRef-PdfiumThirdParty.txt; the converter
+image retains that installed virtual environment.
+
+Sources: [pypdfium2 project](https://github.com/pypdfium2-team/pypdfium2),
+[pypdfium2 4.30.0 release](https://pypi.org/project/pypdfium2/4.30.0/).
+
 ## agent-human-readable-technical-writing
 
 Course OS includes exact policy snapshots from

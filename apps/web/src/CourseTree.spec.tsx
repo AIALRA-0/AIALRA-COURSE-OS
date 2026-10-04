@@ -172,10 +172,28 @@ describe("CourseTree search navigation", () => {
 
     expect(results.map(({ node }) => node.pageId)).toEqual(["page-current"]);
     expect(results[0]?.node.releaseId).toBe("release-current");
+    expect(resolveCourseTreeSearchActivation(results[0]!.node)).toEqual({ kind: "page", releaseId: "release-current", pageId: "page-current" });
     expect(results[0]?.detail).toContain("草稿");
     expect(results[0]?.detail).not.toContain("v4");
     expect(buildCourseTreeSearchResults(treeNodes, "trash", searchMaterials)).toHaveLength(0);
     expect(buildCourseTreeSearchResults(treeNodes, "archived", searchMaterials)).toHaveLength(0);
+  });
+
+  it("keeps the ordinary tree at the material level and highlights the material containing the selected page", () => {
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "课程空间", courses: treeNodes.slice(0, 1), rootMaterials: [], updatedAt: "2026-09-30T10:00:00.000Z" },
+      selectedPageId: "page-current",
+      searchMaterials,
+      actions: { openMaterial: vi.fn(), rename: vi.fn(), duplicate: vi.fn(), move: vi.fn(), trash: vi.fn(), openStudio: vi.fn(), openReadWeave: vi.fn(), history: vi.fn() },
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+
+    expect(markup).not.toContain('data-node-id="page-current"');
+    expect(markup).toContain('data-node-id="material-current"');
+    expect(markup).toContain('data-action="tree-open-material"');
+    const selectedMaterialRow = markup.slice(markup.indexOf('data-node-id="material-current"'), markup.indexOf('</div>', markup.indexOf('data-node-id="material-current"')));
+    expect(selectedMaterialRow).toContain('class="tree-row selected ');
+    expect(selectedMaterialRow).toContain('aria-current="page"');
   });
 
   it("wraps arrow selection and resolves page, material, and course activation to their intended actions", () => {

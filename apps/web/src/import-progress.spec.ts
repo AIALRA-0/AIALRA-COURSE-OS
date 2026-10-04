@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportTaskPollingMode, getImportTaskState, getImportTaskStatus, getImportTaskTiming, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
@@ -225,6 +225,142 @@ describe("import progress summary", () => {
     expect(importTaskStateLabel("running")).toBe("正在处理");
   });
 
+  it("describes the saved draft, explicit no-generation choice, and partial failure with their existing actions", () => {
+    const notGenerated = record({ state: "ready", autoGenerate: false, generationState: "not_requested", pageIds: ["p1", "p2"] });
+    expect(getImportTaskStatus(notGenerated)).toEqual({
+      state: "completed", fact: "材料已导入，讲解未生成", action: "generate"
+    });
+
+    const draft = record({
+      state: "ready", autoGenerate: true, generationState: "awaiting_review", pageIds: ["p1", "p2"],
+      generationCompletedPageIds: ["p1", "p2"], generationFailedPageIds: []
+    });
+    const reviewPlan = plan({
+      state: "awaiting_review", pageIds: ["p1", "p2"], completedPageIds: ["p1", "p2"], failedPageIds: []
+    });
+    expect(getImportTaskStatus(draft, reviewPlan)).toEqual({
+      state: "awaiting_review", fact: "讲解草稿已生成，可阅读；尚未发布", action: "open_draft"
+    });
+    expect(getImportActivity(draft, reviewPlan, [], [], 0).stage).toBe("讲解草稿已生成，可阅读；尚未发布");
+    expect(importTaskStateLabel("awaiting_review")).toBe("已停止，查看详情");
+
+    const unexplainedReview = record({ state: "ready", autoGenerate: true, generationState: "awaiting_review" });
+    expect(getImportTaskStatus(unexplainedReview)).toEqual({
+      state: "awaiting_review", fact: "任务状态需同步；当前没有可确认的待办项"
+    });
+    expect(getImportTaskStatus(unexplainedReview).fact).not.toContain("待检查");
+
+    const partial = record({
+      state: "ready", autoGenerate: true, generationState: "failed", pageIds: ["p1", "p2", "p3"],
+      generationCompletedPageIds: ["p1", "p2"], generationFailedPageIds: ["p3"]
+    });
+    expect(getImportTaskStatus(partial, plan({
+      state: "failed", pageIds: ["p1", "p2", "p3"], completedPageIds: ["p1", "p2"], failedPageIds: ["p3"]
+    }))).toEqual({
+      state: "failed", fact: "讲解部分生成：2/3 页已生成，1 页失败", action: "retry_failed"
+    });
+    expect(importProgressTitle(notGenerated, undefined, false)).toBe("材料已导入，讲解未生成");
+  });
+
+  it("uses merged plan and job state to choose active, idle, and stopped polling", () => {
+    const source = record({ state: "ready", autoGenerate: true, generationState: "queued", generationPlanId: "plan-1" });
+    const runningPlan = plan({ state: "running", pageIds: ["p1"], completedPageIds: [], failedPageIds: [] });
+    expect(getImportTaskState(source, runningPlan)).toBe("running");
+    expect(getImportTaskPollingMode(source, runningPlan)).toBe("active");
+    expect(getImportTaskPollingMode(source, plan({ state: "awaiting_review" }))).toBe("idle");
+    expect(getImportTaskPollingMode(record({
+      state: "ready", autoGenerate: false, generationState: "not_requested"
+    }))).toBe("stopped");
+    expect(getImportTaskPollingMode(record({ state: "ready", generationState: "failed" }))).toBe("stopped");
+  });
+
+  it("times only the current retry attempt and freezes terminal duration at endedAt", () => {
+    const source = record({
+      state: "ready", autoGenerate: true, generationJobId: "job-1", generationState: "running",
+      createdAt: "2026-10-01T00:00:00.000Z"
+    });
+    const retryJob = {
+      id: "job-1", state: "running", attempt: 2,
+      createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-03T10:00:00.000Z",
+      attemptStartedAt: "2026-10-03T10:00:00.000Z", pageIds: ["p1"],
+      completedPageIds: [], failedPageIds: []
+    } as unknown as GenerationJob;
+    const running = getImportTaskTiming(source, undefined, [retryJob], Date.parse("2026-10-03T10:01:05.000Z"));
+    expect(running).toMatchObject({
+      phase: "running", attempt: 2, elapsedSeconds: 65,
+      label: "本次耗时 1 分 5 秒（首轮含排队，重试从重新运行开始）"
+    });
+
+    const completed = getImportTaskTiming(record({
+      ...source, generationState: "completed"
+    }), undefined, [{
+      ...retryJob, state: "completed", endedAt: "2026-10-03T10:01:00.000Z"
+    } as unknown as GenerationJob], Date.parse("2026-10-03T10:10:00.000Z"));
+    expect(completed).toMatchObject({
+      phase: "ended", attempt: 2, elapsedSeconds: 60,
+      label: "本次耗时 1 分（首轮含排队，重试从重新运行开始）"
+    });
+
+    const retryQueued = getImportTaskTiming(record({
+      ...source, generationState: "queued"
+    }), undefined, [{
+      ...retryJob, state: "queued", endedAt: "2026-10-03T10:01:00.000Z"
+    } as unknown as GenerationJob], Date.parse("2026-10-03T10:10:00.000Z"));
+    expect(retryQueued).toMatchObject({
+      phase: "queued", label: "排队中"
+    });
+    expect(retryQueued).not.toHaveProperty("elapsedSeconds");
+  });
+
+  it("stops pause and review timing and marks old or malformed terminal timing unknown", () => {
+    const paused = getImportTaskTiming(record({
+      state: "ready", autoGenerate: true, generationState: "paused", generationJobId: "job-p",
+      attemptStartedAt: "2026-10-03T10:00:00.000Z", endedAt: "2026-10-03T10:02:00.000Z"
+    }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
+    expect(paused).toMatchObject({ phase: "paused", elapsedSeconds: 120, label: "本次耗时 2 分（首轮含排队，重试从重新运行开始）" });
+
+    const awaiting = getImportTaskTiming(record({
+      state: "ready", autoGenerate: true, generationState: "awaiting_review", generationPlanId: "plan-r"
+    }), plan({
+      state: "awaiting_review", attemptStartedAt: "2026-10-03T10:00:00.000Z",
+      endedAt: "2026-10-03T10:02:00.000Z", pageIds: ["p1"], completedPageIds: ["p1"], failedPageIds: []
+    }), [], Date.parse("2026-10-03T10:20:00.000Z"));
+    expect(awaiting).toMatchObject({
+      phase: "awaiting_review", elapsedSeconds: 120,
+      label: "本次耗时 2 分（首轮含排队，重试从重新运行开始）"
+    });
+
+    const oldTerminal = getImportTaskTiming(record({
+      state: "ready", autoGenerate: true, generationState: "completed",
+      createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-03T10:00:00.000Z"
+    }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
+    expect(oldTerminal).toMatchObject({ phase: "ended", label: "已结束，耗时未记录" });
+    expect(oldTerminal).not.toHaveProperty("elapsedSeconds");
+
+    const malformed = getImportTaskTiming(record({
+      state: "ready", autoGenerate: true, generationState: "running",
+      attemptStartedAt: "not-a-time"
+    }), undefined, [], Number.NaN);
+    expect(malformed).toMatchObject({ phase: "running", label: "运行中，耗时暂不可核对" });
+    expect(malformed).not.toHaveProperty("elapsedSeconds");
+
+    const reversed = getImportTaskTiming(record({
+      state: "ready", autoGenerate: true, generationState: "failed",
+      attemptStartedAt: "2026-10-03T10:03:00.000Z", endedAt: "2026-10-03T10:02:00.000Z"
+    }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
+    expect(reversed).toMatchObject({ phase: "ended", label: "已结束，耗时未记录" });
+    expect(reversed).not.toHaveProperty("elapsedSeconds");
+
+    const importedWithoutGeneration = getImportTaskTiming(record({
+      state: "ready", autoGenerate: false, generationState: "not_requested",
+      attemptStartedAt: "2026-10-03T10:00:00.000Z", endedAt: "2026-10-03T10:02:05.000Z"
+    }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
+    expect(importedWithoutGeneration).toMatchObject({
+      phase: "ended", elapsedSeconds: 125,
+      label: "本次耗时 2 分 5 秒（首轮含排队，重试从重新运行开始）"
+    });
+  });
+
   it("restores standalone generation state and uses the persisted stage activity without inventing a percentage", () => {
     const task = record({
       id: "generation-job:job-1",
@@ -387,7 +523,7 @@ describe("import progress summary", () => {
       progressPercent: 100,
       progressScope: "总完成度"
     });
-    expect(importProgressTitle(task, undefined, false)).toBe("材料导入完成，尚未生成讲解");
+    expect(importProgressTitle(task, undefined, false)).toBe("材料已导入，讲解未生成");
   });
 
   it("does not invent a percentage when active work has no persisted counters", () => {

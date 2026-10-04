@@ -77,6 +77,90 @@ describe("ReadingRuntime", () => {
     restarted.close();
   });
 
+  it("projects each acknowledged source registration and publication into the course tree immediately", async () => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const initialRelease = await publishFixture(store);
+    const readCounts = { courses: 0, indexes: 0, nodes: 0, trash: 0 };
+    const countedAuthority = new Proxy(store, {
+      get(target, property) {
+        const readName = property === "listCourses" ? "courses"
+          : property === "listReleaseIndexes" ? "indexes"
+            : property === "listTreeNodes" ? "nodes"
+              : property === "listTrash" ? "trash" : undefined;
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (readName) readCounts[readName] += 1;
+          return value.apply(target, args);
+        };
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, countedAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    const countsAfterMaterialize = { ...readCounts };
+    const observedAuthority = observeReadingWrites(countedAuthority, runtime);
+    const treeMaterialIds = async () => (await runtime.replica.getTree(workspaceId))?.courses
+      .find((item) => item.id === initialRelease.courseId)?.children
+      .filter((item) => item.kind === "material").map((item) => item.materialId ?? item.id) ?? [];
+    const addedRelease = (id: string, moduleId: string, lifecycle: CourseRelease["lifecycle"]): CourseRelease => {
+      const lesson = page(`${id}-page`);
+      return {
+        ...initialRelease,
+        id,
+        moduleId,
+        moduleTitle: `Module ${moduleId}`,
+        manifestHash: `manifest:${id}`,
+        lifecycle,
+        pageIds: [lesson.id],
+        pages: [lesson]
+      };
+    };
+
+    expect(await treeMaterialIds()).toHaveLength(1);
+    const draftSource = addedRelease("fixture-draft-source-2", "fixture-module-2", "draft_source");
+    await observedAuthority.registerDraftSource(draftSource, writeContext("register-second-source"));
+    expect(await treeMaterialIds()).toHaveLength(2);
+
+    const published = addedRelease("fixture-published-3", "fixture-module-3", "published");
+    const manifest: ReleaseManifest = {
+      id: "fixture-published-3-manifest",
+      schemaVersion: COURSE_API_VERSION,
+      courseReleaseId: published.id,
+      sourceHashes: [],
+      pageHashes: [sha256Text(stableStringify(published.pages[0]!))],
+      explanationHashes: [],
+      assessmentHashes: [],
+      writingPolicySnapshotId: published.writingPolicySnapshotId,
+      modelRoutes: [published.modelRoute],
+      qualityHarnessVersion: published.qualityHarnessVersion,
+      costInputs: [],
+      createdAt: stamp
+    };
+    await observedAuthority.publishRelease(published, manifest, writeContext("publish-third-source"));
+    expect(await treeMaterialIds()).toHaveLength(3);
+    expect(readCounts).toEqual({
+      courses: countsAfterMaterialize.courses + 2,
+      indexes: countsAfterMaterialize.indexes,
+      nodes: countsAfterMaterialize.nodes + 2,
+      trash: countsAfterMaterialize.trash + 2
+    });
+    await expect(runtime.replica.getPageSource(workspaceId, published.pages[0]!.id, published.id))
+      .resolves.toMatchObject({ page: { blocks: [{ markdown: "Confirmed fixture explanation" }] } });
+    runtime.close();
+
+    const restarted = new ReadingRuntime(root, failingAuthority(store, "ECONNREFUSED: no remote reads expected"),
+      workspaceId, authorityIdentity, buildReadingTree);
+    await restarted.initialize();
+    expect((await restarted.replica.getTree(workspaceId))?.courses
+      .find((item) => item.id === initialRelease.courseId)?.children.filter((item) => item.kind === "material"))
+      .toHaveLength(3);
+    await expect(restarted.replica.getPageSource(workspaceId, published.pages[0]!.id, published.id))
+      .resolves.toMatchObject({ page: { blocks: [{ markdown: "Confirmed fixture explanation" }] } });
+    restarted.close();
+  });
+
   it("upserts a resolved lesson draft from its targeted authority snapshot", async () => {
     const root = await temporaryRoot();
     const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));

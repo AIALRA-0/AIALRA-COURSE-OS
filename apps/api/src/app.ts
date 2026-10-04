@@ -67,6 +67,7 @@ import { SecretVault } from "./secret-vault.js";
 import { billingBreakdown, billingModeForProvider, estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { buildGenerationCourseContext, buildGenerationSourceText, preparePageForGeneration } from "./page-source.js";
 import { readCodeLayoutHint } from "./source-layout.js";
+import { parsePdfLayout } from "./pdf-layout.js";
 import { previousLessonContext } from "./teaching-plan.js";
 import { planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
 import { policyFormatRules } from "./generation-harness.js";
@@ -539,7 +540,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const scopedNode = findTreeNode(buildCourseTree(
         formalCourses,
         releases,
-        drafts.filter((draft) => draft.workspaceId === workspaceId && courseIds.has(draft.courseId)),
+        drafts.filter((draft) => draft.workspaceId === workspaceId && releases.some(release => release.id === draft.sourceReleaseId)),
         treeNodes.filter((candidate) => !isRegressionAsset(candidate.id, candidate.title, candidate.materialId ?? "")),
         trash.filter((record) => record.workspaceId === workspaceId)
       ), request.params.id);
@@ -1234,6 +1235,24 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.post(/^\/api\/v1\/imports:inspect$/, upload.single("file"), async (request, response, next) => {
+    try {
+      if (!request.file) return sendError(request, response, 400, "FILE_REQUIRED", "请选择 PDF 文件", false);
+      const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
+      if (!inspection.accepted || inspection.kind !== "pdf") return sendError(request, response, 422, "PDF_INSPECTION_REJECTED", "文件检查未通过，或不是 PDF", false);
+      let pdfLayout;
+      try { pdfLayout = parsePdfLayout(request.body.pdfLayout) ?? { mode: "auto" as const }; }
+      catch { return sendError(request, response, 422, "PDF_LAYOUT_INVALID", "拆分选择无效", false); }
+      const cas = await dependencies.cas.put(request.file.buffer);
+      const id = `inspect-${cas.sha256}-${sha256Text(stableStringify(pdfLayout)).slice(0, 16)}`;
+      const result = await dependencies.conversion.enqueueAndWait({ id, sourcePath: cas.absolutePath,
+        originalName: request.file.originalname, kind: "pdf", purpose: "inspect", pdfLayout,
+        outputDir: join(dependencies.dataDir, "conversions", id), createdAt: new Date().toISOString() });
+      if (result.state !== "completed" || !result.inspection || result.inspection.sourceSha256 !== cas.sha256) return sendError(request, response, 422, "PDF_LAYOUT_UNAVAILABLE", "无法取得可靠的拆分预览，请保留原页或重试", false);
+      response.json(result.inspection);
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/v1/imports", upload.single("file"), async (request, response, next) => {
     try {
       if (!request.file) return sendError(request, response, 400, "FILE_REQUIRED", "请选择要导入的文件", false);
@@ -1246,6 +1265,21 @@ export function createApp(dependencies: AppDependencies): Express {
       }
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       const cas = await dependencies.cas.put(request.file.buffer);
+      let pdfLayout;
+      try { pdfLayout = parsePdfLayout(request.body.pdfLayout); }
+      catch { return sendError(request, response, 422, "PDF_LAYOUT_INVALID", "拆分选择无效", false); }
+      if (pdfLayout && inspection.kind !== "pdf") return sendError(request, response, 422, "PDF_LAYOUT_INVALID", "只有 PDF 可以选择拆分版式", false);
+      let layoutFingerprint: string | undefined;
+      let layoutPageCount: number | undefined;
+      if (inspection.accepted && (pdfLayout?.mode === "auto" || Object.keys(pdfLayout?.choices ?? {}).length)) {
+        const id = `inspect-${cas.sha256}-${sha256Text(stableStringify(pdfLayout)).slice(0, 16)}`;
+        const layout = await dependencies.conversion.enqueueAndWait({ id, sourcePath: cas.absolutePath,
+          originalName: request.file.originalname, kind: "pdf", purpose: "inspect", pdfLayout,
+          outputDir: join(dependencies.dataDir, "conversions", id), createdAt: new Date().toISOString() });
+        if (layout.state !== "completed" || !layout.inspection || layout.inspection.sourceSha256 !== cas.sha256) return sendError(request, response, 422, "PDF_LAYOUT_UNAVAILABLE", "拆分方案未确认，未启动导入或生成", false);
+        layoutFingerprint = layout.inspection.fingerprint;
+        layoutPageCount = layout.inspection.logicalPageCount;
+      }
       const incrementalFromMaterialVersionId = asOptionalString(request.body.previousMaterialVersionId);
       const previousSource = incrementalFromMaterialVersionId
         ? await getWorkspaceRelease(dependencies.readweave, incrementalFromMaterialVersionId, workspaceId)
@@ -1271,6 +1305,7 @@ export function createApp(dependencies: AppDependencies): Express {
           return structuredClone(replay);
         }
         const duplicate = state.imports.find((item) => item.workspaceId === workspaceId && item.sha256 === cas.sha256
+          && item.layoutFingerprint === layoutFingerprint
           && item.incrementalFromMaterialVersionId === incrementalFromMaterialVersionId && canonicalImportSource(item.source) === source);
         if (duplicate) {
           deduplicated = true;
@@ -1280,8 +1315,9 @@ export function createApp(dependencies: AppDependencies): Express {
         }
         const now = new Date().toISOString();
         const autoGenerate = requestedAutoGenerate;
+        const importId = randomUUID();
         const item = {
-          id: randomUUID(),
+          id: importId,
           workspaceId,
            courseId: previousSource?.courseId ?? asOptionalString(request.body.courseId),
            parentNodeId: asOptionalString(request.body.parentNodeId),
@@ -1297,6 +1333,9 @@ export function createApp(dependencies: AppDependencies): Express {
           qualityMode: normalizeQualityMode(request.body.qualityMode),
           language: String(request.body.language || "zh-CN"),
           autoGenerate,
+          pdfLayout: layoutFingerprint ? pdfLayout : undefined,
+          layoutFingerprint,
+          ...(layoutPageCount ? { conversionProgress: { stage: "queued" as const, pageCount: layoutPageCount, completedPages: 0, updatedAt: now } } : {}),
           generationState: autoGenerate ? "queued" as const : "not_requested" as const,
           sensitivity: "private" as const,
           state: inspection.accepted ? "accepted" as const : "rejected" as const,
@@ -1416,6 +1455,8 @@ export function createApp(dependencies: AppDependencies): Express {
             lastProgressAt: plan?.updatedAt ?? item.conversionProgress?.updatedAt ?? item.convertedAt ?? item.createdAt,
             cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "import" && ref.id === item.id))?.fingerprint,
             createdAt: item.createdAt
+            ,attemptStartedAt: plan?.attemptStartedAt ?? item.attemptStartedAt,
+            endedAt: plan?.endedAt ?? item.endedAt
           };
         });
       const independentJobs = snapshot.jobs
@@ -1431,6 +1472,7 @@ export function createApp(dependencies: AppDependencies): Express {
           generationState: plan.state, pageIds: plan.pageIds, generationCompletedPageIds: plan.completedPageIds,
           generationFailedPageIds: plan.failedPageIds, generationCoreCompletedPageIds: plan.coreCompletedPageIds,
           generationBridgeCompletedPageIds: plan.bridgeCompletedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt,
+          attemptStartedAt: plan.attemptStartedAt, endedAt: plan.endedAt,
           cleanupFingerprint: cleanupGroups.find(group => group.members.some(ref => ref.kind === "plan" && ref.id === plan.id))?.fingerprint }));
       const tasks = [...imports, ...independentJobs, ...independentPlans]
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -1449,7 +1491,8 @@ export function createApp(dependencies: AppDependencies): Express {
         if (!plan) return sendError(request, response, 404, "PLAN_NOT_FOUND", "没有找到这个生成计划", false);
         response.json({ id: importId, workspaceId, state: "ready", issues: [], autoGenerate: true, originalName: `材料生成任务 ${plan.id.slice(0, 6)}`,
           materialVersionId: plan.materialVersionId, generationPlanId: plan.id, generationState: plan.state, pageIds: plan.pageIds,
-          generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt });
+          generationCompletedPageIds: plan.completedPageIds, generationFailedPageIds: plan.failedPageIds, createdAt: plan.createdAt, lastProgressAt: plan.updatedAt,
+          attemptStartedAt: plan.attemptStartedAt, endedAt: plan.endedAt });
         return;
       }
       if (importId.startsWith(STANDALONE_GENERATION_TASK_PREFIX)) {
@@ -2817,7 +2860,7 @@ async function buildTreeNodeProperties(readweave: ReadWeaveCourseApi, nodeId: st
   ]);
   const formalCourses = formalWorkspaceCourses(courses, workspaceId);
   const courseIds = new Set(formalCourses.map((course) => course.id));
-  const scopedDrafts = drafts.filter((draft) => draft.workspaceId === workspaceId && courseIds.has(draft.courseId));
+  const scopedDrafts = drafts.filter((draft) => draft.workspaceId === workspaceId && releases.some(release => release.id === draft.sourceReleaseId));
   const scopedNodes = treeNodes.filter((node) => !isRegressionAsset(node.id, node.title, node.materialId ?? "") && (node.kind === "course"
     ? courseIds.has(node.id)
     : node.kind === "material"
@@ -2876,7 +2919,7 @@ async function readWeaveNoteBelongsToWorkspace(readweave: ReadWeaveCourseApi, no
     : node.kind === "material"
       ? (node.parentId ? courseIds.has(node.parentId) : node.materialId?.split(":")[1] ? courseIds.has(node.materialId.split(":")[1]!) : false)
       : false))) return true;
-  if (drafts.some((draft) => draft.workspaceId === workspaceId && courseIds.has(draft.courseId) && draft.readweaveNoteId === noteId)) return true;
+  if (drafts.some((draft) => draft.workspaceId === workspaceId && releaseIds.has(draft.sourceReleaseId) && draft.readweaveNoteId === noteId)) return true;
   return questions.some((question) => releaseIds.has(question.courseReleaseId) && question.readweaveNoteId === noteId);
 }
 
@@ -2894,17 +2937,15 @@ function findTreeNode(nodes: CourseTreeNode[], nodeId: string): CourseTreeNode |
 }
 
 async function buildReviewMap(readweave: ReadWeaveCourseApi, now = new Date(), workspaceId = "personal"): Promise<ReviewMap> {
-  const [courses, releases, mastery, questionAttempts, assessmentAttempts] = await Promise.all([
-    readweave.listCourses(),
-    readweave.listReleases(),
+  const [releases, mastery, questionAttempts, assessmentAttempts] = await Promise.all([
+    listWorkspaceReleases(readweave, workspaceId),
     readweave.listMastery(),
     readweave.listQuestionAttempts(),
     readweave.listAssessmentAttempts()
   ]);
-  const formalCourseIds = new Set(courses.filter((course) => course.workspaceId === workspaceId && course.status !== "archived" && !isRegressionAsset(course.id, course.title)).map((course) => course.id));
   const currentByModule = new Map<string, CourseRelease>();
   for (const release of releases) {
-    if (!formalCourseIds.has(release.courseId) || release.lifecycle === "draft_source" || isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`)) continue;
+    if (release.lifecycle === "draft_source" || isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`)) continue;
     const key = `${release.courseId}:${release.moduleId}`;
     const current = currentByModule.get(key);
     if (!current || release.version > current.version || (release.version === current.version && release.publishedAt > current.publishedAt)) currentByModule.set(key, release);
@@ -3138,8 +3179,9 @@ async function listWorkspaceReleases(readweave: ReadWeaveCourseApi, workspaceId:
   ]);
   const courses = formalWorkspaceCourses(allCourses, workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
+  const moved = await movedMaterialIds(readweave, allCourses, workspaceId, trash);
   const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trash, workspaceId);
-  return releases.filter((release) => courseIds.has(release.courseId)
+  return releases.filter((release) => (courseIds.has(release.courseId) || moved.has(stableMaterialNodeId(release.courseId, release.moduleId)))
     && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
     && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
 }
@@ -3157,8 +3199,9 @@ async function listWorkspaceReleaseIndexes(readweave: ReadWeaveCourseApi, worksp
   const filterStartedAt = performance.now();
   const courses = formalWorkspaceCourses(courseRead.value, workspaceId);
   const courseIds = new Set(courses.map((course) => course.id));
+  const moved = await movedMaterialIds(readweave, courseRead.value, workspaceId, trashRead.value);
   const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trashRead.value, workspaceId);
-  const indexes = indexRead.value.filter((release) => courseIds.has(release.courseId)
+  const indexes = indexRead.value.filter((release) => (courseIds.has(release.courseId) || moved.has(stableMaterialNodeId(release.courseId, release.moduleId)))
     && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
     && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`));
   const filterMs = performance.now() - filterStartedAt;
@@ -3184,10 +3227,26 @@ async function getWorkspaceRelease(readweave: ReadWeaveCourseApi, releaseId: str
   if (!release) return undefined;
   const [allCourses, trash] = await Promise.all([readweave.listCourses(), readweave.listTrash()]);
   const courses = formalWorkspaceCourses(allCourses, workspaceId);
+  const moved = await movedMaterialIds(readweave, allCourses, workspaceId, trash);
   const trashedMaterialNodeIds = workspaceTrashedMaterialNodeIds(trash, workspaceId);
-  return courses.some((course) => course.id === release.courseId)
+  return (courses.some((course) => course.id === release.courseId) || moved.has(stableMaterialNodeId(release.courseId, release.moduleId)))
     && !trashedMaterialNodeIds.has(stableMaterialNodeId(release.courseId, release.moduleId))
     && !isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`) ? release : undefined;
+}
+
+/** Moving a material changes its navigation parent, not the immutable source/answer owner. */
+async function movedMaterialIds(readweave: ReadWeaveCourseApi, courses: CourseProject[], workspaceId: string, trash: TrashRecord[]): Promise<Set<string>> {
+  const deletedCourses = new Set(trash.filter(record => record.workspaceId === workspaceId && record.nodeKind === "course"
+    && (record.restoreAvailable || record.permanentDeleteRequested)).map(record => record.nodeId));
+  const archivedOwners = courses.filter(course => course.workspaceId === workspaceId && course.status === "archived"
+    && !deletedCourses.has(course.id) && !isRegressionAsset(course.id, course.title));
+  if (!archivedOwners.length) return new Set();
+  const activeParents = new Set(formalWorkspaceCourses(courses, workspaceId).filter(course => !deletedCourses.has(course.id)).map(course => course.id));
+  const nodes = await readweave.listTreeNodes();
+  return new Set(nodes.filter(node => node.kind === "material" && !node.archived && node.visibility !== "archived"
+    && node.parentId && activeParents.has(node.parentId)
+    && archivedOwners.some(owner => (node.materialId ?? node.id).startsWith(`material:${owner.id}:`)))
+    .map(node => node.materialId ?? node.id));
 }
 
 function assertReadingAvailable(dependencies: AppDependencies): void {
@@ -3269,6 +3328,8 @@ function standaloneGenerationTaskRecord(job: GenerationJob, relatedImport?: Impo
     generationCompletedPageIds: job.completedPageIds,
     generationFailedPageIds: job.failedPageIds,
     createdAt: job.createdAt,
+    attemptStartedAt: job.attemptStartedAt,
+    endedAt: job.endedAt,
     updatedAt: job.updatedAt,
     ...(detailed ? { issues: [] as string[] } : {})
   };
@@ -5058,7 +5119,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         ? progress.updatedAt : new Date().toISOString();
       const next: NonNullable<ImportRecord["conversionProgress"]> = {
         stage: progress.stage,
-        ...(progress.pageCount === undefined ? {} : { pageCount: progress.pageCount }),
+        ...((progress.pageCount ?? lastPersistedProgress?.pageCount) === undefined ? {} : { pageCount: progress.pageCount ?? lastPersistedProgress?.pageCount }),
         completedPages: progress.completedPages,
         ...(progress.issue ? { issue: safeImportIssue(new Error(progress.issue)) } : {}),
         updatedAt
@@ -5089,9 +5150,11 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       originalName: record.originalName,
       kind: record.kind,
       outputDir,
-      createdAt: record.createdAt
+      createdAt: record.createdAt,
+      pdfLayout: record.pdfLayout
     }, (progress) => persistConversionProgress(progress));
     if (conversion.state !== "completed") throw new Error(conversion.issues[0] || "CONVERSION_FAILED");
+    if (record.layoutFingerprint && conversion.inspection?.fingerprint !== record.layoutFingerprint) throw new Error("PDF_LAYOUT_CHANGED");
     await persistConversionProgress({
       requestId: importId,
       stage: "saving_pages",
@@ -5103,7 +5166,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     for (const converted of conversion.pages) {
       const bytes = await readFile(converted.imagePath);
       const stored = await dependencies.cas.put(bytes);
-      const page = createImportedPage(record.sha256, converted.pageNumber, converted.title, converted.text, stored.sha256);
+      const page = createImportedPage(record.layoutFingerprint ?? record.sha256, converted.pageNumber, converted.title, converted.text, stored.sha256);
+      if (converted.sourceRegion) page.anchors[0]!.sourceRegion = converted.sourceRegion;
       convertedPages.push({ page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType });
       await persistConversionProgress({
         requestId: importId,
@@ -5301,19 +5365,19 @@ function resolveParentCourseId(parentNode: CourseTreeNode | undefined, nodes: Co
 async function ensureImportCourse(courseId: string | undefined, originalName: string, sourceHash: string, workspaceId: string, dependencies: AppDependencies): Promise<CourseProject> {
   const courses = await dependencies.readweave.listCourses();
   if (courseId) {
-    const existing = courses.find((item) => item.id === courseId);
+    const existing = courses.find((item) => item.id === courseId && item.workspaceId === workspaceId && item.status !== "archived");
     if (!existing) throw new Error("IMPORT_COURSE_NOT_FOUND");
     return existing;
   }
-  const id = `course-import-${sourceHash.slice(0, 12)}`;
-  const existing = courses.find((item) => item.id === id);
+  const id = `course-unclassified-${sha256Text(workspaceId).slice(0, 12)}`;
+  const existing = courses.find((item) => item.id === id && item.workspaceId === workspaceId);
   if (existing) return existing;
   const now = new Date().toISOString();
   return dependencies.readweave.createCourse({
     id,
     workspaceId,
-    title: `${fileTitle(originalName)} 课程`,
-    description: "由离线导入流程建立，名称和课程结构可继续编辑",
+    title: "未分类",
+    description: "未指定课程的导入材料；可随时移入已有课程",
     status: "active",
     createdAt: now,
     updatedAt: now

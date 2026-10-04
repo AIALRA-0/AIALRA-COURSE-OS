@@ -409,10 +409,12 @@ postgresDescribe("PostgreSQL operational job storage", () => {
     const fixture = await startFixture([job], true);
     const record = makeImport(job.id);
     try {
-      await fixture.store.mutate(state => {
+      await fixture.store.mutateImports((state, context) => {
         state.imports.push(record);
         state.idempotency["unrelated-operation"] = { kind: "job", objectId: job.id };
+        context.appendEvent(record.id, "import.accepted", { synthetic: true });
       });
+      expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({ attemptStartedAt: record.createdAt });
       const baseline = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
       const emitted: OrderedEvent[] = [];
       fixture.store.bus.on(record.id, event => emitted.push(event));
@@ -423,7 +425,9 @@ postgresDescribe("PostgreSQL operational job storage", () => {
         state.idempotency["scoped-import-operation"] = { kind: "import", objectId: record.id };
         context.appendEvent(record.id, "conversion.started", { synthetic: true });
       });
-      expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({ state: "processing", taskIncarnation: 1 });
+      expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({
+        state: "processing", taskIncarnation: 1, attemptStartedAt: record.createdAt
+      });
       expect(await fixture.store.getImport(record.id, "other")).toBeUndefined();
       expect(await fixture.store.readImportByOperation("scoped-import-operation", record.workspaceId)).toMatchObject({ record: { id: record.id } });
       expect(await fixture.store.readImportByOperation("scoped-import-operation", "other")).toMatchObject({ association: { kind: "import" }, record: undefined });
@@ -443,6 +447,22 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       expect(emitted).toHaveLength(1);
       expect(await fixture.store.getImport(record.id, record.workspaceId)).toMatchObject({ state: "processing", taskIncarnation: 1 });
       fullRead.mockRestore();
+      await fixture.store.mutateImports((state, context) => {
+        state.imports.find(item => item.id === record.id)!.state = "failed";
+        context.appendEvent(record.id, "import.failed", { synthetic: true });
+      });
+      const firstEnd = (await fixture.store.getImport(record.id, record.workspaceId))!.endedAt;
+      expect(firstEnd).toBeTypeOf("string");
+      await fixture.store.mutateImports((_state, context) => context.appendEvent(record.id, "import.failed", { duplicate: true }));
+      expect((await fixture.store.getImport(record.id, record.workspaceId))!.endedAt).toBe(firstEnd);
+      await fixture.store.mutateImports((state, context) => {
+        state.imports.find(item => item.id === record.id)!.state = "processing";
+        context.appendEvent(record.id, "conversion.started", { retry: true });
+      });
+      const restarted = await fixture.store.getImport(record.id, record.workspaceId);
+      const latestImportEvent = (await fixture.store.readGenerationJobEvents(record.id)).at(-1)!;
+      expect(restarted).toMatchObject({ state: "processing", attemptStartedAt: latestImportEvent.occurredAt });
+      expect(restarted!.endedAt).toBeUndefined();
       await fixture.store.mutateImports(state => { state.imports.find(item => item.id === record.id)!.state = "failed"; });
       const selected = selectFailedTasks(await fixture.store.readTaskIndex(), record.workspaceId).filter(task => task.id === record.id);
       const cleanupContext = { workspaceId: record.workspaceId, actor: "synthetic", idempotencyKey: "scoped-import-dismiss", hasActiveWrites: () => false };
@@ -828,6 +848,73 @@ postgresDescribe("PostgreSQL operational job storage", () => {
 });
 
 postgresDescribe("scoped generation tasks", () => {
+  it("persists job and plan timing before their scoped Postgres projections are serialized", async () => {
+    const planId = randomUUID();
+    const job = { ...makeJob(randomUUID()), planId };
+    const fixture = await startFixture([job]);
+    const at = job.createdAt;
+    const plan: GenerationPlan = {
+      id: planId, workspaceId: job.workspaceId, materialVersionId: job.materialVersionId,
+      qualityMode: "balanced", language: "en-US", writingPolicySnapshotId: "synthetic-policy",
+      pageIds: [...job.pageIds], completedPageIds: [], failedPageIds: [], jobIds: [job.id],
+      budgetUsd: 1, spentUsd: 0, holdForReview: false, state: "queued", createdAt: at, updatedAt: at
+    };
+    try {
+      await fixture.store.mutateGenerationTasks(state => {
+        state.generationPlans.push(plan);
+        fixture.store.appendEvent(state, plan.id, "plan.queued", {});
+      }, { planId, readEvents: true });
+      expect((await fixture.store.readTaskIndex()).generationPlans[0]).toMatchObject({ attemptStartedAt: at });
+      await fixture.store.mutateGenerationJob(job.id, (current, context) => {
+        current.attempt = 1;
+        current.state = "running";
+        context.appendEvent("job.running", { attempt: current.attempt });
+      });
+      expect(await fixture.store.readGenerationJob(job.id)).toMatchObject({ attemptStartedAt: at });
+      const canonicalStart = (await fixture.pool.query<{ job_data: GenerationJob }>(
+        "SELECT job_data FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.job_data.attemptStartedAt;
+      expect(canonicalStart).toBe(at);
+
+      await fixture.store.mutateGenerationJob(job.id, (current, context) => {
+        current.state = "failed";
+        context.appendEvent("job.failed", {});
+      });
+      const firstJobEnd = (await fixture.store.readGenerationJob(job.id))!.endedAt;
+      expect(firstJobEnd).toBeTypeOf("string");
+      await fixture.store.mutateGenerationJob(job.id, (_current, context) => context.appendEvent("job.failed", { duplicate: true }));
+      expect((await fixture.store.readGenerationJob(job.id))!.endedAt).toBe(firstJobEnd);
+      await fixture.store.mutateGenerationJob(job.id, (current, context) => {
+        current.attempt = 2;
+        current.state = "running";
+        context.appendEvent("job.running", { attempt: current.attempt });
+      });
+      const latestJobEvent = (await fixture.store.readGenerationJobEvents(job.id)).at(-1)!;
+      expect(await fixture.store.readGenerationJob(job.id)).toMatchObject({ attemptStartedAt: latestJobEvent.occurredAt });
+      expect((await fixture.store.readGenerationJob(job.id))!.endedAt).toBeUndefined();
+
+      await fixture.store.mutateGenerationTasks(state => {
+        state.generationPlans[0]!.state = "awaiting_review";
+        fixture.store.appendEvent(state, plan.id, "plan.awaiting_review", {});
+      }, { planId, readEvents: true });
+      const firstPlanEnd = (await fixture.store.readTaskIndex()).generationPlans[0]!.endedAt;
+      expect(firstPlanEnd).toBeTypeOf("string");
+      await fixture.store.mutateGenerationTasks(state => {
+        fixture.store.appendEvent(state, plan.id, "plan.awaiting_review", { repeated: true });
+      }, { planId, readEvents: true });
+      expect((await fixture.store.readTaskIndex()).generationPlans[0]!.endedAt).toBe(firstPlanEnd);
+      await fixture.store.mutateGenerationTasks(state => {
+        state.generationPlans[0]!.state = "queued";
+        fixture.store.appendEvent(state, plan.id, "plan.retry.queued", {});
+      }, { planId, readEvents: true });
+      const latestPlanEvent = (await fixture.store.readGenerationJobEvents(plan.id)).at(-1)!;
+      expect((await fixture.store.readTaskIndex()).generationPlans[0]).toMatchObject({ attemptStartedAt: latestPlanEvent.occurredAt });
+      expect((await fixture.store.readTaskIndex()).generationPlans[0]!.endedAt).toBeUndefined();
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("persists replay once, reopens canonical jobs and preserves all history and checkpoint bytes", async () => {
     const original = makeJob(randomUUID());
     const fixture = await startFixture([original], true);

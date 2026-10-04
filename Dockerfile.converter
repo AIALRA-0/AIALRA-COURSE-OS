@@ -1,6 +1,10 @@
 ARG COURSE_OS_RUNTIME_IMAGE=course-os-runtime:2.4.0-local
 FROM ${COURSE_OS_RUNTIME_IMAGE}
+ENV COURSE_OS_PYTHON_BIN=/opt/course-os-pdf/bin/python
+ENV PATH="/opt/course-os-pdf/bin:${PATH}"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libreoffice-impress poppler-utils python3 fonts-dejavu-core fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends libreoffice-impress poppler-utils python3 python3-venv fonts-dejavu-core fonts-noto-cjk \
+    && python3 -m venv /opt/course-os-pdf \
+    && /opt/course-os-pdf/bin/python -m pip install --no-cache-dir pypdfium2==4.30.0 \
     && rm -rf /var/lib/apt/lists/*
 CMD ["node", "--import", "tsx", "apps/converter/src/index.ts"]

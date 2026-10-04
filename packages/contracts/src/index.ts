@@ -70,6 +70,7 @@ export interface SourceAnchor {
   label: string;
   bounds?: { x: number; y: number; width: number; height: number };
   text?: string;
+  sourceRegion?: PdfSourceRegion;
 }
 
 export interface MathExpression {
@@ -485,6 +486,10 @@ export interface ImportRecord {
   qualityMode?: "economy" | "balanced" | "quality";
   language?: string;
   autoGenerate?: boolean;
+  pdfLayout?: PdfLayoutSelection;
+  layoutFingerprint?: string;
+  attemptStartedAt?: ISODateTime;
+  endedAt?: ISODateTime;
   generationJobId?: Identifier;
   generationJobIds?: Identifier[];
   generationPlanId?: Identifier;
@@ -522,6 +527,33 @@ export interface ConversionRequest {
   kind: "pptx" | "pdf" | "syllabus";
   outputDir: string;
   createdAt: ISODateTime;
+  purpose?: "inspect";
+  pdfLayout?: PdfLayoutSelection;
+}
+
+export type PdfPageLayoutMode = "original" | "top-bottom" | "left-right";
+export interface PdfLayoutSelection {
+  mode: "auto" | "original";
+  choices?: Record<string, PdfPageLayoutMode>;
+}
+export interface PdfSourceRegion {
+  sourceSha256: string;
+  physicalPage: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  rotation: number;
+  scale: number;
+  order: number;
+  planVersion: string;
+}
+export interface PdfLayoutInspection {
+  version: string;
+  sourceSha256: string;
+  physicalPageCount: number;
+  logicalPageCount: number;
+  fingerprint: string;
+  pages: Array<{ physicalPage: number; width: number; height: number; rotation: number;
+    mode: PdfPageLayoutMode; regions: PdfSourceRegion["bounds"][]; reason?: string; options?: PdfPageLayoutMode[] }>;
+  previews: Array<{ physicalPage: number; imageDataUrl: string }>;
 }
 
 export interface ConvertedPage {
@@ -530,6 +562,7 @@ export interface ConvertedPage {
   text: string;
   imagePath: string;
   imageMediaType: "image/png" | "image/svg+xml";
+  sourceRegion?: PdfSourceRegion;
 }
 
 export interface ConversionResult {
@@ -539,6 +572,7 @@ export interface ConversionResult {
   issues: string[];
   startedAt: ISODateTime;
   completedAt: ISODateTime;
+  inspection?: PdfLayoutInspection;
 }
 
 export interface OrderedEvent<T = unknown> {
@@ -579,6 +613,8 @@ export interface GenerationJob {
   lastErrorCode?: GenerationErrorCode | string;
   cancelRequested: boolean;
   createdAt: ISODateTime;
+  attemptStartedAt?: ISODateTime;
+  endedAt?: ISODateTime;
   updatedAt: ISODateTime;
   /** Read-only summary attached by the generation-job detail endpoint. */
   latestStageActivity?: GenerationStageActivitySummary;
@@ -611,6 +647,8 @@ export interface GenerationPlan {
   holdForReview: boolean;
   state: GenerationPlanState;
   createdAt: ISODateTime;
+  attemptStartedAt?: ISODateTime;
+  endedAt?: ISODateTime;
   updatedAt: ISODateTime;
 }
 

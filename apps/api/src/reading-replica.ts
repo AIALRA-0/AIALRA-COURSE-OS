@@ -668,15 +668,24 @@ export class ReadingReplica {
 
   private isReleaseVisible(catalog: ReplicaCatalog, release: CatalogRelease): boolean {
     if (isRegressionAsset(release.index.id, `${release.index.courseTitle} ${release.index.moduleTitle}`)
-      || !this.isCourseVisible(catalog, release.workspaceId, release.courseId)
       || this.isTombstoned(catalog, release.workspaceId, "release", release.index.id)) return false;
+    const sourceCourse = catalog.courses.find((course) => course.id === release.courseId
+      && course.workspaceId === release.workspaceId);
+    if (!sourceCourse || isRegressionAsset(sourceCourse.id, sourceCourse.title)
+      || this.isTombstoned(catalog, release.workspaceId, "course", sourceCourse.id)) return false;
+
     const materialId = `material:${release.courseId}:${release.index.moduleId}`;
     if (this.isTombstoned(catalog, release.workspaceId, "material", materialId)) return false;
     const tree = catalog.trees.find((item) => item.workspaceId === release.workspaceId);
     const material = tree?.courses.flatMap((node) => [node, ...(node.children ?? [])])
       .concat(tree.rootMaterials ?? [])
       .find((node) => node.kind === "material" && (node.id === materialId || node.materialId === materialId));
-    return !material?.archived && material?.visibility !== "archived";
+    if (material?.archived || material?.visibility === "archived") return false;
+
+    if (material?.parentId && material.parentId !== release.courseId) {
+      return this.isCourseVisible(catalog, release.workspaceId, material.parentId);
+    }
+    return this.isCourseVisible(catalog, release.workspaceId, release.courseId);
   }
 
   private visibleReleaseIndex(catalog: ReplicaCatalog, release: CatalogRelease): CourseReleaseIndex {

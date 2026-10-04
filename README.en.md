@@ -84,4 +84,8 @@ Course OS source code is licensed under [Apache-2.0](LICENSE). ReadWeave runs as
 
 Uploads report transferred bytes separately from inspection and acceptance. A lost response is recovered with the original operation key. Conversion reports observed stages and page counts; overall completion counts successfully delivered pages, with failures reported separately. Ordinary drafts show “Draft”; revisions remain in history.
 
+Normal navigation lists courses and materials; opening a material restores its last page. Pages remain accessible through the reader and search. Imports without a selected course share the workspace's Unclassified course. PDF imports preview conservative per-page handout detection and allow original pages; ambiguous layouts are not silently cropped. Split pages have separate source regions and page identities and do not inherit answers from old paper pages. The converter pins pypdfium2 4.30.0; see THIRD_PARTY_NOTICES.md.
+
+Terminal task duration uses the recorded server end time. Historical records without a reliable end time say that duration was not recorded. Saved, unpublished explanations offer a reading action without automatic publication.
+
 Clearing failed tasks persistently dismisses terminal notifications without removing materials, costs, answers, or original request associations. Active or changed tasks are skipped. Emptying trash requires explicit confirmation and reference checks. Adapters without safe remote deletion report unsupported items instead of claiming that removing a local index deleted authority content.
