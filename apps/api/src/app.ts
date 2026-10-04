@@ -5210,12 +5210,32 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       completedPages: 0,
       updatedAt: new Date().toISOString()
     }, true);
+    const materialVersionId = `material-version:${record.id}`;
+    const existingSource = await dependencies.readweave.getRelease(materialVersionId);
+    const existingSourceCourse = existingSource ? (await dependencies.readweave.listCourses())
+      .find(owner => owner.id === existingSource.courseId && owner.workspaceId === record.workspaceId) : undefined;
+    if (existingSource && (!existingSourceCourse || existingSource.lifecycle !== "draft_source"
+      || existingSource.manifestHash !== record.sha256 || existingSource.pages.length !== conversion.pages.length
+      || conversion.pages.some(converted => !existingSource.pages.some(page => page.pageNumber === converted.pageNumber)))) {
+      throw new Error("READWEAVE_IMPORT_SOURCE_CONFLICT");
+    }
+    const importPageIdentity = sha256Text(stableStringify({
+      workspaceId: record.workspaceId,
+      importId: record.id,
+      sourceHash: record.sha256,
+      layoutFingerprint: record.layoutFingerprint ?? null
+    }));
     const convertedPages: Array<{ page: CourseRelease["pages"][number]; bytes: Buffer; sha256: string; mediaType: "image/png" | "image/svg+xml" }> = [];
     for (const converted of conversion.pages) {
       const bytes = await readFile(converted.imagePath);
       const stored = await dependencies.cas.put(bytes);
-      const page = createImportedPage(record.layoutFingerprint ?? record.sha256, converted.pageNumber, converted.title, converted.text, stored.sha256);
-      if (converted.sourceRegion) page.anchors[0]!.sourceRegion = converted.sourceRegion;
+      const existingSourcePage = existingSource?.manifestHash === record.sha256
+        ? existingSource.pages.find((page) => page.pageNumber === converted.pageNumber)
+        : undefined;
+      const page = existingSourcePage
+        ? structuredClone(existingSourcePage)
+        : createImportedPage(importPageIdentity, converted.pageNumber, converted.title, converted.text, stored.sha256);
+      if (!existingSourcePage && converted.sourceRegion) page.anchors[0]!.sourceRegion = converted.sourceRegion;
       convertedPages.push({ page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType });
       await persistConversionProgress({
         requestId: conversionRequestId,
@@ -5235,12 +5255,11 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       ? await getWorkspaceRelease(dependencies.readweave, record.incrementalFromMaterialVersionId, record.workspaceId)
       : undefined;
     if (record.incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source")) throw new Error("INCREMENTAL_SOURCE_INVALID");
-    const navigationCourse = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies);
-    const course = previousSource ? (await dependencies.readweave.listCourses())
-      .find(owner => owner.id === previousSource.courseId && owner.workspaceId === record.workspaceId) : navigationCourse;
+    const course = existingSourceCourse ?? (previousSource ? (await dependencies.readweave.listCourses())
+      .find(owner => owner.id === previousSource.courseId && owner.workspaceId === record.workspaceId)
+      : await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies));
     if (!course) throw new Error("INCREMENTAL_SOURCE_INVALID");
-    const materialVersionId = `material-version:${record.id}`;
-    const moduleId = previousSource?.moduleId ?? (parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`);
+    const moduleId = existingSource?.moduleId ?? previousSource?.moduleId ?? (parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`);
     const createdAt = new Date().toISOString();
     const writingPolicy = await currentWritingPolicy();
     if (writingPolicy.validator.status !== "passed") throw new Error("WRITING_POLICY_VALIDATION_FAILED");
@@ -5280,7 +5299,6 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       if (item) item.state = "syncing";
       context.appendEvent(importId, "readweave.sync.started", { materialVersionId, pages: convertedPages.length });
     });
-    const existingSource = await dependencies.readweave.getRelease(materialVersionId);
     if (existingSource) {
       const sameSource = existingSource.lifecycle === "draft_source"
         && existingSource.manifestHash === sourceRelease.manifestHash
@@ -5434,8 +5452,8 @@ async function ensureImportCourse(courseId: string | undefined, originalName: st
   }, systemWriteContext(`import-course:${id}`, workspaceId));
 }
 
-function createImportedPage(sourceHash: string, pageNumber: number, title: string, extractedText: string, imageHash: string): CourseRelease["pages"][number] {
-  const pageId = `page:${sourceHash}:${pageNumber}`;
+function createImportedPage(importIdentity: string, pageNumber: number, title: string, extractedText: string, imageHash: string, existingPageId?: string): CourseRelease["pages"][number] {
+  const pageId = existingPageId ?? `page:${importIdentity}:${pageNumber}`;
   const pageAnchorId = `${pageId}:source-page`;
   const textAnchorId = `${pageId}:source-text`;
   const atomId = `${pageId}:image-region`;

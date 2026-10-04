@@ -45,6 +45,135 @@ describe("PDF layout import integration", () => {
     expect((await fixture.dependencies.operations.read()).imports).toHaveLength(1);
   });
 
+  it("scopes identical PDF page IDs by workspace and import while deduplicating within one workspace", async () => {
+    const fixture = await createFixture();
+    const bytes = syntheticPdf("same-pdf-across-workspaces");
+    const workspaceA = "personal";
+    const workspaceB = "same-pdf-workspace-b";
+
+    const firstResponse = await postPdf(fixture.app, bytes, {
+      idempotencyKey: "same-pdf-workspace-a-first", workspaceId: workspaceA
+    }).expect(201);
+    const first = await waitForImport(fixture.app, firstResponse.body.id, workspaceA);
+    expect(first.state).toBe("ready");
+
+    const secondResponse = await postPdf(fixture.app, bytes, {
+      idempotencyKey: "same-pdf-workspace-b-first", workspaceId: workspaceB
+    }).expect(201);
+    const second = await waitForImport(fixture.app, secondResponse.body.id, workspaceB);
+    expect(second.state).toBe("ready");
+    expect(second.issues).not.toContain("READWEAVE_IMPORT_DRAFT_CONFLICT");
+
+    const firstSource = await fixture.readweave.getRelease(first.materialVersionId);
+    const secondSource = await fixture.readweave.getRelease(second.materialVersionId);
+    expect(firstSource?.pageIds).toEqual(first.pageIds);
+    expect(secondSource?.pageIds).toEqual(second.pageIds);
+    expect(first.pageIds).toHaveLength(1);
+    expect(second.pageIds).toHaveLength(1);
+    expect(first.pageIds[0]).not.toBe(second.pageIds[0]);
+
+    const repeatedResponse = await postPdf(fixture.app, bytes, {
+      idempotencyKey: "same-pdf-workspace-a-dedup", workspaceId: workspaceA
+    }).expect(200);
+    const repeated = await waitForImport(fixture.app, repeatedResponse.body.id, workspaceA);
+    expect(repeated.id).toBe(first.id);
+    expect(repeated.pageIds).toEqual(first.pageIds);
+    expect((await fixture.dependencies.operations.read()).imports).toHaveLength(2);
+  }, 30_000);
+
+  it("resumes an existing source with the same page IDs and preserves its saved draft", async () => {
+    const fixture = await createFixture();
+    const originalSaveDraft = fixture.readweave.saveDraft.bind(fixture.readweave);
+    let failSecondPageOnce = true;
+    vi.spyOn(fixture.readweave, "saveDraft").mockImplementation(async (draft, expectedRevision, context, sourceAsset) => {
+      if (draft.page.pageNumber === 2 && failSecondPageOnce) {
+        failSecondPageOnce = false;
+        throw new Error("READWEAVE_UNAVAILABLE_INJECTED_AFTER_SOURCE_REGISTER");
+      }
+      return originalSaveDraft(draft, expectedRevision, context, sourceAsset);
+    });
+    const bytes = syntheticPdf("same-import-resume-source");
+    const layout: PdfLayoutSelection = { mode: "auto" };
+    const firstResponse = await postPdf(fixture.app, bytes, {
+      idempotencyKey: "same-import-resume-first", layout
+    }).expect(201);
+    const failed = await waitForImport(fixture.app, firstResponse.body.id);
+    expect(failed.state).toBe("failed");
+
+    const materialVersionId = `material-version:${failed.id}`;
+    const firstSource = await fixture.readweave.getRelease(materialVersionId);
+    expect(firstSource).toBeDefined();
+    if (!firstSource) throw new Error("PDF_IMPORT_SOURCE_NOT_REGISTERED_BEFORE_RETRY");
+    expect(firstSource.pageIds).toHaveLength(2);
+    const firstDraft = await fixture.readweave.getDraftByPage(firstSource.pageIds[0]!);
+    expect(firstDraft).toBeDefined();
+    if (!firstDraft) throw new Error("PDF_IMPORT_FIRST_DRAFT_NOT_SAVED_BEFORE_RETRY");
+
+    const answeredPage = structuredClone(firstDraft.page);
+    const core = answeredPage.blocks.find(block => block.kind === "core");
+    if (!core) throw new Error("PDF_IMPORT_TEST_CORE_BLOCK_MISSING");
+    core.markdown = `${core.markdown}\n\nExisting reviewed draft must survive retry.`;
+    const reviewedDraft = await fixture.readweave.saveDraft({
+      ...firstDraft,
+      page: answeredPage,
+      changedBlockIds: [...new Set([...firstDraft.changedBlockIds, core.id])],
+      contentHash: createHash("sha256").update(JSON.stringify(answeredPage)).digest("hex"),
+      updatedAt: new Date().toISOString()
+    }, firstDraft.revision, {
+      idempotencyKey: "same-import-resume-preserve-draft",
+      actor: "test",
+      workspaceId: "personal",
+      schemaVersion: "2.4.0",
+      requestId: "same-import-resume-preserve-draft"
+    });
+
+    // Model a source saved before scoped import identities and the shared
+    // unclassified course existed. Retry must retain its whole page objects.
+    const legacyOwner = await request(fixture.app).post("/api/v1/courses")
+      .set("X-Workspace-Id", "personal")
+      .set("Idempotency-Key", "same-import-legacy-owner")
+      .send({ id: "pdf-layout-legacy-import-owner", title: "Legacy import owner" })
+      .expect(201);
+    const authorityPath = join(fixture.dependencies.dataDir, "readweave.json");
+    const authority = JSON.parse(await readFile(authorityPath, "utf8"));
+    const legacyPageIds = firstSource.pageIds.map((_, index) => `page:legacy-pdf-layout-source:${index + 1}`);
+    const keepLegacyReferences = <T,>(value: T): T => {
+      let serialized = JSON.stringify(value);
+      firstSource.pageIds.forEach((id, index) => { serialized = serialized.replaceAll(id, legacyPageIds[index]!); });
+      return JSON.parse(serialized);
+    };
+    authority.releases = authority.releases.map((release: typeof firstSource) => release.id !== materialVersionId ? release : {
+      ...keepLegacyReferences(release), courseId: legacyOwner.body.id,
+      courseTitle: legacyOwner.body.title, moduleId: "legacy-import-module"
+    });
+    authority.drafts = authority.drafts.map((draft: LessonDraft) => draft.sourceReleaseId !== materialVersionId ? draft : {
+      ...keepLegacyReferences(draft), courseId: legacyOwner.body.id, moduleId: "legacy-import-module"
+    });
+    await writeFile(authorityPath, JSON.stringify(authority), "utf8");
+    const preservedDraft = await fixture.readweave.getDraftByPage(legacyPageIds[0]!);
+    expect(preservedDraft).toBeDefined();
+
+    const retryResponse = await postPdf(fixture.app, bytes, {
+      idempotencyKey: "same-import-resume-retry", layout
+    }).expect(200);
+    const ready = await waitForImport(fixture.app, retryResponse.body.id);
+    expect(ready.state).toBe("ready");
+    expect(ready.id).toBe(failed.id);
+    expect(ready.pageIds).toEqual(legacyPageIds);
+    const resumedSource = await fixture.readweave.getRelease(materialVersionId);
+    expect(resumedSource).toMatchObject({ pageIds: legacyPageIds, courseId: legacyOwner.body.id, moduleId: "legacy-import-module" });
+    const resumedDraft = await fixture.readweave.getDraftByPage(legacyPageIds[0]!);
+    expect(resumedDraft).toMatchObject({
+      id: preservedDraft!.id,
+      revision: reviewedDraft.revision,
+      contentHash: reviewedDraft.contentHash,
+      page: { blocks: expect.arrayContaining([expect.objectContaining({
+        id: keepLegacyReferences(core).id, markdown: expect.stringContaining("Existing reviewed draft must survive retry.")
+      })]) }
+    });
+    expect(resumedDraft?.page).toEqual(preservedDraft?.page);
+  }, 30_000);
+
   it("returns an inspection preview without creating an import, generation task, course, or model call", async () => {
     const fixture = await createFixture();
     const response = await request(fixture.app).post("/api/v1/imports:inspect")
