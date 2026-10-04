@@ -1119,12 +1119,25 @@ describe("Course OS API", () => {
     const savedGamma = await readweave.saveDraft(originalGamma, originalGamma.revision, {
       idempotencyKey: "gamma-teaching", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "gamma-teaching"
     });
+    const destination = await request(app).post("/api/v1/courses").set("Idempotency-Key", "incremental-destination")
+      .send({ id: "incremental-destination", title: "Moved material" }).expect(201);
+    const materialId = `material:${original.courseId}:material:${original.id}`;
+    await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}/move`)
+      .set("Idempotency-Key", "incremental-material-move").send({ parentId: destination.body.id, expectedRevision: 0 }).expect(200);
+    await request(app).patch(`/api/v1/tree/nodes/${original.courseId}`)
+      .set("Idempotency-Key", "incremental-owner-archive").send({ archived: true, expectedRevision: 0 }).expect(200);
     const second = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-second")
-      .field("autoGenerate", "false").field("courseId", original.courseId)
+      .field("autoGenerate", "false").field("courseId", destination.body.id)
       .field("previousMaterialVersionId", original.materialVersionId)
       .attach("file", Buffer.from("# second version with inserted page"), { filename: "slides.md", contentType: "text/markdown" }).expect(201);
     const updated = await waitForImport(app, second.body.id);
-    expect(updated.state).toBe("ready");
+    expect(updated.state, JSON.stringify(updated.issues)).toBe("ready");
+    expect(updated.courseId).toBe(original.courseId);
+    const movedTree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    expect(movedTree.body.courses.find((course: { id: string }) => course.id === destination.body.id).children)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: materialId, parentId: destination.body.id })]));
+    const versions = await request(app).get(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}/versions`).expect(200);
+    expect(versions.body.map((version: { id: string }) => version.id)).toEqual(expect.arrayContaining([original.materialVersionId, updated.materialVersionId]));
     expect(updated.pageIds).toHaveLength(4);
     const newGamma = await readweave.getDraftByPage(updated.pageIds[3]);
     expect(newGamma?.page.blocks[0]?.markdown).toBe(savedGamma.page.blocks[0]?.markdown);
@@ -1133,7 +1146,7 @@ describe("Course OS API", () => {
     expect(event?.payload).toMatchObject({ insertedPageIds: [updated.pageIds[1]], affectedPageIds: updated.pageIds.slice(0, 3), regeneratedPageIds: [],
       preservedPageIds: expect.arrayContaining([{ previousPageId: original.pageIds[2], pageId: updated.pageIds[3] }]) });
     const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "incremental-second")
-      .field("autoGenerate", "false").field("courseId", original.courseId)
+      .field("autoGenerate", "false").field("courseId", destination.body.id)
       .field("previousMaterialVersionId", original.materialVersionId)
       .attach("file", Buffer.from("# second version with inserted page"), { filename: "slides.md", contentType: "text/markdown" }).expect(200);
     expect(replay.body.id).toBe(updated.id);

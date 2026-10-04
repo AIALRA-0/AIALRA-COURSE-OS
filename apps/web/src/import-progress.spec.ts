@@ -288,7 +288,7 @@ describe("import progress summary", () => {
     const running = getImportTaskTiming(source, undefined, [retryJob], Date.parse("2026-10-03T10:01:05.000Z"));
     expect(running).toMatchObject({
       phase: "running", attempt: 2, elapsedSeconds: 65,
-      label: "本次耗时 1 分 5 秒（首轮含排队，重试从重新运行开始）"
+      label: "本次耗时 1 分 5 秒（含本次排队时间）"
     });
 
     const completed = getImportTaskTiming(record({
@@ -298,7 +298,7 @@ describe("import progress summary", () => {
     } as unknown as GenerationJob], Date.parse("2026-10-03T10:10:00.000Z"));
     expect(completed).toMatchObject({
       phase: "ended", attempt: 2, elapsedSeconds: 60,
-      label: "本次耗时 1 分（首轮含排队，重试从重新运行开始）"
+      label: "本次耗时 1 分（含本次排队时间）"
     });
 
     const retryQueued = getImportTaskTiming(record({
@@ -317,7 +317,7 @@ describe("import progress summary", () => {
       state: "ready", autoGenerate: true, generationState: "paused", generationJobId: "job-p",
       attemptStartedAt: "2026-10-03T10:00:00.000Z", endedAt: "2026-10-03T10:02:00.000Z"
     }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
-    expect(paused).toMatchObject({ phase: "paused", elapsedSeconds: 120, label: "本次耗时 2 分（首轮含排队，重试从重新运行开始）" });
+    expect(paused).toMatchObject({ phase: "paused", elapsedSeconds: 120, label: "本次耗时 2 分（含本次排队时间）" });
 
     const awaiting = getImportTaskTiming(record({
       state: "ready", autoGenerate: true, generationState: "awaiting_review", generationPlanId: "plan-r"
@@ -327,7 +327,7 @@ describe("import progress summary", () => {
     }), [], Date.parse("2026-10-03T10:20:00.000Z"));
     expect(awaiting).toMatchObject({
       phase: "awaiting_review", elapsedSeconds: 120,
-      label: "本次耗时 2 分（首轮含排队，重试从重新运行开始）"
+      label: "本次耗时 2 分（含本次排队时间）"
     });
 
     const oldTerminal = getImportTaskTiming(record({
@@ -357,7 +357,7 @@ describe("import progress summary", () => {
     }), undefined, [], Date.parse("2026-10-03T10:20:00.000Z"));
     expect(importedWithoutGeneration).toMatchObject({
       phase: "ended", elapsedSeconds: 125,
-      label: "本次耗时 2 分 5 秒（首轮含排队，重试从重新运行开始）"
+      label: "本次耗时 2 分 5 秒（含本次排队时间）"
     });
   });
 

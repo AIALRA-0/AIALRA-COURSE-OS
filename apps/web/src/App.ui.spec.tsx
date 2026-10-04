@@ -24,6 +24,8 @@ describe("workspace tree and incremental import UI inputs", () => {
     ] as CourseRelease[];
     expect(sourceReleasesForCourse(releases, "course-a").map((release) => release.id)).toEqual(["source-a"]);
     expect(sourceReleasesForCourse(releases, "")).toEqual([]);
+    const moved = [{ id: "destination", children: [{ kind: "material", currentReleaseId: "source-a" }] }] as WorkspaceTree["courses"];
+    expect(sourceReleasesForCourse(releases, "destination", moved).map(release => release.id)).toEqual(["source-a"]);
   });
 
   it("navigates to the submitted import from either workspace shell", async () => {
@@ -43,7 +45,8 @@ describe("import activity cost reads", () => {
     expect(dock.indexOf("readCosts(`material:")).toBeLessThan(dock.indexOf("const planResult = await api.generationPlan"));
     expect(dock).toContain("setPlan(planResult.plan)");
     expect(dock).toContain("setActiveJobs(planResult.activeJobs");
-    expect(dock).toContain("timer = window.setTimeout(() => void refresh(), 2000)");
+    expect(dock).toContain('polling !== "stopped"');
+    expect(dock).toContain('polling === "idle" ? 60_000 : 2000');
 
     const response = deferred<{ entries: string[] }>();
     const inFlight = new Map<string, Promise<unknown>>();

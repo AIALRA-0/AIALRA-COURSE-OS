@@ -18,6 +18,33 @@ afterEach(async () => {
 });
 
 describe("PDF layout import integration", () => {
+  it("retries a failed conversion only with a new operation key and retains the import identity", async () => {
+    const fixture = await createFixture();
+    const original = fixture.dependencies.conversion;
+    const requestIds: string[] = [];
+    fixture.dependencies.conversion = { enqueueAndWait: async input => {
+      requestIds.push(input.id);
+      if (requestIds.length === 1) return { requestId: input.id, state: "failed", pages: [], issues: ["CONVERSION_PROCESS_FAILED"],
+        startedAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+      return original.enqueueAndWait(input);
+    } };
+    const bytes = syntheticPdf("retry-same-import");
+    const first = await postPdf(fixture.app, bytes, { idempotencyKey: "failed-conversion-original" }).expect(201);
+    expect((await waitForImport(fixture.app, first.body.id)).state).toBe("failed");
+    const replay = await postPdf(fixture.app, bytes, { idempotencyKey: "failed-conversion-original" }).expect(200);
+    expect(replay.body.state).toBe("failed");
+    expect(requestIds).toHaveLength(1);
+    const retry = await postPdf(fixture.app, bytes, { idempotencyKey: "failed-conversion-explicit-retry" }).expect(200);
+    expect(retry.body.id).toBe(first.body.id);
+    const ready = await waitForImport(fixture.app, first.body.id);
+    expect(ready.state).toBe("ready");
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[1]).not.toBe(requestIds[0]);
+    expect(ready.attemptStartedAt).not.toBe(ready.createdAt);
+    expect(fixture.modelCall).not.toHaveBeenCalled();
+    expect((await fixture.dependencies.operations.read()).imports).toHaveLength(1);
+  });
+
   it("returns an inspection preview without creating an import, generation task, course, or model call", async () => {
     const fixture = await createFixture();
     const response = await request(fixture.app).post("/api/v1/imports:inspect")

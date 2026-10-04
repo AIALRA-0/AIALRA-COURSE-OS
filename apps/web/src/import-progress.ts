@@ -419,7 +419,7 @@ export function getImportTaskTiming(
   }
 
   const duration = elapsedSeconds === undefined ? undefined : formatTaskDuration(elapsedSeconds);
-  const normalIntervalNote = "（首轮含排队，重试从重新运行开始）";
+  const normalIntervalNote = "（含本次排队时间）";
   const label = phase === "queued" ? "排队中"
     : phase === "running" ? duration ? `本次耗时 ${duration}${normalIntervalNote}` : "运行中，耗时暂不可核对"
       : phase === "paused" ? duration ? `本次耗时 ${duration}${normalIntervalNote}` : "已暂停，耗时未记录"

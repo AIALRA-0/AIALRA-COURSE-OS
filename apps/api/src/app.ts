@@ -1287,7 +1287,10 @@ export function createApp(dependencies: AppDependencies): Express {
       if (incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source")) {
         return sendError(request, response, 422, "INCREMENTAL_SOURCE_INVALID", "请选择当前工作区已有的原始课件版本", false);
       }
-      if (previousSource && asOptionalString(request.body.courseId) && request.body.courseId !== previousSource.courseId) {
+      const previousMaterialNode = previousSource ? (await dependencies.readweave.listTreeNodes())
+        .find(node => (node.materialId ?? node.id) === stableMaterialNodeId(previousSource.courseId, previousSource.moduleId)) : undefined;
+      const previousNavigationCourseId = previousMaterialNode?.parentId ?? previousSource?.courseId;
+      if (previousSource && asOptionalString(request.body.courseId) && request.body.courseId !== previousNavigationCourseId) {
         return sendError(request, response, 422, "INCREMENTAL_COURSE_MISMATCH", "新版课件必须属于原课程", false);
       }
       if (previousSource && previousSource.manifestHash === cas.sha256) {
@@ -1310,6 +1313,18 @@ export function createApp(dependencies: AppDependencies): Express {
         if (duplicate) {
           deduplicated = true;
           state.idempotency[idempotencyKey] = { kind: "import", objectId: duplicate.id };
+          if (duplicate.state === "failed" && inspection.accepted) {
+            duplicate.state = "accepted";
+            duplicate.issues = [];
+            duplicate.attemptStartedAt = new Date().toISOString();
+            delete duplicate.endedAt;
+            duplicate.autoGenerate = requestedAutoGenerate;
+            duplicate.generationState = requestedAutoGenerate ? "queued" : "not_requested";
+            duplicate.conversionProgress = { stage: "queued", completedPages: 0,
+              ...(layoutPageCount ? { pageCount: layoutPageCount } : {}), updatedAt: duplicate.attemptStartedAt };
+            context.appendEvent(duplicate.id, "import.accepted", { retry: true, sha256: duplicate.sha256 });
+            return structuredClone(duplicate);
+          }
           context.appendEvent(duplicate.id, "import.deduplicated", { sha256: duplicate.sha256, source: duplicate.source });
           return structuredClone(duplicate);
         }
@@ -1320,7 +1335,7 @@ export function createApp(dependencies: AppDependencies): Express {
           id: importId,
           workspaceId,
            courseId: previousSource?.courseId ?? asOptionalString(request.body.courseId),
-           parentNodeId: asOptionalString(request.body.parentNodeId),
+           parentNodeId: previousMaterialNode?.id ?? asOptionalString(request.body.parentNodeId),
           incrementalFromMaterialVersionId,
           originalName: request.file!.originalname,
           mediaType: inspection.detectedMediaType || request.file!.mimetype,
@@ -5101,6 +5116,8 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       return structuredClone(item);
     });
     if (!record) return;
+    const conversionRequestId = record.attemptStartedAt && record.attemptStartedAt !== record.createdAt
+      ? `${importId}-retry-${Date.parse(record.attemptStartedAt)}` : importId;
     const sameProgress = (left: NonNullable<ImportRecord["conversionProgress"]> | undefined,
       right: NonNullable<ImportRecord["conversionProgress"]>) => Boolean(left
         && left.stage === right.stage
@@ -5110,7 +5127,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     let lastPersistedProgress = record.conversionProgress;
     let lastProgressPersistedAt = lastPersistedProgress ? Date.now() : 0;
     const persistConversionProgress = async (progress: Parameters<ConversionProgressCallback>[0], force = false): Promise<void> => {
-      if (progress.requestId !== importId || !Number.isInteger(progress.completedPages)
+      if (progress.requestId !== conversionRequestId || !Number.isInteger(progress.completedPages)
         || progress.completedPages < 0 || progress.completedPages > 500
         || (progress.pageCount !== undefined && (!Number.isInteger(progress.pageCount) || progress.pageCount < 1 || progress.pageCount > 500))
         || (progress.pageCount !== undefined && progress.completedPages > progress.pageCount)
@@ -5145,7 +5162,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       }
     };
     const conversion = await dependencies.conversion.enqueueAndWait({
-      id: importId,
+      id: conversionRequestId,
       sourcePath: record.casPath,
       originalName: record.originalName,
       kind: record.kind,
@@ -5156,7 +5173,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     if (conversion.state !== "completed") throw new Error(conversion.issues[0] || "CONVERSION_FAILED");
     if (record.layoutFingerprint && conversion.inspection?.fingerprint !== record.layoutFingerprint) throw new Error("PDF_LAYOUT_CHANGED");
     await persistConversionProgress({
-      requestId: importId,
+      requestId: conversionRequestId,
       stage: "saving_pages",
       pageCount: conversion.pages.length,
       completedPages: 0,
@@ -5170,7 +5187,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       if (converted.sourceRegion) page.anchors[0]!.sourceRegion = converted.sourceRegion;
       convertedPages.push({ page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType });
       await persistConversionProgress({
-        requestId: importId,
+        requestId: conversionRequestId,
         stage: "saving_pages",
         pageCount: conversion.pages.length,
         completedPages: convertedPages.length,
@@ -5183,13 +5200,15 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     const treeNodes = await dependencies.readweave.listTreeNodes();
     const parentNode = record.parentNodeId ? treeNodes.find((node) => node.id === record.parentNodeId) : undefined;
     const parentCourseId = resolveParentCourseId(parentNode, treeNodes, record.courseId);
-    const course = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies);
-    const materialVersionId = `material-version:${record.id}`;
     const previousSource = record.incrementalFromMaterialVersionId
       ? await getWorkspaceRelease(dependencies.readweave, record.incrementalFromMaterialVersionId, record.workspaceId)
       : undefined;
-    if (record.incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source"
-      || previousSource.courseId !== course.id)) throw new Error("INCREMENTAL_SOURCE_INVALID");
+    if (record.incrementalFromMaterialVersionId && (!previousSource || previousSource.lifecycle !== "draft_source")) throw new Error("INCREMENTAL_SOURCE_INVALID");
+    const navigationCourse = await ensureImportCourse(parentCourseId, record.originalName, record.sha256, record.workspaceId, dependencies);
+    const course = previousSource ? (await dependencies.readweave.listCourses())
+      .find(owner => owner.id === previousSource.courseId && owner.workspaceId === record.workspaceId) : navigationCourse;
+    if (!course) throw new Error("INCREMENTAL_SOURCE_INVALID");
+    const materialVersionId = `material-version:${record.id}`;
     const moduleId = previousSource?.moduleId ?? (parentNode?.kind === "module" ? parentNode.id : `material:${record.id}`);
     const createdAt = new Date().toISOString();
     const writingPolicy = await currentWritingPolicy();

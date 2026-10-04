@@ -307,8 +307,14 @@ export function normalizeSidebarWidth(savedValue: string | null): number {
   return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH ? clampSidebarWidth(saved) : SIDEBAR_DEFAULT_WIDTH;
 }
 
-export function sourceReleasesForCourse(releases: CourseRelease[], courseId: string): CourseRelease[] {
+export function sourceReleasesForCourse(releases: CourseRelease[], courseId: string, courses?: CourseTreeNode[]): CourseRelease[] {
   if (!courseId) return [];
+  const selected = courses?.find(course => course.id === courseId);
+  if (selected) {
+    const current = new Set(selected.children.filter(node => node.kind === "material")
+      .map(node => node.currentReleaseId ?? node.releaseId));
+    return releases.filter(release => release.lifecycle === "draft_source" && current.has(release.id));
+  }
   return releases.filter((release) => release.courseId === courseId && release.lifecycle === "draft_source");
 }
 
@@ -1650,7 +1656,7 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
   const [autoGenerate, setAutoGenerate] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const updateSources = sourceReleasesForCourse(releases, courseId);
+  const updateSources = sourceReleasesForCourse(releases, courseId, courses);
   const [uploadStatus, setUploadStatus] = useState("");
   const submitting = useRef(false);
   const [pdfLayout, setPdfLayout] = useState<import("@course-os/contracts").PdfLayoutSelection>({ mode: "auto" });
