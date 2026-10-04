@@ -2831,7 +2831,7 @@ describe("Course OS API", () => {
     const material = firstTree.body.courses[0].children[0];
     await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
       .set("Idempotency-Key", "persist-material-title")
-      .send({ expectedRevision: material.revision, title: "保留的材料名称" })
+      .send({ expectedRevision: material.revision, title: "保留的材料名称", currentReleaseId: release.id })
       .expect(200);
     const nextRelease = { ...structuredClone(release), id: "test-release-v2", version: release.version + 1, publishedAt: new Date(Date.now() + 1_000).toISOString() };
     await readweave.publishRelease(nextRelease, testManifest(nextRelease.id), {
@@ -2848,6 +2848,22 @@ describe("Course OS API", () => {
       currentReleaseId: release.id,
       pageCount: nextRelease.pages.length
     });
+  });
+
+  it("retains renamed material properties while an unpinned selection follows a newer published release", async () => {
+    const { app, readweave, release } = await seededApp();
+    const initial = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    const material = initial.body.courses[0].children[0];
+    await request(app).patch(`/api/v1/tree/nodes/${encodeURIComponent(material.id)}`)
+      .set("Idempotency-Key", "rename-derived-material")
+      .send({ expectedRevision: material.revision, title: "Renamed unpinned material" }).expect(200);
+    const newer = { ...structuredClone(release), id: "test-release-derived-v2", version: release.version + 1,
+      publishedAt: new Date(Date.now() + 1_000).toISOString() };
+    await readweave.publishRelease(newer, testManifest(newer.id), {
+      idempotencyKey: "publish-derived-newer", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "publish-derived-newer"
+    });
+    const tree = await request(app).get("/api/v1/workspaces/personal/tree").expect(200);
+    expect(tree.body.courses[0].children[0]).toMatchObject({ title: "Renamed unpinned material", currentReleaseId: newer.id, releaseId: newer.id });
   });
 
   it("switches a material current release only to a complete owned draft source", async () => {
