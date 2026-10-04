@@ -51,6 +51,41 @@ describe("ReadingRuntime", () => {
     runtime.close();
   });
 
+  it("projects createCourse rename and trash capabilities before a full refresh", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    let fullRefreshReads = 0;
+    const countedAuthority = new Proxy(authority, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property === "listCourses" || property === "listReleaseIndexes" || property === "listTreeNodes" || property === "listTrash") {
+          return (...args: unknown[]) => {
+            fullRefreshReads += 1;
+            return value.apply(target, args);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, countedAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    const observedAuthority = observeReadingWrites(countedAuthority, runtime);
+    const created = await observedAuthority.createCourse({
+      id: "new-course-before-refresh",
+      workspaceId,
+      title: "New course",
+      status: "active",
+      createdAt: stamp,
+      updatedAt: stamp
+    }, writeContext("create-course-before-refresh"));
+
+    expect(runtime.replica.getTreeNode(workspaceId, created.id)?.capabilities).toEqual([
+      "import_material", "rename", "duplicate", "move", "reorder", "trash", "open_readweave", "history", "properties"
+    ]);
+    expect(fullRefreshReads).toBe(0);
+    runtime.close();
+  });
+
   it("persists a confirmed authority draft write across a runtime restart", async () => {
     const root = await temporaryRoot();
     const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));

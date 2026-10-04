@@ -84,9 +84,13 @@ describe("metadata write result recovery", () => {
     await expect(api.updateTreeNode(node, { title: "Renamed" })).rejects.toMatchObject({ code: "METADATA_RESULT_UNKNOWN" });
     vi.resetModules();
     const reloaded = await import("./api.js");
+    expect(reloaded.api.hasPendingTreeNodeUpdate({ ...node, title: "Renamed", revision: 2 }, { title: "Renamed" })).toBe(true);
+    expect(reloaded.api.hasPendingTreeNodeUpdate(node, { title: "Other intent" })).toBe(false);
+    expect(sent).toHaveLength(1); // Checking the pending intent performs no request.
     await reloaded.api.updateTreeNode({ ...node, title: "Renamed", revision: 2 }, { title: "Renamed" });
     expect(sent[1]).toEqual(sent[0]);
     expect(sent[1]?.body).toEqual({ title: "Renamed", expectedRevision: 1 });
+    expect(reloaded.api.hasPendingTreeNodeUpdate(node, { title: "Renamed" })).toBe(false);
   });
   it("stops waiting on a hung write without forgetting its unknown result or retrying automatically", async () => {
     vi.useFakeTimers();

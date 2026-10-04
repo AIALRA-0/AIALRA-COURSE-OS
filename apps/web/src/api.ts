@@ -270,14 +270,15 @@ const metadataStorage = () => {
   return window.sessionStorage;
 };
 
-// Preserve only unresolved operations. Explicit retries reuse their original
-// key, including after reopening a tab; no background write or optimistic success.
-async function metadataWrite<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown, extraHeaders?: Record<string, string>, operationKey?: string): Promise<T> {
+function metadataIntentFingerprint(path: string, method: string, body?: unknown, extraHeaders?: Record<string, string>): string {
   // A refreshed tree may already expose the committed revision. Retrying that
   // unresolved intent must still send the original revision and operation key.
   const intentBody = method === "PATCH" && body && typeof body === "object"
     ? Object.fromEntries(Object.entries(body).filter(([name]) => name !== "expectedRevision")) : body;
-  const fingerprint = JSON.stringify([path, method, intentBody, extraHeaders]);
+  return JSON.stringify([path, method, intentBody, extraHeaders]);
+}
+
+function restorePendingMetadata(): void {
   try {
     const stored = metadataStorage().getItem(pendingMetadataStorageKey)
       ?? window.sessionStorage.getItem(pendingMetadataStorageKey);
@@ -291,6 +292,13 @@ async function metadataWrite<T>(path: string, method: "POST" | "PATCH" | "DELETE
       }
     }
   } catch { /* Unavailable storage still permits an in-tab retry. */ }
+}
+
+// Preserve only unresolved operations. Explicit retries reuse their original
+// key, including after reopening a tab; no background write or optimistic success.
+async function metadataWrite<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown, extraHeaders?: Record<string, string>, operationKey?: string): Promise<T> {
+  const fingerprint = metadataIntentFingerprint(path, method, body, extraHeaders);
+  restorePendingMetadata();
   if (!pendingMetadata.has(fingerprint) && pendingMetadata.size >= 64) {
     throw new ApiRequestError("已有过多保存结果待确认，请先核对原操作；这次尚未提交", "METADATA_PENDING_LIMIT", 409, false);
   }
@@ -337,6 +345,10 @@ export const api = {
   workspaceTree: (workspaceId = WORKSPACE_ID, options?: ApiRequestOptions) => request<WorkspaceTree>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tree?view=library`, { signal: options?.signal }),
   createModule: (courseId: string, title: string, description?: string) => metadataWrite<CourseTreeNode>("/api/v1/modules", "POST", { courseId, title, description }),
   updateTreeNode: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }) => metadataWrite<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, "PATCH", { ...patch, expectedRevision: node.revision ?? 0 }),
+  hasPendingTreeNodeUpdate: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }) => {
+    restorePendingMetadata();
+    return pendingMetadata.has(metadataIntentFingerprint(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, "PATCH", patch));
+  },
   treeNodeProperties: (nodeId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").TreeNodeProperties>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/properties`, { signal: options?.signal }),
   treeNodeVersions: (nodeId: string, options?: ApiRequestOptions) => request<CourseRelease[]>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/versions`, { signal: options?.signal }),
   duplicateTreeNode: (node: CourseTreeNode) => metadataWrite<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:duplicate`, "POST"),

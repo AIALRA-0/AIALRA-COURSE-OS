@@ -46,7 +46,6 @@ import type {
   TreeNodeProperties,
   WorkspaceSettings,
   WritingPolicyCurrent,
-  CourseTreeNodeKind,
   TrashRecord
 } from "@course-os/contracts";
 import type { WorkspaceTree } from "@course-os/contracts";
@@ -74,6 +73,7 @@ import { planningPrompt, plannedWritingPrompt, writingFormatContract, type Plann
 import { policyFormatRules } from "./generation-harness.js";
 import { probeSearchConnection, type CourseSearchConnection } from "./search-providers.js";
 import { prepareIncrementalVersion } from "./incremental-import.js";
+import { treeCapabilities } from "./tree-capabilities.js";
 
 export interface AppDependencies {
   dataDir: string;
@@ -3135,18 +3135,6 @@ async function reviewQuestionFor(readweave: ReadWeaveCourseApi, session: ReviewS
   const questionId = session.questionIdsByObjective?.[objective.objectiveId]?.[0];
   return bank.find((item) => item.status === "approved" && item.id === questionId)
     ?? bank.find((item) => item.status === "approved" && item.objectiveId === objective.objectiveId);
-}
-
-function treeCapabilities(kind: CourseTreeNodeKind): CourseTreeNode["capabilities"] {
-  if (kind === "workspace") return ["create_course", "create", "properties"];
-  if (kind === "course") return ["import_material", "rename", "duplicate", "move", "reorder", "trash", "open_readweave", "history", "properties"];
-  if (kind === "module") return ["import_material", "rename", "duplicate", "move", "reorder", "trash", "open_studio", "open_readweave", "history", "properties"];
-  if (kind === "material") return ["rename", "duplicate", "move", "reorder", "trash", "open_studio", "open_readweave", "history", "properties"];
-  if (kind === "page") return ["open_studio", "open_readweave", "properties"];
-  if (kind === "release") return ["open_readweave", "history", "properties"];
-  if (kind === "section") return ["history", "properties"];
-  if (kind === "trash") return ["restore"];
-  return ["properties"];
 }
 
 function isRegressionAsset(...values: string[]): boolean {

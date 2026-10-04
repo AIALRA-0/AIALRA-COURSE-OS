@@ -177,6 +177,22 @@ describe("ReadingReplica", () => {
     await expect(replica.getPageSource("workspace-a", "regression-course-page", hiddenCourseRelease.id)).resolves.toBeUndefined();
   });
 
+  it("fills missing tree-node capabilities while preserving an explicit restricted empty list", async () => {
+    const root = await temporaryRoot();
+    const replica = new ReadingReplica(root, "authority:tree-node-capabilities");
+    await replica.initialize();
+
+    await replica.updateMetadata({ treeNodeUpserts: [
+      { workspaceId: "workspace-a", node: { id: "course-default", kind: "course", title: "Default", children: [] } },
+      { workspaceId: "workspace-a", node: { id: "course-restricted", kind: "course", title: "Restricted", capabilities: [], children: [] } }
+    ] });
+
+    expect(replica.getTreeNode("workspace-a", "course-default")?.capabilities).toEqual([
+      "import_material", "rename", "duplicate", "move", "reorder", "trash", "open_readweave", "history", "properties"
+    ]);
+    expect(replica.getTreeNode("workspace-a", "course-restricted")?.capabilities).toEqual([]);
+  });
+
   it("checks shared media against visible page owners within the requested workspace", async () => {
     const root = await temporaryRoot();
     const replica = new ReadingReplica(root, "authority:media-visibility");

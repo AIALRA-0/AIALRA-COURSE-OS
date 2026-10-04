@@ -13,6 +13,7 @@ import type {
 import { sha256Text, stableStringify } from "@course-os/domain";
 import { writeJsonAtomic } from "@course-os/storage";
 import { toCourseReleaseIndex, type CourseReleaseIndex } from "@course-os/readweave-adapter";
+import { treeCapabilities } from "./tree-capabilities.js";
 
 const FORMAT_VERSION = 1;
 const MAX_SNAPSHOT_COUNT = 50_000;
@@ -845,6 +846,10 @@ export class ReadingReplica {
     }
     return this.commit(async (current) => {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) return undefined;
+      const treeNodeUpserts = (update.treeNodeUpserts ?? []).map(({ workspaceId, node }) => ({
+        workspaceId,
+        node: node.capabilities === undefined ? { ...node, capabilities: treeCapabilities(node.kind) } : node
+      }));
       // Authority callbacks can complete out of order. Reject the whole stale
       // projection before updating its course, version selection or protection.
       const findNode = (nodes: CourseTreeNode[], id: string): CourseTreeNode | undefined => {
@@ -855,7 +860,7 @@ export class ReadingReplica {
         }
         return undefined;
       };
-      for (const { workspaceId, node } of update.treeNodeUpserts ?? []) {
+      for (const { workspaceId, node } of treeNodeUpserts) {
         const tree = current.trees.find(item => item.workspaceId === workspaceId);
         const old = tree && (findNode(tree.courses, node.id) ?? findNode(tree.rootMaterials ?? [], node.id));
         if (old?.revision !== undefined && (node.revision === undefined || node.revision < old.revision)) return undefined;
@@ -961,7 +966,7 @@ export class ReadingReplica {
         const tree = getTree(item.workspaceId);
         removeTreeNode(tree, item.nodeId);
       }
-      for (const item of update.treeNodeUpserts ?? []) {
+      for (const item of treeNodeUpserts) {
         const tree = getTree(item.workspaceId);
         if (!upsertTreeNode(tree, item.node)) throw new Error("READING_PROJECTION_TREE_PARENT_MISSING");
       }
