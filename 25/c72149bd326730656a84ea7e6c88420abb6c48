@@ -1,0 +1,29 @@
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_5309b335b31ded 372,389
+  s_e8850ef125fb32::t_0e20e2c1df6e22 4,45,369-371,373-378,380-388,390-406
+apps/web/src/QuestionInputs.spec.tsx
+  s_e8850ef125fb32::t_5abc514823dd4f 21,24,44
+  s_e8850ef125fb32::t_094450b967ae5a 1-20,22-23,25-43,45-48
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_23d7645a74d145 412
+  s_e8850ef125fb32::t_0e20e2c1df6e22 6,8
+apps/web/src/QuestionInputs.tsx
+  s_e8850ef125fb32::t_1493e4b23f56df 27,29,32
+  s_e8850ef125fb32::t_0e20e2c1df6e22 1-26,28,30-31,33-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25c72149bd326730656a84ea7e6c88420abb6c48",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
