@@ -89,14 +89,14 @@ def _object_bounds(obj: Any) -> tuple[float, float, float, float] | None:
 
 
 def _path_visible_frame(obj: Any) -> bool:
-    fill_mode, stroke = ctypes.c_long(), ctypes.c_long()
+    fill_mode, stroke = ctypes.c_int(), ctypes.c_int()
     if not pdfium_c.FPDFPath_GetDrawMode(
         obj.raw, ctypes.byref(fill_mode), ctypes.byref(stroke)
     ):
         return False
     if stroke.value:
         width = ctypes.c_float()
-        color = [ctypes.c_ulong() for _ in range(4)]
+        color = [ctypes.c_uint() for _ in range(4)]
         if (
             pdfium_c.FPDFPageObj_GetStrokeWidth(obj.raw, ctypes.byref(width))
             and width.value > 0
@@ -107,7 +107,7 @@ def _path_visible_frame(obj: Any) -> bool:
         ):
             return True
     if fill_mode.value:
-        color = [ctypes.c_ulong() for _ in range(4)]
+        color = [ctypes.c_uint() for _ in range(4)]
         if (
             pdfium_c.FPDFPageObj_GetFillColor(
                 obj.raw, *(ctypes.byref(channel) for channel in color)
