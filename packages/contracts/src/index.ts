@@ -338,6 +338,8 @@ export interface CourseTreeNode {
   visibility?: "library" | "internal" | "archived";
   materialId?: Identifier;
   currentReleaseId?: Identifier;
+  /** Whether the current material release is a user pin or a computed default. */
+  currentReleaseSelection?: "explicit" | "derived";
   pageCount?: number;
   capabilities?: TreeNodeCapability[];
   readweaveNoteId?: Identifier;

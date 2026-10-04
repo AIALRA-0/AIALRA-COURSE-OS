@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, LessonDraft, PageLesson, TrashRecord, WorkspaceTree } from "@course-os/contracts";
 import { toCourseReleaseIndex } from "@course-os/readweave-adapter";
-import { ReadingReplica, type ReadingReplicaInput } from "./reading-replica.js";
+import { ReadingReplica, readingProjectionInvalidationId, type ReadingReplicaInput } from "./reading-replica.js";
 
 const roots: string[] = [];
 const stamp = "2026-09-30T12:00:00.000Z";
@@ -175,6 +175,50 @@ describe("ReadingReplica", () => {
     expect(await replica.getPageSource("workspace-a", "sample-page", sampleRelease.id)).toBeDefined();
     await expect(replica.getPageSource("workspace-a", "regression-page", regressionRelease.id)).resolves.toBeUndefined();
     await expect(replica.getPageSource("workspace-a", "regression-course-page", hiddenCourseRelease.id)).resolves.toBeUndefined();
+  });
+
+  it("checks shared media against visible page owners within the requested workspace", async () => {
+    const root = await temporaryRoot();
+    const replica = new ReadingReplica(root, "authority:media-visibility");
+    await replica.initialize();
+    const sharedImageUrl = "/api/v1/media/shared-media-hash";
+    const ownerA = page("media-owner-a");
+    const ownerB = page("media-owner-b");
+    const ownerOtherWorkspace = page("media-owner-other-workspace");
+    ownerA.imageUrl = sharedImageUrl;
+    ownerB.imageUrl = sharedImageUrl;
+    ownerOtherWorkspace.imageUrl = sharedImageUrl;
+    const releaseA = release("media-release-a", "course-a", [ownerA], 1, "module-a");
+    const releaseB = release("media-release-b", "course-a", [ownerB], 1, "module-b");
+    const otherWorkspaceRelease = release("media-release-c", "course-c", [ownerOtherWorkspace], 1, "module-c");
+    await replica.replace({
+      courses: [course("course-a", "workspace-a"), course("course-c", "workspace-c")],
+      releases: [releaseA, releaseB, otherWorkspaceRelease],
+      drafts: [],
+      tree: tree("workspace-a", "course-a", releaseA.id),
+      trash: []
+    });
+
+    expect(replica.getMediaVisibility("workspace-a", "shared-media-hash")).toBe("confirmed");
+    expect(replica.getMediaVisibility("workspace-c", "shared-media-hash")).toBe("confirmed");
+    expect(replica.getMediaVisibility("workspace-missing", "shared-media-hash")).toBe("unindexed");
+
+    const invalidatePage = (workspaceId: string, pageId: string) => replica.invalidateProjection({
+      id: readingProjectionInvalidationId(workspaceId, "page", pageId),
+      workspaceId,
+      targetKind: "page",
+      targetId: pageId,
+      reason: "draft",
+      revision: 2
+    });
+    await invalidatePage("workspace-a", ownerA.id);
+    expect(replica.getMediaVisibility("workspace-a", "shared-media-hash")).toBe("confirmed");
+    await invalidatePage("workspace-a", ownerB.id);
+    expect(replica.getMediaVisibility("workspace-a", "shared-media-hash")).toBe("blocked");
+    expect(replica.getMediaVisibility("workspace-c", "shared-media-hash")).toBe("confirmed");
+
+    await invalidatePage("workspace-c", ownerOtherWorkspace.id);
+    expect(replica.getMediaVisibility("workspace-c", "shared-media-hash")).toBe("blocked");
   });
 
   it("restarts offline, refreshes lightweight indexes without replacing bodies, and verifies page hashes", async () => {

@@ -5,6 +5,7 @@ import { buildReadingTree } from "../apps/api/src/app.js";
 import { EtapiSettingsRuntime } from "../apps/api/src/etapi-settings-routes.js";
 import { ReadingRuntime } from "../apps/api/src/reading-runtime.js";
 import { SecretVault } from "../apps/api/src/secret-vault.js";
+import { acquireProductionApiWriterLock } from "../apps/api/src/server.js";
 
 // Operator-only controlled confirmation of existing authority data, never a startup job.
 const dataDir = resolve(process.env.COURSE_OS_DATA_DIR || "var");
@@ -23,6 +24,30 @@ const fallback = () => process.env.READWEAVE_MODE === "http"
   : new FileReadWeaveCourseApi(join(dataDir, "readweave-course-store.json"), process.env.READWEAVE_PUBLIC_URL);
 const settings = new EtapiSettingsRuntime({ dataDir, workspaceId, vault: new SecretVault(join(dataDir, "settings-secrets.json")),
   initialConfig: config, initialAdapter: config ? new EtapiReadWeaveCourseApi(config) : fallback(), fallbackAdapter: fallback });
+const metadataMode = process.argv.includes("--metadata-index");
+const rollbackMode = process.argv.includes("--metadata-rollback");
+if (metadataMode && rollbackMode) throw new Error("Choose metadata activation or rollback, not both");
+if (metadataMode || rollbackMode) {
+  // Metadata migration writes authority data. Use the same production writer
+  // lease as the API; an operator must stop the API before invoking this mode.
+  const lock = await acquireProductionApiWriterLock(process.env.NODE_ENV, process.env.DATABASE_URL, error => {
+    process.stderr.write(`Metadata operator writer lease lost: ${error.message}\n`);
+    process.exit(1);
+  });
+  try {
+    const adapter = await settings.initialize();
+    if (!(adapter instanceof EtapiReadWeaveCourseApi)) throw new Error("Metadata operation requires the ETAPI authority");
+    const startedAt = Date.now();
+    if (metadataMode) {
+      const result = await adapter.ensureMetadataIndex();
+      process.stdout.write(JSON.stringify({ operation: "metadata-index", ...result, elapsedMs: Date.now() - startedAt }) + "\n");
+    } else {
+      await adapter.prepareMetadataRollback();
+      process.stdout.write(JSON.stringify({ operation: "metadata-rollback", confirmed: true, elapsedMs: Date.now() - startedAt }) + "\n");
+    }
+  } finally { await lock?.release(); }
+  process.exit(0);
+}
 const authority = await settings.initialize();
 const identity = settings.readingIdentity();
 const runtime = new ReadingRuntime(join(dataDir, "confirmed-reading", identity), authority, workspaceId, identity, buildReadingTree);

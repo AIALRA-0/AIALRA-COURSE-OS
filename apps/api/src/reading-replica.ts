@@ -51,6 +51,8 @@ interface ReplicaCatalog {
   releases: CatalogRelease[];
   trees: WorkspaceTree[];
   trash: TrashRecord[];
+  invalidations?: ReadingProjectionInvalidation[];
+  materialReleaseSelections?: Record<string, ReadingMaterialReleaseSelection>;
 }
 
 interface SnapshotEnvelope {
@@ -82,6 +84,7 @@ export interface ReadingReplicaInput {
   drafts: LessonDraft[];
   tree: WorkspaceTree;
   trash: TrashRecord[];
+  materialReleaseSelectionUpserts?: ReadingMaterialReleaseSelectionUpsert[];
 }
 
 export interface ReadingReplicaMetadataUpdate {
@@ -90,6 +93,44 @@ export interface ReadingReplicaMetadataUpdate {
   indexes?: CourseReleaseIndex[];
   tree?: WorkspaceTree;
   trash?: TrashRecord[];
+  courseUpserts?: CourseProject[];
+  treeNodeUpserts?: Array<{ workspaceId: string; node: CourseTreeNode }>;
+  treeNodeRemovals?: Array<{ workspaceId: string; nodeId: string }>;
+  trashUpserts?: TrashRecord[];
+  trashRemovals?: Array<{ workspaceId: string; trashId: string }>;
+  materialReleaseSelectionUpserts?: ReadingMaterialReleaseSelectionUpsert[];
+  clearInvalidations?: string[];
+  clearInvalidationConfirmations?: ReadingProjectionInvalidation[];
+}
+
+export interface ReadingMaterialReleaseSelection {
+  releaseId: string;
+  source: "derived" | "explicit";
+}
+
+export interface ReadingMaterialReleaseSelectionUpsert {
+  workspaceId: string;
+  materialId: string;
+  selection: ReadingMaterialReleaseSelection;
+}
+
+export interface ReadingProjectionInvalidation {
+  id: string;
+  workspaceId: string;
+  targetKind: "course" | "material" | "release" | "page" | "node";
+  targetId: string;
+  reason: "draft" | "tree" | "trashed" | "restored" | "release-removed" | "permanent-delete";
+  revision?: number;
+  previousRevision?: number;
+  rejected?: boolean;
+  expectedArchived?: boolean;
+  expectedCurrentReleaseId?: string;
+  trashId?: string;
+  deletedAt?: string;
+}
+
+export function readingProjectionInvalidationId(workspaceId: string, targetKind: ReadingProjectionInvalidation["targetKind"], targetId: string): string {
+  return `${workspaceId}\u0000${targetKind}\u0000${targetId}`;
 }
 
 export interface ReadingReplicaStatus {
@@ -103,6 +144,8 @@ export interface ReadingReplicaStatus {
   maxSnapshotCount: number;
   maxSnapshotBytes: number;
 }
+
+export type ReadingMediaVisibility = "confirmed" | "blocked" | "unindexed";
 
 const processLocks = new Map<string, Promise<void>>();
 
@@ -149,8 +192,36 @@ function isRegressionAsset(...values: string[]): boolean {
   return REGRESSION_ASSET_MARKER.test(values.join(" "));
 }
 
+function imageMediaHash(imageUrl: string): string | undefined {
+  const path = imageUrl.split(/[?#]/u, 1)[0] ?? "";
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length < 2 || segments.at(-2) !== "media") return undefined;
+  try { return decodeURIComponent(segments.at(-1)!); }
+  catch { return undefined; }
+}
+
 function assertIdentifier(value: unknown, name: string): asserts value is string {
   if (typeof value !== "string" || value.trim().length === 0) throw new Error(`READING_INVALID_INPUT:${name}`);
+}
+
+function applyMaterialReleaseSelectionUpserts(
+  current: Record<string, ReadingMaterialReleaseSelection> | undefined,
+  upserts: ReadingMaterialReleaseSelectionUpsert[] = []
+): Record<string, ReadingMaterialReleaseSelection> {
+  let selections = current ?? {};
+  for (const item of upserts) {
+    assertIdentifier(item?.workspaceId, "WORKSPACE_ID");
+    assertIdentifier(item?.materialId, "MATERIAL_ID");
+    assertIdentifier(item?.selection?.releaseId, "RELEASE_ID");
+    if (item.selection.source !== "derived" && item.selection.source !== "explicit") {
+      throw new Error("READING_INVALID_INPUT:MATERIAL_RELEASE_SELECTION");
+    }
+    selections = {
+      ...selections,
+      [pointerKey(item.workspaceId, item.materialId, "")]: jsonClone(item.selection)
+    };
+  }
+  return selections;
 }
 
 function assertCatalog(catalog: ReplicaCatalog, authorityHash: string): void {
@@ -159,6 +230,17 @@ function assertCatalog(catalog: ReplicaCatalog, authorityHash: string): void {
   }
   if (catalog.authorityHash !== authorityHash) throw new Error("READING_AUTHORITY_MISMATCH");
   if (!Array.isArray(catalog.courses) || !Array.isArray(catalog.releases) || !Array.isArray(catalog.trees) || !Array.isArray(catalog.trash)) {
+    throw new Error("READING_CORRUPT:CATALOG_INVALID");
+  }
+  if (catalog.invalidations !== undefined && (!Array.isArray(catalog.invalidations)
+    || catalog.invalidations.some((item) => !item || typeof item.id !== "string" || typeof item.workspaceId !== "string"
+      || typeof item.targetId !== "string" || !["course", "material", "release", "page", "node"].includes(item.targetKind)))) {
+    throw new Error("READING_CORRUPT:CATALOG_INVALID");
+  }
+  if (catalog.materialReleaseSelections !== undefined && (!catalog.materialReleaseSelections
+    || typeof catalog.materialReleaseSelections !== "object" || Array.isArray(catalog.materialReleaseSelections)
+    || Object.values(catalog.materialReleaseSelections).some((selection) => !selection
+      || typeof selection.releaseId !== "string" || !["derived", "explicit"].includes(selection.source)))) {
     throw new Error("READING_CORRUPT:CATALOG_INVALID");
   }
   const totals = snapshotTotals(catalog.releases);
@@ -189,7 +271,7 @@ function snapshotTotals(releases: CatalogRelease[]): { count: number; bytes: num
 
 function withSnapshotTotals(catalog: ReplicaCatalog): ReplicaCatalog {
   const totals = snapshotTotals(catalog.releases);
-  return { ...catalog, snapshotCount: totals.count, snapshotBytes: totals.bytes };
+  return { ...catalog, snapshotCount: totals.count, snapshotBytes: totals.bytes, invalidations: catalog.invalidations ?? [] };
 }
 
 function draftPointer(draft: LessonDraft | undefined): DraftPointer | undefined {
@@ -290,7 +372,9 @@ function emptyCatalog(authorityHash: string): ReplicaCatalog {
     courses: [],
     releases: [],
     trees: [],
-    trash: []
+    trash: [],
+    invalidations: [],
+    materialReleaseSelections: {}
   };
 }
 
@@ -301,6 +385,73 @@ function walkTree(nodes: CourseTreeNode[], visit: (node: CourseTreeNode) => bool
     result.push({ ...jsonClone(node), children: walkTree(node.children ?? [], visit) });
   }
   return result;
+}
+
+function emptyWorkspaceTree(workspaceId: string): WorkspaceTree {
+  return {
+    workspaceId,
+    title: "Course OS 课程空间",
+    treeVersion: "2.4.0",
+    courses: [],
+    rootMaterials: [],
+    trash: { id: `workspace:${workspaceId}:trash`, kind: "trash", title: "回收站", children: [] },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function takeTreeNode(nodes: CourseTreeNode[], nodeId: string): CourseTreeNode | undefined {
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]!;
+    if (node.id === nodeId || (node.kind === "material" && node.materialId === nodeId)) {
+      nodes.splice(index, 1);
+      return node;
+    }
+    const nested = takeTreeNode(node.children ?? [], nodeId);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+function removeTreeNode(tree: WorkspaceTree, nodeId: string): void {
+  takeTreeNode(tree.courses, nodeId);
+  takeTreeNode(tree.rootMaterials ?? [], nodeId);
+}
+
+function appendToTreeNode(nodes: CourseTreeNode[], parentId: string, child: CourseTreeNode): boolean {
+  for (const node of nodes) {
+    if (node.id === parentId || node.materialId === parentId) {
+      node.children = [...(node.children ?? []), child];
+      return true;
+    }
+    if (appendToTreeNode(node.children ?? [], parentId, child)) return true;
+  }
+  return false;
+}
+
+function upsertTreeNode(tree: WorkspaceTree, incoming: CourseTreeNode): boolean {
+  const old = takeTreeNode(tree.courses, incoming.id) ?? takeTreeNode(tree.rootMaterials ?? [], incoming.id)
+    ?? (incoming.materialId ? takeTreeNode(tree.courses, incoming.materialId) ?? takeTreeNode(tree.rootMaterials ?? [], incoming.materialId) : undefined);
+  const node: CourseTreeNode = {
+    ...(old ?? {} as CourseTreeNode),
+    ...jsonClone(incoming),
+    children: incoming.children?.length ? jsonClone(incoming.children) : old?.children ?? []
+  };
+  if (node.kind === "course") {
+    tree.courses = [...tree.courses, node];
+    return true;
+  }
+  if (node.parentId) {
+    const virtualParent = /^material:([^:]+):current$/u.exec(node.parentId);
+    const parentId = virtualParent?.[1] ?? node.parentId;
+    if (!appendToTreeNode(tree.courses, parentId, node) && !appendToTreeNode(tree.rootMaterials ?? [], parentId, node)) return false;
+    return true;
+  }
+  if (node.kind === "material") {
+    tree.rootMaterials = [...(tree.rootMaterials ?? []), node];
+    return true;
+  }
+  tree.courses = [...tree.courses, node];
+  return true;
 }
 
 export class ReadingReplica {
@@ -359,7 +510,8 @@ export class ReadingReplica {
       revision: catalog.revision,
       courses: catalog.courses.filter((course) => this.isCourseVisible(catalog, course.workspaceId, course.id)).length,
       pages: catalog.releases.reduce((total, release) => total + (this.isReleaseVisible(catalog, release)
-        ? release.pages.filter((page) => Boolean(page.snapshot) && !this.isTombstoned(catalog, release.workspaceId, "page", page.pageId)).length
+        ? release.pages.filter((page) => Boolean(page.snapshot) && !this.isTombstoned(catalog, release.workspaceId, "page", page.pageId)
+          && !this.isProjectionInvalidated(catalog, release.workspaceId, "page", page.pageId)).length
         : 0), 0),
       releases: catalog.releases.filter((release) => this.isReleaseVisible(catalog, release)).length,
       snapshotBytes: catalog.snapshotBytes,
@@ -383,6 +535,23 @@ export class ReadingReplica {
       .map((release) => this.visibleReleaseIndex(catalog, release)));
   }
 
+  getMediaVisibility(workspaceId: string, hash: string): ReadingMediaVisibility {
+    const catalog = this.requireCatalog();
+    let indexedOwner = false;
+    for (const release of catalog.releases) {
+      if (release.workspaceId !== workspaceId) continue;
+      for (const page of release.index.pages) {
+        if (imageMediaHash(page.imageUrl) !== hash) continue;
+        indexedOwner = true;
+        if (this.isReleaseVisible(catalog, release)
+          && !this.isTombstoned(catalog, workspaceId, "page", page.id)
+          && !this.isProjectionInvalidated(catalog, workspaceId, "page", page.id)
+          && !this.isPageArchived(catalog, workspaceId, page.id)) return "confirmed";
+      }
+    }
+    return indexedOwner ? "blocked" : "unindexed";
+  }
+
   async getReleaseIndex(workspaceId: string, releaseId: string): Promise<CourseReleaseIndex | undefined> {
     const catalog = this.requireReadableCatalog();
     const release = catalog.releases.find((item) => item.workspaceId === workspaceId && item.index.id === releaseId);
@@ -396,6 +565,7 @@ export class ReadingReplica {
     const tree = catalog.trees.find((item) => item.workspaceId === workspaceId);
     if (!tree) return undefined;
     const visibleNode = (node: CourseTreeNode): boolean => {
+      if (this.isNodeProjectionInvalidated(catalog, workspaceId, node)) return false;
       if (node.archived || node.visibility === "archived") return false;
       if (node.kind === "course") return this.isCourseVisible(catalog, workspaceId, node.id);
       if (node.kind === "material") {
@@ -419,6 +589,86 @@ export class ReadingReplica {
     return jsonClone(this.requireReadableCatalog().trash.filter((item) => item.workspaceId === workspaceId));
   }
 
+  projectionInvalidations(workspaceId?: string): ReadingProjectionInvalidation[] {
+    const catalog = this.catalog;
+    if (!catalog) return [];
+    return jsonClone((catalog.invalidations ?? []).filter((item) => !workspaceId || item.workspaceId === workspaceId));
+  }
+
+  async invalidateProjection(invalidation: ReadingProjectionInvalidation): Promise<void> {
+    assertIdentifier(invalidation?.workspaceId, "WORKSPACE_ID");
+    assertIdentifier(invalidation?.targetId, "INVALIDATION_TARGET");
+    if (invalidation.id !== readingProjectionInvalidationId(invalidation.workspaceId, invalidation.targetKind, invalidation.targetId)
+      || (invalidation.revision !== undefined && (!Number.isSafeInteger(invalidation.revision) || invalidation.revision < 0))) {
+      throw new Error("READING_INVALID_INPUT:PROJECTION_INVALIDATION");
+    }
+    await this.commit(async (current) => {
+      const invalidations = current.invalidations ?? [];
+      const existing = invalidations.find((item) => item.id === invalidation.id);
+      if (existing && existing.revision !== undefined && invalidation.revision !== undefined
+        && existing.revision > invalidation.revision) return current;
+      return {
+        ...current,
+        invalidations: [...invalidations.filter((item) => item.id !== invalidation.id), jsonClone(invalidation)]
+      };
+    });
+  }
+
+  async clearProjectionInvalidations(ids: string[], confirmations?: ReadingProjectionInvalidation[]): Promise<void> {
+    const clear = new Set(ids);
+    if (!clear.size) return;
+    await this.commit(async (current) => ({
+      ...current,
+      invalidations: (current.invalidations ?? []).filter((item) => !clear.has(item.id)
+        || confirmations !== undefined && !confirmations.some(value => JSON.stringify(value) === JSON.stringify(item)))
+    }));
+  }
+
+  async markProjectionRejected(id: string, confirmation?: ReadingProjectionInvalidation): Promise<void> {
+    await this.commit(async (current) => ({
+      ...current,
+      invalidations: (current.invalidations ?? []).map((item) => item.id === id
+        && (confirmation === undefined || JSON.stringify(item) === JSON.stringify(confirmation))
+        ? { ...item, rejected: true }
+        : item)
+    }));
+  }
+
+  getCourse(workspaceId: string, courseId: string): CourseProject | undefined {
+    const course = this.requireCatalog().courses.find((item) => item.workspaceId === workspaceId && item.id === courseId);
+    return course ? jsonClone(course) : undefined;
+  }
+
+  getTrashRecord(workspaceId: string, trashId: string): TrashRecord | undefined {
+    const record = this.requireCatalog().trash.find((item) => item.workspaceId === workspaceId && item.id === trashId);
+    return record ? jsonClone(record) : undefined;
+  }
+
+  getCachedReleaseIndex(workspaceId: string, releaseId: string): CourseReleaseIndex | undefined {
+    const release = this.requireCatalog().releases.find((item) => item.workspaceId === workspaceId && item.index.id === releaseId);
+    return release ? jsonClone(release.index) : undefined;
+  }
+
+  getTreeNode(workspaceId: string, nodeId: string): CourseTreeNode | undefined {
+    const tree = this.requireCatalog().trees.find((item) => item.workspaceId === workspaceId);
+    if (!tree) return undefined;
+    const find = (nodes: CourseTreeNode[]): CourseTreeNode | undefined => {
+      for (const node of nodes) {
+        if (node.id === nodeId || node.materialId === nodeId) return node;
+        const nested = find(node.children ?? []);
+        if (nested) return nested;
+      }
+      return undefined;
+    };
+    const node = find(tree.courses) ?? find(tree.rootMaterials ?? []);
+    return node ? jsonClone(node) : undefined;
+  }
+
+  getMaterialReleaseSelection(workspaceId: string, materialId: string): ReadingMaterialReleaseSelection | undefined {
+    const selection = this.requireCatalog().materialReleaseSelections?.[pointerKey(workspaceId, materialId, "")];
+    return selection ? jsonClone(selection) : undefined;
+  }
+
   async getPageSource(workspaceId: string, pageId: string, releaseId?: string): Promise<{
     release: CourseReleaseIndex;
     page: PageLesson;
@@ -429,6 +679,7 @@ export class ReadingReplica {
       && (!releaseId || item.index.id === releaseId)
       && this.isReleaseVisible(catalog, item)
       && !this.isTombstoned(catalog, workspaceId, "page", pageId)
+      && !this.isProjectionInvalidated(catalog, workspaceId, "page", pageId)
       && item.index.pages.some((page) => page.id === pageId));
     const tree = catalog.trees.find((item) => item.workspaceId === workspaceId);
     const preferredReleaseIds = new Set<string>();
@@ -470,7 +721,8 @@ export class ReadingReplica {
     const candidates: Array<{ release: CatalogRelease; page: SnapshotPointer }> = [];
     for (const release of catalog.releases) {
       if (release.workspaceId !== workspaceId || (releaseId && release.index.id !== releaseId)
-        || !this.isReleaseVisible(catalog, release) || this.isTombstoned(catalog, workspaceId, "page", pageId)) continue;
+        || !this.isReleaseVisible(catalog, release) || this.isTombstoned(catalog, workspaceId, "page", pageId)
+        || this.isProjectionInvalidated(catalog, workspaceId, "page", pageId)) continue;
       const page = release.pages.find((item) => item.pageId === pageId)?.snapshot;
       if (page?.draft) candidates.push({ release, page });
     }
@@ -482,18 +734,21 @@ export class ReadingReplica {
     return snapshot.draft ? jsonClone(snapshot.draft) : undefined;
   }
 
-  async replace(input: ReadingReplicaInput, expectedRevision?: number): Promise<void | false> {
+  async replace(input: ReadingReplicaInput, expectedRevision?: number, clearInvalidations: string[] = []): Promise<void | false> {
     if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
       throw new Error("READING_INVALID_INPUT:EXPECTED_REVISION");
     }
     const committed = await this.commit(async (current) => {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) return undefined;
-      return this.buildReplacement(input, current);
+      const replacement = await this.buildReplacement(input, current);
+      if (!replacement) return undefined;
+      const clear = new Set(clearInvalidations);
+      return { ...replacement, invalidations: (current.invalidations ?? []).filter((item) => !clear.has(item.id)) };
     });
     return committed ? undefined : false;
   }
 
-  async upsertRelease(release: CourseRelease): Promise<boolean> {
+  async upsertRelease(release: CourseRelease, clearInvalidations: string[] = []): Promise<boolean> {
     validateRelease(release);
     return this.commit(async (current) => {
       const matchingCourses = current.courses.filter((course) => course.id === release.courseId);
@@ -512,11 +767,13 @@ export class ReadingReplica {
       if (!replacement) return undefined;
       const releases = current.releases.filter((item) => !(item.workspaceId === course.workspaceId && item.index.id === release.id));
       releases.push(replacement);
-      return withSnapshotTotals({ ...current, releases });
+      const clear = new Set(clearInvalidations);
+      return withSnapshotTotals({ ...current, releases,
+        invalidations: (current.invalidations ?? []).filter((item) => !clear.has(item.id)) });
     });
   }
 
-  async upsertDraft(draft: LessonDraft): Promise<boolean> {
+  async upsertDraft(draft: LessonDraft, clearInvalidations: string[] = []): Promise<boolean> {
     validateDraft(draft);
     return this.commit(async (current) => {
       const release = current.releases.find((item) => item.workspaceId === draft.workspaceId && item.index.id === draft.sourceReleaseId);
@@ -575,7 +832,10 @@ export class ReadingReplica {
         ? { pageId: item.pageId, snapshot: stored }
         : item);
       const releases = current.releases.map((item) => item === release ? { ...item, pages } : item);
-      return withSnapshotTotals({ ...current, releases });
+      const clear = new Set(clearInvalidations);
+      return withSnapshotTotals({ ...current, releases,
+        invalidations: (current.invalidations ?? []).filter((item) => !clear.has(item.id)
+          || item.reason !== "draft" || (item.revision ?? 0) > draft.revision) });
     });
   }
 
@@ -585,10 +845,31 @@ export class ReadingReplica {
     }
     return this.commit(async (current) => {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) return undefined;
+      // Authority callbacks can complete out of order. Reject the whole stale
+      // projection before updating its course, version selection or protection.
+      const findNode = (nodes: CourseTreeNode[], id: string): CourseTreeNode | undefined => {
+        for (const node of nodes) {
+          if (node.id === id || node.materialId === id) return node;
+          const found = findNode(node.children ?? [], id);
+          if (found) return found;
+        }
+        return undefined;
+      };
+      for (const { workspaceId, node } of update.treeNodeUpserts ?? []) {
+        const tree = current.trees.find(item => item.workspaceId === workspaceId);
+        const old = tree && (findNode(tree.courses, node.id) ?? findNode(tree.rootMaterials ?? [], node.id));
+        if (old?.revision !== undefined && (node.revision === undefined || node.revision < old.revision)) return undefined;
+        const targetId = node.kind === "material" ? node.materialId ?? node.id : node.id;
+        const fence = (current.invalidations ?? []).find(item => item.workspaceId === workspaceId && item.targetId === targetId);
+        if (fence?.revision !== undefined && (node.revision === undefined || node.revision < fence.revision)) return undefined;
+      }
       let courses = current.courses;
       let releases = current.releases;
       let trees = current.trees;
       let trash = current.trash;
+      const materialReleaseSelections = applyMaterialReleaseSelectionUpserts(
+        current.materialReleaseSelections, update.materialReleaseSelectionUpserts
+      );
 
       if (update.courses !== undefined) {
         courses = validateCourseList(update.courses);
@@ -646,8 +927,77 @@ export class ReadingReplica {
           return jsonClone(record);
         });
       }
-      return withSnapshotTotals({ ...current, courses, releases, trees, trash });
+      if (update.courseUpserts !== undefined) {
+        const upserts = validateCourseList(update.courseUpserts);
+        for (const course of upserts) {
+          courses = [...courses.filter((item) => item.workspaceId !== course.workspaceId || item.id !== course.id), course];
+        }
+      }
+      if (update.trashRemovals !== undefined) {
+        const removed = new Set(update.trashRemovals.map((item) => pointerKey(item.workspaceId, item.trashId, "")));
+        trash = trash.filter((item) => !removed.has(pointerKey(item.workspaceId, item.id, "")));
+      }
+      if (update.trashUpserts !== undefined) {
+        const upserts = update.trashUpserts.map((record) => {
+          assertIdentifier(record?.workspaceId, "WORKSPACE_ID");
+          assertIdentifier(record?.id, "TRASH_ID");
+          return jsonClone(record);
+        });
+        for (const record of upserts) {
+          trash = [...trash.filter((item) => item.workspaceId !== record.workspaceId || item.id !== record.id), record];
+        }
+      }
+
+      const treeByWorkspace = new Map<string, WorkspaceTree>();
+      const getTree = (workspaceId: string): WorkspaceTree => {
+        const cached = treeByWorkspace.get(workspaceId);
+        if (cached) return cached;
+        const existing = trees.find((item) => item.workspaceId === workspaceId);
+        const tree = existing ? jsonClone(existing) : emptyWorkspaceTree(workspaceId);
+        treeByWorkspace.set(workspaceId, tree);
+        return tree;
+      };
+      for (const item of update.treeNodeRemovals ?? []) {
+        const tree = getTree(item.workspaceId);
+        removeTreeNode(tree, item.nodeId);
+      }
+      for (const item of update.treeNodeUpserts ?? []) {
+        const tree = getTree(item.workspaceId);
+        if (!upsertTreeNode(tree, item.node)) throw new Error("READING_PROJECTION_TREE_PARENT_MISSING");
+      }
+      for (const [workspaceId, tree] of treeByWorkspace) {
+        const available = trash.filter((item) => item.workspaceId === workspaceId && item.restoreAvailable).length;
+        tree.trash = {
+          ...(tree.trash ?? { id: `workspace:${workspaceId}:trash`, kind: "trash" as const, title: "回收站", children: [] }),
+          subtitle: available ? `${available} 项可恢复` : "暂时为空",
+          status: available ? "draft" : "published"
+        };
+        tree.updatedAt = new Date().toISOString();
+      }
+      if (treeByWorkspace.size) {
+        trees = [...trees.filter((tree) => !treeByWorkspace.has(tree.workspaceId)), ...treeByWorkspace.values()];
+      }
+      const invalidations = new Set(update.clearInvalidations ?? []);
+      return withSnapshotTotals({
+        ...current,
+        courses,
+        releases,
+        trees,
+        trash,
+        materialReleaseSelections,
+        invalidations: (current.invalidations ?? []).filter((item) => !invalidations.has(item.id)
+          || update.clearInvalidationConfirmations !== undefined
+            && !update.clearInvalidationConfirmations.some(value => JSON.stringify(value) === JSON.stringify(item)))
+      });
     });
+  }
+
+  async removeRelease(workspaceId: string, releaseId: string, clearInvalidations: string[] = []): Promise<void> {
+    await this.commit(async (current) => ({
+      ...current,
+      releases: current.releases.filter((item) => item.workspaceId !== workspaceId || item.index.id !== releaseId),
+      invalidations: (current.invalidations ?? []).filter((item) => !clearInvalidations.includes(item.id))
+    }));
   }
 
   private isTombstoned(catalog: ReplicaCatalog, workspaceId: string, kind: TrashRecord["nodeKind"], nodeId: string): boolean {
@@ -656,9 +1006,39 @@ export class ReadingReplica {
       && (record.nodeId === nodeId || (kind === "page" && record.nodeId === `page:${nodeId}`)));
   }
 
+  private isProjectionInvalidated(
+    catalog: ReplicaCatalog,
+    workspaceId: string,
+    targetKind: ReadingProjectionInvalidation["targetKind"],
+    targetId: string
+  ): boolean {
+    return (catalog.invalidations ?? []).some((item) => item.workspaceId === workspaceId
+      && item.targetKind === targetKind && item.targetId === targetId);
+  }
+
+  private isNodeProjectionInvalidated(catalog: ReplicaCatalog, workspaceId: string, node: CourseTreeNode): boolean {
+    const targetKind = node.kind === "course" ? "course" : node.kind === "material" ? "material" : "node";
+    const targetId = node.kind === "material" ? node.materialId ?? node.id : node.id;
+    if (this.isProjectionInvalidated(catalog, workspaceId, targetKind, targetId)) return true;
+    if (node.kind === "material" && node.currentReleaseId
+      && this.isProjectionInvalidated(catalog, workspaceId, "release", node.currentReleaseId)) return true;
+    return false;
+  }
+
+  private isPageArchived(catalog: ReplicaCatalog, workspaceId: string, pageId: string): boolean {
+    const tree = catalog.trees.find((item) => item.workspaceId === workspaceId);
+    if (!tree) return false;
+    const visit = (nodes: CourseTreeNode[]): boolean => nodes.some((node) =>
+      node.kind === "page" && (node.pageId ?? node.id) === pageId
+        && (node.archived === true || node.visibility === "archived")
+      || visit(node.children ?? []));
+    return visit(tree.courses) || visit(tree.rootMaterials ?? []);
+  }
+
   private isCourseVisible(catalog: ReplicaCatalog, workspaceId: string, courseId: string): boolean {
     const course = catalog.courses.find((item) => item.workspaceId === workspaceId && item.id === courseId);
     if (!course || isRegressionAsset(course.id, course.title)
+      || this.isProjectionInvalidated(catalog, workspaceId, "course", courseId)
       || course.status === "archived" || Boolean(course.archivedAt)
       || this.isTombstoned(catalog, workspaceId, "course", courseId)) return false;
     const courseNode = catalog.trees.find((tree) => tree.workspaceId === workspaceId)?.courses
@@ -668,14 +1048,17 @@ export class ReadingReplica {
 
   private isReleaseVisible(catalog: ReplicaCatalog, release: CatalogRelease): boolean {
     if (isRegressionAsset(release.index.id, `${release.index.courseTitle} ${release.index.moduleTitle}`)
-      || this.isTombstoned(catalog, release.workspaceId, "release", release.index.id)) return false;
+      || this.isTombstoned(catalog, release.workspaceId, "release", release.index.id)
+      || this.isProjectionInvalidated(catalog, release.workspaceId, "release", release.index.id)) return false;
     const sourceCourse = catalog.courses.find((course) => course.id === release.courseId
       && course.workspaceId === release.workspaceId);
     if (!sourceCourse || isRegressionAsset(sourceCourse.id, sourceCourse.title)
       || this.isTombstoned(catalog, release.workspaceId, "course", sourceCourse.id)) return false;
 
     const materialId = `material:${release.courseId}:${release.index.moduleId}`;
-    if (this.isTombstoned(catalog, release.workspaceId, "material", materialId)) return false;
+    if (this.isTombstoned(catalog, release.workspaceId, "material", materialId)
+      || this.isProjectionInvalidated(catalog, release.workspaceId, "material", materialId)
+      || this.isProjectionInvalidated(catalog, release.workspaceId, "node", release.index.moduleId)) return false;
     const tree = catalog.trees.find((item) => item.workspaceId === release.workspaceId);
     const material = tree?.courses.flatMap((node) => [node, ...(node.children ?? [])])
       .concat(tree.rootMaterials ?? [])
@@ -683,13 +1066,15 @@ export class ReadingReplica {
     if (material?.archived || material?.visibility === "archived") return false;
 
     if (material?.parentId && material.parentId !== release.courseId) {
+      if (this.isProjectionInvalidated(catalog, release.workspaceId, "course", material.parentId)) return false;
       return this.isCourseVisible(catalog, release.workspaceId, material.parentId);
     }
     return this.isCourseVisible(catalog, release.workspaceId, release.courseId);
   }
 
   private visibleReleaseIndex(catalog: ReplicaCatalog, release: CatalogRelease): CourseReleaseIndex {
-    const pages = release.index.pages.filter((page) => !this.isTombstoned(catalog, release.workspaceId, "page", page.id));
+    const pages = release.index.pages.filter((page) => !this.isTombstoned(catalog, release.workspaceId, "page", page.id)
+      && !this.isProjectionInvalidated(catalog, release.workspaceId, "page", page.id));
     return { ...jsonClone(release.index), pages, pageIds: pages.map((page) => page.id) };
   }
 
@@ -810,7 +1195,10 @@ export class ReadingReplica {
       courses,
       releases,
       trees: [tree],
-      trash
+      trash,
+      materialReleaseSelections: applyMaterialReleaseSelectionUpserts(
+        current.materialReleaseSelections, input.materialReleaseSelectionUpserts
+      )
     });
   }
 

@@ -262,43 +262,89 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
+const pendingMetadataStorageKey = "course-os-pending-metadata:personal";
+const pendingMetadata = new Map<string, string>();
+const pendingMetadataBodies = new Map<string, string | undefined>();
+const metadataStorage = () => {
+  try { if (window.localStorage) return window.localStorage; } catch { /* Browser policy may deny durable storage. */ }
+  return window.sessionStorage;
+};
+
+// Preserve only unresolved operations. Explicit retries reuse their original
+// key, including after reopening a tab; no background write or optimistic success.
+async function metadataWrite<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown, extraHeaders?: Record<string, string>, operationKey?: string): Promise<T> {
+  // A refreshed tree may already expose the committed revision. Retrying that
+  // unresolved intent must still send the original revision and operation key.
+  const intentBody = method === "PATCH" && body && typeof body === "object"
+    ? Object.fromEntries(Object.entries(body).filter(([name]) => name !== "expectedRevision")) : body;
+  const fingerprint = JSON.stringify([path, method, intentBody, extraHeaders]);
+  try {
+    const stored = metadataStorage().getItem(pendingMetadataStorageKey)
+      ?? window.sessionStorage.getItem(pendingMetadataStorageKey);
+    const saved = JSON.parse(stored ?? "[]") as unknown;
+    if (stored !== null && Array.isArray(saved)) { pendingMetadata.clear(); pendingMetadataBodies.clear(); }
+    if (Array.isArray(saved)) for (const row of saved) {
+      if (Array.isArray(row) && row.length >= 2 && typeof row[0] === "string" && typeof row[1] === "string"
+        && (row[2] === undefined || row[2] === null || typeof row[2] === "string")) {
+        pendingMetadata.set(row[0], row[1]);
+        if (row.length >= 3) pendingMetadataBodies.set(row[0], row[2] ?? undefined);
+      }
+    }
+  } catch { /* Unavailable storage still permits an in-tab retry. */ }
+  if (!pendingMetadata.has(fingerprint) && pendingMetadata.size >= 64) {
+    throw new ApiRequestError("已有过多保存结果待确认，请先核对原操作；这次尚未提交", "METADATA_PENDING_LIMIT", 409, false);
+  }
+  const key = pendingMetadata.get(fingerprint) || operationKey || crypto.randomUUID();
+  const serializedBody = pendingMetadataBodies.has(fingerprint) ? pendingMetadataBodies.get(fingerprint) : body === undefined ? undefined : JSON.stringify(body);
+  pendingMetadata.set(fingerprint, key);
+  pendingMetadataBodies.set(fingerprint, serializedBody);
+  const persist = () => {
+    try {
+      const storage = metadataStorage();
+      const rows = JSON.parse(storage.getItem(pendingMetadataStorageKey) || "[]") as unknown;
+      const current = new Map<string, unknown[]>();
+      if (Array.isArray(rows)) for (const row of rows) {
+        if (Array.isArray(row) && typeof row[0] === "string" && typeof row[1] === "string") current.set(row[0], row);
+      }
+      // Change only this operation; another tab's acknowledgment must not be
+      // resurrected by this tab's older in-memory map.
+      if (pendingMetadata.has(fingerprint)) current.set(fingerprint, [fingerprint, key, pendingMetadataBodies.get(fingerprint)]);
+      else current.delete(fingerprint);
+      storage.setItem(pendingMetadataStorageKey, JSON.stringify([...current.values()]));
+    } catch { /* Keep the in-tab key if storage is unavailable. */ }
+  };
+  persist();
+  const cancellation = new AbortController();
+  const deadline = setTimeout(() => cancellation.abort(new DOMException("Metadata response deadline exceeded", "TimeoutError")), 30_000);
+  try {
+    const result = await request<T>(path, { method, headers: { "Content-Type": "application/json", ...extraHeaders, "Idempotency-Key": key }, body: serializedBody, signal: cancellation.signal });
+    if (cancellation.signal.aborted) throw cancellation.signal.reason;
+    pendingMetadata.delete(fingerprint);
+    pendingMetadataBodies.delete(fingerprint);
+    persist();
+    return result;
+  } catch (error) {
+    const definitive = error instanceof ApiRequestError && error.status >= 400 && error.status < 500
+      && ![408, 429].includes(error.status) && !["INVALID_RESPONSE", "AUTH_REQUIRED"].includes(error.code);
+    if (definitive) { pendingMetadata.delete(fingerprint); pendingMetadataBodies.delete(fingerprint); persist(); throw error; }
+    throw new ApiRequestError("保存结果待确认；重试同一操作将核对原操作，不会重新创建", "METADATA_RESULT_UNKNOWN", error instanceof ApiRequestError ? error.status : 0,
+      true, { operationKey: key }, error instanceof ApiRequestError ? error.requestId : undefined);
+  } finally { clearTimeout(deadline); }
+}
+
 export const api = {
-  createCourse: (title: string, description?: string) => request<CourseProject>("/api/v1/courses", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ title, description })
-  }),
+  createCourse: (title: string, description?: string) => metadataWrite<CourseProject>("/api/v1/courses", "POST", { title, description }),
   workspaceTree: (workspaceId = WORKSPACE_ID, options?: ApiRequestOptions) => request<WorkspaceTree>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tree?view=library`, { signal: options?.signal }),
-  createModule: (courseId: string, title: string, description?: string) => request<CourseTreeNode>("/api/v1/modules", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ courseId, title, description })
-  }),
-  updateTreeNode: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }) => request<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ ...patch, expectedRevision: node.revision ?? 0 })
-  }),
+  createModule: (courseId: string, title: string, description?: string) => metadataWrite<CourseTreeNode>("/api/v1/modules", "POST", { courseId, title, description }),
+  updateTreeNode: (node: CourseTreeNode, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }) => metadataWrite<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}`, "PATCH", { ...patch, expectedRevision: node.revision ?? 0 }),
   treeNodeProperties: (nodeId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").TreeNodeProperties>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/properties`, { signal: options?.signal }),
   treeNodeVersions: (nodeId: string, options?: ApiRequestOptions) => request<CourseRelease[]>(`/api/v1/tree/nodes/${encodeURIComponent(nodeId)}/versions`, { signal: options?.signal }),
-  duplicateTreeNode: (node: CourseTreeNode) => request<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:duplicate`, {
-    method: "POST",
-    headers: { "Idempotency-Key": crypto.randomUUID() }
-  }),
-  trashTreeNode: (node: CourseTreeNode) => request<TrashRecord>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:trash`, {
-    method: "POST",
-    headers: { "Idempotency-Key": crypto.randomUUID() }
-  }),
+  duplicateTreeNode: (node: CourseTreeNode) => metadataWrite<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:duplicate`, "POST"),
+  trashTreeNode: (node: CourseTreeNode) => metadataWrite<TrashRecord>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:trash`, "POST"),
   trash: (options?: ApiRequestOptions) => request<TrashRecord[]>("/api/v1/trash", { signal: options?.signal }),
-  restoreTrash: (item: TrashRecord, restoreMode: "original" | "root" = "original") => request<CourseTreeNode>(`/api/v1/trash/${encodeURIComponent(item.id)}:restore`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ restoreMode })
-  }),
-  permanentlyDeleteTrash: (item: TrashRecord) => request<void>(`/api/v1/trash/${encodeURIComponent(item.id)}`, {
-    method: "DELETE",
-    headers: { "Idempotency-Key": crypto.randomUUID(), "X-Trash-Deleted-At": item.deletedAt }
-  }),
+  trashCapabilities: () => request<{ directPermanentDelete: boolean; requiresNativeUi: boolean; reason?: string }>("/api/v1/trash/capabilities"),
+  restoreTrash: (item: TrashRecord, restoreMode: "original" | "root" = "original") => metadataWrite<CourseTreeNode>(`/api/v1/trash/${encodeURIComponent(item.id)}:restore`, "POST", { restoreMode }),
+  permanentlyDeleteTrash: (item: TrashRecord) => metadataWrite<void>(`/api/v1/trash/${encodeURIComponent(item.id)}`, "DELETE", undefined, { "X-Trash-Deleted-At": item.deletedAt }),
   deepLink: (noteId: string, options?: ApiRequestOptions) => request<ReadWeaveDeepLink>(`/api/v1/readweave/links/${encodeURIComponent(noteId)}`, { signal: options?.signal }),
   settings: (options?: ApiRequestOptions) => request<WorkspaceSettings>("/api/v1/settings", { signal: options?.signal }),
   saveSettings: (settings: WorkspaceSettings) => request<WorkspaceSettings>("/api/v1/settings", {
@@ -418,9 +464,7 @@ export const api = {
   clearFailedTasks: (taskIds: string[], operationKey: string, fingerprints: Record<string, string>) => request<TaskClearReceipt>("/api/v1/imports:clear-failed", {
     method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey }, body: JSON.stringify({ taskIds, fingerprints })
   }),
-  emptyTrash: (items: TrashRecord[], operationKey: string) => request<TaskClearReceipt>("/api/v1/trash:empty", {
-    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey }, body: JSON.stringify({ items: items.map(item => ({ id: item.id, deletedAt: item.deletedAt })) })
-  }),
+  emptyTrash: (items: TrashRecord[], operationKey: string) => metadataWrite<TaskClearReceipt>("/api/v1/trash:empty", "POST", { items: items.map(item => ({ id: item.id, deletedAt: item.deletedAt })) }, undefined, operationKey),
   importTasks: (options?: ApiRequestOptions) => request<ImportTaskSummary[]>("/api/v1/imports", { signal: options?.signal }),
   importRecord: (importId: string, options?: ApiRequestOptions) => request<WebImportRecord>(`/api/v1/imports/${encodeURIComponent(importId)}`, { signal: options?.signal }),
   createGenerationJob: (materialVersionId: string, pageIds: string[], budgetUsd: number) => request<GenerationJob>("/api/v1/generation-jobs", {

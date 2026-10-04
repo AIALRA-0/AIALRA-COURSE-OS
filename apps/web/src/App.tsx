@@ -1103,7 +1103,7 @@ export function App() {
           {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} unpublishedDraftRevision={pageCache.get(pageSnapshotCacheKey(release.id, page.id))?.unpublishedDraftRevision} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
           </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
+            {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" className="quiet-button compact" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
              {mode === "review" && <ReviewWorkspace releases={releases} reviewMap={reviewMap} onOpenPage={(nextReleaseId, pageId) => { selectPage(nextReleaseId, pageId); setMode("learn"); }} onReviewChanged={() => refreshMetadata({ includeReview: true })} />}
           </Suspense>}
@@ -1212,14 +1212,14 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
         : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" onClick={onRetryContent}>重试</button>}</div>}</div>}
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
       <div className="page-dock-summary">
         <button data-action="page-previous" disabled={pageIndex === 0} title={pageIndex === 0 ? "已经是第一页" : "打开上一页"} onMouseEnter={() => onPrefetchPage(pageIndex - 1)} onFocus={() => onPrefetchPage(pageIndex - 1)} onPointerDown={() => onPrefetchPage(pageIndex - 1, 20)} onClick={() => setPageIndex((index) => index - 1)}><Icon name="arrowLeft" />上一页</button>
         <button className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起全部页面" : `展开全部 ${release.pages.length} 页`}</small><Icon name={pageDockOpen ? "chevronUp" : "chevronDown"} /></button>
-        <button data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onMouseEnter={() => onPrefetchPage(pageIndex + 1)} onFocus={() => onPrefetchPage(pageIndex + 1)} onPointerDown={() => onPrefetchPage(pageIndex + 1, 20)} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
+        <button className="button-icon-trailing" data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onMouseEnter={() => onPrefetchPage(pageIndex + 1)} onFocus={() => onPrefetchPage(pageIndex + 1)} onPointerDown={() => onPrefetchPage(pageIndex + 1, 20)} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
       </div>
       {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)} onPointerDown={() => onPrefetchPage(index, 20)} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>}
     </footer>
@@ -1544,7 +1544,7 @@ function SettingsPanel({ theme, onTheme, sync, onOpenTrash }: { theme: "light" |
           <div className="settings-callout"><Icon name="target" /><span>修改保存后立即用于后续模型调用；现有页面内容不受影响</span></div>
           <SettingsSaveButton busy={busy} onClick={savePolicy} />
         </SettingsSection>}
-        {tab === "data" && <SettingsSection title="数据与版本" description="正式版本不可原位修改，删除默认进入 ReadWeave 回收站"><SettingsRow label="权威内容" value="ReadWeave" /><SettingsRow label="回收站记录" value={`${trashCount} 条`} /><SettingsRow label="正式发布" value="不可变，可回滚" /><SettingsRow label="原始材料" value="私有、内容寻址、去重保存" /><div className="settings-callout"><Icon name="archive" /><span>测试课程、黄金样本和旧发布版本仍用于回归，但不会混入正式课程树</span></div><button className="quiet-button settings-trash-button" data-action="settings-open-trash" onClick={onOpenTrash}>打开回收站<Icon name="arrowRight" /></button></SettingsSection>}
+        {tab === "data" && <SettingsSection title="数据与版本" description="正式版本不可原位修改，删除默认进入 ReadWeave 回收站"><SettingsRow label="权威内容" value="ReadWeave" /><SettingsRow label="回收站记录" value={`${trashCount} 条`} /><SettingsRow label="正式发布" value="不可变，可回滚" /><SettingsRow label="原始材料" value="私有、内容寻址、去重保存" /><div className="settings-callout"><Icon name="archive" /><span>测试课程、黄金样本和旧发布版本仍用于回归，但不会混入正式课程树</span></div><button className="quiet-button button-icon-trailing settings-trash-button" data-action="settings-open-trash" onClick={onOpenTrash}>打开回收站<Icon name="arrowRight" /></button></SettingsSection>}
         {tab === "diagnostics" && <SettingsSection title="连接与诊断" description="这里显示可核对的状态，不显示密钥"><SettingsRow label="Course OS API" value="已载入当前页面" /><SettingsRow label="ReadWeave" value={sync?.state === "connected" ? "已连接" : "离线或待检查"} /><SettingsRow label="同步队列" value={`${sync?.pendingWrites ?? 0} 条待处理`} /><SettingsRow label="冲突" value={`${sync?.conflicts ?? 0} 条`} /><button className="primary-button" data-action="settings-reload" aria-describedby="settings-reload-reason" disabled={busy} onClick={() => window.location.reload()}>重新载入并重试</button><span id="settings-reload-reason" className="sr-only">{busy ? "当前有设置操作正在保存" : "重新载入页面并重新检查连接"}</span></SettingsSection>}
         {notice && <p className="settings-notice"><Icon name="check" />{notice}</p>}
         {error && <p className="settings-error"><Icon name="warning" />{error}</p>}
@@ -1987,41 +1987,166 @@ function MoveNodeDialog({ node, tree, onClose, onMove }: { node: CourseTreeNode;
   </div>;
 }
 
+export type TrashCapabilities = Awaited<ReturnType<typeof api.trashCapabilities>>;
+
+export function latestRestorableTrashRecords(records: readonly TrashRecord[]): TrashRecord[] {
+  const latestByNode = new Map<string, TrashRecord>();
+  for (const record of records) {
+    if (!record.restoreAvailable) continue;
+    const key = `${record.workspaceId}\u0000${record.nodeId}`;
+    const current = latestByNode.get(key);
+    if (!current || record.deletedAt > current.deletedAt || (record.deletedAt === current.deletedAt && record.id > current.id)) {
+      latestByNode.set(key, record);
+    }
+  }
+  return [...latestByNode.values()]
+    .sort((left, right) => right.deletedAt.localeCompare(left.deletedAt) || left.id.localeCompare(right.id));
+}
+
+export function canDirectlyDeleteTrashRecord(
+  capabilities: TrashCapabilities | undefined,
+  record: Pick<TrashRecord, "readweaveNoteId">
+): boolean {
+  return capabilities?.directPermanentDelete === true
+    && capabilities.requiresNativeUi === false
+    && Boolean(record.readweaveNoteId);
+}
+
+export function canDirectlyDeleteTrashRecords(
+  capabilities: TrashCapabilities | undefined,
+  records: readonly TrashRecord[]
+): boolean {
+  return records.length > 0 && records.every((record) => canDirectlyDeleteTrashRecord(capabilities, record));
+}
+
 function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
   const [items, setItems] = useState<TrashRecord[]>([]);
+  const [capabilities, setCapabilities] = useState<TrashCapabilities>();
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(true);
+  const [capabilityError, setCapabilityError] = useState("");
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const load = async () => {
+  const visibleItems = useMemo(() => latestRestorableTrashRecords(items), [items]);
+  const directDeleteAvailable = capabilities?.directPermanentDelete === true && capabilities.requiresNativeUi === false;
+  const nativeUiRequired = capabilities?.requiresNativeUi === true;
+  const canEmptyTrash = canDirectlyDeleteTrashRecords(capabilities, visibleItems);
+
+  const load = async (): Promise<TrashRecord[] | undefined> => {
     setError("");
-    try { setItems(await api.trash()); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "回收站读取失败"); }
+    try {
+      const records = await api.trash();
+      setItems(records);
+      return records;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "回收站读取失败");
+      return undefined;
+    }
+  };
+  const loadCapabilities = async () => {
+    setCapabilities(undefined);
+    setCapabilitiesLoading(true);
+    setCapabilityError("");
+    try {
+      const result = await api.trashCapabilities();
+      if (typeof result.directPermanentDelete !== "boolean" || typeof result.requiresNativeUi !== "boolean") {
+        throw new Error("永久删除能力响应格式无效");
+      }
+      setCapabilities(result);
+    } catch (reason) {
+      setCapabilityError(reason instanceof Error ? reason.message : "无法读取永久删除能力");
+    } finally {
+      setCapabilitiesLoading(false);
+    }
   };
   useEffect(() => { void load(); }, []);
+  useEffect(() => { void loadCapabilities(); }, []);
+  const reload = () => { void load(); void loadCapabilities(); };
   const restore = async (item: TrashRecord, restoreMode: "original" | "root") => {
     setBusyId(item.id); setError(""); setNotice("");
-    try { await api.restoreTrash(item, restoreMode); await load(); await onRefresh(); setNotice(restoreMode === "original" ? "项目已经恢复到原路径" : "项目已经恢复到工作区根目录"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "项目恢复失败"); }
+    try {
+      await api.restoreTrash(item, restoreMode);
+      const refreshedRecords = await load();
+      await onRefresh();
+      setNotice(refreshedRecords
+        ? restoreMode === "original" ? "项目已恢复到原路径，并已重新读取回收站" : "项目已恢复到工作区根目录，并已重新读取回收站"
+        : "恢复请求已完成，但回收站重新读取失败；请重新载入核对");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "项目恢复失败"); }
     finally { setBusyId(""); }
   };
   const permanentlyDelete = async (item: TrashRecord) => {
-    if (!window.confirm(`永久删除“${item.title}”及其关联记录吗？这个操作无法撤回`)) return;
+    if (busyId || !canDirectlyDeleteTrashRecord(capabilities, item)) return;
+    if (!window.confirm(`确认通过当前适配器直接永久删除“${item.title}”吗？此操作无法撤回。`)) return;
     setBusyId(item.id); setError(""); setNotice("");
-    try { await api.permanentlyDeleteTrash(item); await load(); await onRefresh(); setNotice("项目已经永久删除"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "永久删除失败"); }
+    try {
+      await api.permanentlyDeleteTrash(item);
+      const refreshedRecords = await load();
+      await onRefresh();
+      const remainsRestorable = refreshedRecords && latestRestorableTrashRecords(refreshedRecords)
+        .some((record) => record.workspaceId === item.workspaceId && record.nodeId === item.nodeId);
+      setNotice(refreshedRecords
+        ? remainsRestorable
+          ? "直接删除请求返回成功，但该对象仍出现在最新可恢复列表中；请先核对状态，不要重复操作。"
+          : "适配器直接删除请求返回成功；Course OS 已重新读取最新可恢复列表。"
+        : "直接删除请求返回成功，但回收站重新读取失败；请重新载入核对当前状态。");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "永久删除结果尚未确认，请重新读取回收站"); }
     finally { setBusyId(""); }
   };
   const emptyTrash = async () => {
-    if (busyId || !items.length || !window.confirm(`永久清空回收站中的 ${items.length} 个对象？此操作无法恢复，并可能删除这些对象的关联记录；仍被保留课程使用的附件及不支持安全删除的对象会保留。取消不会删除任何内容`)) return;
+    if (busyId || !canEmptyTrash || !window.confirm(`确认向当前适配器直接永久删除这 ${visibleItems.length} 条最新可恢复记录？操作无法撤回；取消不会删除任何内容。`)) return;
     setBusyId("empty-trash"); setError(""); setNotice("");
     try {
-      const receipt = await api.emptyTrash(items, crypto.randomUUID());
-      await load(); await onRefresh();
-      setNotice(`永久删除 ${receipt.cleared.length} 个；保留 ${receipt.skipped.length} 个；失败 ${receipt.failed.length} 个${[...receipt.skipped, ...receipt.failed].map(item => ` · ${item.reason}`).join("")}`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "清空结果尚未确认，请重新读取回收站"); }
+      const receipt = await api.emptyTrash(visibleItems, crypto.randomUUID());
+      const refreshedRecords = await load();
+      await onRefresh();
+      const readback = refreshedRecords ? "最新可恢复列表已重新读取" : "回收站重新读取失败，请重新载入核对";
+      setNotice(`适配器回执：直接删除 ${receipt.cleared.length} 条，跳过 ${receipt.skipped.length} 条，失败 ${receipt.failed.length} 条；${readback}${[...receipt.skipped, ...receipt.failed].map((entry) => ` · ${entry.reason}`).join("")}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "直接删除结果尚未确认，请重新读取回收站"); }
     finally { setBusyId(""); }
   };
-  return <div className="utility-content trash-panel"><div className="trash-intro"><div><strong>回收站</strong><p>移入回收站不会立即破坏 ReadWeave 历史记录，恢复前仍保留原对象和修订</p></div><div className="trash-actions"><button className="quiet-button" onClick={() => void load()} disabled={Boolean(busyId)}>重新载入</button><button className="quiet-button danger-button" data-action="empty-trash" onClick={() => void emptyTrash()} disabled={Boolean(busyId) || !items.length}>清空回收站（{items.length}）</button></div></div><div className="trash-list">{items.map((item) => { const remotePermanentDeleteUnavailable = Boolean(item.readweaveNoteId); const canRestoreOriginal = Boolean(item.originalParentId || item.originalPath?.length); return <article className="trash-item" key={item.id}><div><strong>{item.title}</strong><span>{item.nodeKind} · 删除于 {formatDateTime(item.deletedAt)}</span><small>{item.restoreAvailable ? `原路径：${item.originalPath?.join(" / ") || "未记录"}` : "已处理"}</small></div><div className="trash-actions"><button className="quiet-button" disabled={Boolean(busyId) || !item.restoreAvailable || !canRestoreOriginal} title={!canRestoreOriginal ? "原路径已经不存在，请选择恢复到工作区根目录" : busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "original")}>恢复原路径</button><button className="quiet-button" disabled={Boolean(busyId) || !item.restoreAvailable} title={busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "root")}>恢复到根目录</button><button className="quiet-button danger-button" disabled={Boolean(busyId) || remotePermanentDeleteUnavailable} title={remotePermanentDeleteUnavailable ? "当前 ReadWeave 接口没有安全的单条永久删除能力，只能保留在回收站" : busyId ? "正在处理上一项操作" : "永久删除后无法恢复"} onClick={() => void permanentlyDelete(item)}>永久删除</button></div></article>; })}{items.length === 0 && !error && <p className="empty-inline">回收站是空的</p>}</div>{notice && <p className="settings-notice"><Icon name="check" />{notice}</p>}{error && <p className="settings-error"><Icon name="warning" />{error}</p>}</div>;
+  const openNativeReadWeaveNote = async (item: TrashRecord) => {
+    if (busyId || !nativeUiRequired || !item.readweaveNoteId) return;
+    const actionId = `open-readweave:${item.id}`;
+    setBusyId(actionId); setError(""); setNotice("");
+    try {
+      await openVerifiedReadWeaveDeepLink(item.readweaveNoteId);
+      setNotice("已打开经过验证的 ReadWeave 笔记链接。请在 ReadWeave 原生回收站登录并核对对象；Course OS 未执行删除。");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法打开经过验证的 ReadWeave 笔记链接"); }
+    finally { setBusyId(""); }
+  };
+
+  const capabilityMessage = capabilitiesLoading
+    ? "正在单独检查永久删除能力；检查完成前，直接删除和清空操作均已停用。"
+    : capabilityError
+      ? `无法确认当前适配器的永久删除能力，直接删除和清空操作已停用。${capabilityError}`
+      : nativeUiRequired
+        ? "永久删除必须在 ReadWeave 原生回收站中完成。请使用 ReadWeave 登录状态核对并确认；Course OS 只会打开经过验证的笔记链接，不会执行删除。"
+        : directDeleteAvailable
+          ? "当前适配器报告支持直接永久删除。操作只会对下方最新可恢复记录开放，并要求存在 ReadWeave 笔记 ID。"
+          : `当前适配器未报告可用的直接永久删除能力，相关操作已停用。${capabilities?.reason || ""}`;
+
+  return <div className="utility-content trash-panel">
+    <div className="trash-intro"><div><strong>回收站</strong><p>移入回收站不会立即删除对象。下方仅显示每个对象最近一次可恢复记录；历史重复项和不可恢复记录不计入操作数量。</p></div><div className="trash-actions"><button className="quiet-button" onClick={reload} disabled={Boolean(busyId)}>重新载入</button><button className="quiet-button danger-button" data-action="empty-trash" onClick={() => void emptyTrash()} disabled={Boolean(busyId) || !canEmptyTrash} title={!directDeleteAvailable ? capabilityMessage : visibleItems.some((item) => !item.readweaveNoteId) ? "至少一项缺少 ReadWeave 笔记 ID，无法安全执行批量永久删除" : undefined}>清空回收站（{visibleItems.length}）</button></div></div>
+    <p className={`trash-capability ${capabilityError ? "is-error" : ""}`} role={capabilityError ? "alert" : "status"} aria-live="polite">{capabilityMessage}</p>
+    <div className="trash-list">{visibleItems.map((item) => {
+      const canRestoreOriginal = Boolean(item.originalParentId || item.originalPath?.length);
+      const canDelete = canDirectlyDeleteTrashRecord(capabilities, item);
+      const actionIsBusy = busyId === item.id;
+      const nativeLinkIsBusy = busyId === `open-readweave:${item.id}`;
+      return <article className="trash-item" key={`${item.workspaceId}:${item.nodeId}`}>
+        <div><strong>{item.title}</strong><span>{item.nodeKind} · 删除于 {formatDateTime(item.deletedAt)}</span><small>原路径：{item.originalPath?.join(" / ") || "未记录"}</small></div>
+        <div className="trash-actions">
+          <button className="quiet-button" disabled={Boolean(busyId) || !canRestoreOriginal} title={!canRestoreOriginal ? "原路径已经不存在，请选择恢复到工作区根目录" : busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "original")}>恢复原路径</button>
+          <button className="quiet-button" disabled={Boolean(busyId)} title={busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "root")}>恢复到根目录</button>
+          {directDeleteAvailable && <button className="quiet-button danger-button" data-action="trash-permanent-delete" disabled={Boolean(busyId) || !canDelete} title={!item.readweaveNoteId ? "缺少 ReadWeave 笔记 ID，不能直接永久删除" : busyId ? "正在处理上一项操作" : "适配器直接永久删除后无法撤回"} onClick={() => void permanentlyDelete(item)}>{actionIsBusy ? "正在删除" : "永久删除"}</button>}
+          {nativeUiRequired && item.readweaveNoteId && <button className="quiet-button" data-action="trash-open-native-note" disabled={Boolean(busyId)} title={busyId ? "正在打开经过验证的笔记链接" : "打开经过验证的 ReadWeave 笔记；删除需在 ReadWeave 原生回收站中完成"} onClick={() => void openNativeReadWeaveNote(item)}>{nativeLinkIsBusy ? "正在打开" : "在 ReadWeave 中核对"}</button>}
+          {nativeUiRequired && !item.readweaveNoteId && <span className="trash-native-note-missing">没有可验证的 ReadWeave 笔记链接</span>}
+        </div>
+      </article>;
+    })}{visibleItems.length === 0 && !error && <p className="empty-inline">当前没有可恢复的回收站项目</p>}</div>
+    {notice && <p className="settings-notice"><Icon name="check" />{notice}</p>}
+    {error && <p className="settings-error"><Icon name="warning" />{error}</p>}
+  </div>;
 }
 
 function HistoryDialog({ node, releases, onClose, onSelectPage }: { node: CourseTreeNode; releases: CourseRelease[]; onClose: () => void; onSelectPage: (releaseId: string, pageId: string) => void }) {
@@ -2036,7 +2161,7 @@ function HistoryDialog({ node, releases, onClose, onSelectPage }: { node: Course
       <header><div><span className="section-kicker">VERSION HISTORY</span><h2 id="history-title">{node.title} 的版本历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
       <div className="history-list">
         {versions.length === 0 && <p className="empty-inline">这个节点暂时没有可查看的历史版本</p>}
-        {versions.map((release) => <article key={release.id}><div><strong>v{release.version} · {release.moduleTitle}</strong><span>{release.pages.length} 页 · {release.lifecycle === "published" ? "正式版本" : "草稿来源"}</span></div><button className="quiet-button" onClick={() => { const first = release.pages[0]; if (first) { onSelectPage(release.id, first.id); onClose(); } }}>打开第一页<Icon name="arrowRight" /></button></article>)}
+        {versions.map((release) => <article key={release.id}><div><strong>v{release.version} · {release.moduleTitle}</strong><span>{release.pages.length} 页 · {release.lifecycle === "published" ? "正式版本" : "草稿来源"}</span></div><button className="quiet-button button-icon-trailing" onClick={() => { const first = release.pages[0]; if (first) { onSelectPage(release.id, first.id); onClose(); } }}>打开第一页<Icon name="arrowRight" /></button></article>)}
       </div>
       <footer><button className="quiet-button" onClick={onClose}>关闭</button></footer>
     </section>

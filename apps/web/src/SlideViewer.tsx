@@ -108,7 +108,7 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
         onDoubleClick={() => onChange({ zoom: 1, panX: 0, panY: 0 })}
       >
         {(!currentImageStatus || currentImageStatus.state === "loading") && <span className="slide-image-status" role="status">正在载入本页原图</span>}
-        {currentImageStatus?.state === "error" && <span className="slide-image-status" role="alert">原图载入失败<button type="button" data-action="slide-image-retry" onClick={retryImage} style={{ pointerEvents: "auto" }}>重试原图</button></span>}
+        {currentImageStatus?.state === "error" && <span className="slide-image-status" role="alert">原图载入失败<button type="button" className="quiet-button compact" data-action="slide-image-retry" onClick={retryImage} style={{ pointerEvents: "auto" }}>重试原图</button></span>}
         <img
           key={`${imageUrl}:${imageAttempt}`}
           src={imageSource}

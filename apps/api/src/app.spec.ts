@@ -72,6 +72,69 @@ async function seededReplicaDraftApp() {
 }
 
 describe("Course OS API", () => {
+  it("blocks fenced media before CAS while retaining unindexed import previews and workspace isolation", async () => {
+    const { app, dependencies, reading } = await seededReplicaDraftApp();
+    const image = await dependencies.cas.put(Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
+    const casRead = vi.spyOn(dependencies.cas, "get");
+    const visibility = vi.spyOn(reading.replica, "getMediaVisibility");
+    try {
+      visibility.mockReturnValue("blocked");
+      await request(app).get(`/api/v1/media/${image.sha256}`).expect(404);
+      expect(casRead).not.toHaveBeenCalled();
+      await request(app).get(`/api/v1/media/${image.sha256}`).set("X-Workspace-Id", "other-workspace").expect(403);
+      expect(casRead).not.toHaveBeenCalled();
+      visibility.mockReturnValue("confirmed");
+      await request(app).get(`/api/v1/media/${image.sha256}`).expect(200);
+      visibility.mockReturnValue("unindexed");
+      await request(app).get(`/api/v1/media/${image.sha256}`).expect(200);
+      expect(casRead).toHaveBeenCalledTimes(2);
+    } finally { reading.close(); }
+  });
+  it("confirms repeated course and metadata operations using the original key without duplicate writes", async () => {
+    const { app, readweave } = await seededApp();
+    const created = await request(app).post("/api/v1/courses").set("Idempotency-Key", "synthetic-course-lost-response")
+      .send({ title: "Recovery course" }).expect(201);
+    const replayed = await request(app).post("/api/v1/courses").set("Idempotency-Key", "synthetic-course-lost-response")
+      .send({ title: "Recovery course" }).expect(201);
+    expect(replayed.body.id).toBe(created.body.id);
+    expect((await readweave.listCourses()).filter(course => course.id === created.body.id)).toHaveLength(1);
+    const path = `/api/v1/tree/nodes/${encodeURIComponent(created.body.id)}`;
+    const patch = { title: "Renamed recovery course", expectedRevision: created.body.revision ?? 0 };
+    const first = await request(app).patch(path).set("Idempotency-Key", "synthetic-rename-lost-response").send(patch).expect(200);
+    const second = await request(app).patch(path).set("Idempotency-Key", "synthetic-rename-lost-response").send(patch).expect(200);
+    expect(second.body).toEqual(first.body);
+    expect(second.body.revision).toBe((created.body.revision ?? 0) + 1);
+  });
+  it("reports adapter deletion capability separately from the presence of a trash button", async () => {
+    const { app, readweave } = await seededApp();
+    await request(app).get("/api/v1/trash/capabilities").expect(200).expect(({ body }) => {
+      expect(body).toEqual({ directPermanentDelete: true, requiresNativeUi: false });
+    });
+    vi.spyOn(readweave, "getTrashCapabilities").mockResolvedValue({ directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_NATIVE_ERASE_REQUIRED" });
+    await request(app).get("/api/v1/trash/capabilities").expect(200).expect(({ body }) => {
+      expect(body).toEqual({ directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_NATIVE_ERASE_REQUIRED" });
+    });
+  });
+  it("confirms an archived operation replay without resurrecting a trashed node or accepting another workspace", async () => {
+    const { app, readweave } = await seededApp();
+    const created = await request(app).post("/api/v1/courses").set("Idempotency-Key", "archive-replay-course")
+      .send({ title: "Archive recovery course" }).expect(201);
+    const path = `/api/v1/tree/nodes/${encodeURIComponent(created.body.id)}`;
+    const patch = { archived: true, expectedRevision: created.body.revision ?? 0 };
+    const saved = await request(app).patch(path).set("Idempotency-Key", "archive-lost-response").send(patch).expect(200);
+    const replay = await request(app).patch(path).set("Idempotency-Key", "archive-lost-response").send(patch).expect(200);
+    expect(replay.body).toEqual(saved.body);
+    const foreign = await request(app).patch(path).set("X-Workspace-Id", "other-workspace")
+      .set("Idempotency-Key", "archive-lost-response").send(patch);
+    expect(foreign.status).toBeGreaterThanOrEqual(400);
+    const restore = { archived: false, expectedRevision: saved.body.revision };
+    await request(app).patch(path).set("Idempotency-Key", "archive-restore").send(restore).expect(200);
+    await request(app).post(`${path}:trash`).set("Idempotency-Key", "archive-trash").expect(201);
+    const resurrection = await request(app).patch(path).set("Idempotency-Key", "archive-unauthorized-resurrection")
+      .send({ archived: false, expectedRevision: restore.expectedRevision + 1 });
+    expect(resurrection.status).toBeGreaterThanOrEqual(400);
+    expect((await readweave.listTrash()).some(record => record.nodeId === created.body.id && record.restoreAvailable)).toBe(true);
+  });
   it.each(["accepted", "processing", "syncing"] as const)("protects %s imports with an empty worker map during permanent material deletion", async importState => {
     for (const reference of ["parentNodeId", "incrementalFromMaterialVersionId", "materialVersionId"] as const) {
       const { app, operations, readweave, release } = await seededApp();
@@ -281,6 +344,35 @@ describe("Course OS API", () => {
     expect(errorLogText.match(/READ_DEADLINE_EXCEEDED/gu)).toHaveLength(2);
     expect(errorLogText).toContain("LATE_IMPORT_READ_FAILURE");
     expect(errorLogText).not.toContain("startsWith");
+  }, 15_000);
+  it("does not send a second lesson or image response after the read deadline and permits a fresh read", async () => {
+    const { app, dependencies, reading, release } = await seededReplicaDraftApp();
+    const path = `/api/v1/pages/page-1/lesson?releaseId=${encodeURIComponent(release.id)}`;
+    const source = await reading.replica.getPageSource("personal", "page-1", release.id);
+    expect(source).toBeDefined();
+    let releaseLate!: () => void;
+    const gate = new Promise<void>(resolve => { releaseLate = resolve; });
+    const pageRead = vi.spyOn(reading.replica, "getPageSource").mockImplementationOnce(async () => { await gate; return source; });
+    const mediaRead = vi.spyOn(dependencies.cas, "get").mockImplementationOnce(async () => { await gate; return Buffer.from("late-image"); });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const [lesson, image] = await Promise.all([
+        request(app).get(path),
+        request(app).get(`/api/v1/media/${"a".repeat(64)}`)
+      ]);
+      expect(lesson.status).toBe(504);
+      expect(image.status).toBe(504);
+      expect(lesson.body.error.code).toBe("READ_DEADLINE_EXCEEDED");
+      expect(image.body.error.code).toBe("READ_DEADLINE_EXCEEDED");
+    } finally { releaseLate(); }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(pageRead).toHaveBeenCalledOnce();
+    expect(mediaRead).toHaveBeenCalledOnce();
+    expect(JSON.stringify(errors.mock.calls)).not.toMatch(/HEADERS_SENT|headers after|write after end/u);
+    expect(warnings.mock.calls.filter(call => String(call[0]).includes("late_response_ignored"))).toHaveLength(2);
+    const recovered = await request(app).get(path).expect(200);
+    expect(recovered.body.page.id).toBe("page-1");
   }, 15_000);
   it("returns a workspace-scoped latest stage and ignores historical phase fields", async () => {
     const { app, operations } = await seededApp();

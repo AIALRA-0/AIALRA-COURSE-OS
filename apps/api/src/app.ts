@@ -51,6 +51,7 @@ import type {
 } from "@course-os/contracts";
 import type { WorkspaceTree } from "@course-os/contracts";
 import type { ReadingRuntime } from "./reading-runtime.js";
+import { protectReadResponse } from "./read-response.js";
 import { selectMaterialRelease, toCourseReleaseIndex, withReadBudget } from "@course-os/readweave-adapter";
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput, type ConversionProgressCallback } from "@course-os/converter";
@@ -228,6 +229,9 @@ export function createApp(dependencies: AppDependencies): Express {
   });
   app.use((request, response, next) => {
     if (request.method !== "GET" || !request.path.startsWith("/api/") || request.path.endsWith("/events")) return next();
+    protectReadResponse(response, method => {
+      console.warn(JSON.stringify({ event: "api.read.late_response_ignored", requestId: response.getHeader("X-Request-Id"), method: request.method, path: request.path, responseMethod: method }));
+    });
     const cancellation = new AbortController();
     const disconnect = () => { if (!response.writableEnded) cancellation.abort(); };
     response.once("close", disconnect);
@@ -355,7 +359,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const idempotencyKey = requireIdempotencyKey(request);
       const expectedRevision = Number(request.body.expectedRevision);
       if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return sendError(request, response, 422, "TREE_REVISION_REQUIRED", "修改课程树时必须提供当前修订号", false);
-      await assertWorkspaceTreeNode(dependencies.readweave, request.params.id, request.header("X-Workspace-Id") || "personal");
+      await assertWorkspaceTreeNode(dependencies.readweave, request.params.id, request.header("X-Workspace-Id") || "personal", true);
       const patch = {
         title: typeof request.body.title === "string" ? request.body.title : undefined,
         parentId: request.body.parentId === null ? null : typeof request.body.parentId === "string" ? request.body.parentId : undefined,
@@ -413,6 +417,15 @@ export function createApp(dependencies: AppDependencies): Express {
       response.json((await dependencies.readweave.listTrash()).filter((record) => record.workspaceId === workspaceId));
     }
     catch (error) { next(error); }
+  });
+
+  app.get("/api/v1/trash/capabilities", async (request, response, next) => {
+    try {
+      const workspaceId = request.header("X-Workspace-Id") || "personal";
+      if (dependencies.reading && dependencies.reading.workspaceId !== workspaceId) return sendError(request, response, 403, "ACCESS_DENIED", "当前工作区无权读取删除能力", false);
+      response.json(await dependencies.readweave.getTrashCapabilities?.()
+        ?? { directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_PERMANENT_DELETE_UNSUPPORTED" });
+    } catch (error) { next(error); }
   });
 
   app.post(/^\/api\/v1\/trash\/[^/]+:restore$/, async (request, response, next) => {
@@ -1226,6 +1239,16 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/media/:sha256", async (request, response, next) => {
     try {
       const startedAt = performance.now();
+      if (dependencies.reading) {
+        dependencies.reading.assertAccess();
+        const workspaceId = request.header("X-Workspace-Id") || "personal";
+        if (workspaceId !== dependencies.reading.workspaceId) return sendError(request, response, 403, "ACCESS_DENIED", "当前工作区不支持读取此原图", false);
+        // A preview may not have a catalog entry yet. Known archived or fenced
+        // owners must not regain image access through the CAS route.
+        if (dependencies.reading.replica.getMediaVisibility(workspaceId, request.params.sha256) === "blocked") {
+          return sendError(request, response, 404, "MEDIA_NOT_AVAILABLE", "此原图所属材料当前不可读取", false);
+        }
+      }
       const bytes = await dependencies.cas.get(request.params.sha256);
       response.setHeader("Server-Timing", `cas;dur=${(performance.now() - startedAt).toFixed(1)}`);
       const prefix = bytes.subarray(0, 256).toString("utf8").trimStart();
@@ -3382,8 +3405,16 @@ async function resolveWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: s
   return findTreeNode(root, nodeId);
 }
 
-async function assertWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string): Promise<CourseTreeNode> {
+async function assertWorkspaceTreeNode(readweave: ReadWeaveCourseApi, nodeId: string, workspaceId: string, includeArchived = false): Promise<CourseTreeNode> {
   if (isLikelyLegacyTreeNodeId(nodeId)) throw new Error("TREE_NODE_STALE");
+  if (includeArchived && readweave.getTreeNodeMetadata) {
+    const metadata = await readweave.getTreeNodeMetadata(nodeId);
+    if (!metadata || metadata.workspaceId !== workspaceId || isRegressionAsset(metadata.node.id, metadata.node.title, metadata.node.materialId ?? "")) throw new Error("TREE_NODE_STALE");
+    if (metadata.node.kind !== "course" && metadata.node.kind !== "material") throw new Error("TREE_NODE_NOT_EDITABLE");
+    const trash = await readweave.listTrash();
+    if (trash.some(record => record.workspaceId === workspaceId && record.nodeId === nodeId && record.restoreAvailable)) throw new Error("TREE_NODE_STALE");
+    return metadata.node;
+  }
   const node = await resolveWorkspaceTreeNode(readweave, nodeId, workspaceId);
   if (!node) throw new Error("TREE_NODE_STALE");
   if (node.kind !== "course" && node.kind !== "material") throw new Error("TREE_NODE_NOT_EDITABLE");

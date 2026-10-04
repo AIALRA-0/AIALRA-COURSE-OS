@@ -70,10 +70,61 @@ disables runtime Corepack downloads. Check `pnpm --version` with container
 networking disabled before activation, so API startup cannot wait on the package
 registry even though application network access remains available.
 
-Build both images from the exact public commit and tag them `2.4.0-<short-sha>`. Put those tags in the private environment file, then apply Compose. API, web, worker, and converter must switch together.
+Build only affected components from the exact candidate commit and tag them `2.4.0-<short-sha>`. Put those tags in the private deployment configuration, then apply Compose. API and worker must use compatible adapter code; retain an unchanged converter image. Record each component's actual commit and digest rather than assuming one version for all services.
+
+### Confirmed writes and deletion capability
+
+For an existing ETAPI installation, activate the small metadata index once with
+the candidate image's existing operator script:
+
+```sh
+node --import tsx scripts/materialize-reading.ts --metadata-index
+```
+
+Stop the API and worker first. Use the API's actual environment, mounted secrets,
+settings vault and PostgreSQL connection. The command holds the existing API
+writer lease, resumes interrupted activation and verifies the authority index.
+It does not generate lessons. Rename/move/archive subsequently update that index
+instead of copying teaching bodies. Keep the pre-switch Compose file and images.
+
+A lost metadata-write response is an unknown result, not a failed transaction.
+The browser preserves the original idempotency key for an explicit retry,
+including after refresh or reopening a tab when browser storage is available. Do not replace that key or show a saved
+state until the authority confirms the result.
+
+An acknowledged write updates the reading copy from that specific result.
+Ordinary name/location projection failures retain unrelated confirmed reading.
+Deletion, archive and version-sensitive changes protect the affected object until
+the matching authority revision is confirmed. Stale refreshes cannot clear that
+protection. Keep the replica catalog with its persisted protections across
+restarts; do not repair this condition by deleting the replica directory.
+
+Check `/api/v1/trash/capabilities` before offering permanent deletion. The ETAPI
+adapter reports that native ReadWeave UI authentication is required: its ordinary
+note deletion is recoverable, and its API token does not authorize native erase.
+Use the native UI's scoped confirmation under a legitimate logged-in session.
+Never substitute an index-only removal, global erase, copied browser credentials,
+or direct database deletion. Verify authority absence and shared references before
+reporting that a selected object has been permanently removed.
 
 Keep the prior Compose file and images until internal health, reading readiness, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass. Keep all database, authority, and data-volume backups under the existing 7-daily, 4-weekly, and 6-monthly retention schedule; deployment and rollback do not shorten or reset retention.
 
 ## Rollback
 
-Restore the previous runtime environment and Compose file, then reapply the retained immutable images. Preserve every backup and rollback point under the existing retention schedule. Do not modify historical ReadWeave releases during application rollback. If readiness or confirmed reading still fails, stop and restore from the verified PostgreSQL, ReadWeave, and Course OS data-volume backups rather than deleting or overwriting authority data.
+If the candidate activated the metadata index, stop the API and worker and run
+the **candidate** image's script with the same private configuration and writer
+lease before switching to an image that predates this split:
+
+```sh
+node --import tsx scripts/materialize-reading.ts --metadata-rollback
+```
+
+This confirms a legacy-readable root assembled from the current content and
+current metadata; it does not restore an old snapshot over newer answers or
+drafts. If confirmation fails, keep services stopped and preserve the evidence.
+Then restore the previous runtime environment and Compose file and reapply the
+retained immutable images. Preserve every backup and rollback point under the
+existing retention schedule. Do not modify historical ReadWeave releases during
+application rollback. If readiness or confirmed reading still fails, use the
+verified PostgreSQL, ReadWeave and data-volume recovery procedure; never delete
+or overwrite authority data merely to make startup pass.

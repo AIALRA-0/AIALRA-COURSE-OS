@@ -129,10 +129,13 @@ interface DraftProjection {
 interface ProjectionIndex {
   courseRootNoteId: string;
   stateNoteId: string;
+  metadataIndexNoteId?: string;
+  metadataIndexRevision?: number;
   activityStateNoteId?: string;
   costIndexNoteId?: string;
   rootMaterialsNoteId?: string;
   trashNoteId?: string;
+  materialReleaseSelections?: Record<string, { releaseId: string; source: "derived" | "explicit" }>;
   courses: Record<string, CourseProjection>;
   drafts: Record<string, DraftProjection>;
   releases: Record<string, string>;
@@ -140,6 +143,36 @@ interface ProjectionIndex {
 
 interface EtapiState extends ReadWeaveFileState {
   projections: ProjectionIndex;
+}
+
+interface EtapiMetadataIndex {
+  format: "course-os-metadata-index";
+  formatVersion: 1;
+  schemaVersion: "1.0.0";
+  authorityType: "readweave-etapi";
+  workspaceId: string;
+  stateNoteId: string;
+  status: "staged" | "active" | "rolling_back" | "rolled_back";
+  revision: number;
+  migration: {
+    id: string;
+    phase: "staged" | "active" | "rolling_back" | "rolled_back";
+    sourceSchemaVersion: string;
+    startedAt: string;
+    completedAt?: string;
+  };
+  courses: CourseProject[];
+  treeNodes: CourseTreeNode[];
+  trash: TrashRecord[];
+  projections: Pick<ProjectionIndex, "courseRootNoteId" | "rootMaterialsNoteId" | "trashNoteId" | "materialReleaseSelections"> & {
+    courses: Record<string, CourseProjection>;
+  };
+  idempotency: ReadWeaveFileState["idempotency"];
+}
+
+interface LocatedMetadataIndex {
+  noteId: string;
+  index: EtapiMetadataIndex;
 }
 
 interface EtapiActivityState {
@@ -207,8 +240,13 @@ interface SharedRead<T> {
 // overlap briefly when ETAPI settings are replaced, so their page locks share
 // this process-wide map.
 const draftPageWriteChains = new Map<string, Promise<void>>();
+const etapiWriteChains = new Map<string, Promise<void>>();
 
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
+const metadataIdempotencyKinds = new Set(["course", "tree_node", "trash", "restore"]);
+const metadataIndexLabel = "courseOsMetadataIndex";
+const metadataMigrationLabel = "courseOsMetadataMigration";
+const metadataIndexTitlePrefix = "Course OS Metadata Index";
 const backgroundSharedReadBudgetMs = 30_000;
 const maximumSharedReadBudgetMs = 180_000;
 
@@ -360,10 +398,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private static readonly maxStaleReadMs = 300_000;
   private readonly fetchImpl: typeof fetch;
   private readonly workspaceId: string;
+  private readonly writeQueueKey: string;
   private readonly requestTimeoutMs: number;
   private bootstrapInFlight?: SharedRead<BootstrapResult>;
   private bootstrapCache?: BootstrapResult;
-  private writeChain: Promise<void> = Promise.resolve();
+  private metadataIndexCache?: { noteId: string; index: EtapiMetadataIndex; expiresAt: number };
   private readonly draftPageRecordCache = new Map<string, LocatedDraftPageRecord>();
   private readonly draftPageRecordVersions = new Map<string, number>();
   private draftPageRecordVersion = 0;
@@ -386,6 +425,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   constructor(private readonly config: EtapiReadWeaveConfig) {
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.workspaceId = config.workspaceId ?? "personal";
+    this.writeQueueKey = `${new URL(config.baseUrl).toString()}\u0000${config.parentNoteId}\u0000${this.workspaceId}`;
     this.requestTimeoutMs = Math.max(1_000, config.requestTimeoutMs ?? 30_000);
   }
 
@@ -395,12 +435,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listCourses(): Promise<CourseProject[]> {
+    const metadata = await this.metadataIndexForRead();
+    if (metadata) return mergeReleaseCourses(metadata.index.courses, [], this.workspaceId);
     const state = await this.readStateReference(false, false);
     return mergeReleaseCourses(state.courses, state.releases, this.workspaceId);
   }
 
   async createCourse(course: CourseProject, context: IdempotentWriteContext): Promise<CourseProject> {
-    const saved = await this.mutate(async (state) => {
+    const result = await this.mutateMetadata(context, () => true, async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
         const existing = state.courses.find((item) => item.id === replay.objectId);
@@ -413,8 +455,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.courses.push(saved);
       state.idempotency[context.idempotencyKey] = { kind: "course", objectId: saved.id };
       return saved;
-    }, context);
-    await this.readBackTreeNode(saved.id, courseNodeFromProject(saved));
+    });
+    if (!result.applied) throw new Error("READWEAVE_METADATA_MUTATION_UNAVAILABLE");
+    const saved = result.value;
+    await this.readBackMetadataTreeNode(saved.id, courseNodeFromProject(saved));
     return saved;
   }
 
@@ -430,6 +474,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const saved = structuredClone({ ...release, lifecycle: "draft_source" as const });
       await this.ensureCourseProjection(state, saved);
       state.releases.push(saved);
+      this.upsertStableMaterialNodes(state);
       state.idempotency[context.idempotencyKey] = { kind: "draft_source", objectId: saved.id };
       return saved;
     }, context);
@@ -539,6 +584,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           await this.writeDraftPageRecord(refreshed, pageRecord.noteId, state);
         }
       }
+      this.upsertStableMaterialNodes(state);
       state.idempotency[context.idempotencyKey] = { kind: "release", objectId: release.id };
       return release;
     }, context);
@@ -1041,6 +1087,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           const migrated = this.makeDraftPageRecord(state, existing, projection);
           await this.writeDraftPageRecord(migrated, undefined, fallbackState());
         }
+        await this.syncMetadataMaterialFromDraft(this.stateCache?.state ?? fallbackState(), existing, context);
         if (cost) await this.writeContext.run(context, () => this.ensureCostNoteOnce(projection!.sectionNoteIds.quality, cost));
         return structuredClone(existing);
       }
@@ -1099,6 +1146,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       record.idempotency[context.idempotencyKey] = { kind: "draft", objectId: saved.id };
       if (cost) record.idempotency[cost.id] = { kind: "cost_entry", objectId: cost.id };
       await this.writeDraftPageRecord(record, located?.noteId, fallbackState());
+      await this.syncMetadataMaterialFromDraft(this.stateCache?.state ?? fallbackState(), saved, context);
       return saved;
     }).catch((error: unknown) => {
       this.invalidateStateCache();
@@ -1213,6 +1261,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listTreeNodes(): Promise<CourseTreeNode[]> {
+    const metadata = await this.metadataIndexForRead();
+    if (metadata) return this.treeNodesFromMetadata(metadata.index);
     const state = await this.readStateReference(false, false);
     const courses = mergeReleaseCourses(state.courses, state.releases, this.workspaceId).filter((course) => course.status !== "archived");
     const stableMaterialIds = new Set(materialGroups(state.releases).map((group) => stableMaterialId(group.courseId, group.moduleId)));
@@ -1235,7 +1285,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const byId = new Map(state.treeNodes
       .filter((node) => (node.kind === "course" || node.kind === "material") && !node.archived)
       .filter((node) => !(node.kind === "material" && node.id !== node.materialId && node.materialId && stableMaterialIds.has(node.materialId)))
-      .map((node) => [node.id, structuredClone(node)] as const));
+      .map((node) => [node.id, withMaterialReleaseSelectionHint(structuredClone(node), state.projections.materialReleaseSelections)] as const));
     for (const node of generated) if (!byId.has(node.id)) byId.set(node.id, node);
     for (const group of materialGroups(state.releases, state.drafts)) {
       const course = courses.find((item) => item.id === group.courseId);
@@ -1243,14 +1293,95 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const id = stableMaterialId(group.courseId, group.moduleId);
       if (archivedMaterialIds.has(id)) continue;
       const persisted = state.treeNodes.find((node) => node.kind === "material" && !node.archived && (node.id === id || node.materialId === id));
+      const selection = state.projections.materialReleaseSelections?.[id];
+      const selectionNode = !persisted ? undefined
+        : selection?.source === "derived" ? { ...persisted, currentReleaseId: undefined, releaseId: undefined }
+          : selection?.source === "explicit" ? { ...persisted, currentReleaseId: selection.releaseId, releaseId: selection.releaseId }
+            : persisted;
       const projection = state.projections.courses[group.courseId];
       const legacyNoteId = projection?.modules[group.moduleId];
-      byId.set(id, { ...materialTreeNode(course, group, persisted, state.drafts), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId });
+      byId.set(id, withMaterialReleaseSelectionHint({
+        ...materialTreeNode(course, group, selectionNode, state.drafts),
+        id,
+        materialId: id,
+        readweaveNoteId: persisted?.readweaveNoteId ?? legacyNoteId
+      }, state.projections.materialReleaseSelections));
     }
     return [...byId.values()];
   }
 
+  /** Raw same-workspace metadata lookup, including archived nodes hidden from the visible tree. */
+  async getTreeNodeMetadata(nodeId: string): Promise<{ node: CourseTreeNode; workspaceId: string } | undefined> {
+    const metadata = await this.metadataIndexForRead();
+    if (!metadata) {
+      const state = await this.readStateReference(false, false);
+      const course = state.courses.find((candidate) => candidate.id === nodeId);
+      if (course) return course.workspaceId === this.workspaceId
+        ? { node: courseNodeFromProject(course), workspaceId: course.workspaceId }
+        : undefined;
+      const node = state.treeNodes.find((candidate) => candidate.id === nodeId);
+      if (!node) return undefined;
+      const courses = mergeReleaseCourses(state.courses, state.releases, this.workspaceId);
+      const materialId = node.materialId || node.id;
+      const owner = node.kind === "material"
+        ? courses.filter((candidate) => materialId.startsWith(`material:${candidate.id}:`))
+          .sort((left, right) => right.id.length - left.id.length)[0]
+        : courses.find((candidate) => candidate.id === node.parentId);
+      return owner?.workspaceId === this.workspaceId
+        ? { node: withMaterialReleaseSelectionHint(structuredClone(node), state.projections.materialReleaseSelections), workspaceId: owner.workspaceId }
+        : undefined;
+    }
+    const course = metadata.index.courses.find((candidate) => candidate.id === nodeId);
+    if (course) return course.workspaceId === this.workspaceId
+      ? { node: courseNodeFromProject(course), workspaceId: course.workspaceId }
+      : undefined;
+    const node = metadata.index.treeNodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return undefined;
+    const materialId = node.materialId || node.id;
+    const owner = node.kind === "material"
+      ? metadata.index.courses
+        .filter((candidate) => materialId.startsWith(`material:${candidate.id}:`))
+        .sort((left, right) => right.id.length - left.id.length)[0]
+      : metadata.index.courses.find((candidate) => candidate.id === node.parentId);
+    return owner?.workspaceId === this.workspaceId
+      ? { node: withMaterialReleaseSelectionHint(structuredClone(node), metadata.index.projections.materialReleaseSelections), workspaceId: owner.workspaceId }
+      : undefined;
+  }
+
   async createTreeNode(node: CourseTreeNode, context: IdempotentWriteContext): Promise<CourseTreeNode> {
+    const result = await this.mutateMetadata(context, (state) => {
+      if (node.kind !== "module" && node.kind !== "material") return true;
+      if (!node.parentId) return true;
+      if (state.courses.some((course) => course.id === node.parentId)) return true;
+      const currentMaterial = /^material:([^:]+):current$/.exec(node.parentId);
+      return Boolean(currentMaterial && state.courses.some((course) => course.id === currentMaterial[1]));
+    }, async (state) => {
+      const replay = state.idempotency[context.idempotencyKey];
+      if (replay) return state.treeNodes.find((item) => item.id === replay.objectId) ?? node;
+      if (state.treeNodes.some((item) => item.id === node.id) || state.courses.some((item) => item.id === node.id)) throw new Error("READWEAVE_TREE_NODE_EXISTS");
+      const saved = structuredClone({ ...node, revision: node.revision ?? 0, children: [] });
+      if (node.kind === "module" || node.kind === "material") {
+        const courseId = this.courseIdForParent(state, node.parentId);
+        const course = state.courses.find((item) => item.id === courseId);
+        if (!course) throw new Error("READWEAVE_TREE_COURSE_NOT_FOUND");
+        const projection = await this.ensureCourseScaffold(state, course.id, course.title, course.description);
+        const parentNoteId = node.parentId ? this.parentNoteIdForTreeNode(state, projection, node.parentId) : await this.ensureWorkspaceContainer(state, "rootMaterialsNoteId", "00 工作区根材料");
+        const moduleNote = await this.createNote(parentNoteId, node.title, `<p>Course OS 材料</p>`, "text", undefined, { courseOsType: "material", courseOsObjectId: node.id });
+        saved.readweaveNoteId = moduleNote.noteId;
+        projection.modules[node.materialId || node.id] = moduleNote.noteId;
+        projection.moduleBranchIds ??= {};
+        projection.moduleBranchIds[node.materialId || node.id] = moduleNote.branch.branchId;
+      }
+      state.treeNodes.push(saved);
+      state.idempotency[context.idempotencyKey] = { kind: "tree_node", objectId: saved.id };
+      return saved;
+    });
+    if (!result.applied) return this.createTreeNodeLegacy(node, context);
+    await this.readBackMetadataTreeNode(result.value.id, result.value);
+    return result.value;
+  }
+
+  private async createTreeNodeLegacy(node: CourseTreeNode, context: IdempotentWriteContext): Promise<CourseTreeNode> {
     const saved = await this.mutate(async (state) => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) return state.treeNodes.find((item) => item.id === replay.objectId) ?? node;
@@ -1276,7 +1407,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode> {
-    const saved = await this.mutate(async (state) => {
+    const change = async (state: EtapiState): Promise<CourseTreeNode> => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
         const replayNode = state.treeNodes.find((item) => item.id === replay.objectId);
@@ -1296,6 +1427,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const targetRelease = validateMaterialReleaseTarget(node, patch.currentReleaseId, state.courses, state.releases, state.drafts, this.workspaceId);
         node!.currentReleaseId = targetRelease.id;
         node!.releaseId = targetRelease.id;
+        if (node!.kind === "material") {
+          state.projections.materialReleaseSelections ??= {};
+          state.projections.materialReleaseSelections[node!.materialId || node!.id] = { releaseId: targetRelease.id, source: "explicit" };
+          node!.currentReleaseSelection = "explicit";
+        }
       }
       if (course) {
         if (patch.title?.trim() && patch.title.trim() !== course.title) {
@@ -1331,7 +1467,26 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       node!.revision = currentRevision + 1;
       state.idempotency[context.idempotencyKey] = { kind: "tree_node", objectId: nodeId };
       return structuredClone(node!);
-    }, context);
+    };
+    const canUseMetadata = (state: EtapiState): boolean => {
+      if (patch.currentReleaseId !== undefined) return false;
+      const course = state.courses.some((item) => item.id === nodeId);
+      const node = state.treeNodes.find((item) => item.id === nodeId);
+      if (!course && !node) return false;
+      if (patch.parentId !== undefined && patch.parentId !== null) {
+        const knownParent = state.courses.some((item) => item.id === patch.parentId)
+          || state.treeNodes.some((item) => item.id === patch.parentId)
+          || isVirtualTreeParent(state, patch.parentId);
+        if (!knownParent) return false;
+      }
+      return true;
+    };
+    const fast = await this.mutateMetadata(context, canUseMetadata, change);
+    if (fast.applied) {
+      await this.readBackMetadataTreeNode(fast.value.id, fast.value);
+      return fast.value;
+    }
+    const saved = await this.mutate(change, context);
     return this.readBackTreeNode(saved.id, saved);
   }
 
@@ -1419,7 +1574,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listTrash(): Promise<TrashRecord[]> {
-    return structuredClone((await this.readStateReference(false, false)).trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId));
+    const metadata = await this.metadataIndexForRead();
+    const trash = metadata?.index.trash ?? (await this.readStateReference(false, false)).trash;
+    return structuredClone(trash.filter((item) => item.workspaceId === this.workspaceId || !item.workspaceId));
   }
 
   async restoreTrash(trashId: string, context: IdempotentWriteContext, options: { restoreMode?: "original" | "root" } = {}): Promise<CourseTreeNode> {
@@ -1489,6 +1646,97 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // Even virtual nodes can own page-note projections; removing the index
     // would falsely report permanent deletion and orphan those projections.
     throw new Error("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
+  }
+
+  async getTrashCapabilities(): Promise<{
+    directPermanentDelete: false;
+    requiresNativeUi: true;
+    reason: "READWEAVE_NATIVE_ERASE_REQUIRED";
+  }> {
+    return {
+      directPermanentDelete: false,
+      requiresNativeUi: true,
+      reason: "READWEAVE_NATIVE_ERASE_REQUIRED"
+    };
+  }
+
+  /** Run or resume the one-time legacy metadata split and return its active authority. */
+  async ensureMetadataIndex(): Promise<{ noteId: string; revision: number; status: "active" }> {
+    return this.enqueueWrite(async () => {
+      const located = await this.metadataIndexForMutation();
+      if (located.index.status !== "active") throw new Error("READWEAVE_METADATA_MIGRATION_NOT_ACTIVE");
+      return { noteId: located.noteId, revision: located.index.revision, status: "active" };
+    });
+  }
+
+  /** Rebuild the legacy root snapshot from the current core and metadata overlay before retiring the split. */
+  async prepareMetadataRollback(): Promise<void> {
+    await this.enqueueWrite(async () => {
+      this.metadataIndexCache = undefined;
+      this.invalidateStateCache();
+      const root = await this.readRawState();
+      const pointer = root.projections.metadataIndexNoteId;
+      let located: LocatedMetadataIndex | undefined;
+      if (pointer) {
+        located = await this.readMetadataIndex(pointer);
+      } else {
+        located = await this.findMetadataMigration(metadataMigrationId(this.workspaceId, root.projections.stateNoteId));
+        if (!located) return;
+        if (located.index.status === "rolled_back") return;
+        if (located.index.status === "active" && JSON.stringify(metadataPayload(root)) !== JSON.stringify(metadataPayload(located.index))) {
+          throw new Error("READWEAVE_METADATA_ROLLBACK_ROOT_MISMATCH");
+        }
+      }
+      if (located.index.workspaceId !== this.workspaceId || located.index.stateNoteId !== root.projections.stateNoteId) {
+        throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+      }
+      if (located.index.status === "rolled_back") {
+        if (pointer) throw new Error("READWEAVE_METADATA_ROLLBACK_POINTER_REMAINS");
+        return;
+      }
+      if (located.index.status !== "active" && located.index.status !== "staged" && located.index.status !== "rolling_back") {
+        throw new Error("READWEAVE_METADATA_ROLLBACK_NOT_ACTIVE");
+      }
+
+      if (located.index.status !== "rolling_back") {
+        const rollingBack = {
+          ...located.index,
+          status: "rolling_back" as const,
+          revision: located.index.revision + 1,
+          migration: { ...located.index.migration, phase: "rolling_back" as const }
+        };
+        located = await this.writeMetadataIndex(located, rollingBack, located.index.revision);
+      }
+
+      const currentRoot = await this.readRawState();
+      if (currentRoot.projections.stateNoteId !== located.index.stateNoteId
+        || (currentRoot.projections.metadataIndexNoteId && currentRoot.projections.metadataIndexNoteId !== located.noteId)) {
+        throw new Error("READWEAVE_METADATA_ROLLBACK_ROOT_MISMATCH");
+      }
+
+      const restored = applyMetadataIndex(currentRoot, located.index, located.noteId);
+      delete restored.projections.metadataIndexNoteId;
+      delete restored.projections.metadataIndexRevision;
+      const content = await encodeReadWeaveStateContentAsync(restored);
+      await this.putContent(currentRoot.projections.stateNoteId, content);
+      const readBackContent = await this.getContent(currentRoot.projections.stateNoteId);
+      if (readBackContent !== content) throw new Error("READWEAVE_METADATA_ROLLBACK_READBACK_FAILED");
+      const readBack = normalizeState(await decodeReadWeaveStateContentAsync(readBackContent) as Partial<EtapiState>, currentRoot.projections);
+      if (readBack.projections.metadataIndexNoteId || JSON.stringify(metadataPayload(readBack)) !== JSON.stringify(metadataPayload(located.index))) {
+        throw new Error("READWEAVE_METADATA_ROLLBACK_READBACK_FAILED");
+      }
+
+      const retired = {
+        ...located.index,
+        status: "rolled_back" as const,
+        revision: located.index.revision + 1,
+        migration: { ...located.index.migration, phase: "rolled_back" as const }
+      };
+      const committed = await this.writeMetadataIndex(located, retired, located.index.revision);
+      this.metadataIndexCache = undefined;
+      this.invalidateStateCache();
+      if (committed.index.status !== "rolled_back") throw new Error("READWEAVE_METADATA_ROLLBACK_READBACK_FAILED");
+    });
   }
 
   async getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined> {
@@ -1642,6 +1890,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const projection = await this.ensureCourseScaffold(state, course.id, course.title, course.description);
     const material = materialTreeNode(course, group, undefined, state.drafts);
+    state.projections.materialReleaseSelections ??= {};
+    state.projections.materialReleaseSelections[nodeId] ??= { releaseId: material.currentReleaseId ?? "", source: "derived" };
+    material.currentReleaseSelection = state.projections.materialReleaseSelections[nodeId]!.source;
     const noteId = projection.modules[group.moduleId] ?? projection.modules[nodeId];
     if (noteId) {
       material.readweaveNoteId = noteId;
@@ -1660,6 +1911,97 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     material.materialId = nodeId;
     state.treeNodes.push(material);
     return material;
+  }
+
+  /** Keep the metadata authority's stable material rows current at existing state-save boundaries. */
+  private upsertStableMaterialNodes(state: EtapiState, only?: { courseId: string; moduleId: string }): void {
+    const releases = (state.releases ?? []).filter((release) => !only || (release.courseId === only.courseId && release.moduleId === only.moduleId));
+    const drafts = (state.drafts ?? []).filter((draft) => !only || (draft.courseId === only.courseId && draft.moduleId === only.moduleId));
+    state.courses = mergeReleaseCourses(state.courses ?? [], releases, this.workspaceId);
+    state.projections.materialReleaseSelections ??= {};
+    const groups = materialGroups(releases, drafts);
+    for (const group of groups) {
+      const id = stableMaterialId(group.courseId, group.moduleId);
+      const course = state.courses.find((item) => item.id === group.courseId);
+      if (!course) continue;
+
+      const existing = state.treeNodes.find((node) => node.kind === "material" && node.id === id)
+        ?? state.treeNodes.find((node) => node.kind === "material" && node.materialId === id);
+      const selection = state.projections.materialReleaseSelections[id] ??= existing?.currentReleaseId
+        ? { releaseId: existing.currentReleaseId, source: "explicit" }
+        : { releaseId: "", source: "derived" };
+      const selectionNode = existing && selection.source === "explicit"
+        ? { ...existing, currentReleaseId: selection.releaseId, releaseId: selection.releaseId }
+        : existing ? { ...existing, currentReleaseId: undefined, releaseId: undefined } : undefined;
+      const material: CourseTreeNode = {
+        ...materialTreeNode(course, group, selectionNode, drafts),
+        id,
+        materialId: id,
+        currentReleaseSelection: selection.source
+      };
+      if (selection.source === "derived") selection.releaseId = material.currentReleaseId ?? "";
+      const projection = state.projections.courses[group.courseId];
+      const projectedNoteId = projection?.modules[id] ?? projection?.modules[group.moduleId];
+      material.readweaveNoteId = existing?.readweaveNoteId ?? projectedNoteId;
+      if (projection && projectedNoteId && !projection.modules[id]) projection.modules[id] = projectedNoteId;
+
+      const stableIndex = state.treeNodes.findIndex((node) => node.kind === "material" && node.id === id);
+      if (stableIndex >= 0) state.treeNodes[stableIndex] = material;
+      else state.treeNodes.push(material);
+    }
+  }
+
+  private async syncMetadataMaterialFromDraft(state: EtapiState, draft: LessonDraft, context: IdempotentWriteContext): Promise<void> {
+    const pointer = state.projections.metadataIndexNoteId;
+    if (!pointer) return;
+
+    await this.enqueueWrite(async () => {
+      const located = await this.readMetadataIndex(pointer);
+      if (located.index.workspaceId !== this.workspaceId || located.index.stateNoteId !== state.projections.stateNoteId) {
+        throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+      }
+      if (located.index.status !== "active") throw new Error("READWEAVE_METADATA_MIGRATION_IN_PROGRESS");
+
+      const materialState = metadataStateView(located.index, located.noteId);
+      materialState.releases = state.releases.filter((release) => release.courseId === draft.courseId && release.moduleId === draft.moduleId);
+      materialState.drafts = state.drafts.filter((item) => item.courseId === draft.courseId && item.moduleId === draft.moduleId);
+      const draftIndex = materialState.drafts.findIndex((item) => item.pageId === draft.pageId);
+      if (draftIndex >= 0) materialState.drafts[draftIndex] = structuredClone(draft);
+      else materialState.drafts.push(structuredClone(draft));
+
+      const incomingProjection = state.projections.courses[draft.courseId];
+      const currentProjection = materialState.projections.courses[draft.courseId];
+      if (incomingProjection) {
+        materialState.projections.courses[draft.courseId] = {
+          ...structuredClone(incomingProjection),
+          ...structuredClone(currentProjection ?? {}),
+          modules: { ...incomingProjection.modules, ...currentProjection?.modules },
+          moduleBranchIds: { ...incomingProjection.moduleBranchIds, ...currentProjection?.moduleBranchIds },
+          childBranchIds: { ...incomingProjection.childBranchIds, ...currentProjection?.childBranchIds }
+        };
+      }
+
+      this.upsertStableMaterialNodes(materialState, { courseId: draft.courseId, moduleId: draft.moduleId });
+      const next: EtapiMetadataIndex = {
+        ...located.index,
+        courses: structuredClone(materialState.courses),
+        treeNodes: structuredClone(materialState.treeNodes),
+        projections: {
+          ...located.index.projections,
+          materialReleaseSelections: structuredClone(materialState.projections.materialReleaseSelections ?? {}),
+          courses: structuredClone(materialState.projections.courses)
+        }
+      };
+      if (JSON.stringify(metadataPayload(located.index)) !== JSON.stringify(metadataPayload(next))) {
+        next.revision = located.index.revision + 1;
+        const committed = await this.writeMetadataIndex(located, next, located.index.revision);
+        this.commitMetadataIndex(committed);
+        state.projections.metadataIndexRevision = committed.index.revision;
+      } else {
+        this.commitMetadataIndex(located);
+        state.projections.metadataIndexRevision = located.index.revision;
+      }
+    }, context);
   }
 
   private ensureCourseProject(state: EtapiState, courseId: string): CourseProject | undefined {
@@ -2250,6 +2592,424 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return `<p>原始页面</p>${image}<p><code>${escapeHtml(draft.page.imageUrl)}</code></p>${extracted ? `<h3>提取文本</h3><pre>${escapeHtml(extracted)}</pre>` : ""}<h3>来源锚点</h3><pre>${escapeHtml(JSON.stringify(draft.page.anchors, null, 2))}</pre>`;
   }
 
+  private async mutateMetadata<T>(
+    context: IdempotentWriteContext,
+    canApply: (state: EtapiState) => boolean,
+    change: (state: EtapiState) => Promise<T>
+  ): Promise<{ applied: false } | { applied: true; value: T; replayed: boolean }> {
+    return this.enqueueWrite(async () => {
+      try {
+        const cached = this.metadataIndexCache;
+        const cachedReplay = cached && cached.expiresAt > Date.now() && cached.index.status === "active"
+          && Object.hasOwn(cached.index.idempotency, context.idempotencyKey);
+        const located = cachedReplay
+          ? { noteId: cached.noteId, index: cached.index }
+          : await this.metadataIndexForMutation();
+        const state = metadataStateView(located.index, located.noteId);
+        if (!canApply(state)) return { applied: false };
+        const replayed = Boolean(state.idempotency[context.idempotencyKey]);
+        const before = metadataPayload(located.index);
+        const value = structuredClone(await change(state));
+        const next = metadataIndexFromState(located.index, state);
+        if (JSON.stringify(before) !== JSON.stringify(metadataPayload(next))) {
+          next.revision = located.index.revision + 1;
+          next.status = "active";
+          next.migration = { ...next.migration, phase: "active", completedAt: next.migration.completedAt ?? new Date().toISOString() };
+          const committed = await this.writeMetadataIndex(located, next, located.index.revision);
+          this.commitMetadataIndex(committed);
+        } else {
+          this.commitMetadataIndex(located);
+        }
+        return { applied: true, value, replayed };
+      } catch (error) {
+        this.metadataIndexCache = undefined;
+        this.invalidateStateCache();
+        throw error;
+      }
+    }, context);
+  }
+
+  private async readBackMetadataTreeNode(nodeId: string, expected: CourseTreeNode, verifyRemoteNote = true): Promise<CourseTreeNode> {
+    // mutateMetadata has already committed and read back the authority before
+    // handing its result here. Use that exact revision instead of downloading
+    // the metadata index a second time for the same operation.
+    const cached = this.metadataIndexCache;
+    const located = cached && cached.expiresAt > Date.now() && cached.index.status === "active"
+      ? { noteId: cached.noteId, index: cached.index }
+      : await this.metadataIndexForMutation();
+    const stored = located.index.treeNodes.find((candidate) => candidate.id === nodeId);
+    const course = located.index.courses.find((candidate) => candidate.id === nodeId);
+    const node = stored ?? (course ? courseNodeFromProject(course) : undefined);
+    if (!node || node.title !== expected.title || node.parentId !== expected.parentId
+      || (expected.revision !== undefined && node.revision !== expected.revision)) {
+      throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    }
+    if (expected.currentReleaseId !== undefined && node.currentReleaseId !== expected.currentReleaseId) {
+      throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    }
+    if (expected.readweaveNoteId && node.readweaveNoteId !== expected.readweaveNoteId) {
+      throw new Error("READWEAVE_TREE_IDENTITY_READBACK_FAILED");
+    }
+    if (verifyRemoteNote && node.readweaveNoteId) await this.getNote(node.readweaveNoteId);
+    return structuredClone(node);
+  }
+
+  private async metadataIndexForMutation(): Promise<LocatedMetadataIndex> {
+    const cached = this.metadataIndexCache;
+    if (cached && cached.expiresAt > Date.now()) {
+      const latest = await this.readMetadataIndex(cached.noteId);
+      if (latest.index.status === "active") return latest;
+      if (latest.index.status === "rolling_back") throw new Error("READWEAVE_METADATA_ROLLBACK_IN_PROGRESS");
+    }
+
+    const legacy = await this.readRawState();
+    const pointer = legacy.projections.metadataIndexNoteId;
+    if (pointer) {
+      const pointed = await this.readMetadataIndex(pointer);
+      if (pointed.index.workspaceId !== this.workspaceId || pointed.index.stateNoteId !== legacy.projections.stateNoteId) {
+        throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+      }
+      const rootRevision = legacy.projections.metadataIndexRevision ?? 0;
+      const stagedPointerPending = pointed.index.status === "staged" && rootRevision === pointed.index.revision + 1;
+      if (pointed.index.revision < rootRevision && !stagedPointerPending) throw new Error("READWEAVE_METADATA_INDEX_REVISION_INVALID");
+      if (pointed.index.status === "active") {
+        await this.addMetadataIndexAuthorityLabel(pointed);
+        this.commitMetadataIndex(pointed);
+        return pointed;
+      }
+      if (pointed.index.status === "staged") return this.finishMetadataMigration(legacy, pointed);
+      if (pointed.index.status === "rolling_back") throw new Error("READWEAVE_METADATA_ROLLBACK_IN_PROGRESS");
+      throw new Error("READWEAVE_METADATA_INDEX_ROLLED_BACK");
+    }
+
+    const active = await this.findActiveMetadataIndex();
+    if (active) throw new Error("READWEAVE_METADATA_ROOT_POINTER_MISSING");
+    return this.startMetadataMigration(legacy);
+  }
+
+  private async metadataIndexForRead(): Promise<LocatedMetadataIndex | undefined> {
+    const cached = this.metadataIndexCache;
+    if (cached && cached.expiresAt > Date.now()) {
+      const latest = await this.readMetadataIndex(cached.noteId);
+      if (latest.index.status === "active" || latest.index.status === "rolling_back") {
+        this.cacheMetadataIndex(latest);
+        return latest;
+      }
+    }
+    const located = await this.findMetadataIndexForWorkspace();
+    if (!located) return undefined;
+    if (located.index.status === "active" || located.index.status === "rolling_back") {
+      this.cacheMetadataIndex(located);
+      return located;
+    }
+    if (located.index.status !== "staged") return undefined;
+
+    // A staged index is readable only after the root has committed its pointer.
+    // This path is limited to recovery from an interrupted one-time migration.
+    const root = await this.readRawState();
+    if (root.projections.metadataIndexNoteId !== located.noteId
+      || (root.projections.metadataIndexRevision ?? 0) !== located.index.revision + 1) return undefined;
+    this.cacheMetadataIndex(located);
+    return located;
+  }
+
+  private async findMetadataIndexForWorkspace(): Promise<LocatedMetadataIndex | undefined> {
+    const query = new URLSearchParams({
+      search: quoteSearchValue(`${metadataIndexTitlePrefix} · ${this.workspaceId}`),
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const response = await this.request<SearchResponse>(`/notes?${query.toString()}`);
+    const matches = response.results.filter((note) => note.title === `${metadataIndexTitlePrefix} · ${this.workspaceId}`);
+    if (matches.length > 1) throw new Error("READWEAVE_METADATA_INDEX_DUPLICATE");
+    return matches[0] ? this.readMetadataIndex(matches[0].noteId) : undefined;
+  }
+
+  private treeNodesFromMetadata(index: EtapiMetadataIndex): CourseTreeNode[] {
+    const courses = mergeReleaseCourses(index.courses, [], this.workspaceId).filter((course) => course.status !== "archived");
+    const stableMaterialIds = new Set(index.treeNodes
+      .filter((node) => node.kind === "material" && node.id === node.materialId)
+      .map((node) => node.id));
+    const byId = new Map(index.treeNodes
+      .filter((node) => (node.kind === "course" || node.kind === "material") && !node.archived)
+      .filter((node) => !(node.kind === "material" && node.id !== node.materialId && node.materialId && stableMaterialIds.has(node.materialId)))
+      .map((node) => [node.id, withMaterialReleaseSelectionHint(structuredClone(node), index.projections.materialReleaseSelections)] as const));
+    for (const course of courses) {
+      if (byId.has(course.id)) continue;
+      byId.set(course.id, {
+        id: course.id,
+        kind: "course",
+        title: course.title,
+        subtitle: course.description,
+        status: "published",
+        archived: false,
+        visibility: "library",
+        revision: course.revision ?? 0,
+        sortOrder: course.sortOrder,
+        readweaveNoteId: course.readweaveNoteId ?? index.projections.courses[course.id]?.courseNoteId,
+        children: []
+      });
+    }
+    return [...byId.values()];
+  }
+
+  private async startMetadataMigration(legacy: EtapiState): Promise<LocatedMetadataIndex> {
+    this.upsertStableMaterialNodes(legacy);
+    const stateNoteId = legacy.projections.stateNoteId;
+    const migrationId = metadataMigrationId(this.workspaceId, stateNoteId);
+    let staged = await this.findMetadataMigration(migrationId);
+    if (staged?.index.status === "staged") return this.finishMetadataMigration(legacy, staged);
+    if (staged?.index.status === "active" || staged?.index.status === "rolling_back") {
+      throw new Error("READWEAVE_METADATA_ROOT_POINTER_MISSING");
+    }
+
+    const migrated = metadataIndexFromLegacy(legacy, this.workspaceId, migrationId, 1);
+    if (staged) {
+      migrated.revision = staged.index.revision + 1;
+      await this.writeMetadataIndex(staged, migrated, staged.index.revision);
+      staged = { noteId: staged.noteId, index: migrated };
+    } else {
+      const title = `${metadataIndexTitlePrefix} · ${this.workspaceId}`;
+      const created = await this.createNote(stateNoteId, title, await encodeReadWeaveStateContentAsync(migrated), "code", "application/json", {
+        [metadataMigrationLabel]: migrationId,
+        courseOsWorkspaceId: this.workspaceId,
+        courseOsType: "metadata_index"
+      });
+      staged = await this.readMetadataIndex(created.noteId);
+      if (staged.index.status !== "staged" || staged.index.migration.id !== migrationId) throw new Error("READWEAVE_METADATA_MIGRATION_READBACK_FAILED");
+    }
+    return this.finishMetadataMigration(legacy, staged);
+  }
+
+  private async finishMetadataMigration(legacy: EtapiState, staged: LocatedMetadataIndex): Promise<LocatedMetadataIndex> {
+    if (staged.index.workspaceId !== this.workspaceId || staged.index.stateNoteId !== legacy.projections.stateNoteId) {
+      throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+    }
+    let root = await this.readRawState();
+    if (root.projections.stateNoteId !== legacy.projections.stateNoteId) throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+    const existingPointer = root.projections.metadataIndexNoteId;
+    if (existingPointer && existingPointer !== staged.noteId) throw new Error("READWEAVE_METADATA_INDEX_POINTER_MISMATCH");
+
+    if (staged.index.status === "active") {
+      if (!existingPointer || !metadataFieldsAreEmpty(root)
+        || (root.projections.metadataIndexRevision ?? 0) > staged.index.revision) {
+        throw new Error("READWEAVE_METADATA_ROOT_POINTER_INVALID");
+      }
+      await this.addMetadataIndexAuthorityLabel(staged);
+      this.commitMetadataIndex(staged);
+      return staged;
+    }
+    if (staged.index.status !== "staged") {
+      throw new Error("READWEAVE_METADATA_MIGRATION_NOT_RESUMABLE");
+    }
+
+    if (!existingPointer) this.upsertStableMaterialNodes(root);
+    if (!existingPointer && JSON.stringify(metadataPayload(root)) !== JSON.stringify(metadataPayload(staged.index))) {
+      const refreshed = metadataIndexFromLegacy(root, this.workspaceId, staged.index.migration.id, staged.index.revision + 1);
+      staged = await this.writeMetadataIndex(staged, refreshed, staged.index.revision);
+    }
+    const activeRevision = staged.index.revision + 1;
+    if (existingPointer && (root.projections.metadataIndexRevision ?? 0) !== activeRevision) {
+      throw new Error("READWEAVE_METADATA_ROOT_POINTER_INVALID");
+    }
+    const rootIsSplit = existingPointer === staged.noteId && metadataFieldsAreEmpty(root);
+    if (!rootIsSplit) {
+      const core = stateWithoutMetadata(root, staged.noteId, activeRevision);
+      const content = await encodeReadWeaveStateContentAsync(core);
+      const stateNoteId = stateNoteIdFromState(root);
+      await this.putContent(stateNoteId, content);
+      const readBackContent = await this.getContent(stateNoteId);
+      if (readBackContent !== content) throw new Error("READWEAVE_METADATA_ROOT_READBACK_FAILED");
+      const readBack = normalizeState(await decodeReadWeaveStateContentAsync(readBackContent) as Partial<EtapiState>, root.projections);
+      if (readBack.projections.metadataIndexNoteId !== staged.noteId
+        || readBack.projections.metadataIndexRevision !== activeRevision
+        || !metadataFieldsAreEmpty(readBack)) {
+        throw new Error("READWEAVE_METADATA_ROOT_READBACK_FAILED");
+      }
+      root = readBack;
+    }
+
+    const next = {
+      ...staged.index,
+      status: "active" as const,
+      revision: activeRevision,
+      migration: { ...staged.index.migration, phase: "active" as const, completedAt: new Date().toISOString() }
+    };
+    let activated = await this.writeMetadataIndex(staged, next, staged.index.revision);
+    await this.addMetadataIndexAuthorityLabel(activated);
+    activated = await this.readMetadataIndex(activated.noteId);
+    if (activated.index.status !== "active") throw new Error("READWEAVE_METADATA_MIGRATION_READBACK_FAILED");
+    this.commitMetadataIndex(activated);
+    return activated;
+  }
+
+  private async readRawState(): Promise<EtapiState> {
+    const bootstrap = await this.ensureWorkspaceResult();
+    let parsed = bootstrap.stateSnapshot;
+    if (parsed) bootstrap.stateSnapshot = undefined;
+    if (!parsed) parsed = await decodeReadWeaveStateContentAsync(await this.getContent(bootstrap.projection.stateNoteId)) as Partial<EtapiState>;
+    return normalizeState(parsed, bootstrap.projection);
+  }
+
+  private async readMetadataIndex(noteId: string, confirmedContent?: string): Promise<LocatedMetadataIndex> {
+    const parsed = await decodeReadWeaveStateContentAsync(confirmedContent ?? await this.getContent(noteId)) as Partial<EtapiMetadataIndex>;
+    if (parsed.format !== "course-os-metadata-index" || parsed.formatVersion !== 1 || parsed.schemaVersion !== "1.0.0"
+      || parsed.authorityType !== "readweave-etapi" || !parsed.workspaceId || !parsed.stateNoteId
+      || !["staged", "active", "rolling_back", "rolled_back"].includes(parsed.status ?? "")
+      || !Number.isInteger(parsed.revision) || (parsed.revision ?? -1) < 1
+      || !parsed.migration?.id || !["staged", "active", "rolling_back", "rolled_back"].includes(parsed.migration.phase ?? "")
+      || !Array.isArray(parsed.courses) || !Array.isArray(parsed.treeNodes) || !Array.isArray(parsed.trash)
+      || !parsed.projections || typeof parsed.projections.courses !== "object" || !parsed.idempotency) {
+      throw new Error("READWEAVE_METADATA_INDEX_INVALID");
+    }
+    const index = parsed as EtapiMetadataIndex;
+    if (index.workspaceId !== this.workspaceId) throw new Error("READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH");
+    return { noteId, index };
+  }
+
+  private async writeMetadataIndex(
+    located: LocatedMetadataIndex,
+    next: EtapiMetadataIndex,
+    expectedRevision: number
+  ): Promise<LocatedMetadataIndex> {
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+    let encodeMs: number | undefined;
+    let snapshotBytes: number | undefined;
+    let stateNotePutMs: number | undefined;
+    let confirmationMs: number | undefined;
+    let succeeded = false;
+    try {
+      const latest = await this.readMetadataIndex(located.noteId);
+      if (latest.index.revision !== expectedRevision) throw new Error("READWEAVE_METADATA_REVISION_CONFLICT");
+      if (latest.index.migration.id !== next.migration.id || latest.index.stateNoteId !== next.stateNoteId
+        || latest.index.workspaceId !== next.workspaceId || next.revision !== expectedRevision + 1) {
+        throw new Error("READWEAVE_METADATA_INDEX_IDENTITY_MISMATCH");
+      }
+      const encodeStartedAt = timingEnabled ? performance.now() : 0;
+      const content = await encodeReadWeaveStateContentAsync(next);
+      if (timingEnabled) { encodeMs = Math.round(performance.now() - encodeStartedAt); snapshotBytes = Buffer.byteLength(content); }
+      await this.putContent(located.noteId, content, timingEnabled ? durationMs => { stateNotePutMs = durationMs; } : undefined);
+      const confirmationStartedAt = timingEnabled ? performance.now() : 0;
+      const readBackContent = await this.getContent(located.noteId);
+      if (readBackContent !== content) throw new Error("READWEAVE_METADATA_INDEX_READBACK_FAILED");
+      const readBack = await this.readMetadataIndex(located.noteId, readBackContent);
+      if (readBack.index.revision !== next.revision || readBack.index.status !== next.status
+        || JSON.stringify(metadataPayload(readBack.index)) !== JSON.stringify(metadataPayload(next))) {
+        throw new Error("READWEAVE_METADATA_INDEX_READBACK_FAILED");
+      }
+      if (timingEnabled) confirmationMs = Math.round(performance.now() - confirmationStartedAt);
+      succeeded = true;
+      return readBack;
+    } finally {
+      if (timingEnabled) this.logWriteTiming("course_os.readweave_metadata_write_timing", {
+        encodeMs, snapshotBytes, stateNotePutMs, confirmationMs, succeeded
+      });
+    }
+  }
+
+  private async findMetadataMigration(migrationId: string): Promise<LocatedMetadataIndex | undefined> {
+    const byLabelQuery = new URLSearchParams({
+      search: `#${metadataMigrationLabel}=${quoteSearchValue(migrationId)}`,
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const byTitleQuery = new URLSearchParams({
+      search: quoteSearchValue(`${metadataIndexTitlePrefix} · ${this.workspaceId}`),
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const responses = await Promise.all([
+      this.request<SearchResponse>(`/notes?${byLabelQuery.toString()}`),
+      this.request<SearchResponse>(`/notes?${byTitleQuery.toString()}`)
+    ]);
+    const candidates = [...new Map(responses.flatMap((response) => response.results)
+      .filter((candidate) => candidate.title === `${metadataIndexTitlePrefix} · ${this.workspaceId}`)
+      .map((candidate) => [candidate.noteId, candidate])).values()];
+    const matches: LocatedMetadataIndex[] = [];
+    for (const note of candidates) {
+      const located = await this.readMetadataIndex(note.noteId);
+      if (located.index.migration.id === migrationId) matches.push(located);
+    }
+    if (matches.length > 1) throw new Error("READWEAVE_METADATA_MIGRATION_DUPLICATE");
+    return matches[0];
+  }
+
+  private async findActiveMetadataIndex(): Promise<LocatedMetadataIndex | undefined> {
+    const query = new URLSearchParams({
+      search: `#${metadataIndexLabel}=${quoteSearchValue(this.workspaceId)}`,
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const response = await this.request<SearchResponse>(`/notes?${query.toString()}`);
+    const active: LocatedMetadataIndex[] = [];
+    for (const note of response.results.filter((candidate) => candidate.title.startsWith(`${metadataIndexTitlePrefix} · `))) {
+      const located = await this.readMetadataIndex(note.noteId);
+      if (located.index.status === "active" && located.index.workspaceId === this.workspaceId) active.push(located);
+    }
+    if (active.length > 1) throw new Error("READWEAVE_METADATA_INDEX_DUPLICATE");
+    return active[0];
+  }
+
+  private async addMetadataIndexAuthorityLabel(located: LocatedMetadataIndex): Promise<void> {
+    const query = new URLSearchParams({
+      search: `#${metadataIndexLabel}=${quoteSearchValue(this.workspaceId)}`,
+      ancestorNoteId: this.config.parentNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const found = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results.some((note) => note.noteId === located.noteId);
+    if (!found) await this.addDraftRecordLabel(located.noteId, metadataIndexLabel, this.workspaceId);
+  }
+
+  private commitMetadataIndex(located: LocatedMetadataIndex): void {
+    this.cacheMetadataIndex(located);
+    this.stateVersion += 1;
+    if (!this.stateCache || located.index.status === "rolled_back") return;
+    applyMetadataIndex(this.stateCache.state, located.index, located.noteId);
+    this.stateCache.expiresAt = Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs;
+  }
+
+  private cacheMetadataIndex(located: LocatedMetadataIndex): void {
+    this.metadataIndexCache = { noteId: located.noteId, index: located.index, expiresAt: Date.now() + 15_000 };
+  }
+
+  private async prepareMetadataAwareStateWrite(state: EtapiState): Promise<{ coreState?: EtapiState }> {
+    const stateNoteId = state.projections.stateNoteId;
+    const pointer = state.projections.metadataIndexNoteId;
+    if (!pointer) {
+      const migrationId = metadataMigrationId(this.workspaceId, stateNoteId);
+      const pending = await this.findMetadataMigration(migrationId);
+      if (pending && pending.index.status !== "rolled_back") throw new Error("READWEAVE_METADATA_MIGRATION_IN_PROGRESS");
+      const active = await this.findActiveMetadataIndex();
+      if (active) throw new Error("READWEAVE_METADATA_ROOT_POINTER_MISSING");
+      return {};
+    }
+
+    const located = await this.readMetadataIndex(pointer);
+    if (located.index.stateNoteId !== stateNoteId || located.index.workspaceId !== this.workspaceId) {
+      throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+    }
+    if (located.index.status === "rolling_back") throw new Error("READWEAVE_METADATA_ROLLBACK_IN_PROGRESS");
+    if (located.index.status !== "active") throw new Error("READWEAVE_METADATA_MIGRATION_IN_PROGRESS");
+    if ((state.projections.metadataIndexRevision ?? 0) !== located.index.revision) {
+      throw new Error("READWEAVE_METADATA_REVISION_CONFLICT");
+    }
+
+    const next = metadataIndexFromState(located.index, state);
+    if (JSON.stringify(metadataPayload(located.index)) !== JSON.stringify(metadataPayload(next))) {
+      next.revision = located.index.revision + 1;
+      next.migration = { ...next.migration, completedAt: next.migration.completedAt ?? new Date().toISOString() };
+      const committed = await this.writeMetadataIndex(located, next, located.index.revision);
+      this.commitMetadataIndex(committed);
+      state.projections.metadataIndexRevision = committed.index.revision;
+    }
+    return { coreState: stateWithoutMetadata(state, pointer, state.projections.metadataIndexRevision ?? located.index.revision) };
+  }
+
   private async readState(requireFresh = false): Promise<EtapiState> {
     const state = structuredClone(await this.readStateReference(requireFresh));
     await this.mergeDraftPageRecords(state);
@@ -2310,6 +3070,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (parsed) bootstrap.stateSnapshot = undefined;
     if (!parsed) parsed = await decodeReadWeaveStateContentAsync(await this.getContent(bootstrap.projection.stateNoteId)) as Partial<EtapiState>;
     const state = normalizeState(parsed, bootstrap.projection);
+    const metadataNoteId = state.projections.metadataIndexNoteId;
+    if (metadataNoteId) {
+      const located = await this.readMetadataIndex(metadataNoteId);
+      if (located.index.workspaceId !== this.workspaceId || located.index.stateNoteId !== state.projections.stateNoteId) {
+        throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+      }
+      const pointerRevision = state.projections.metadataIndexRevision ?? 0;
+      const stagedPointerPending = located.index.status === "staged" && pointerRevision === located.index.revision + 1;
+      if (located.index.status === "rolled_back" || (located.index.revision < pointerRevision && !stagedPointerPending)) {
+        throw new Error("READWEAVE_METADATA_INDEX_REVISION_INVALID");
+      }
+      if (!metadataFieldsAreEmpty(state)) throw new Error("READWEAVE_METADATA_ROOT_DUAL_AUTHORITY");
+      applyMetadataIndex(state, located.index, metadataNoteId);
+      state.projections.metadataIndexRevision = located.index.revision;
+      this.cacheMetadataIndex(located);
+    }
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     return state;
   }
@@ -2651,10 +3427,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     let succeeded = false;
     try {
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      this.upsertStableMaterialNodes(state);
+      const split = await this.prepareMetadataAwareStateWrite(state);
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
       let content: string;
       try {
-        content = await encodeReadWeaveStateContentAsync(state);
+        content = await encodeReadWeaveStateContentAsync(split.coreState ?? state);
       } finally {
         if (timingEnabled) encodeMs = Math.round(performance.now() - encodeStartedAt);
       }
@@ -3058,7 +3836,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private enqueueWrite<T>(work: () => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
     const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     const enqueuedAt = timingEnabled ? performance.now() : 0;
-    const operation = this.writeChain.catch(() => undefined).then(async () => {
+    const previous = etapiWriteChains.get(this.writeQueueKey) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(async () => {
       const workStartedAt = timingEnabled ? performance.now() : 0;
       let succeeded = false;
       try {
@@ -3075,7 +3854,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         }
       }
     });
-    this.writeChain = operation.then(() => undefined, () => undefined);
+    etapiWriteChains.set(this.writeQueueKey, operation.then(() => undefined, () => undefined));
     return operation;
   }
 
@@ -3433,6 +4212,176 @@ function lessonDraftPageIdFromConflictId(conflictId: string): string | undefined
   const timestampSeparator = conflictId.lastIndexOf(":");
   if (timestampSeparator <= prefix.length || !/^\d+$/u.test(conflictId.slice(timestampSeparator + 1))) return undefined;
   return conflictId.slice(prefix.length, timestampSeparator);
+}
+
+function metadataMigrationId(workspaceId: string, stateNoteId: string): string {
+  return `migration-${sha256(`${workspaceId}\u0000${stateNoteId}`).slice(0, 32)}`;
+}
+
+function metadataIdempotency(idempotency: ReadWeaveFileState["idempotency"]): ReadWeaveFileState["idempotency"] {
+  return Object.fromEntries(Object.entries(idempotency ?? {})
+    .filter(([, entry]) => metadataIdempotencyKinds.has(entry.kind)));
+}
+
+function metadataPayload(value: EtapiMetadataIndex | EtapiState): unknown {
+  const projections = value.projections;
+  return {
+    courses: value.courses ?? [],
+    treeNodes: value.treeNodes ?? [],
+    trash: value.trash ?? [],
+    projections: {
+      courseRootNoteId: projections.courseRootNoteId,
+      ...(projections.rootMaterialsNoteId ? { rootMaterialsNoteId: projections.rootMaterialsNoteId } : {}),
+      ...(projections.trashNoteId ? { trashNoteId: projections.trashNoteId } : {}),
+      materialReleaseSelections: projections.materialReleaseSelections ?? {},
+      courses: projections.courses ?? {}
+    },
+    idempotency: metadataIdempotency(value.idempotency)
+  };
+}
+
+function withMaterialReleaseSelectionHint(
+  node: CourseTreeNode,
+  selections?: Record<string, { releaseId: string; source: "derived" | "explicit" }>
+): CourseTreeNode {
+  if (node.kind !== "material") return node;
+  const source = selections?.[node.materialId || node.id]?.source
+    ?? node.currentReleaseSelection
+    ?? (node.currentReleaseId ? "explicit" : "derived");
+  return { ...node, currentReleaseSelection: source };
+}
+
+function metadataIndexFromLegacy(
+  state: EtapiState,
+  workspaceId: string,
+  migrationId: string,
+  revision: number
+): EtapiMetadataIndex {
+  return {
+    format: "course-os-metadata-index",
+    formatVersion: 1,
+    schemaVersion: "1.0.0",
+    authorityType: "readweave-etapi",
+    workspaceId,
+    stateNoteId: state.projections.stateNoteId,
+    status: "staged",
+    revision,
+    migration: {
+      id: migrationId,
+      phase: "staged",
+      sourceSchemaVersion: String((state as { schemaVersion?: string }).schemaVersion ?? "1.0.0"),
+      startedAt: new Date().toISOString()
+    },
+    courses: structuredClone(state.courses ?? []),
+    treeNodes: structuredClone(state.treeNodes ?? []),
+    trash: structuredClone(state.trash ?? []),
+    projections: {
+      courseRootNoteId: state.projections.courseRootNoteId,
+      ...(state.projections.rootMaterialsNoteId ? { rootMaterialsNoteId: state.projections.rootMaterialsNoteId } : {}),
+      ...(state.projections.trashNoteId ? { trashNoteId: state.projections.trashNoteId } : {}),
+      materialReleaseSelections: structuredClone(state.projections.materialReleaseSelections ?? {}),
+      courses: structuredClone(state.projections.courses ?? {})
+    },
+    idempotency: structuredClone(metadataIdempotency(state.idempotency))
+  };
+}
+
+function metadataIndexFromState(index: EtapiMetadataIndex, state: EtapiState): EtapiMetadataIndex {
+  return {
+    ...index,
+    courses: structuredClone(state.courses ?? []),
+    treeNodes: structuredClone(state.treeNodes ?? []),
+    trash: structuredClone(state.trash ?? []),
+    projections: {
+      courseRootNoteId: state.projections.courseRootNoteId,
+      ...(state.projections.rootMaterialsNoteId ? { rootMaterialsNoteId: state.projections.rootMaterialsNoteId } : {}),
+      ...(state.projections.trashNoteId ? { trashNoteId: state.projections.trashNoteId } : {}),
+      materialReleaseSelections: structuredClone(state.projections.materialReleaseSelections ?? {}),
+      courses: structuredClone(state.projections.courses ?? {})
+    },
+    idempotency: structuredClone(metadataIdempotency(state.idempotency))
+  };
+}
+
+function metadataStateView(index: EtapiMetadataIndex, noteId: string): EtapiState {
+  return {
+    ...structuredClone(EMPTY_STATE),
+    courses: structuredClone(index.courses),
+    treeNodes: structuredClone(index.treeNodes),
+    trash: structuredClone(index.trash),
+    idempotency: structuredClone(index.idempotency),
+    projections: {
+      courseRootNoteId: index.projections.courseRootNoteId,
+      stateNoteId: index.stateNoteId,
+      metadataIndexNoteId: noteId,
+      metadataIndexRevision: index.revision,
+      ...(index.projections.rootMaterialsNoteId ? { rootMaterialsNoteId: index.projections.rootMaterialsNoteId } : {}),
+      ...(index.projections.trashNoteId ? { trashNoteId: index.projections.trashNoteId } : {}),
+      materialReleaseSelections: structuredClone(index.projections.materialReleaseSelections ?? {}),
+      courses: structuredClone(index.projections.courses),
+      drafts: {},
+      releases: {}
+    }
+  };
+}
+
+function applyMetadataIndex(state: EtapiState, index: EtapiMetadataIndex, noteId?: string): EtapiState {
+  state.courses = structuredClone(index.courses);
+  state.treeNodes = structuredClone(index.treeNodes);
+  state.trash = structuredClone(index.trash);
+  for (const [key, entry] of Object.entries(state.idempotency)) {
+    if (metadataIdempotencyKinds.has(entry.kind)) delete state.idempotency[key];
+  }
+  Object.assign(state.idempotency, structuredClone(index.idempotency));
+  state.projections = {
+    ...state.projections,
+    courseRootNoteId: index.projections.courseRootNoteId,
+    rootMaterialsNoteId: index.projections.rootMaterialsNoteId,
+    trashNoteId: index.projections.trashNoteId,
+    materialReleaseSelections: structuredClone(index.projections.materialReleaseSelections ?? {}),
+    courses: structuredClone(index.projections.courses),
+    metadataIndexNoteId: noteId ?? state.projections.metadataIndexNoteId,
+    metadataIndexRevision: index.revision
+  };
+  return state;
+}
+
+function metadataFieldsAreEmpty(state: EtapiState): boolean {
+  return state.courses.length === 0
+    && state.treeNodes.length === 0
+    && state.trash.length === 0
+    && Object.keys(state.projections.courses ?? {}).length === 0
+    && state.projections.rootMaterialsNoteId === undefined
+    && state.projections.trashNoteId === undefined
+    && Object.keys(state.projections.materialReleaseSelections ?? {}).length === 0
+    && Object.keys(metadataIdempotency(state.idempotency)).length === 0;
+}
+
+function stateWithoutMetadata(state: EtapiState, noteId: string, revision: number): EtapiState {
+  const idempotency = Object.fromEntries(Object.entries(state.idempotency)
+    .filter(([, entry]) => !metadataIdempotencyKinds.has(entry.kind)));
+  return {
+    ...state,
+    courses: [],
+    treeNodes: [],
+    trash: [],
+    idempotency,
+    projections: {
+      ...state.projections,
+      metadataIndexNoteId: noteId,
+      metadataIndexRevision: revision,
+      rootMaterialsNoteId: undefined,
+      trashNoteId: undefined,
+      materialReleaseSelections: undefined,
+      courses: {}
+    }
+  };
+}
+
+function stateNoteIdFromState(state: EtapiState): string {
+  const noteId = state.projections.stateNoteId;
+  if (!noteId) throw new Error("READWEAVE_METADATA_STATE_NOTE_MISSING");
+  return noteId;
 }
 
 function normalizeState(input: Partial<EtapiState>, projection: ProjectionIndex): EtapiState {

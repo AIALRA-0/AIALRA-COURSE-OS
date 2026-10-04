@@ -41,6 +41,12 @@ export interface QuestionAttemptTransactionResult {
 
 export type MasteryReducer = (previous: MasteryRecord | undefined) => MasteryRecord;
 
+export interface TrashCapabilities {
+  directPermanentDelete: boolean;
+  requiresNativeUi: boolean;
+  reason?: string;
+}
+
 export type CourseReleaseIndexPage = Pick<CourseRelease["pages"][number], "id" | "pageNumber" | "title" | "imageUrl" | "quality"> & {
   anchors: [];
   atoms: [];
@@ -117,11 +123,13 @@ export interface ReadWeaveCourseApi {
   resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict>;
   getSyncStatus(): Promise<ReadWeaveSyncStatus>;
   listTreeNodes(): Promise<CourseTreeNode[]>;
+  getTreeNodeMetadata?(nodeId: string): Promise<{ node: CourseTreeNode; workspaceId: string } | undefined>;
   createTreeNode(node: CourseTreeNode, context: IdempotentWriteContext): Promise<CourseTreeNode>;
   updateTreeNode(nodeId: string, patch: { title?: string; parentId?: string | null; archived?: boolean; sortOrder?: number; currentReleaseId?: string }, expectedRevision: number, context: IdempotentWriteContext): Promise<CourseTreeNode>;
   duplicateTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<CourseTreeNode>;
   trashTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<TrashRecord>;
   listTrash(): Promise<TrashRecord[]>;
+  getTrashCapabilities?(): Promise<TrashCapabilities>;
   restoreTrash(trashId: string, context: IdempotentWriteContext, options?: { restoreMode?: "original" | "root" }): Promise<CourseTreeNode>;
   permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string, options?: TrashDeleteOptions): Promise<void>;
   getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined>;
@@ -217,6 +225,9 @@ export function defaultModelRoutePolicy(workspaceId: string): ModelRoutePolicy {
 }
 
 export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
+  async getTrashCapabilities(): Promise<TrashCapabilities> {
+    return { directPermanentDelete: true, requiresNativeUi: false };
+  }
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly statePath: string, private readonly publicUrl = "https://readweave.example.com") {}
@@ -256,7 +267,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
     const byId = new Map(state.treeNodes
       .filter((node) => (node.kind === "course" || node.kind === "material") && !node.archived)
       .filter((node) => !(node.kind === "material" && node.id !== node.materialId && node.materialId && stableMaterialIds.has(node.materialId)))
-      .map((node) => [node.id, structuredClone(node)] as const));
+      .map((node) => [node.id, withFileMaterialSelectionHint(structuredClone(node))] as const));
     for (const node of generatedCourses) if (!byId.has(node.id)) byId.set(node.id, node);
     const persistedMaterials = new Map(state.treeNodes.filter((node) => node.kind === "material" && !node.archived).map((node) => [node.id, node]));
     for (const group of materialGroups(state.releases, state.drafts)) {
@@ -265,6 +276,10 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
       const id = stableMaterialId(group.courseId, group.moduleId);
       if (archivedMaterialIds.has(id)) continue;
       const persisted = persistedMaterials.get(id) ?? state.treeNodes.find((node) => node.kind === "material" && !node.archived && node.materialId === id);
+      const selection = fileMaterialSelectionSource(persisted);
+      const selectionNode = persisted && selection === "derived"
+        ? { ...persisted, currentReleaseId: undefined, releaseId: undefined }
+        : persisted;
       byId.set(id, { ...materialTreeNode(state.courses.find((item) => item.id === course.id) ?? {
         id: course.id,
         workspaceId: "personal",
@@ -272,9 +287,52 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
         status: "active",
         createdAt: new Date(0).toISOString(),
         updatedAt: new Date(0).toISOString()
-      }, group, persisted, state.drafts), id, materialId: id, readweaveNoteId: persisted?.readweaveNoteId ?? fileMaterialNoteId(id) });
+      }, group, selectionNode, state.drafts), id, materialId: id, currentReleaseSelection: selection,
+      readweaveNoteId: persisted?.readweaveNoteId ?? fileMaterialNoteId(id) });
     }
     return [...byId.values()];
+  }
+
+  /** Raw same-workspace tree metadata for write replay checks; archived rows remain addressable. */
+  async getTreeNodeMetadata(nodeId: string): Promise<{ node: CourseTreeNode; workspaceId: string } | undefined> {
+    const state = await this.read();
+    const courses = mergeReleaseCourses(state.courses, state.releases);
+    const course = courses.find((candidate) => candidate.id === nodeId);
+    if (course) {
+      return course.workspaceId
+        ? { node: { ...courseTreeNode(course), readweaveNoteId: course.readweaveNoteId ?? fileCourseNoteId(course.id) }, workspaceId: course.workspaceId }
+        : undefined;
+    }
+
+    const ownerFor = (node: CourseTreeNode): CourseProject | undefined => {
+      const parent = courses.find((candidate) => candidate.id === node.parentId);
+      if (parent) return parent;
+      const materialId = node.materialId || node.id;
+      return courses.filter((candidate) => materialId.startsWith(`material:${candidate.id}:`))
+        .sort((left, right) => right.id.length - left.id.length)[0];
+    };
+    const stored = state.treeNodes.find((candidate) => candidate.id === nodeId);
+    if (stored) {
+      const owner = ownerFor(stored);
+      if (!owner?.workspaceId) return undefined;
+      return {
+        node: stored.kind === "material" ? { ...withFileMaterialSelectionHint(structuredClone(stored)), readweaveNoteId: stored.readweaveNoteId ?? fileMaterialNoteId(stored.materialId || stored.id) } : structuredClone(stored),
+        workspaceId: owner.workspaceId
+      };
+    }
+
+    const group = materialGroups(state.releases, state.drafts)
+      .find((candidate) => stableMaterialId(candidate.courseId, candidate.moduleId) === nodeId);
+    if (!group) return undefined;
+    const owner = courses.find((candidate) => candidate.id === group.courseId);
+    if (!owner?.workspaceId) return undefined;
+    const persisted = state.treeNodes.find((candidate) => candidate.kind === "material"
+      && (candidate.id === nodeId || candidate.materialId === nodeId));
+    const node = materialTreeNode(owner, group, persisted, state.drafts);
+    return {
+      node: { ...node, id: nodeId, materialId: nodeId, currentReleaseSelection: fileMaterialSelectionSource(persisted), readweaveNoteId: persisted?.readweaveNoteId ?? fileMaterialNoteId(nodeId) },
+      workspaceId: owner.workspaceId
+    };
   }
 
   async createTreeNode(node: CourseTreeNode, context: IdempotentWriteContext): Promise<CourseTreeNode> {
@@ -310,6 +368,7 @@ export class FileReadWeaveCourseApi implements ReadWeaveCourseApi {
         const targetRelease = validateMaterialReleaseTarget(node, patch.currentReleaseId, state.courses, state.releases, state.drafts, context.workspaceId);
         node!.currentReleaseId = targetRelease.id;
         node!.releaseId = targetRelease.id;
+        node!.currentReleaseSelection = "explicit";
       }
       const now = new Date().toISOString();
       if (course) {
@@ -984,7 +1043,7 @@ function ensureMaterialForTreeMutation(state: ReadWeaveFileState, nodeId: string
     if (course) state.courses.push(course);
   }
   if (!course) return undefined;
-  const material = { ...materialTreeNode(course, group, undefined, state.drafts), readweaveNoteId: fileMaterialNoteId(nodeId) };
+  const material = { ...materialTreeNode(course, group, undefined, state.drafts), currentReleaseSelection: "derived" as const, readweaveNoteId: fileMaterialNoteId(nodeId) };
   state.treeNodes.push(material);
   return material;
 }
@@ -1003,6 +1062,14 @@ function treePath(state: ReadWeaveFileState, nodeId: string): string[] {
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   return path;
+}
+
+function fileMaterialSelectionSource(node: CourseTreeNode | undefined): "explicit" | "derived" {
+  return node?.currentReleaseSelection ?? (node?.currentReleaseId ? "explicit" : "derived");
+}
+
+function withFileMaterialSelectionHint(node: CourseTreeNode): CourseTreeNode {
+  return node.kind === "material" ? { ...node, currentReleaseSelection: fileMaterialSelectionSource(node) } : node;
 }
 
 function fileCourseNoteId(courseId: string): string { return `file-readweave:course:${courseId}`; }

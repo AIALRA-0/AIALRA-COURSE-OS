@@ -457,7 +457,9 @@ it("keeps write-side GET retry and idempotency behavior outside read budgets", a
   };
 
   await expect(writer.createCourse(course, { ...context, idempotencyKey: "write-read-retry" })).resolves.toMatchObject({ id: course.id });
-  expect(stateReads).toBe(3);
+  // Three attempts resolve the transient cold read; controlled metadata
+  // activation then rechecks the latest root and verifies the committed split.
+  expect(stateReads).toBe(5);
   expect(remote.requests.some((request) => request.method === "POST" && request.headers["idempotency-key"] === "write-read-retry")).toBe(true);
 });
 
@@ -2845,6 +2847,299 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(maxActiveBlockCreates).toBe(1);
     expect(remote.titles()).toContain("new block 1");
     expect(remote.titles()).not.toContain("new block 3");
+  });
+
+  it("stores course metadata in one small authority while preserving page records and rejecting stale root writes", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const bootstrap = new EtapiReadWeaveCourseApi(config);
+    await bootstrap.listCourses();
+
+    const published = releaseWithPage();
+    await bootstrap.publishRelease(published, { ...manifest, courseReleaseId: published.id }, context);
+    const savedDraft = await bootstrap.saveDraft(draftFor(published), 0, { ...context, idempotencyKey: "metadata-page-record" });
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const legacyCourse: CourseProject = {
+      id: "legacy-metadata-course", workspaceId: "personal", title: "迁移前课程", status: "active",
+      createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+    const legacyNode: CourseTreeNode = {
+      id: "legacy-metadata-node", kind: "module", title: "旧目录", parentId: legacyCourse.id,
+      revision: 4, status: "draft", archived: false, children: []
+    };
+    const legacy = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      courses: CourseProject[];
+      treeNodes: CourseTreeNode[];
+      idempotency: Record<string, { kind: string; objectId: string }>;
+      projections: { drafts: Record<string, unknown> };
+    };
+    legacy.courses.push(legacyCourse);
+    legacy.treeNodes.push(legacyNode);
+    legacy.idempotency["legacy-metadata-idempotency"] = { kind: "course", objectId: legacyCourse.id };
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(legacy));
+
+    const staleWriter = new EtapiReadWeaveCourseApi(config);
+    const staleState = await (staleWriter as unknown as { readStateReference(fresh: boolean, activity: boolean): Promise<unknown> }).readStateReference(true, false);
+    const api = new EtapiReadWeaveCourseApi(config);
+    const migration = await api.ensureMetadataIndex();
+    expect(migration).toMatchObject({ status: "active", noteId: remote.noteIdByTitle("Course OS Metadata Index · personal") });
+
+    const splitRoot = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      courses: CourseProject[];
+      treeNodes: CourseTreeNode[];
+      projections: { metadataIndexNoteId?: string; metadataIndexRevision?: number; drafts: Record<string, unknown> };
+      idempotency: Record<string, { kind: string }>;
+    };
+    expect(splitRoot.courses).toEqual([]);
+    expect(splitRoot.treeNodes).toEqual([]);
+    expect(splitRoot.projections.metadataIndexNoteId).toBe(migration.noteId);
+    expect(splitRoot.projections.drafts).toEqual(legacy.projections.drafts);
+    expect(splitRoot.idempotency["legacy-metadata-idempotency"]).toBeUndefined();
+    expect(remote.countNotesByLabel("courseOsType", "metadata_index")).toBe(1);
+
+    const stateWritesAfterMigration = remote.contentWriteCount(stateNoteId);
+    const rootReadsAfterMigration = remote.requests.filter((request) => request.method === "GET" && request.path === `/notes/${stateNoteId}/content`).length;
+    const addedCourse: CourseProject = {
+      id: "small-metadata-course", workspaceId: "personal", title: "小索引课程", status: "active",
+      createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z"
+    };
+    await api.createCourse(addedCourse, { ...context, idempotencyKey: "small-metadata-course-create" });
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterMigration);
+    expect(remote.requests.filter((request) => request.method === "GET" && request.path === `/notes/${stateNoteId}/content`)).toHaveLength(rootReadsAfterMigration);
+    await expect((staleWriter as unknown as { writeState(state: unknown): Promise<void> }).writeState(staleState))
+      .rejects.toThrow("READWEAVE_METADATA_MIGRATION_IN_PROGRESS");
+    expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterMigration);
+
+    const reopened = new EtapiReadWeaveCourseApi(config);
+    await expect(reopened.listCourses()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: legacyCourse.id }), expect.objectContaining({ id: addedCourse.id })
+    ]));
+    await expect(reopened.getDraftSnapshotByPage(savedDraft.pageId)).resolves.toMatchObject({ revision: savedDraft.revision });
+    await expect(reopened.getTrashCapabilities()).resolves.toEqual({
+      directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_NATIVE_ERASE_REQUIRED"
+    });
+  });
+
+  it("resumes a split after interruption and rolls back by merging current metadata into the live root", async () => {
+    const remote = new FakeEtapi();
+    let blockActivation = true;
+    let metadataNoteId: string | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname.endsWith("/create-note") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { title: string };
+        if (body.title === "Course OS Metadata Index · personal") {
+          const created = await remote.fetch(input, init);
+          const result = await created.clone().json() as { note: { noteId: string } };
+          metadataNoteId = result.note.noteId;
+          return created;
+        }
+      }
+      if (metadataNoteId && url.pathname === `/etapi/notes/${metadataNoteId}/content` && init?.method === "PUT" && blockActivation) {
+        const body = Buffer.isBuffer(init.body) ? init.body.toString("utf8") : String(init.body ?? "");
+        const candidate = decodeReadWeaveStateContent(body) as { status?: string };
+        if (candidate.status === "active") return new Response("simulated activation interruption", { status: 503 });
+      }
+      return remote.fetch(input, init);
+    };
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl };
+    const initial = new EtapiReadWeaveCourseApi(config);
+    await initial.listCourses();
+    const oldCourse: CourseProject = {
+      id: "rollback-old-course", workspaceId: "personal", title: "旧课程", status: "active",
+      createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+    const state = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      courses: CourseProject[];
+    };
+    state.courses.push(oldCourse);
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(state));
+
+    await expect(initial.ensureMetadataIndex()).rejects.toThrow();
+    const interruptedRoot = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      courses: CourseProject[];
+      projections: { metadataIndexNoteId?: string };
+    };
+    expect(interruptedRoot.courses).toEqual([]);
+    expect(interruptedRoot.projections.metadataIndexNoteId).toBe(metadataNoteId);
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as { status: string }).status).toBe("staged");
+
+    blockActivation = false;
+    const restarted = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch });
+    await expect(restarted.listCourses()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: oldCourse.id })]));
+    await expect(restarted.ensureMetadataIndex()).resolves.toMatchObject({ noteId: metadataNoteId, status: "active" });
+    const researchContent = "必须在回滚后保留";
+    await restarted.archiveResearch({
+      id: "post-split-research", version: 1, title: "分裂后新研究", content: researchContent,
+      sha256: createHash("sha256").update(researchContent).digest("hex"),
+      byteCount: Buffer.byteLength(researchContent), characterCount: [...researchContent].length, lineCount: 1,
+      sourceDate: "2026-09-03", gitPath: "research/post-split.md", immutable: true,
+      createdAt: "2026-09-03T00:00:00.000Z"
+    }, { ...context, idempotencyKey: "post-split-research" });
+    const newCourse: CourseProject = {
+      id: "rollback-new-course", workspaceId: "personal", title: "分裂后课程", status: "active",
+      createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
+    };
+    await restarted.createCourse(newCourse, { ...context, idempotencyKey: "rollback-new-course" });
+
+    await restarted.prepareMetadataRollback();
+    const rolledBackRoot = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      courses: CourseProject[];
+      researchArchives: Array<{ id: string; content: string }>;
+      projections: { metadataIndexNoteId?: string; metadataIndexRevision?: number };
+    };
+    expect(rolledBackRoot.projections.metadataIndexNoteId).toBeUndefined();
+    expect(rolledBackRoot.projections.metadataIndexRevision).toBeUndefined();
+    expect(rolledBackRoot.courses.map((course) => course.id)).toEqual(expect.arrayContaining([oldCourse.id, newCourse.id]));
+    expect(rolledBackRoot.researchArchives).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "post-split-research", content: "必须在回滚后保留" })
+    ]));
+    expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as { status: string }).status).toBe("rolled_back");
+    const oldImage = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch });
+    await expect(oldImage.listCourses()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: oldCourse.id }), expect.objectContaining({ id: newCourse.id })
+    ]));
+    await expect(oldImage.searchResearch("必须在回滚后保留")).resolves.toEqual([
+      expect.objectContaining({ archiveId: "post-split-research" })
+    ]);
+  });
+
+  it("migrates a missing legacy material row and keeps its first rename, move, and archive on the metadata authority", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release: CourseRelease = {
+      ...releaseWithPage(), id: "legacy-derived-release", courseId: "legacy-derived-course",
+      moduleId: "legacy-derived-module", moduleTitle: "迁移前材料"
+    };
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const materialId = `material:${release.courseId}:${release.moduleId}`;
+    const legacy = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      treeNodes: CourseTreeNode[];
+      projections: {
+        courses: Record<string, { modules: Record<string, string> }>;
+        materialReleaseSelections?: Record<string, { releaseId: string; source: "derived" | "explicit" }>;
+      };
+    };
+    const projectedNoteId = legacy.projections.courses[release.courseId]?.modules[release.moduleId];
+    expect(projectedNoteId).toBeTruthy();
+    legacy.treeNodes = legacy.treeNodes.filter((node) => node.kind !== "material" || (node.materialId || node.id) !== materialId);
+    delete legacy.projections.materialReleaseSelections?.[materialId];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(legacy));
+
+    const api = new EtapiReadWeaveCourseApi(config);
+    const migrated = await api.ensureMetadataIndex();
+    const migratedIndex = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as {
+      treeNodes: CourseTreeNode[];
+    };
+    expect(migratedIndex.treeNodes.find((node) => node.id === materialId)).toMatchObject({
+      id: materialId,
+      kind: "material",
+      currentReleaseId: release.id,
+      currentReleaseSelection: "derived",
+      readweaveNoteId: projectedNoteId
+    });
+
+    const target: CourseProject = {
+      id: "legacy-derived-target", workspaceId: "personal", title: "目标课程", status: "active",
+      createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z"
+    };
+    await api.createCourse(target, { ...context, idempotencyKey: "legacy-derived-target" });
+    const rootContentPath = `/notes/${stateNoteId}/content`;
+    const rootReads = () => remote.requests.filter((request) => request.method === "GET" && request.path === rootContentPath).length;
+    const rootReadsBefore = rootReads();
+    const rootWrites = remote.contentWriteCount(stateNoteId);
+    const metadataWrites = remote.contentWriteCount(migrated.noteId);
+    const listed = (await api.listTreeNodes()).find((node) => node.id === materialId)!;
+    expect(listed.currentReleaseSelection).toBe("derived");
+    await api.listCourses();
+    await api.listTrash();
+    const renamed = await api.updateTreeNode(materialId, { title: "材料改名" }, listed.revision ?? 0,
+      { ...context, idempotencyKey: "legacy-derived-rename" });
+    const moved = await api.updateTreeNode(materialId, { parentId: target.id }, renamed.revision ?? 0,
+      { ...context, idempotencyKey: "legacy-derived-move" });
+    await api.updateTreeNode(materialId, { archived: true }, moved.revision ?? 0,
+      { ...context, idempotencyKey: "legacy-derived-archive" });
+
+    expect(rootReads()).toBe(rootReadsBefore);
+    expect(remote.contentWriteCount(stateNoteId)).toBe(rootWrites);
+    expect(remote.contentWriteCount(migrated.noteId)).toBeGreaterThan(metadataWrites);
+    await expect(api.getTreeNodeMetadata(materialId)).resolves.toMatchObject({
+      workspaceId: "personal",
+      node: { id: materialId, archived: true, currentReleaseSelection: "derived", readweaveNoteId: projectedNoteId }
+    });
+  });
+
+  it("keeps a migrated explicit material pin while a derived material advances to its newly readable draft", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const explicitBase: CourseRelease = {
+      ...releaseWithPage(), id: "selection-explicit-base", courseId: "selection-explicit-course",
+      moduleId: "pinned-module", moduleTitle: "固定材料", pageIds: ["selection-explicit-base-page"],
+      pages: [{ ...releaseWithPage().pages[0]!, id: "selection-explicit-base-page" }]
+    };
+    const derivedBase: CourseRelease = {
+      ...releaseWithPage(), id: "selection-derived-base", courseId: "selection-derived-course",
+      moduleId: "derived-module", moduleTitle: "默认材料", pageIds: ["selection-derived-base-page"],
+      pages: [{ ...releaseWithPage().pages[0]!, id: "selection-derived-base-page" }]
+    };
+    await setup.publishRelease(explicitBase, { ...manifest, courseReleaseId: explicitBase.id }, { ...context, idempotencyKey: "publish-explicit-base" });
+    await setup.publishRelease(derivedBase, { ...manifest, courseReleaseId: derivedBase.id }, { ...context, idempotencyKey: "publish-derived-base" });
+
+    const explicitMaterialId = `material:${explicitBase.courseId}:${explicitBase.moduleId}`;
+    const derivedMaterialId = `material:${derivedBase.courseId}:${derivedBase.moduleId}`;
+    const legacy = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      treeNodes: CourseTreeNode[];
+      projections: { materialReleaseSelections?: Record<string, { releaseId: string; source: "derived" | "explicit" }> };
+    };
+    const pinned = legacy.treeNodes.find((node) => node.kind === "material" && node.id === explicitMaterialId)!;
+    pinned.currentReleaseId = explicitBase.id;
+    pinned.releaseId = explicitBase.id;
+    legacy.projections.materialReleaseSelections = {
+      [explicitMaterialId]: { releaseId: explicitBase.id, source: "explicit" }
+    };
+    legacy.treeNodes = legacy.treeNodes.filter((node) => node.kind !== "material" || node.id !== derivedMaterialId);
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(legacy));
+
+    const api = new EtapiReadWeaveCourseApi(config);
+    await api.ensureMetadataIndex();
+    const migrated = await api.listTreeNodes();
+    expect(migrated.find((node) => node.id === explicitMaterialId)).toMatchObject({
+      currentReleaseId: explicitBase.id,
+      currentReleaseSelection: "explicit"
+    });
+    expect(migrated.find((node) => node.id === derivedMaterialId)).toMatchObject({
+      currentReleaseId: derivedBase.id,
+      currentReleaseSelection: "derived"
+    });
+
+    const candidateFor = (base: CourseRelease, id: string, pageId: string): CourseRelease => ({
+      ...base,
+      id,
+      version: base.version + 1,
+      lifecycle: "draft_source",
+      pageIds: [pageId],
+      pages: [{ ...base.pages[0]!, id: pageId }]
+    });
+    const explicitCandidate = candidateFor(explicitBase, "selection-explicit-candidate", "selection-explicit-candidate-page");
+    const derivedCandidate = candidateFor(derivedBase, "selection-derived-candidate", "selection-derived-candidate-page");
+    await api.registerDraftSource(explicitCandidate, { ...context, idempotencyKey: "register-explicit-candidate" });
+    await api.saveDraft({ ...draftFor(explicitCandidate), status: "ready" }, 0, { ...context, idempotencyKey: "save-explicit-candidate" });
+    await api.registerDraftSource(derivedCandidate, { ...context, idempotencyKey: "register-derived-candidate" });
+    await api.saveDraft({ ...draftFor(derivedCandidate), status: "ready" }, 0, { ...context, idempotencyKey: "save-derived-candidate" });
+
+    const projected = await api.listTreeNodes();
+    expect(projected.find((node) => node.id === explicitMaterialId)).toMatchObject({
+      currentReleaseId: explicitBase.id,
+      currentReleaseSelection: "explicit"
+    });
+    expect(projected.find((node) => node.id === derivedMaterialId)).toMatchObject({
+      currentReleaseId: derivedCandidate.id,
+      currentReleaseSelection: "derived"
+    });
   });
 
   it("projects tree changes to ReadWeave branches and validates exact links", async () => {

@@ -177,7 +177,7 @@ describe("saved lesson navigation", () => {
     const appSource = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     const studioSource = await readFile(new URL("./StudioWorkspace.tsx", import.meta.url), "utf8");
 
-    expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
+    expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" className=\"quiet-button compact\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
     expect(appSource).toContain("imageResources={imageResources} rightCollapsed={rightCollapsed}");
     expect(appSource).toMatch(/<div className="visual-column">\{contentTerminalError\s*\? <div className="empty-inline" role="alert">/);
     expect(appSource).toContain(": <SlideViewer imageUrl={page.imageUrl}");

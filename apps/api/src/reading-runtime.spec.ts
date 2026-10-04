@@ -140,12 +140,7 @@ describe("ReadingRuntime", () => {
     };
     await observedAuthority.publishRelease(published, manifest, writeContext("publish-third-source"));
     expect(await treeMaterialIds()).toHaveLength(3);
-    expect(readCounts).toEqual({
-      courses: countsAfterMaterialize.courses + 2,
-      indexes: countsAfterMaterialize.indexes,
-      nodes: countsAfterMaterialize.nodes + 2,
-      trash: countsAfterMaterialize.trash + 2
-    });
+    expect(readCounts).toEqual(countsAfterMaterialize);
     await expect(runtime.replica.getPageSource(workspaceId, published.pages[0]!.id, published.id))
       .resolves.toMatchObject({ page: { blocks: [{ markdown: "Confirmed fixture explanation" }] } });
     runtime.close();
@@ -159,6 +154,176 @@ describe("ReadingRuntime", () => {
     await expect(restarted.replica.getPageSource(workspaceId, published.pages[0]!.id, published.id))
       .resolves.toMatchObject({ page: { blocks: [{ markdown: "Confirmed fixture explanation" }] } });
     restarted.close();
+  });
+
+  it("moves the incremental material default to a newly readable draft source", async () => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const published = await publishFixture(store);
+    const readCounts = { courses: 0, indexes: 0, nodes: 0, trash: 0 };
+    const countedAuthority = new Proxy(store, {
+      get(target, property) {
+        const readName = property === "listCourses" ? "courses"
+          : property === "listReleaseIndexes" ? "indexes"
+            : property === "listTreeNodes" ? "nodes"
+              : property === "listTrash" ? "trash" : undefined;
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (readName) readCounts[readName] += 1;
+          return value.apply(target, args);
+        };
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, countedAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    const readsAfterMaterialize = { ...readCounts };
+    const observedAuthority = observeReadingWrites(countedAuthority, runtime);
+    const candidatePage = page("fixture-candidate-page");
+    const candidate: CourseRelease = {
+      ...published,
+      id: "fixture-candidate-release",
+      version: 2,
+      pageIds: [candidatePage.id],
+      pages: [candidatePage],
+      lifecycle: "draft_source",
+      manifestHash: "fixture-candidate-manifest-hash"
+    };
+    const materialId = `material:${published.courseId}:${published.moduleId}`;
+
+    await observedAuthority.registerDraftSource(candidate, writeContext("register-readable-candidate"));
+    expect(runtime.replica.getTreeNode(workspaceId, materialId)).toMatchObject({
+      currentReleaseId: published.id,
+      pageCount: published.pages.length
+    });
+    await observedAuthority.saveDraft(makeDraft(candidate, 1, "Readable candidate explanation"), 0,
+      writeContext("save-readable-candidate"));
+
+    expect(runtime.replica.getTreeNode(workspaceId, materialId)).toMatchObject({
+      currentReleaseId: candidate.id,
+      releaseId: candidate.id,
+      pageCount: candidate.pages.length
+    });
+    expect(runtime.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: candidate.id,
+      source: "derived"
+    });
+    expect(readCounts).toEqual(readsAfterMaterialize);
+    runtime.close();
+  });
+
+  it("preserves a persisted explicit material release pin when a newer draft becomes readable", async () => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const published = await publishFixture(store);
+    const readCounts = { courses: 0, indexes: 0, nodes: 0, trash: 0 };
+    const countedAuthority = new Proxy(store, {
+      get(target, property) {
+        const readName = property === "listCourses" ? "courses"
+          : property === "listReleaseIndexes" ? "indexes"
+            : property === "listTreeNodes" ? "nodes"
+              : property === "listTrash" ? "trash" : undefined;
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (readName) readCounts[readName] += 1;
+          return value.apply(target, args);
+        };
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, countedAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    const readsAfterMaterialize = { ...readCounts };
+    const observedAuthority = observeReadingWrites(countedAuthority, runtime);
+    const materialId = `material:${published.courseId}:${published.moduleId}`;
+    const materialNode = runtime.replica.getTreeNode(workspaceId, materialId)!;
+
+    await observedAuthority.updateTreeNode(materialId, { currentReleaseId: published.id }, materialNode.revision ?? 0,
+      writeContext("explicitly-pin-published-release"));
+    expect(runtime.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: published.id,
+      source: "explicit"
+    });
+    runtime.close();
+
+    const restarted = new ReadingRuntime(root, countedAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await restarted.initialize();
+    expect(restarted.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: published.id,
+      source: "explicit"
+    });
+    const restartedAuthority = observeReadingWrites(countedAuthority, restarted);
+    const candidatePage = page("fixture-explicit-pin-candidate-page");
+    const candidate: CourseRelease = {
+      ...published,
+      id: "fixture-explicit-pin-candidate",
+      version: 2,
+      pageIds: [candidatePage.id],
+      pages: [candidatePage],
+      lifecycle: "draft_source",
+      manifestHash: "fixture-explicit-pin-candidate-manifest"
+    };
+    await restartedAuthority.registerDraftSource(candidate, writeContext("register-explicit-pin-candidate"));
+    await restartedAuthority.saveDraft(makeDraft(candidate, 1, "Readable newer candidate"), 0,
+      writeContext("save-explicit-pin-candidate"));
+
+    expect(restarted.replica.getTreeNode(workspaceId, materialId)).toMatchObject({
+      currentReleaseId: published.id,
+      releaseId: published.id,
+      pageCount: published.pages.length
+    });
+    expect(restarted.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: published.id,
+      source: "explicit"
+    });
+    expect(readCounts).toEqual(readsAfterMaterialize);
+    restarted.close();
+  });
+
+  it.each(["materialize", "refresh"] as const)("seeds a preexisting authority pin hint through %s", async (projection) => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const published = await publishFixture(store);
+    const materialId = `material:${published.courseId}:${published.moduleId}`;
+    const materialNode = (await store.listTreeNodes()).find((node) => node.id === materialId)!;
+    await store.updateTreeNode(materialId, { currentReleaseId: published.id }, materialNode.revision ?? 0,
+      writeContext("preexisting-explicit-pin"));
+
+    const runtime = new ReadingRuntime(root, store, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    if (projection === "materialize") await runtime.materialize();
+    else await runtime.refresh();
+    expect(runtime.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: published.id,
+      source: "explicit"
+    });
+
+    const candidatePage = page("fixture-preexisting-pin-candidate-page");
+    const candidate: CourseRelease = {
+      ...published,
+      id: "fixture-preexisting-pin-candidate",
+      version: 2,
+      pageIds: [candidatePage.id],
+      pages: [candidatePage],
+      lifecycle: "draft_source",
+      manifestHash: "fixture-preexisting-pin-candidate-manifest"
+    };
+    const observedAuthority = observeReadingWrites(store, runtime);
+    await observedAuthority.registerDraftSource(candidate, writeContext("register-preexisting-pin-candidate"));
+    await observedAuthority.saveDraft(makeDraft(candidate, 1, "Readable preexisting-pin candidate"), 0,
+      writeContext("save-preexisting-pin-candidate"));
+
+    expect(runtime.replica.getTreeNode(workspaceId, materialId)).toMatchObject({
+      currentReleaseId: published.id,
+      releaseId: published.id
+    });
+    expect(runtime.replica.getMaterialReleaseSelection(workspaceId, materialId)).toEqual({
+      releaseId: published.id,
+      source: "explicit"
+    });
+    runtime.close();
   });
 
   it("upserts a resolved lesson draft from its targeted authority snapshot", async () => {
@@ -210,7 +375,9 @@ describe("ReadingRuntime", () => {
       contentHash: sha256Text(stableStringify(mergedPage)),
       page: { blocks: [{ markdown: "caller-confirmed merged full page" }] }
     });
-    expect(snapshotReads).toBe(1);
+    // One targeted read reconciles the rejected stale save; one projects the
+    // later conflict resolution.
+    expect(snapshotReads).toBe(2);
     expect(broadDraftReads).toBe(0);
     runtime.close();
   });
@@ -285,6 +452,122 @@ describe("ReadingRuntime", () => {
     liveRuntime.close();
   });
 
+  it("keeps the last confirmed tree when an ordinary move projection fails", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const release = await publishFixture(authority);
+    const node = (await authority.listTreeNodes()).find((item) => item.kind === "material");
+    expect(node).toBeDefined();
+
+    const malformedMoveResult = new Proxy(authority, {
+      get(target, property) {
+        if (property === "updateTreeNode") return async (...args: Parameters<ReadWeaveCourseApi["updateTreeNode"]>) => {
+          const saved = await target.updateTreeNode(...args);
+          return { ...saved, parentId: "missing-parent" };
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+
+    await observeReadingWrites(malformedMoveResult, runtime).updateTreeNode(node!.id, { parentId: null }, node!.revision ?? 0,
+      writeContext("ordinary-move-projection-failure"));
+
+    expect(runtime.status()).toMatchObject({ ready: true, blockedObjects: 0 });
+    await expect(runtime.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id))
+      .resolves.toMatchObject({ page: { id: release.pages[0]!.id } });
+    const tree = await runtime.replica.getTree(workspaceId);
+    expect(tree?.courses[0]?.children.some((child) => child.id === node!.id)).toBe(true);
+    runtime.close();
+  });
+
+  it("keeps a version-sensitive material blocked across stale refreshes and repairs its confirmed revision", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const release = await publishFixture(authority);
+    const siblingPage = page("unrelated-material-page");
+    const siblingRelease: CourseRelease = {
+      ...release,
+      id: "unrelated-release",
+      moduleId: "unrelated-module",
+      moduleTitle: "Unrelated Module",
+      pageIds: [siblingPage.id],
+      pages: [siblingPage],
+      manifestHash: "unrelated-release-manifest"
+    };
+    const manifest: ReleaseManifest = {
+      id: "unrelated-release-manifest",
+      schemaVersion: COURSE_API_VERSION,
+      courseReleaseId: siblingRelease.id,
+      sourceHashes: [],
+      pageHashes: [sha256Text(stableStringify(siblingPage))],
+      explanationHashes: [],
+      assessmentHashes: [],
+      writingPolicySnapshotId: siblingRelease.writingPolicySnapshotId,
+      modelRoutes: [siblingRelease.modelRoute],
+      qualityHarnessVersion: siblingRelease.qualityHarnessVersion,
+      costInputs: [],
+      createdAt: stamp
+    };
+    await authority.publishRelease(siblingRelease, manifest, writeContext("publish-unrelated-material"));
+    const targetId = `material:${release.courseId}:${release.moduleId}`;
+    const targetNode = (await authority.listTreeNodes()).find((item) => item.id === targetId)!;
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+
+    const malformedSensitiveResult = new Proxy(authority, {
+      get(target, property) {
+        if (property === "updateTreeNode") return async (...args: Parameters<ReadWeaveCourseApi["updateTreeNode"]>) => {
+          const saved = await target.updateTreeNode(...args);
+          return { ...saved, parentId: "missing-parent" };
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    await observeReadingWrites(malformedSensitiveResult, runtime).updateTreeNode(targetId,
+      { currentReleaseId: release.id }, targetNode.revision ?? 0, writeContext("sensitive-version-projection-failure"));
+
+    expect(runtime.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await expect(runtime.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id)).resolves.toBeUndefined();
+    await expect(runtime.replica.getPageSource(workspaceId, siblingPage.id, siblingRelease.id))
+      .resolves.toMatchObject({ page: { id: siblingPage.id } });
+    runtime.close();
+
+    let staleTree = true;
+    const staleAuthority = new Proxy(authority, {
+      get(target, property) {
+        if (property === "listTreeNodes") return async () => {
+          const nodes = await target.listTreeNodes();
+          if (!staleTree) return nodes;
+          return nodes.map((item) => item.id === targetId
+            ? { ...item, revision: Math.max(0, (item.revision ?? 0) - 1) } : item);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const restarted = new ReadingRuntime(root, staleAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await restarted.initialize();
+    expect(restarted.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await restarted.refresh();
+    expect(restarted.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await expect(restarted.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id)).resolves.toBeUndefined();
+    await expect(restarted.replica.getPageSource(workspaceId, siblingPage.id, siblingRelease.id))
+      .resolves.toMatchObject({ page: { id: siblingPage.id } });
+
+    staleTree = false;
+    await restarted.refresh();
+    expect(restarted.status()).toMatchObject({ ready: true, blockedObjects: 0 });
+    await expect(restarted.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id))
+      .resolves.toMatchObject({ page: { id: release.pages[0]!.id } });
+    restarted.close();
+  });
+
   it("fails closed on authority access denial and retains denial across restart", async () => {
     const root = await temporaryRoot();
     const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
@@ -308,7 +591,7 @@ describe("ReadingRuntime", () => {
     restarted.close();
   });
 
-  it("returns an acknowledged authority write when projection fails and requires controlled confirmation", async () => {
+  it("keeps a failed draft projection scoped until a matching revision is confirmed", async () => {
     const root = await temporaryRoot();
     const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
     const release = await publishFixture(authority);
@@ -328,24 +611,99 @@ describe("ReadingRuntime", () => {
         return typeof value === "function" ? value.bind(target) : value;
       }
     }) as ReadWeaveCourseApi;
-    const attemptedDraft = makeDraft(release, 1, "Authority acknowledged this draft");
+    // The request body carries the current revision; the authority commits the
+    // next revision, so protection must target expectedRevision + 1.
+    const attemptedDraft = makeDraft(release, 0, "Authority acknowledged this draft");
     const acknowledged = await observeReadingWrites(badProjection, runtime)
       .saveDraft(attemptedDraft, 0, writeContext("projection-failure-write"));
 
     expect(acknowledged.workspaceId).toBe("different-workspace");
     expect(authorityWrites).toBe(1);
-    expect(runtime.status().ready).toBe(false);
+    expect(runtime.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await expect(runtime.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id)).resolves.toBeUndefined();
+    await expect(runtime.replica.getPageSource(workspaceId, release.pages[1]!.id, release.id))
+      .resolves.toMatchObject({ page: { id: release.pages[1]!.id } });
+    expect(await runtime.replica.listCourses(workspaceId)).toHaveLength(1);
     runtime.close();
+
+    const staleAuthority = new Proxy(authority, {
+      get(target, property) {
+        if (property === "getDraftByPage") return async (pageId: string) => {
+          const draft = await target.getDraftByPage(pageId);
+          return draft ? { ...draft, revision: 0 } : undefined;
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const stale = new ReadingRuntime(root, staleAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await stale.initialize();
+    expect(stale.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await stale.refresh();
+    expect(stale.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await expect(stale.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id)).resolves.toBeUndefined();
+    await expect(stale.replica.getPageSource(workspaceId, release.pages[1]!.id, release.id))
+      .resolves.toMatchObject({ page: { id: release.pages[1]!.id } });
+    stale.close();
 
     const restarted = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
     await restarted.initialize();
-    expect(restarted.status().ready).toBe(false);
-    await restarted.materialize();
-    expect(restarted.status().ready).toBe(true);
+    expect(restarted.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await restarted.refresh();
+    expect(restarted.status()).toMatchObject({ ready: true, blockedObjects: 0 });
     expect(await restarted.replica.getDraft(workspaceId, attemptedDraft.pageId, release.id))
       .toMatchObject({ revision: 1, page: { blocks: [{ markdown: "Authority acknowledged this draft" }] } });
     expect(authorityWrites).toBe(1);
     restarted.close();
+  });
+
+  it("recovers a definitively rejected metadata write from authority but keeps uncertain writes blocked", async () => {
+    const conflictRoot = await temporaryRoot();
+    const conflictAuthority = new FileReadWeaveCourseApi(join(conflictRoot, "readweave-course-store.json"));
+    await publishFixture(conflictAuthority);
+    const conflictRuntime = new ReadingRuntime(conflictRoot, conflictAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await conflictRuntime.initialize();
+    await conflictRuntime.materialize();
+    const material = conflictRuntime.replica.getTreeNode(workspaceId, "material:fixture-course:fixture-module")!;
+    const etapiConflict = new Proxy(conflictAuthority, {
+      get(target, property) {
+        if (property === "updateTreeNode") return async () => { throw new Error("READWEAVE_ETAPI_409:revision conflict"); };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const rejected = observeReadingWrites(etapiConflict, conflictRuntime);
+
+    await expect(rejected.updateTreeNode(material.id, { archived: true }, material.revision! - 1,
+      writeContext("definitive-etapi-tree-conflict"))).rejects.toThrow("READWEAVE_ETAPI_409");
+    expect(conflictRuntime.status()).toMatchObject({ ready: true, blockedObjects: 0 });
+    await expect(conflictRuntime.replica.getPageSource(workspaceId, "fixture-page", "fixture-release"))
+      .resolves.toMatchObject({ page: { id: "fixture-page" } });
+    conflictRuntime.close();
+
+    const uncertainRoot = await temporaryRoot();
+    const uncertainAuthority = new FileReadWeaveCourseApi(join(uncertainRoot, "readweave-course-store.json"));
+    await publishFixture(uncertainAuthority);
+    const uncertainRuntime = new ReadingRuntime(uncertainRoot, uncertainAuthority, workspaceId, authorityIdentity, buildReadingTree);
+    await uncertainRuntime.initialize();
+    await uncertainRuntime.materialize();
+    const uncertainMaterial = uncertainRuntime.replica.getTreeNode(workspaceId, "material:fixture-course:fixture-module")!;
+    const interruptedAuthority = new Proxy(uncertainAuthority, {
+      get(target, property) {
+        if (property === "updateTreeNode") return async () => { throw new Error("ECONNRESET: outcome uncertain"); };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const interrupted = observeReadingWrites(interruptedAuthority, uncertainRuntime);
+
+    await expect(interrupted.updateTreeNode(uncertainMaterial.id, { archived: true }, uncertainMaterial.revision!,
+      writeContext("uncertain-tree-write"))).rejects.toThrow("ECONNRESET");
+    expect(uncertainRuntime.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await uncertainRuntime.refresh();
+    expect(uncertainRuntime.status()).toMatchObject({ ready: true, blockedObjects: 1 });
+    await expect(uncertainRuntime.replica.getPageSource(workspaceId, "fixture-page", "fixture-release")).resolves.toBeUndefined();
+    uncertainRuntime.close();
   });
 });
 
@@ -367,6 +725,9 @@ async function publishFixture(authority: FileReadWeaveCourseApi): Promise<Course
   await authority.createCourse(course, writeContext("create-fixture-course"));
 
   const lesson = page("fixture-page");
+  const secondLesson = page("fixture-page-2");
+  secondLesson.pageNumber = 2;
+  secondLesson.title = "Confirmed fixture page two";
   const release: CourseRelease = {
     id: "fixture-release",
     courseId: course.id,
@@ -375,8 +736,8 @@ async function publishFixture(authority: FileReadWeaveCourseApi): Promise<Course
     moduleTitle: "Fixture Module",
     version: 1,
     publishedAt: stamp,
-    pageIds: [lesson.id],
-    pages: [lesson],
+    pageIds: [lesson.id, secondLesson.id],
+    pages: [lesson, secondLesson],
     assessments: [],
     manifestHash: "fixture-manifest-hash-v1",
     writingPolicySnapshotId: "fixture-policy-v1",
@@ -390,7 +751,7 @@ async function publishFixture(authority: FileReadWeaveCourseApi): Promise<Course
     schemaVersion: COURSE_API_VERSION,
     courseReleaseId: release.id,
     sourceHashes: [],
-    pageHashes: [sha256Text(stableStringify(lesson))],
+    pageHashes: [sha256Text(stableStringify(lesson)), sha256Text(stableStringify(secondLesson))],
     explanationHashes: [],
     assessmentHashes: [],
     writingPolicySnapshotId: release.writingPolicySnapshotId,
@@ -465,6 +826,45 @@ function failingAuthority(authority: FileReadWeaveCourseApi, message: string): R
 function writeContext(idempotencyKey: string): IdempotentWriteContext {
   return { idempotencyKey, actor: "reading-runtime-spec", workspaceId, schemaVersion: COURSE_API_VERSION, requestId: idempotencyKey };
 }
+
+describe("out-of-order acknowledged directory writes", () => {
+  it("does not replace a newer archived node or clear its newer protection with an older callback", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const release = await publishFixture(authority);
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    const id = `material:${release.courseId}:${release.moduleId}`;
+    const initial = (await authority.listTreeNodes()).find(node => node.id === id)!;
+    const older = await authority.updateTreeNode(id, { archived: false }, initial.revision ?? 0, writeContext("older-directory-result"));
+    await runtime.saved("updateTreeNode", older, [id, { archived: false }, initial.revision ?? 0]);
+    await runtime.beforeWrite("updateTreeNode", [id, { archived: true }, older.revision]);
+    await runtime.saved("updateTreeNode", older, [id, { archived: false }, initial.revision ?? 0]);
+    expect(runtime.status().blockedObjects).toBe(1);
+    const newer = await authority.updateTreeNode(id, { archived: true }, older.revision ?? 0, writeContext("newer-directory-result"));
+    await runtime.saved("updateTreeNode", newer, [id, { archived: true }, older.revision]);
+    await runtime.saved("updateTreeNode", older, [id, { archived: false }, initial.revision ?? 0]);
+    expect(runtime.replica.getTreeNode(workspaceId, id)).toMatchObject({ archived: true, revision: newer.revision });
+    await expect(runtime.replica.getPageSource(workspaceId, release.pages[0]!.id, release.id)).resolves.toBeUndefined();
+    runtime.close();
+  });
+
+  it("does not mark a newer write rejected when an older conflicting write returns late", async () => {
+    const root = await temporaryRoot();
+    const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));
+    const release = await publishFixture(authority);
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    const id = `material:${release.courseId}:${release.moduleId}`;
+    const old = await runtime.beforeWrite("updateTreeNode", [id, { archived: false }, 1]);
+    const latest = await runtime.beforeWrite("updateTreeNode", [id, { archived: true }, 2]);
+    await runtime.writeFailed(old, new Error("READWEAVE_ETAPI_409"));
+    expect(runtime.replica.projectionInvalidations(workspaceId)).toEqual([latest]);
+    runtime.close();
+  });
+});
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
