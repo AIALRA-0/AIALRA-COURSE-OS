@@ -1404,6 +1404,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const selectionRequests = remote.requests.length;
     await api.saveQuestionSelection({ ...firstSelection, id: "selection-2", seed: "seed-2" }, { ...context, idempotencyKey: "activity-selection-2" });
     expect(remote.requests.slice(selectionRequests).map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: "GET", path: `/notes/${activityNoteId}/content` },
       { method: "POST", path: `/notes/${activityNoteId}/revision` }, { method: "PUT", path: `/notes/${activityNoteId}/content` }
     ]);
     expect(remote.contentWriteCount(stateNoteId)).toBe(stateWritesAfterInitialization);
@@ -1558,6 +1559,188 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(Reflect.get(api, "stateCache")).toBeUndefined();
   });
 
+  it("serializes activity independently and reconciles it after an older core PUT", async () => {
+    const remote = new FakeEtapi();
+    let holdCorePut = false;
+    let releaseCorePut: (() => void) | undefined;
+    let announceCorePut!: () => void;
+    const corePutGate = new Promise<void>((resolve) => { releaseCorePut = resolve; });
+    const corePutStarted = new Promise<void>((resolve) => { announceCorePut = resolve; });
+    const api = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/u, "");
+        if (holdCorePut && init?.method === "PUT") {
+          const coreNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+          if (path === `/notes/${coreNoteId}/content`) {
+            holdCorePut = false;
+            announceCorePut();
+            await corePutGate;
+          }
+        }
+        return remote.fetch(input, init);
+      }
+    });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const initialSelection = { id: "core-race-initial", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", seed: "initial", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" };
+    await api.saveQuestionSelection(initialSelection, { ...context, idempotencyKey: "core-race-initial" });
+    const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const coreNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+
+    holdCorePut = true;
+    const coreMutation = api.registerDraftSource({ ...releaseWithPage(), id: "core-race-source" },
+      { ...context, idempotencyKey: "core-race-source" });
+    await corePutStarted;
+    const requestsAtCorePut = remote.requests.length;
+
+    const selection = { ...initialSelection, id: "core-race-selection", seed: "saved selection" };
+    const replayedSelection = { ...selection, seed: "must not replace first request" };
+    const attempt = { id: "core-race-attempt", selectionId: selection.id, sessionId: selection.sessionId,
+      courseReleaseId: pageRelease.id, pageId: selection.pageId, questionId: "question-1", objectiveId: "objective-1",
+      answer: "saved answer", correct: true, usedHintLevel: 0, attemptedAt: "2026-09-15T00:01:00.000Z" };
+    const activityPromise = Promise.all([
+      api.saveQuestionSelection(selection, { ...context, idempotencyKey: "core-race-selection" }),
+      api.saveQuestionSelection(replayedSelection, { ...context, idempotencyKey: "core-race-selection" })
+    ]).then(async (savedSelections) => {
+      const savedAttempt = await api.saveQuestionAttempt(attempt, { ...context, idempotencyKey: "core-race-attempt" });
+      Reflect.set(api, "activityCache", undefined);
+      const [selected, attempts] = await Promise.all([
+        api.getQuestionSelection(selection.id), api.listQuestionAttempts("page-1")
+      ]);
+      return { savedSelections, savedAttempt, selected, attempts };
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const activityOutcome = await Promise.race([
+      activityPromise.then((value) => ({ value }), (error: unknown) => ({ error })),
+      new Promise<{ timeout: true }>((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), 1_000); })
+    ]);
+    if (timeout) clearTimeout(timeout);
+    try {
+      expect(activityOutcome).toEqual({ value: {
+        savedSelections: [selection, selection], savedAttempt: attempt, selected: selection, attempts: [attempt]
+      } });
+      expect(remote.requests.slice(requestsAtCorePut)
+        .filter((request) => request.method === "GET" && request.path === `/notes/${coreNoteId}/content`)).toHaveLength(0);
+      expect(remote.requests.some((request) => request.method === "GET" && request.path === `/notes/${activityNoteId}/content`)).toBe(true);
+    } finally {
+      releaseCorePut?.();
+    }
+
+    const activityWritesBeforeCoreCommit = remote.contentWriteCount(activityNoteId);
+    await coreMutation;
+    expect(remote.contentWriteCount(activityNoteId)).toBe(activityWritesBeforeCoreCommit);
+
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const fullState = await (reopened as unknown as { readStateReference(requireFresh?: boolean): Promise<{
+      questionSelections: typeof selection[];
+      questionAttempts: typeof attempt[];
+    }> }).readStateReference(true);
+    expect(fullState.questionSelections).toEqual([initialSelection, selection]);
+    expect(fullState.questionAttempts).toEqual([attempt]);
+  });
+
+  it("serializes the cold recheck-existing path against indexed activity writes", async () => {
+    const remote = new FakeEtapi();
+    let watchedActivityNoteId = "";
+    let watchThirdActivityRead = false;
+    let announceThirdActivityRead!: () => void;
+    const thirdActivityReadStarted = new Promise<void>((resolve) => { announceThirdActivityRead = resolve; });
+    const api = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/u, "");
+        if (watchThirdActivityRead && init?.method === "GET" && path === `/notes/${watchedActivityNoteId}/content`) {
+          announceThirdActivityRead();
+        }
+        return remote.fetch(input, init);
+      }
+    });
+    const pageRelease = releaseWithPage();
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+
+    const internals = api as unknown as {
+      findActivityStateNoteId(): Promise<string | undefined>;
+      readActivityReference(noteId?: string, requireFresh?: boolean): Promise<unknown>;
+      writeContext: { getStore(): { idempotencyKey: string } | undefined };
+    };
+    const originalFind = internals.findActivityStateNoteId.bind(api);
+    const originalRead = internals.readActivityReference.bind(api);
+    let coldFinds = 0;
+    let releaseColdFinds!: () => void;
+    const bothColdFinds = new Promise<void>((resolve) => { releaseColdFinds = resolve; });
+    let secondIndexedReadCount = 0;
+    let releaseSecondRead!: () => void;
+    let announceSecondRead!: () => void;
+    const secondReadGate = new Promise<void>((resolve) => { releaseSecondRead = resolve; });
+    const secondReadStarted = new Promise<void>((resolve) => { announceSecondRead = resolve; });
+    let watchNextFind = false;
+    let announceThirdFind!: () => void;
+    const thirdFindDone = new Promise<void>((resolve) => { announceThirdFind = resolve; });
+    const activityNoteIdAtStart: string | undefined = undefined;
+
+    vi.spyOn(internals, "findActivityStateNoteId").mockImplementation(async () => {
+      const found = await originalFind();
+      if (!found && coldFinds < 2) {
+        coldFinds += 1;
+        if (coldFinds === 2) releaseColdFinds();
+        await bothColdFinds;
+        return undefined;
+      }
+      if (watchNextFind) {
+        watchNextFind = false;
+        announceThirdFind();
+      }
+      return found;
+    });
+    vi.spyOn(internals, "readActivityReference").mockImplementation(async (noteId, requireFresh) => {
+      const activity = await originalRead(noteId, requireFresh);
+      let currentActivityNoteId: string | undefined;
+      try { currentActivityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引"); } catch { /* cold index not created yet */ }
+      if (requireFresh && currentActivityNoteId !== activityNoteIdAtStart && currentActivityNoteId !== undefined) {
+        secondIndexedReadCount += 1;
+        if (secondIndexedReadCount === 2) {
+          announceSecondRead();
+          await secondReadGate;
+        }
+      }
+      return activity;
+    });
+    const first = { id: "cold-first", sessionId: "session-1", courseReleaseId: pageRelease.id, pageId: "page-1",
+      seed: "first", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" };
+    const second = { ...first, id: "cold-second", seed: "second" };
+    const third = { ...first, id: "cold-third", seed: "third" };
+    const firstTask = api.saveQuestionSelection(first, { ...context, idempotencyKey: "cold-first" });
+    const secondTask = api.saveQuestionSelection(second, { ...context, idempotencyKey: "cold-second" });
+
+    try {
+      await secondReadStarted;
+      const activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+      watchedActivityNoteId = activityNoteId;
+      watchThirdActivityRead = true;
+      watchNextFind = true;
+      const thirdTask = api.saveQuestionSelection(third, { ...context, idempotencyKey: "cold-third" });
+      await thirdFindDone;
+      const thirdReadWonRace = await Promise.race([
+        thirdActivityReadStarted.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 75))
+      ]);
+      if (thirdReadWonRace) await thirdTask;
+      expect(thirdReadWonRace).toBe(false);
+      releaseSecondRead();
+      await Promise.all([firstTask, secondTask, thirdTask]);
+      expect(remote.noteIdByTitle("01 Course OS 学习活动索引")).toBe(activityNoteId);
+      const persisted = decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引")) as {
+        questionSelections: typeof first[];
+      };
+      expect(persisted.questionSelections).toEqual([first, second, third]);
+    } finally {
+      releaseSecondRead();
+      watchThirdActivityRead = false;
+    }
+  });
+
   it("returns a cached draft snapshot without cloning or merging the full course state", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -1592,6 +1775,63 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.slice(before).map(({ method, path }) => [method, path])).toEqual([
       ["GET", `/notes/${activityNoteId}/content`]
     ]);
+  });
+
+  it("re-reads an activity snapshot invalidated by a successful or ambiguous write", async () => {
+    for (const ambiguous of [false, true]) {
+      const remote = new FakeEtapi();
+      let activityNoteId = "";
+      let holdStaleRead = false;
+      let releaseStaleRead!: () => void;
+      let announceStaleRead!: () => void;
+      const staleReadGate = new Promise<void>((resolve) => { releaseStaleRead = resolve; });
+      const staleReadStarted = new Promise<void>((resolve) => { announceStaleRead = resolve; });
+      let loseActivityPutResponse = false;
+      let lostPutResponses = 0;
+      const api = new EtapiReadWeaveCourseApi({
+        baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+        fetchImpl: async (input, init) => {
+          const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname.replace(/^\/etapi/u, "");
+          if (holdStaleRead && (init?.method ?? "GET") === "GET" && path === `/notes/${activityNoteId}/content`) {
+            holdStaleRead = false;
+            const response = await remote.fetch(input, init);
+            announceStaleRead();
+            await staleReadGate;
+            return response;
+          }
+          const response = await remote.fetch(input, init);
+          if (ambiguous && loseActivityPutResponse && init?.method === "PUT"
+            && path === `/notes/${activityNoteId}/content` && lostPutResponses < 3) {
+            lostPutResponses += 1;
+            return new Response("response lost after activity commit", { status: 503 });
+          }
+          return response;
+        }
+      });
+      const pageRelease = releaseWithPage();
+      await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+      const initial = { id: "stale-read-initial", sessionId: "session-1", courseReleaseId: pageRelease.id,
+        pageId: "page-1", seed: "initial", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" };
+      await api.saveQuestionSelection(initial, { ...context, idempotencyKey: "stale-read-initial" });
+      activityNoteId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+      Reflect.set(api, "activityCache", undefined);
+      holdStaleRead = true;
+      const pendingRead = api.getQuestionSelection("stale-read-after-write");
+      await staleReadStarted;
+
+      const next = { ...initial, id: "stale-read-after-write", seed: "committed while read is paused" };
+      loseActivityPutResponse = ambiguous;
+      const write = api.saveQuestionSelection(next, { ...context, idempotencyKey: "stale-read-after-write" });
+      if (ambiguous) await expect(write).rejects.toThrow("READWEAVE_ETAPI_503");
+      else await expect(write).resolves.toEqual(next);
+
+      releaseStaleRead();
+      await expect(pendingRead).resolves.toEqual(next);
+      const persisted = decodeReadWeaveStateContent(remote.contentByTitle("01 Course OS 学习活动索引")) as {
+        questionSelections: typeof initial[];
+      };
+      expect(persisted.questionSelections).toEqual([initial, next]);
+    }
   });
 
   it("scopes cold activity and bootstrap reads to the renamed direct workspace ahead of nested clones", async () => {

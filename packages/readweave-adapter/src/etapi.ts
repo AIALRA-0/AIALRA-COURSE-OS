@@ -243,6 +243,7 @@ interface SharedRead<T> {
 // this process-wide map.
 const draftPageWriteChains = new Map<string, Promise<void>>();
 const etapiWriteChains = new Map<string, Promise<void>>();
+const etapiActivityWriteChains = new Map<string, Promise<void>>();
 
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
 const metadataIdempotencyKinds = new Set(["course", "tree_node", "trash", "restore", "native_erase_preflight", "permanent_delete"]);
@@ -3949,13 +3950,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         : undefined);
       this.lastWriteAt = new Date().toISOString();
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
-      // `mutate` owns this object and serializes every writer through
-      // `writeChain`, so the committed snapshot can become the cache directly.
-      // Public reads still clone the values they return.
-      this.stateVersion += 1;
-      this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
-      this.cacheActivityRoutes(state);
-      if (state.projections.activityStateNoteId) this.commitActivityState(this.activityState(state));
+      const commitCoreSnapshot = async () => {
+        const activityNoteId = state.projections.activityStateNoteId;
+        if (activityNoteId) {
+          // Core PUTs may have started from an older activity clone. Reconcile
+          // under the activity queue before publishing that clone to readers.
+          this.applyActivityState(state, await this.readActivityReference(activityNoteId, true));
+        }
+        this.stateVersion += 1;
+        this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        this.cacheActivityRoutes(state);
+      };
+      if (state.projections.activityStateNoteId) {
+        await this.enqueueActivityWrite(commitCoreSnapshot, this.writeContext.getStore());
+      } else {
+        await commitCoreSnapshot();
+      }
       phase = "complete";
       succeeded = true;
     } catch (error) {
@@ -4033,12 +4043,26 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
   }
 
-  private async readActivityReference(noteId?: string): Promise<EtapiActivityState> {
+  private async readActivityReference(noteId?: string, requireFresh = false): Promise<EtapiActivityState> {
     const activityNoteId = noteId ?? await this.findActivityStateNoteId();
     if (!activityNoteId) {
       const state = await this.readStateReference();
       this.cacheActivityRoutes(state);
       return this.activityState(state);
+    }
+    if (requireFresh) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const versionAtReadStart = this.activityVersion;
+        // GETs used for a version retry must retain the caller's read budget,
+        // even when the initial caller also carries a write context.
+        const content = await this.writeContext.exit(() => this.getContent(activityNoteId));
+        const activity = this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>);
+        if (this.activityVersion === versionAtReadStart) {
+          this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+          return activity;
+        }
+      }
+      throw new Error("READWEAVE_ACTIVITY_READ_CONCURRENT_MODIFICATION");
     }
     const now = Date.now();
     if (this.activityCache && this.activityCache.expiresAt > now) return this.activityCache.state;
@@ -4049,8 +4073,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const activity = this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>);
       if (this.activityVersion === versionAtReadStart) {
         this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
+        return activity;
       }
-      return activity;
+      return this.writeContext.exit(() => this.readActivityReference(activityNoteId, true));
     }
 
     if (!this.activityReadInFlight) {
@@ -4070,8 +4095,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const pendingRead = this.activityReadInFlight;
     if (!pendingRead) throw new Error("READWEAVE_ACTIVITY_READ_MISSING");
+    const versionAtJoin = this.activityVersion;
     const activity = await joinSharedRead(pendingRead, currentReadBudget());
-    return this.activityCache && this.activityCache.expiresAt > Date.now() ? this.activityCache.state : activity;
+    if (this.activityCache && this.activityCache.expiresAt > Date.now()) return this.activityCache.state;
+    if (this.activityVersion !== versionAtJoin) {
+      return this.writeContext.exit(() => this.readActivityReference(activityNoteId, true));
+    }
+    return activity;
   }
 
   private async findActivityStateNoteId(): Promise<string | undefined> {
@@ -4224,30 +4254,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await this.writeState(state);
   }
 
-  private async writeActivityState(state: EtapiState): Promise<void> {
-    const noteId = state.projections.activityStateNoteId;
-    if (!noteId) throw new Error("READWEAVE_ACTIVITY_INDEX_NOT_INITIALIZED");
-    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
-    try {
-      const encodeStartedAt = timingEnabled ? performance.now() : 0;
-      const activity = this.activityState(state);
-      const content = await encodeReadWeaveStateContentAsync(activity);
-      const putStartedAt = timingEnabled ? performance.now() : 0;
-      await this.putContent(noteId, content);
-      const putFinishedAt = timingEnabled ? performance.now() : 0;
-      this.lastWriteAt = new Date().toISOString();
-      this.commitActivityState(activity);
-      this.stateVersion += 1;
-      if (timingEnabled) this.logWriteTiming("course_os.readweave_activity_state_write_timing", {
-        encodeMs: Math.round(putStartedAt - encodeStartedAt), revisionAndPutMs: Math.round(putFinishedAt - putStartedAt),
-        idempotencyKeyCount: Object.keys(activity.idempotency).length
-      });
-    } catch (error) {
-      this.invalidateStateCache();
-      throw error;
-    }
-  }
-
   private commitActivityState(activity: EtapiActivityState): void {
     this.activityVersion += 1;
     this.activityCache = { state: activity, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
@@ -4275,7 +4281,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async mutateActivity<T>(change: (state: EtapiActivityState) => Promise<T>, context: IdempotentWriteContext): Promise<T> {
-    return this.enqueueWrite(async () => {
+    // Keep mutations on an existing activity index independent from the
+    // serialized core snapshot writer. The first-index path still uses the
+    // core queue so index creation and root-pointer persistence stay atomic.
+    const indexedActivityNoteId = await this.findActivityStateNoteId();
+    const work = async (): Promise<T> => {
       const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
       const mutationStartedAt = timingEnabled ? performance.now() : 0;
       let activityReadMs = 0;
@@ -4284,24 +4294,36 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       let activityWriteMs = 0;
       let replay = false;
       try {
-        const activityNoteId = await this.findActivityStateNoteId();
+        const activityNoteId = indexedActivityNoteId ?? await this.findActivityStateNoteId();
         let result: T;
         if (activityNoteId) {
-          const readStartedAt = timingEnabled ? performance.now() : 0;
-          const reference = await this.readActivityReference(activityNoteId);
-          if (timingEnabled) activityReadMs = performance.now() - readStartedAt;
-          const cloneStartedAt = timingEnabled ? performance.now() : 0;
-          const activity = structuredClone(reference);
-          if (timingEnabled) activityCloneMs = performance.now() - cloneStartedAt;
-          replay = Boolean(activity.idempotency[context.idempotencyKey]);
-          const changeStartedAt = timingEnabled ? performance.now() : 0;
-          result = structuredClone(await change(activity));
-          if (timingEnabled) changeMs = performance.now() - changeStartedAt;
-          if (!replay) {
-            const writeStartedAt = timingEnabled ? performance.now() : 0;
-            await this.writeActivityIndex(activityNoteId, activity);
-            if (timingEnabled) activityWriteMs = performance.now() - writeStartedAt;
-          }
+          const updateIndexedActivity = async (): Promise<T> => {
+            const readStartedAt = timingEnabled ? performance.now() : 0;
+            // The process-wide activity queue can serve multiple adapter
+            // instances; reload after acquiring it to avoid applying a stale
+            // instance-local cache over another instance's preceding write.
+            const reference = await this.readActivityReference(activityNoteId, true);
+            if (timingEnabled) activityReadMs = performance.now() - readStartedAt;
+            const cloneStartedAt = timingEnabled ? performance.now() : 0;
+            const activity = structuredClone(reference);
+            if (timingEnabled) activityCloneMs = performance.now() - cloneStartedAt;
+            replay = Boolean(activity.idempotency[context.idempotencyKey]);
+            const changeStartedAt = timingEnabled ? performance.now() : 0;
+            const saved = structuredClone(await change(activity));
+            if (timingEnabled) changeMs = performance.now() - changeStartedAt;
+            if (!replay) {
+              const writeStartedAt = timingEnabled ? performance.now() : 0;
+              await this.writeActivityIndex(activityNoteId, activity);
+              if (timingEnabled) activityWriteMs = performance.now() - writeStartedAt;
+            }
+            return saved;
+          };
+          // A caller may have selected the core queue before another cold
+          // initializer created the index. Re-enter the activity queue for
+          // that recheck-existing case; indexed work never waits on core.
+          result = indexedActivityNoteId
+            ? await updateIndexedActivity()
+            : await this.enqueueActivityWrite(updateIndexedActivity, context);
         } else {
           // A legacy workspace has no separate activity note yet. Initialize
           // it once from the root snapshot, without draft hydration/merging.
@@ -4334,7 +4356,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         // committed value available when the activity index write fails.
         throw error;
       }
-    }, context);
+    };
+    return indexedActivityNoteId
+      ? this.enqueueActivityWrite(work, context)
+      : this.enqueueWrite(work, context);
   }
 
   private async writeActivityIndex(noteId: string, activity: EtapiActivityState): Promise<void> {
@@ -4380,17 +4405,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const state = structuredClone(await this.readStateReference(true));
         await this.mergeDraftPageRecords(state);
         const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
-        const activityBefore = state.projections.activityStateNoteId
-          ? JSON.stringify(this.activityState(state)) : undefined;
         const result = structuredClone(await change(state));
         if (!replay) {
-          // Drafts, release metadata, and generation costs do not change the
-          // learning activity index. Avoid rewriting that separate note for
-          // every generated page while retaining the write for actual changes.
-          if (state.projections.activityStateNoteId
-            && JSON.stringify(this.activityState(state)) !== activityBefore) {
-            await this.writeActivityState(state);
-          }
+          // Learning routes own the separate activity index. A core snapshot
+          // clone must never write that note or roll back concurrent activity.
           await this.writeState(state);
         }
         return result;
@@ -4426,6 +4444,31 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       }
     });
     etapiWriteChains.set(this.writeQueueKey, operation.then(() => undefined, () => undefined));
+    return operation;
+  }
+
+  private enqueueActivityWrite<T>(work: () => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
+    const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+    const enqueuedAt = timingEnabled ? performance.now() : 0;
+    const previous = etapiActivityWriteChains.get(this.writeQueueKey) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(async () => {
+      const workStartedAt = timingEnabled ? performance.now() : 0;
+      let succeeded = false;
+      try {
+        const result = await (context ? this.writeContext.run(context, work) : work());
+        succeeded = true;
+        return result;
+      } finally {
+        if (timingEnabled) {
+          this.logWriteTiming("course_os.readweave_activity_write_queue_timing", {
+            queueWaitMs: Math.round(workStartedAt - enqueuedAt),
+            serializedWorkMs: Math.round(performance.now() - workStartedAt),
+            succeeded
+          });
+        }
+      }
+    });
+    etapiActivityWriteChains.set(this.writeQueueKey, operation.then(() => undefined, () => undefined));
     return operation;
   }
 
