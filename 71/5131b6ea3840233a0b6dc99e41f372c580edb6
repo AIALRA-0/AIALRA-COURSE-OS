@@ -1,0 +1,35 @@
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_68547b3159a4a6 48,199-247,253
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_9d509cf7672373 4083,4135
+  s_e8850ef125fb32::t_4d7fdde985c39f 252-254,650-652,4080-4081,4084,4094-4095,4101-4134,4136-4142,4144,4146-4149,4157-4158
+  s_e8850ef125fb32::t_8563319ca44ca4 4143,4150,4482
+  s_e8850ef125fb32::t_0e6da983ce6932 4481,4483-4484,4489-4503,4506,4511,4515
+  s_e8850ef125fb32::t_813e15590b884d 4145
+  s_e8850ef125fb32::t_968bb3c8334a7c 4088-4093,4151-4156
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_994ca3646cea82 1621-1623,1654,1662,1680-1681,1723-1728,1732-1757
+  s_e8850ef125fb32::t_8c9d8e38740fb2 1630,1663,1874,1884,1915-1923,1926,1929,1933,4799-4832
+  s_e8850ef125fb32::t_e878789f2d5e43 1682-1701
+  s_e8850ef125fb32::t_d709edd3c1d640 1702-1722
+  s_e8850ef125fb32::t_a8883997e516de 1729-1731
+  s_e8850ef125fb32::t_d5ed27f9b3a9ff 1597-1620,1624-1629,1631-1636,1639-1653,1655-1661,1664-1679,1758-1759
+  s_e8850ef125fb32::t_6f0da81394383d 1637-1638,1885
+  s_e8850ef125fb32::t_fbe1c3cf8bbef4 4833
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "715131b6ea3840233a0b6dc99e41f372c580edb6",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
