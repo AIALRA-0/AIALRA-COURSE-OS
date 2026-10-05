@@ -3585,6 +3585,74 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(await reopened.listCourses()).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: course.id })]));
   });
 
+  it("starts queued draft record reads as workers free while preserving search order and newest revisions", async () => {
+    const remote = new FakeEtapi();
+    const pages = [
+      { pageId: "page-0", revision: 1 },
+      ...Array.from({ length: 7 }, (_, index) => ({ pageId: `page-${index + 1}`, revision: 1 })),
+      { pageId: "page-0", revision: 2 },
+      { pageId: "page-8", revision: 1 }
+    ];
+    const noteIds = pages.map(({ pageId, revision }, index) => {
+      const title = `Course OS draft record · ${pageId} candidate ${index}`;
+      const noteId = remote.addChildNote("root", title);
+      remote.editByTitle(title, encodeReadWeaveStateContent({
+        pageId,
+        draft: { pageId, revision },
+        projection: { sectionNoteIds: { assessment: "" } }
+      }));
+      return noteId;
+    });
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>(resolve => { releaseSlow = resolve; });
+    let markSlowStarted!: () => void;
+    const slowStarted = new Promise<void>(resolve => { markSlowStarted = resolve; });
+    let active = 0;
+    let maximumActive = 0;
+    let slowCompleted = false;
+    let queuedHasStarted = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const contentMatch = /^\/etapi\/notes\/([^/]+)\/content$/.exec(url.pathname);
+      if ((init?.method ?? "GET") === "GET" && contentMatch) {
+        const noteId = contentMatch[1]!;
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        try {
+          if (noteId === noteIds[0]) {
+            markSlowStarted();
+            await slowGate;
+            slowCompleted = true;
+          }
+          if (noteId === noteIds[8]) {
+            queuedHasStarted = true;
+          }
+          return await remote.fetch(input, init);
+        } finally {
+          active -= 1;
+        }
+      }
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    const scan = (api as any).readDraftPageRecords() as Promise<Array<{ record: { pageId: string; draft: { revision: number } } }>>;
+    try {
+      await slowStarted;
+      await vi.waitFor(() => {
+        expect(queuedHasStarted).toBe(true);
+        expect(slowCompleted).toBe(false);
+      }, { timeout: 1_000 });
+    } finally {
+      releaseSlow();
+    }
+    const records = await scan;
+    expect(maximumActive).toBe(8);
+    expect(records.map(({ record }) => [record.pageId, record.draft.revision])).toEqual([
+      ["page-0", 2], ["page-1", 1], ["page-2", 1], ["page-3", 1], ["page-4", 1],
+      ["page-5", 1], ["page-6", 1], ["page-7", 1], ["page-8", 1]
+    ]);
+  });
+
   it("prepares and confirms native erase for a draft-only source without a published release note", async () => {
     const remote = new FakeEtapi();
     const verifyNativeErase = vi.fn(async () => true);

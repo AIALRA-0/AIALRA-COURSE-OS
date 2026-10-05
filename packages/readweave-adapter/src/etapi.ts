@@ -3635,29 +3635,27 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const notes = [...new Map(responses.flatMap((response) => response.results)
       .filter((note) => note.title.startsWith("Course OS draft record · "))
       .map((note) => [note.noteId, note])).values()];
-    const located: LocatedDraftPageRecord[] = [];
     const concurrency = pageIds ? 4 : 8;
-    for (let index = 0; index < notes.length; index += concurrency) {
-      const batch = await Promise.all(notes.slice(index, index + concurrency).map(async (note) => {
-        const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
-        if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return undefined;
-        if (pageIds && !pageIds.has(parsed.pageId)) return undefined;
-        const located = {
-          noteId: note.noteId,
-          record: {
-            schemaVersion: "1.0.0" as const,
-            pageId: parsed.pageId,
-            draft: parsed.draft,
-            projection: parsed.projection,
-            costEntries: parsed.costEntries ?? [],
-            idempotency: parsed.idempotency ?? {},
-            conflicts: parsed.conflicts ?? []
-          }
-        };
-        return located;
-      }));
-      located.push(...batch.filter((item): item is LocatedDraftPageRecord => item !== undefined));
-    }
+    const recordsBySearchOrder = new Array<LocatedDraftPageRecord | undefined>(notes.length);
+    await forEachWithConcurrency(notes.map((note, index) => ({ note, index })), concurrency, async ({ note, index }) => {
+      const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
+      if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return;
+      if (pageIds && !pageIds.has(parsed.pageId)) return;
+      const located = {
+        noteId: note.noteId,
+        record: {
+          schemaVersion: "1.0.0" as const,
+          pageId: parsed.pageId,
+          draft: parsed.draft,
+          projection: parsed.projection,
+          costEntries: parsed.costEntries ?? [],
+          idempotency: parsed.idempotency ?? {},
+          conflicts: parsed.conflicts ?? []
+        }
+      };
+      recordsBySearchOrder[index] = located;
+    });
+    const located = recordsBySearchOrder.filter((item): item is LocatedDraftPageRecord => item !== undefined);
     const newest = new Map<string, LocatedDraftPageRecord>();
     for (const candidate of located) {
       const previous = newest.get(candidate.record.pageId);
