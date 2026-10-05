@@ -444,7 +444,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async createCourse(course: CourseProject, context: IdempotentWriteContext): Promise<CourseProject> {
-    const result = await this.mutateMetadata(context, () => true, async (state) => {
+    const change = async (state: EtapiState): Promise<CourseProject> => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
         const existing = state.courses.find((item) => item.id === replay.objectId);
@@ -457,7 +457,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.courses.push(saved);
       state.idempotency[context.idempotencyKey] = { kind: "course", objectId: saved.id };
       return saved;
-    });
+    };
+    // Existing metadata is sufficient even after an API restart. Bootstrap
+    // from the legacy core only when no active metadata authority exists.
+    const existing = await this.mutateMetadata(context, () => true, change, true);
+    const result = existing.applied ? existing : await this.mutateMetadata(context, () => true, change);
     if (!result.applied) throw new Error("READWEAVE_METADATA_MUTATION_UNAVAILABLE");
     const saved = result.value;
     await this.readBackMetadataTreeNode(saved.id, courseNodeFromProject(saved));

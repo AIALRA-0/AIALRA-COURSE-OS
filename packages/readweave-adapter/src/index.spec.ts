@@ -2958,6 +2958,30 @@ describe("ReadWeave ETAPI adapter", () => {
     });
   });
 
+  it("creates a course after restart from active metadata without loading the large core", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await setup.ensureMetadataIndex();
+    const coreId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const before = remote.requests.length;
+    const cold = new EtapiReadWeaveCourseApi(config);
+    const course: CourseProject = { id: "cold-metadata-course", workspaceId: "personal", title: "Cold metadata course", status: "active",
+      createdAt: "2026-10-05T00:00:00Z", updatedAt: "2026-10-05T00:00:00Z" };
+    const write = { ...context, idempotencyKey: "cold-metadata-create" };
+    const saved = await cold.createCourse(course, write);
+    expect(saved.id).toBe(course.id);
+    expect(saved.readweaveNoteId).toBeTruthy();
+    await expect(cold.createCourse(course, write)).resolves.toEqual(saved);
+    expect(remote.requests.slice(before).filter(request => request.path === `/notes/${coreId}/content`)).toEqual([]);
+    expect((await cold.listCourses()).filter(item => item.id === course.id)).toHaveLength(1);
+    const restarted = new EtapiReadWeaveCourseApi(config);
+    await expect(restarted.createCourse(course, write)).resolves.toEqual(saved);
+    await expect(restarted.getRelease(release.id)).resolves.toMatchObject({ id: release.id });
+  });
+
   it.each(["course", "module"])("trashes a mapped %s through metadata without reading, writing, or cloning the large core", async (kind) => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
