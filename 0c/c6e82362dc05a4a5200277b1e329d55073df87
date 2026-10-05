@@ -1,0 +1,38 @@
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_5297cf6c6306f0 1720,1740
+  s_e8850ef125fb32::t_2c5c05274226fd 1642,1780-1836
+  s_e8850ef125fb32::t_b665c9557a7afe 1596,1624-1625
+  s_e8850ef125fb32::t_a1f31653b23c24 1644-1645,1660-1680,1682-1698,1702-1719,1722-1732,1735-1739,1741-1743
+  s_e8850ef125fb32::t_44131ad233f70d 1721
+  s_e8850ef125fb32::t_c8b6cbe299a8ed 1653
+  s_e8850ef125fb32::t_226bf75ea06e05 1733-1734
+  s_e8850ef125fb32::t_a72e3312fca523 1573-1579,1681,1699-1701
+  s_e8850ef125fb32::t_e92b05ee7cf234 1646-1652,1654-1659
+  s_e8850ef125fb32::t_ffd9141f5a4e4b 1407,1562-1572,1580-1595,1597-1623,1626-1641
+  s_e8850ef125fb32::t_883f8951058ad7 1643
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_18c7929a07cdf1 4055,4059,4076,4098,4100,4104
+  s_e8850ef125fb32::t_3aeefaeccec8f0 4284-4288,4297,4359-4362
+  s_e8850ef125fb32::t_dc12571afc6f08 4300-4326
+  s_e8850ef125fb32::t_45d730b4ed1afd 4450-4474
+  s_e8850ef125fb32::t_1a9426dc1c0924 4410-4411
+  s_e8850ef125fb32::t_5faac159268c1b 246,4046,4053,4064,4066
+  s_e8850ef125fb32::t_7ec1b020c8755d 3953-3968
+  s_e8850ef125fb32::t_5e4549c55f095e 4054,4056-4058,4060-4063,4065,4078,4101-4103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0cc6e82362dc05a4a5200277b1e329d55073df87",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
