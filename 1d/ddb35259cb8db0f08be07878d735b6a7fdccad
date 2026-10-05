@@ -1,0 +1,35 @@
+docs/runbooks/deployment.md
+  s_e8850ef125fb32::t_9e3aa6060f77ca 90-98
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_80a4b4985b46a8 6,2400-2478,2482-2488
+  s_e8850ef125fb32::t_8800c2c70f0076 2489,4751-4907,5046-5068
+  s_e8850ef125fb32::t_ffbf856263632c 5012-5020,5022-5045
+  s_e8850ef125fb32::t_7afe745d70cab1 5021
+  s_e8850ef125fb32::t_8155c3021b4289 4908-5011
+  s_e8850ef125fb32::t_5143a860721104 2479-2481
+  s_e8850ef125fb32::t_1828276a033c0b 2490
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_55dbd6b8471381 2196-2197,2200
+  s_e8850ef125fb32::t_1eacf25b9f74d4 4049-4052
+  s_e8850ef125fb32::t_24b251933cee06 1182-1188,2228-2229,3964-3965
+  s_e8850ef125fb32::t_a74b390b2508f5 169-170,603,1178-1181,2191,2193-2195,2198-2199,2201-2207,2212-2227,3457-3461,3937-3938,3963,3966,4048
+  s_e8850ef125fb32::t_ad66118b2f06c9 4956-4961,4964-4968,5075
+  s_e8850ef125fb32::t_f1551b6bd4c953 4962-4963
+  s_e8850ef125fb32::t_e48e8d5a340979 1109,1209,1214-1217,3941-3943,4515-4516
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1dddb35259cb8db0f08be07878d735b6a7fdccad",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
