@@ -3127,7 +3127,42 @@ describe("ReadWeave ETAPI adapter", () => {
     expect((await (reopened as any).readStateReference(true, false)).courses.some((item: CourseProject) => item.id === course.id)).toBe(false);
   });
 
-  it.each(["answers", "job", "native-clone", "native-child", "revision", "restore"])("rejects reopened native erase links after new %s protection or scope changes", async (change) => {
+  it("scans all independent draft records once on the first native erase preview and stays fresh on reopen", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await setup.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "single-scan-draft" });
+    const trash = await setup.trashTreeNode(release.courseId, { ...context, idempotencyKey: "single-scan-trash" });
+    const searches: Array<string | null> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === "/etapi/notes" && (init?.method ?? "GET") === "GET") searches.push(url.searchParams.get("search"));
+      return remote.fetch(input, init);
+    };
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    const options = { expectedSnapshotHash: trash.snapshotHash,
+      checkExternalReferences: async () => ({ active: false, answers: false }) };
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const checkOneScan = (before: number) => {
+      const requests = remote.requests.slice(before);
+      expect(searches.filter(search => search === '#courseOsType="draft_record"')).toHaveLength(1);
+      expect(searches.filter(search => search === '"Course OS draft record"')).toHaveLength(1);
+      expect(requests.filter(request => request.method === "GET" && request.path === `/notes/${recordId}/content`)).toHaveLength(1);
+      expect((reader as any).draftPageRecordsHydrated).toBe(false);
+    };
+    const before = remote.requests.length;
+    const plan = await reader.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options);
+    checkOneScan(before);
+    expect(plan.noteIds).toContain(recordId);
+    const beforeReopen = remote.requests.length;
+    searches.length = 0;
+    await expect(reader.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options)).resolves.toEqual(plan);
+    checkOneScan(beforeReopen);
+  });
+
+  it.each(["new-draft", "answers", "job", "native-clone", "native-child", "revision", "restore"])("rejects reopened native erase links after new %s protection or scope changes", async (change) => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
     const api = new EtapiReadWeaveCourseApi(config);
@@ -3143,8 +3178,17 @@ describe("ReadWeave ETAPI adapter", () => {
     const options = { expectedSnapshotHash: trash.snapshotHash, expectedRevision: 1, checkExternalReferences };
     const plan = await api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options);
     const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
-    const writes = remote.contentWriteCount(metadataId);
-    if (change === "answers") {
+    if (change === "new-draft") {
+      const writer = new EtapiReadWeaveCourseApi(config);
+      const draft = draftFor(release);
+      draft.id = "draft:independent-after-preflight";
+      draft.pageId = "independent-after-preflight";
+      draft.page.id = draft.pageId;
+      const rootContentBefore = remote.contentByTitle("00 Course OS 结构化索引");
+      await writer.saveDraft(draft, 0, { ...context, idempotencyKey: "reopen-new-draft" });
+      expect(remote.contentByTitle("00 Course OS 结构化索引")).toBe(rootContentBefore);
+      expect((api as any).draftPageRecordCache.has(draft.pageId)).toBe(false);
+    } else if (change === "answers") {
       const writer = new EtapiReadWeaveCourseApi(config);
       await writer.saveQuestionAttempt({ id: "new-protected-answer", sessionId: "new-session", selectionId: "new-selection", courseReleaseId: release.id,
         pageId: "page-1", questionId: "question", objectiveId: "objective", answer: "saved response", correct: true,
@@ -3160,10 +3204,12 @@ describe("ReadWeave ETAPI adapter", () => {
       else { storedCourse.status = "active"; metadata.trash[0].restoreAvailable = false; }
       remote.editByTitle("Course OS Metadata Index · personal", encodeReadWeaveStateContent(metadata));
     }
-    const expected = { answers: "ANSWERS_PROTECTED", job: "ACTIVITY_PROTECTED", "native-clone": "SHARED_REFERENCE",
+    const writes = remote.contentWriteCount(metadataId);
+    const expected = { "new-draft": "MAPPING_CHANGED", answers: "ANSWERS_PROTECTED", job: "ACTIVITY_PROTECTED", "native-clone": "SHARED_REFERENCE",
       "native-child": "MAPPING_CHANGED", revision: "TRASH_CHANGED", restore: "NOT_DELETED" }[change]!;
     await expect(api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options)).rejects.toThrow(expected);
     expect(remote.contentWriteCount(metadataId)).toBe(writes);
+    if (change === "new-draft") expect((api as any).draftPageRecordCache.has("independent-after-preflight")).toBe(true);
     if (change === "job") expect(checkExternalReferences.mock.calls.at(-1)?.[0]).toMatchObject({ releaseIds: [release.id], pageIds: ["page-1"] });
   });
 

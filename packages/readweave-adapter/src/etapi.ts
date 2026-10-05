@@ -1747,7 +1747,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.applyActivityState(state, this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>));
     }
     await this.readDraftPageRecords();
-    await this.mergeDraftPageRecords(state);
+    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     return state;
   }
 
