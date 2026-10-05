@@ -245,7 +245,7 @@ const draftPageWriteChains = new Map<string, Promise<void>>();
 const etapiWriteChains = new Map<string, Promise<void>>();
 
 const activityIdempotencyKinds = new Set(["question_selection", "question_attempt", "question_attempt_transaction", "attempt"]);
-const metadataIdempotencyKinds = new Set(["course", "tree_node", "trash", "restore", "native_erase_preflight"]);
+const metadataIdempotencyKinds = new Set(["course", "tree_node", "trash", "restore", "native_erase_preflight", "permanent_delete"]);
 const metadataIndexLabel = "courseOsMetadataIndex";
 const metadataMigrationLabel = "courseOsMetadataMigration";
 const metadataIndexTitlePrefix = "Course OS Metadata Index";
@@ -1530,7 +1530,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async trashTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<TrashRecord> {
-    const saved = await this.mutate(async (state) => {
+    const change = async (state: EtapiState): Promise<TrashRecord> => {
       const replay = state.idempotency[context.idempotencyKey];
       if (replay) {
         const replayTrash = state.trash.find((item) => item.id === replay.objectId);
@@ -1565,7 +1565,23 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.trash.push(item);
       state.idempotency[context.idempotencyKey] = { kind: "trash", objectId: item.id };
       return item;
-    }, context);
+    };
+    const fast = await this.mutateMetadata(context, (state) => {
+      if (state.idempotency[context.idempotencyKey]) return true;
+      const existing = state.trash.find(item => item.nodeId === nodeId && item.restoreAvailable);
+      if (existing) return !existing.readweaveNoteId || Boolean(state.projections.trashNoteId);
+      const course = state.courses.find(item => item.id === nodeId);
+      if (course) {
+        const projection = state.projections.courses[course.id];
+        return Boolean(projection && [projection.courseNoteId, projection.materialsNoteId, projection.qaNoteId,
+          projection.reviewNoteId, projection.qualityNoteId, projection.releasesNoteId, projection.notesNoteId].every(Boolean));
+      }
+      const node = state.treeNodes.find(item => item.id === nodeId);
+      return Boolean(node && (node.readweaveNoteId
+        || (node.kind === "module" && this.findProjectedModuleNoteId(state, nodeId))));
+    }, change, true);
+    if (fast.applied) return this.readBackMetadataTrashRecord(fast.value);
+    const saved = await this.mutate(change, context);
     const readBack = (await this.listTrash()).find((item) => item.id === saved.id);
     if (!readBack || readBack.nodeId !== saved.nodeId || readBack.snapshotHash !== saved.snapshotHash) throw new Error("READWEAVE_TREE_READBACK_FAILED");
     if (readBack.readweaveNoteId) {
@@ -1574,6 +1590,25 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (!trashRoot || !(await this.findBranchId(readBack.readweaveNoteId, trashRoot))) throw new Error("READWEAVE_TREE_TRASH_READBACK_FAILED");
     }
     return readBack;
+  }
+
+  private async readBackMetadataTrashRecord(expected: TrashRecord): Promise<TrashRecord> {
+    const cached = this.metadataIndexCache;
+    const located = cached && cached.expiresAt > Date.now() && cached.index.status === "active"
+      ? { noteId: cached.noteId, index: cached.index } : await this.metadataIndexForRead();
+    const readBack = located?.index.trash.find(item => item.id === expected.id);
+    if (!readBack || readBack.nodeId !== expected.nodeId || readBack.workspaceId !== expected.workspaceId
+      || readBack.snapshotHash !== expected.snapshotHash || readBack.deletedAt !== expected.deletedAt
+      || readBack.readweaveNoteId !== expected.readweaveNoteId || readBack.restoreAvailable !== expected.restoreAvailable) {
+      throw new Error("READWEAVE_TREE_READBACK_FAILED");
+    }
+    if (readBack.readweaveNoteId) {
+      const trashRoot = located!.index.projections.trashNoteId;
+      if (!trashRoot || !(await this.findBranchId(readBack.readweaveNoteId, trashRoot))) {
+        throw new Error("READWEAVE_TREE_TRASH_READBACK_FAILED");
+      }
+    }
+    return structuredClone(readBack);
   }
 
   async listTrash(): Promise<TrashRecord[]> {
@@ -1648,30 +1683,68 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     trashDeleteIdempotencyKey(context);
     if (context.workspaceId !== this.workspaceId) throw new Error("READWEAVE_TRASH_WORKSPACE_MISMATCH");
     const provisionalContext = { ...context, idempotencyKey: "native-erase-preflight:lookup" };
-    this.invalidateStateCache();
-    return this.mutate(async (state) => {
-      const item = state.trash.find(candidate => candidate.id === trashId);
+    const prepare = async (metadata: EtapiState): Promise<TrashNativeErasePlan> => {
+      const item = metadata.trash.find(candidate => candidate.id === trashId);
       if (!item) throw new Error("READWEAVE_TRASH_NOT_FOUND");
       const deleteOptions: TrashDeleteOptions = { ...selector, expectedDeletedAt, ...options };
-      const scope = trashDeleteScope(state, item, context, deleteOptions);
-      await assertTrashReferencesSafe(state, scope, deleteOptions);
+      const metadataScope = trashDeleteScope(metadata, item, context, deleteOptions);
       const key = nativeErasePreflightKey(item.workspaceId, item.id, item.snapshotHash ?? "");
-      const existing = state.idempotency[key];
+      const existing = metadata.idempotency[key];
       if (existing) {
         if (existing.kind !== "native_erase_preflight") throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CONFLICT");
         let saved: TrashNativeErasePlan;
         try { saved = JSON.parse(existing.objectId) as TrashNativeErasePlan; }
         catch { throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT"); }
+        this.assertNativeErasePlanMetadataBindings(metadata, item, metadataScope, saved);
+        const state = await this.readNativeEraseScopeState(metadata);
+        const scope = trashDeleteScope(state, item, context, deleteOptions);
         this.assertFrozenNativeErasePlan(state, item, scope, saved);
+        await assertTrashReferencesSafe(state, scope, deleteOptions);
+        const current = await this.makeTrashNativeErasePlan(state, item, scope);
+        if (JSON.stringify([current.noteIds, current.rootNoteIds, current.rootBranchIds, current.branches])
+          !== JSON.stringify([saved.noteIds, saved.rootNoteIds, saved.rootBranchIds, saved.branches])) {
+          throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_CHANGED");
+        }
+        await assertTrashReferencesSafe(state, scope, deleteOptions);
         return saved;
       }
+      const state = await this.readNativeEraseScopeState(metadata);
+      const scope = trashDeleteScope(state, item, context, deleteOptions);
+      await assertTrashReferencesSafe(state, scope, deleteOptions);
       const plan = await this.makeTrashNativeErasePlan(state, item, scope);
+      await assertTrashReferencesSafe(state, scope, deleteOptions);
       // Native UI erase removes the live note graph before Course OS can
       // confirm it. Persist this small snapshot-bound receipt now so the
       // verifier can still bind logs to the pre-erase roots and branches.
-      state.idempotency[key] = { kind: "native_erase_preflight", objectId: JSON.stringify(plan) };
+      metadata.idempotency[key] = { kind: "native_erase_preflight", objectId: JSON.stringify(plan) };
       return plan;
-    }, provisionalContext);
+    };
+    const fast = await this.mutateMetadata(provisionalContext, () => true, prepare, true);
+    if (fast.applied) return fast.value;
+    const legacy = await this.mutateMetadata(provisionalContext, () => true, prepare);
+    if (!legacy.applied) throw new Error("READWEAVE_METADATA_MUTATION_UNAVAILABLE");
+    return legacy.value;
+  }
+
+  private async readNativeEraseScopeState(metadata: EtapiState): Promise<EtapiState> {
+    const reference = await this.readStateReference(true, false);
+    const state: EtapiState = {
+      ...reference, courses: metadata.courses, treeNodes: metadata.treeNodes, trash: metadata.trash,
+      drafts: [...reference.drafts], costEntries: [...reference.costEntries], conflicts: [...reference.conflicts],
+      idempotency: { ...reference.idempotency, ...metadata.idempotency },
+      projections: { ...reference.projections, ...metadata.projections,
+        drafts: { ...reference.projections.drafts }, releases: reference.projections.releases }
+    };
+    // Scope/reference checks must observe current independent authorities even
+    // when the large, otherwise unchanged core snapshot is already cached.
+    const activityNoteId = state.projections.activityStateNoteId ?? await this.findActivityStateNoteId();
+    if (activityNoteId) {
+      const content = await this.getContent(activityNoteId);
+      this.applyActivityState(state, this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>));
+    }
+    await this.readDraftPageRecords();
+    await this.mergeDraftPageRecords(state);
+    return state;
   }
 
   async permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string, options: TrashDeleteOptions = {}): Promise<void> {
@@ -1681,6 +1754,49 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (!verifier) throw new Error("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
     if (!expectedDeletedAt || !options.expectedSnapshotHash) throw new Error("READWEAVE_TRASH_SNAPSHOT_REQUIRED");
     const deleteOptions = { ...options, expectedDeletedAt };
+    const fast = await this.mutateMetadata(context, () => true, async (metadata) => {
+      if (trashDeleteReplay(metadata, trashId, context, deleteOptions)) return true;
+      const item = metadata.trash.find(candidate => candidate.id === trashId);
+      if (!item) return false;
+      const state = await this.readNativeEraseScopeState(metadata);
+      const scope = trashDeleteScope(state, item, context, deleteOptions);
+      // A scope with any core release/page authority still needs the existing
+      // full-state prune and readback. Only metadata-only scopes use this path.
+      if (scope.releaseIds.length || scope.pageIds.length) return false;
+      const preflight = metadata.idempotency[nativeErasePreflightKey(item.workspaceId, item.id, item.snapshotHash ?? "")];
+      if (!preflight || preflight.kind !== "native_erase_preflight") throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_REQUIRED");
+      let plan: TrashNativeErasePlan;
+      try { plan = JSON.parse(preflight.objectId) as TrashNativeErasePlan; }
+      catch { throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT"); }
+      this.assertFrozenNativeErasePlan(state, item, scope, plan);
+      const physicalIds = new Set(plan.noteIds);
+      if (Object.values(state.projections.releases).some(id => physicalIds.has(id))
+        || Object.values(state.projections.drafts).some(projection =>
+          [projection.pageNoteId, projection.sourceNoteId, projection.atomsNoteId, projection.sourceImageNoteId,
+            ...Object.values(projection.blockNoteIds), ...Object.values(projection.sectionNoteIds)]
+            .some(id => id && physicalIds.has(id)))) return false;
+      await assertTrashReferencesSafe(state, scope, deleteOptions);
+      await this.verifyTrashNativeErase(state, item, scope);
+      const nodeIds = new Set(scope.nodeIds);
+      const materialIds = new Set(metadata.treeNodes.filter(node => nodeIds.has(node.id)).map(node => node.materialId ?? node.id));
+      metadata.courses = metadata.courses.filter(course => !scope.courseIds.includes(course.id));
+      metadata.treeNodes = metadata.treeNodes.filter(node => !nodeIds.has(node.id));
+      metadata.trash = metadata.trash.filter(record => record.id !== trashId && !nodeIds.has(record.nodeId));
+      for (const id of [...scope.courseIds, ...nodeIds]) delete metadata.projections.courses[id];
+      for (const projection of Object.values(metadata.projections.courses)) for (const key of Object.keys(projection.modules)) {
+        if (nodeIds.has(key) || materialIds.has(key)) {
+          delete projection.modules[key]; delete projection.moduleBranchIds?.[key];
+        }
+      }
+      for (const key of Object.keys(metadata.projections.materialReleaseSelections ?? {})) {
+        if (nodeIds.has(key) || materialIds.has(key)) delete metadata.projections.materialReleaseSelections![key];
+      }
+      metadata.idempotency[trashDeleteIdempotencyKey(context)] = {
+        kind: "permanent_delete", objectId: JSON.stringify([trashId, deleteOptions.expectedDeletedAt, deleteOptions.expectedSnapshotHash])
+      };
+      return true;
+    }, true);
+    if (fast.applied && fast.value) return;
     let confirmedPlan: TrashNativeErasePlan | undefined;
     let confirmedNodeIds: string[] = [];
     let confirmedPageIds: string[] = [];
@@ -1694,29 +1810,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       confirmedNodeIds = [...scope.nodeIds];
       confirmedPageIds = [...scope.pageIds];
       await assertTrashReferencesSafe(state, scope, deleteOptions);
-      const preflight = state.idempotency[nativeErasePreflightKey(item.workspaceId, item.id, item.snapshotHash ?? "")];
-      if (!preflight || preflight.kind !== "native_erase_preflight") throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_REQUIRED");
-      let plan: TrashNativeErasePlan;
-      try { plan = JSON.parse(preflight.objectId) as TrashNativeErasePlan; }
-      catch { throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT"); }
-      this.assertFrozenNativeErasePlan(state, item, scope, plan);
+      const plan = await this.verifyTrashNativeErase(state, item, scope);
       confirmedPlan = plan;
-      let affirmative: boolean;
-      try {
-        affirmative = await verifier(structuredClone(plan));
-      } catch {
-        throw new Error("READWEAVE_NATIVE_ERASE_UNVERIFIED");
-      }
-      if (affirmative !== true) throw new Error("READWEAVE_NATIVE_ERASE_UNVERIFIED");
-      for (const noteId of plan.noteIds) {
-        try {
-          await this.getNote(noteId);
-        } catch (error) {
-          if (!(error instanceof Error) || !error.message.startsWith("READWEAVE_ETAPI_404:")) throw error;
-          continue;
-        }
-        throw new Error("READWEAVE_NATIVE_ERASE_READBACK_FAILED");
-      }
       const releaseIds = new Set(scope.releaseIds);
       const nodeIds = new Set(scope.nodeIds);
       const materials = new Set(state.treeNodes.filter(node => nodeIds.has(node.id)).map(node => node.materialId ?? node.id));
@@ -1761,6 +1856,28 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
   }
 
+  private async verifyTrashNativeErase(state: EtapiState, item: TrashRecord, scope: TrashDeleteScope): Promise<TrashNativeErasePlan> {
+    const preflight = state.idempotency[nativeErasePreflightKey(item.workspaceId, item.id, item.snapshotHash ?? "")];
+    if (!preflight || preflight.kind !== "native_erase_preflight") throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_REQUIRED");
+    let plan: TrashNativeErasePlan;
+    try { plan = JSON.parse(preflight.objectId) as TrashNativeErasePlan; }
+    catch { throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT"); }
+    this.assertFrozenNativeErasePlan(state, item, scope, plan);
+    let affirmative: boolean;
+    try { affirmative = await this.config.verifyNativeErase!(structuredClone(plan)); }
+    catch { throw new Error("READWEAVE_NATIVE_ERASE_UNVERIFIED"); }
+    if (affirmative !== true) throw new Error("READWEAVE_NATIVE_ERASE_UNVERIFIED");
+    for (const noteId of plan.noteIds) {
+      try { await this.getNote(noteId); }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("READWEAVE_ETAPI_404:")) throw error;
+        continue;
+      }
+      throw new Error("READWEAVE_NATIVE_ERASE_READBACK_FAILED");
+    }
+    return plan;
+  }
+
   async getTrashCapabilities(): Promise<{
     directPermanentDelete: false;
     requiresNativeUi: true;
@@ -1775,7 +1892,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
   }
 
-  private assertFrozenNativeErasePlan(state: EtapiState, item: TrashRecord, scope: TrashDeleteScope, plan: TrashNativeErasePlan): void {
+  private assertNativeErasePlanMetadataBindings(state: EtapiState, item: TrashRecord, scope: TrashDeleteScope, plan: TrashNativeErasePlan): Set<string> {
     const node = state.courses.find(candidate => candidate.id === item.nodeId)
       ?? state.treeNodes.find(candidate => candidate.id === item.nodeId);
     if (plan.trashId !== item.id || plan.workspaceId !== item.workspaceId || plan.nodeId !== item.nodeId
@@ -1787,10 +1904,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT");
     }
     const expected = new Set<string>();
-    const expectedRoots = new Set<string>();
     const add = (id?: string) => { if (id) expected.add(id); };
     add(item.readweaveNoteId);
-    if (item.readweaveNoteId) expectedRoots.add(item.readweaveNoteId);
     for (const courseId of scope.courseIds) {
       const course = state.courses.find(candidate => candidate.id === courseId);
       const projection = state.projections.courses[courseId];
@@ -1806,6 +1921,20 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const key = treeNode.materialId || treeNode.id;
       for (const projection of Object.values(state.projections.courses)) add(projection.modules[key]);
     }
+    const frozenIds = new Set(plan.noteIds);
+    if (frozenIds.size !== plan.noteIds.length || [...expected].some(id => !frozenIds.has(id))) {
+      throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_CHANGED");
+    }
+    if (!item.readweaveNoteId || !plan.rootNoteIds.includes(item.readweaveNoteId)) {
+      throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT");
+    }
+    return expected;
+  }
+
+  private assertFrozenNativeErasePlan(state: EtapiState, item: TrashRecord, scope: TrashDeleteScope, plan: TrashNativeErasePlan): void {
+    const expected = this.assertNativeErasePlanMetadataBindings(state, item, scope, plan);
+    if (!plan.rootBranchIds) throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT");
+    const add = (id?: string) => { if (id) expected.add(id); };
     for (const releaseId of scope.releaseIds) {
       const id = state.projections.releases[releaseId];
       if (!id) throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_CHANGED");
@@ -1825,7 +1954,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const roots = new Set(plan.rootNoteIds);
     if (roots.size !== plan.rootNoteIds.length || [...roots].some(id => !frozenIds.has(id))
       || !item.readweaveNoteId || !roots.has(item.readweaveNoteId)
-      || [...expectedRoots].some(id => !roots.has(id))
       || Object.keys(plan.rootBranchIds).length !== roots.size) throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT");
     const linkIds = new Set(plan.nativeLinks.map(link => link.noteId));
     if (linkIds.size !== roots.size || [...roots].some(id => !linkIds.has(id)
@@ -2931,7 +3059,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async mutateMetadata<T>(
     context: IdempotentWriteContext,
     canApply: (state: EtapiState) => boolean,
-    change: (state: EtapiState) => Promise<T>
+    change: (state: EtapiState) => Promise<T>,
+    existingAuthorityOnly = false
   ): Promise<{ applied: false } | { applied: true; value: T; replayed: boolean }> {
     return this.enqueueWrite(async () => {
       try {
@@ -2940,7 +3069,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           && Object.hasOwn(cached.index.idempotency, context.idempotencyKey);
         const located = cachedReplay
           ? { noteId: cached.noteId, index: cached.index }
-          : await this.metadataIndexForMutation();
+          : existingAuthorityOnly ? await this.metadataIndexForRead() : await this.metadataIndexForMutation();
+        if (!located) return { applied: false };
+        if (located.index.status === "rolling_back") throw new Error("READWEAVE_METADATA_ROLLBACK_IN_PROGRESS");
+        if (located.index.status !== "active") return { applied: false };
         const state = metadataStateView(located.index, located.noteId);
         if (!canApply(state)) return { applied: false };
         const replayed = Boolean(state.idempotency[context.idempotencyKey]);
@@ -4670,7 +4802,10 @@ function applyMetadataIndex(state: EtapiState, index: EtapiMetadataIndex, noteId
   state.treeNodes = structuredClone(index.treeNodes);
   state.trash = structuredClone(index.trash);
   for (const [key, entry] of Object.entries(state.idempotency)) {
-    if (metadataIdempotencyKinds.has(entry.kind)) delete state.idempotency[key];
+    // Older native confirmations stored their receipt in the core. Preserve
+    // it until a real core write moves it to metadata; no cleanup rewrite.
+    if (metadataIdempotencyKinds.has(entry.kind)
+      && (entry.kind !== "permanent_delete" || Object.hasOwn(index.idempotency, key))) delete state.idempotency[key];
   }
   Object.assign(state.idempotency, structuredClone(index.idempotency));
   state.projections = {
@@ -4694,7 +4829,7 @@ function metadataFieldsAreEmpty(state: EtapiState): boolean {
     && state.projections.rootMaterialsNoteId === undefined
     && state.projections.trashNoteId === undefined
     && Object.keys(state.projections.materialReleaseSelections ?? {}).length === 0
-    && Object.keys(metadataIdempotency(state.idempotency)).length === 0;
+    && !Object.values(metadataIdempotency(state.idempotency)).some(entry => entry.kind !== "permanent_delete");
 }
 
 function stateWithoutMetadata(state: EtapiState, noteId: string, revision: number): EtapiState {

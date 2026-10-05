@@ -2958,6 +2958,191 @@ describe("ReadWeave ETAPI adapter", () => {
     });
   });
 
+  it.each(["course", "module"])("trashes a mapped %s through metadata without reading, writing, or cloning the large core", async (kind) => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const saved = await setup.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "reading-draft" });
+    await setup.ensureMetadataIndex();
+    const course: CourseProject = { id: "small-trash-course", workspaceId: "personal", title: "Empty course", status: "active",
+      createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z" };
+    await setup.createCourse(course, { ...context, idempotencyKey: "small-trash-create" });
+    const node = kind === "course" ? course : await setup.createTreeNode({ id: "small-trash-module", kind: "module",
+      title: "Empty module", parentId: course.id, revision: 0, children: [] }, { ...context, idempotencyKey: "small-trash-module" });
+    const rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const core = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as Record<string, unknown>;
+    core.researchArchives = [{ id: "large-unrelated-core", content: "preserve reading authorities ".repeat(60_000) }];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(core));
+    const reader = new EtapiReadWeaveCourseApi(config);
+    await reader.getRelease(release.id);
+    await reader.getDraftByPage(saved.pageId);
+    const cached = (reader as any).stateCache.state;
+    const releases = cached.releases;
+    const drafts = cached.drafts;
+    const nativeClone = globalThis.structuredClone;
+    const cloneSpy = vi.spyOn(globalThis, "structuredClone").mockImplementation((value, options) => {
+      if (value === cached || value === drafts || (value as any)?.drafts === drafts) throw new Error("FULL_CORE_CLONE_FOR_TRASH");
+      return nativeClone(value, options);
+    });
+    const before = remote.requests.length;
+    try {
+      const trashed = await reader.trashTreeNode(node.id, { ...context, idempotencyKey: "small-trash" });
+      expect(trashed).toMatchObject({ nodeId: node.id, restoreAvailable: true });
+      await expect(reader.listTrash()).resolves.toEqual([expect.objectContaining({ id: trashed.id })]);
+      await expect(reader.getRelease(release.id)).resolves.toMatchObject({ id: release.id });
+      await expect(reader.getDraftByPage(saved.pageId)).resolves.toMatchObject({ revision: saved.revision });
+      expect((reader as any).stateCache.state.releases).toBe(releases);
+      expect((reader as any).stateCache.state.drafts).toBe(drafts);
+      expect(remote.requests.slice(before).filter(request => request.path === `/notes/${rootId}/content`)).toEqual([]);
+      const metadata = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+      expect(metadata.trash).toHaveLength(1);
+      expect((kind === "course" ? metadata.courses : metadata.treeNodes).find((item: any) => item.id === node.id).revision).toBe(1);
+      expect(metadata.idempotency["small-trash"]).toMatchObject({ kind: "trash", objectId: trashed.id });
+    } finally { cloneSpy.mockRestore(); }
+  });
+
+  it.each(["trash", "preview", "confirm"])("replays a %s metadata commit after a lost response without duplicate writes or core access", async (operation) => {
+    const remote = new FakeEtapi();
+    let loseReply = false;
+    let lostPuts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const response = await remote.fetch(input, init);
+      if (loseReply && init?.method === "PUT" && url.pathname === `/etapi/notes/${remote.noteIdByTitle("Course OS Metadata Index · personal")}/content`) {
+        lostPuts += 1;
+        throw new TypeError("simulated committed response loss");
+      }
+      return response;
+    };
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    await api.ensureMetadataIndex();
+    const course: CourseProject = { id: "lost-trash-course", workspaceId: "personal", title: "Lost reply", status: "active",
+      createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z" };
+    await api.createCourse(course, { ...context, idempotencyKey: "lost-trash-create" });
+    const writeContext = { ...context, idempotencyKey: `lost-${operation}` };
+    let trashed = operation === "trash" ? undefined : await api.trashTreeNode(course.id, { ...context, idempotencyKey: "lost-trash-prepare" });
+    const checkExternalReferences = vi.fn(async () => ({ active: false, answers: false }));
+    const selector = () => ({ expectedSnapshotHash: trashed!.snapshotHash, expectedRevision: 1, checkExternalReferences });
+    if (operation === "confirm") {
+      const plan = await api.previewTrashNativeErase(trashed!.id, context, trashed!.deletedAt, selector(), { checkExternalReferences });
+      remote.eraseNativeNotes(plan.noteIds);
+    }
+    const execute = (adapter: EtapiReadWeaveCourseApi) => operation === "trash"
+      ? adapter.trashTreeNode(course.id, writeContext)
+      : operation === "preview" ? adapter.previewTrashNativeErase(trashed!.id, writeContext, trashed!.deletedAt, selector(), { checkExternalReferences })
+        : adapter.permanentlyDeleteTrash(trashed!.id, writeContext, trashed!.deletedAt, selector());
+    const rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const rootWritesBefore = remote.contentWriteCount(rootId);
+    loseReply = true;
+    await expect(execute(api)).rejects.toThrow("READWEAVE_ETAPI_NETWORK:");
+    loseReply = false;
+    expect(lostPuts).toBe(3); // Existing transport retry only.
+    const committed = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+    trashed ??= committed.trash[0];
+    const before = remote.requests.length;
+    const reopened = new EtapiReadWeaveCourseApi(config);
+    const replay = await execute(reopened);
+    if (operation === "trash") expect(replay).toEqual(trashed);
+    if (operation === "preview") expect(replay).toMatchObject({ trashId: trashed!.id });
+    const after = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+    expect(after).toEqual(committed);
+    expect(remote.requests.slice(before).filter(request => request.method !== "GET")).toEqual([]);
+    expect(remote.contentWriteCount(rootId)).toBe(rootWritesBefore);
+    if (operation !== "preview") expect(remote.requests.slice(before).filter(request => request.path === `/notes/${rootId}/content`)).toEqual([]);
+    if (operation === "confirm") expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+    expect(remote.countNotesByLabel("courseOsType", "trash_root")).toBe(1);
+  });
+
+  it("prepares, reopens, and confirms an empty course with metadata writes while preserving unrelated reading authorities", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await api.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const draft = await api.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "preserved-draft" });
+    await api.ensureMetadataIndex();
+    const course: CourseProject = { id: "empty-confirm-course", workspaceId: "personal", title: "Empty confirm", status: "active",
+      createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z" };
+    await api.createCourse(course, { ...context, idempotencyKey: "empty-confirm-create" });
+    const trash = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "empty-confirm-trash" });
+    await api.getDraftByPage(draft.pageId);
+    const cachedReleases = (api as any).stateCache.state.releases;
+    const cachedDrafts = (api as any).stateCache.state.drafts;
+    const options = { expectedSnapshotHash: trash.snapshotHash, expectedRevision: 1,
+      checkExternalReferences: vi.fn(async () => ({ active: false, answers: false })) };
+    const rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    const before = remote.requests.length;
+    const plan = await api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options);
+    expect(plan.noteIds).toHaveLength(9);
+    const metadataWrites = remote.contentWriteCount(metadataId);
+    await expect(api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options)).resolves.toEqual(plan);
+    expect(remote.contentWriteCount(metadataId)).toBe(metadataWrites);
+    expect(options.checkExternalReferences).toHaveBeenCalledTimes(4);
+    remote.eraseNativeNotes(plan.noteIds);
+    const confirmContext = { ...context, idempotencyKey: "empty-confirm" };
+    await api.permanentlyDeleteTrash(trash.id, confirmContext, trash.deletedAt, options);
+    expect(remote.requests.slice(before).filter(request => request.path === `/notes/${rootId}/content`)).toEqual([]);
+    expect((api as any).stateCache.state.releases).toBe(cachedReleases);
+    expect((api as any).stateCache.state.drafts).toBe(cachedDrafts);
+    await expect(api.getDraftByPage(draft.pageId)).resolves.toMatchObject({ revision: draft.revision });
+    const reopened = new EtapiReadWeaveCourseApi(config);
+    const beforeReplay = remote.requests.length;
+    await reopened.permanentlyDeleteTrash(trash.id, confirmContext, trash.deletedAt, options);
+    await expect(reopened.listTrash()).resolves.toEqual([]);
+    await expect(reopened.listCourses()).resolves.not.toEqual(expect.arrayContaining([expect.objectContaining({ id: course.id })]));
+    expect(remote.requests.slice(beforeReplay).filter(request => request.path === `/notes/${rootId}/content` || request.method !== "GET")).toEqual([]);
+    expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+    await expect(reopened.getRelease(release.id)).resolves.toMatchObject({ id: release.id });
+    await expect(reopened.getDraftByPage(draft.pageId)).resolves.toMatchObject({ revision: draft.revision });
+    expect((await (reopened as any).readStateReference(true, false)).courses.some((item: CourseProject) => item.id === course.id)).toBe(false);
+  });
+
+  it.each(["answers", "job", "native-clone", "native-child", "revision", "restore"])("rejects reopened native erase links after new %s protection or scope changes", async (change) => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const course: CourseProject = { id: "reopen-protected-course", workspaceId: "personal", title: "Reopen safety", status: "active",
+      createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z" };
+    await api.createCourse(course, { ...context, idempotencyKey: "reopen-create" });
+    const release = { ...releaseWithPage(), courseId: course.id };
+    await api.publishRelease(release, { ...manifest, courseReleaseId: release.id }, { ...context, idempotencyKey: "reopen-publish" });
+    await api.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "reopen-draft" });
+    const trash = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "reopen-trash" });
+    let active = false;
+    const checkExternalReferences = vi.fn(async (_scope: unknown) => ({ active, answers: false }));
+    const options = { expectedSnapshotHash: trash.snapshotHash, expectedRevision: 1, checkExternalReferences };
+    const plan = await api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options);
+    const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    const writes = remote.contentWriteCount(metadataId);
+    if (change === "answers") {
+      const writer = new EtapiReadWeaveCourseApi(config);
+      await writer.saveQuestionAttempt({ id: "new-protected-answer", sessionId: "new-session", selectionId: "new-selection", courseReleaseId: release.id,
+        pageId: "page-1", questionId: "question", objectiveId: "objective", answer: "saved response", correct: true,
+        usedHintLevel: 0, attemptedAt: "2026-10-04T00:01:00Z" }, { ...context, idempotencyKey: "reopen-new-answer" });
+    } else if (change === "job") active = true;
+    else if (change === "native-clone") remote.addClone(plan.noteIds[0]!, "root");
+    else if (change === "native-child") remote.addChildNote(trash.readweaveNoteId!, "new child after preflight");
+    else {
+      const metadata = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+      metadata.revision += 1;
+      const storedCourse = metadata.courses.find((item: CourseProject) => item.id === course.id);
+      if (change === "revision") storedCourse.revision += 1;
+      else { storedCourse.status = "active"; metadata.trash[0].restoreAvailable = false; }
+      remote.editByTitle("Course OS Metadata Index · personal", encodeReadWeaveStateContent(metadata));
+    }
+    const expected = { answers: "ANSWERS_PROTECTED", job: "ACTIVITY_PROTECTED", "native-clone": "SHARED_REFERENCE",
+      "native-child": "MAPPING_CHANGED", revision: "TRASH_CHANGED", restore: "NOT_DELETED" }[change]!;
+    await expect(api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options)).rejects.toThrow(expected);
+    expect(remote.contentWriteCount(metadataId)).toBe(writes);
+    if (change === "job") expect(checkExternalReferences.mock.calls.at(-1)?.[0]).toMatchObject({ releaseIds: [release.id], pageIds: ["page-1"] });
+  });
+
   it("resumes a split after interruption and rolls back by merging current metadata into the live root", async () => {
     const remote = new FakeEtapi();
     let blockActivation = true;
