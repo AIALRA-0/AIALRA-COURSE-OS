@@ -21,6 +21,22 @@ export interface TrashDeleteOptions {
   checkExternalReferences?: (scope: TrashDeleteScope) => Promise<{ active: boolean; answers: boolean }>;
 }
 
+export interface TrashNativeErasePlan {
+  trashId: string;
+  workspaceId: string;
+  nodeId: string;
+  deletedAt: string;
+  snapshotHash: string;
+  revision?: number;
+  /** Smallest independently erasable ReadWeave roots, including separate authorities. */
+  rootNoteIds: string[];
+  rootBranchIds?: Record<string, string[]>;
+  nativeLinks: Array<{ noteId: string; url: string; title: string }>;
+  /** Every ReadWeave note owned by this exact trash incarnation. */
+  noteIds: string[];
+  branches?: Array<{ branchId: string; noteId: string; parentNoteId: string }>;
+}
+
 export interface TrashDeleteSelection {
   id: string;
   deletedAt: string;

@@ -1876,6 +1876,44 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(stateReads).toBe(0);
   });
 
+  it("reconciles a native block edit from a cold page record, writes its revision, and preserves the full-state cache", async () => {
+    const remote = new FakeEtapi();
+    const setup = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const initial = await setup.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "native-edit-return-initial" });
+    const stateNoteId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const pageRecordNoteId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let stateReads = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "GET" && url.pathname === `/etapi/notes/${stateNoteId}/content`) stateReads += 1;
+      return remote.fetch(input, init);
+    };
+    const cold = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    remote.editByTitle("核心解释", "Native editor edit survives return");
+    const reconciled = await withReadBudget({ timeoutMs: 8_000 }, () => cold.getDraftByPage("page-1"));
+    expect(reconciled).toMatchObject({
+      revision: initial.revision + 1,
+      page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "Native editor edit survives return" })]) }
+    });
+    expect(stateReads).toBe(0);
+    expect(remote.requests.some(request => request.method === "PUT" && request.path === `/notes/${pageRecordNoteId}/content`)).toBe(true);
+
+    const restarted = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await expect(restarted.getDraftSnapshotByPage("page-1")).resolves.toMatchObject({
+      revision: initial.revision + 1,
+      page: { blocks: expect.arrayContaining([expect.objectContaining({ id: "block-1", markdown: "Native editor edit survives return" })]) }
+    });
+    expect(stateReads).toBe(0);
+
+    const cacheGuard = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await expect(cacheGuard.listCourses()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: release.courseId })]));
+    remote.editByTitle("核心解释", "Second native edit with full state cached");
+    await expect(cacheGuard.getDraftByPage("page-1")).resolves.toMatchObject({ revision: initial.revision + 2 });
+    await expect(cacheGuard.listCourses()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: release.courseId })]));
+  });
+
   it("reconciles one external page edit without a redundant full-state clone and keeps page metadata", async () => {
     const remote = new FakeEtapi();
     const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -2916,7 +2954,7 @@ describe("ReadWeave ETAPI adapter", () => {
     ]));
     await expect(reopened.getDraftSnapshotByPage(savedDraft.pageId)).resolves.toMatchObject({ revision: savedDraft.revision });
     await expect(reopened.getTrashCapabilities()).resolves.toEqual({
-      directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_NATIVE_ERASE_REQUIRED"
+      directPermanentDelete: false, requiresNativeUi: true, canConfirmNativeErase: false, reason: "READWEAVE_NATIVE_ERASE_REQUIRED"
     });
   });
 
@@ -3179,6 +3217,202 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(link).toEqual(expect.objectContaining({ host: "readweave.example.com", verified: true, url: `https://readweave.example.com/#root/${created.readweaveNoteId}` }));
     expect(hydrateAllDrafts).not.toHaveBeenCalled();
     await expect(api.permanentlyDeleteTrash(trashed.id, { ...context, idempotencyKey: "tree-permanent-delete" })).rejects.toThrow("READWEAVE_PERMANENT_DELETE_UNSUPPORTED");
+  });
+
+  it("freezes native erase mappings before UI action and confirms from the saved plan after every note is gone", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", publicUrl: "https://notes.example.test", fetchImpl: remote.fetch, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const course: CourseProject = {
+      id: "native-erase-course", workspaceId: "personal", title: "Native erase test", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-course-create" });
+    const pageRelease = { ...releaseWithPage(), id: "native-erase-release", courseId: course.id, courseTitle: course.title };
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, { ...context, idempotencyKey: "native-erase-release-publish" });
+    await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "native-erase-draft-save" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-trash" });
+    const legacyChildId = remote.addChildNote(trashed.readweaveNoteId!, "历史非当前 block placeholder");
+    const selector = { expectedSnapshotHash: trashed.snapshotHash, expectedRevision: 1 };
+    const plan = await api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, selector, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+    const draftRecordId = remote.noteIdForTitle("Course OS draft record · page-1");
+    const releaseNoteId = (await (api as any).readStateReference(true, false)).projections.releases[pageRelease.id] as string;
+    expect(plan.rootNoteIds).toEqual([trashed.readweaveNoteId, draftRecordId].sort());
+    expect(plan.rootNoteIds).not.toContain(releaseNoteId);
+    expect(plan.noteIds).toContain(legacyChildId);
+    expect(plan.rootNoteIds).not.toContain(legacyChildId);
+    expect(plan.branches).toContainEqual(expect.objectContaining({ noteId: legacyChildId, parentNoteId: trashed.readweaveNoteId }));
+    let ancestor = releaseNoteId;
+    const branchParents = new Map(plan.branches?.map(branch => [branch.noteId, branch.parentNoteId]));
+    const seenAncestors = new Set<string>();
+    while (ancestor !== trashed.readweaveNoteId && !seenAncestors.has(ancestor)) {
+      seenAncestors.add(ancestor);
+      ancestor = branchParents.get(ancestor)!;
+      if (!ancestor) break;
+    }
+    expect(ancestor).toBe(trashed.readweaveNoteId);
+    expect(plan.rootNoteIds).toContain(draftRecordId);
+    expect(plan.nativeLinks.find(link => link.noteId === draftRecordId)).toMatchObject({
+      url: `https://notes.example.test/#root/${draftRecordId}`,
+      title: "Course OS draft record · page-1"
+    });
+    expect(Object.keys(plan.rootBranchIds ?? {})).toEqual(plan.rootNoteIds);
+
+    remote.eraseNativeNotes(plan.noteIds);
+    const confirmContext = { ...context, idempotencyKey: "native-erase-confirm" };
+    await api.permanentlyDeleteTrash(trashed.id, confirmContext, trashed.deletedAt, {
+      ...selector, checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+    expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+    expect(verifyNativeErase).toHaveBeenCalledWith(expect.objectContaining({
+      trashId: trashed.id, snapshotHash: trashed.snapshotHash, noteIds: plan.noteIds, rootBranchIds: plan.rootBranchIds
+    }));
+    await expect(api.listTrash()).resolves.toEqual([]);
+    await expect(api.getDraftSnapshotByPage("page-1")).resolves.toBeUndefined();
+
+    const reopened = new EtapiReadWeaveCourseApi(config);
+    await expect(reopened.listTrash()).resolves.toEqual([]);
+    await expect(reopened.getDraftSnapshotByPage("page-1")).resolves.toBeUndefined();
+    await reopened.permanentlyDeleteTrash(trashed.id, confirmContext, trashed.deletedAt, {
+      ...selector, checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+    expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+    expect(await reopened.listCourses()).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: course.id })]));
+  });
+
+  it("rejects 404-only and negative native erase evidence without pruning Course OS state", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => false);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const course: CourseProject = {
+      id: "native-erase-negative", workspaceId: "personal", title: "Negative evidence", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-negative-create" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-negative-trash" });
+    const selector = { expectedSnapshotHash: trashed.snapshotHash, expectedRevision: 1 };
+    const plan = await api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, selector,
+      { checkExternalReferences: async () => ({ active: false, answers: false }) });
+    remote.eraseNativeNotes(plan.noteIds);
+    await expect(api.permanentlyDeleteTrash(trashed.id, { ...context, idempotencyKey: "native-erase-negative-confirm" }, trashed.deletedAt, {
+      ...selector, checkExternalReferences: async () => ({ active: false, answers: false })
+    }))
+      .rejects.toThrow("READWEAVE_NATIVE_ERASE_UNVERIFIED");
+    expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+    await expect(api.listTrash()).resolves.toEqual([expect.objectContaining({ id: trashed.id, restoreAvailable: true })]);
+  });
+
+  it("requires ETAPI 404 corroboration for every frozen note after affirmative log evidence", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase });
+    const course: CourseProject = {
+      id: "native-erase-live-note", workspaceId: "personal", title: "Live note check", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-live-create" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-live-trash" });
+    const selector = { expectedSnapshotHash: trashed.snapshotHash, expectedRevision: 1 };
+    const plan = await api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, selector,
+      { checkExternalReferences: async () => ({ active: false, answers: false }) });
+    remote.eraseNativeNotes(plan.noteIds);
+    remote.restoreNativeNote(plan.noteIds[0]!);
+    await expect(api.permanentlyDeleteTrash(trashed.id, { ...context, idempotencyKey: "native-erase-live-confirm" }, trashed.deletedAt, {
+      ...selector, checkExternalReferences: async () => ({ active: false, answers: false })
+    })).rejects.toThrow("READWEAVE_NATIVE_ERASE_READBACK_FAILED");
+    await expect(api.listTrash()).resolves.toEqual([expect.objectContaining({ id: trashed.id, restoreAvailable: true })]);
+  });
+
+  it("fails native erase preflight when a mapped note has a clone outside the trash scope", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const course: CourseProject = {
+      id: "native-erase-clone", workspaceId: "personal", title: "Clone protection", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-clone-create" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-clone-trash" });
+    remote.addClone(trashed.readweaveNoteId!, "root");
+    await expect(api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, { expectedSnapshotHash: trashed.snapshotHash }, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    })).rejects.toThrow("READWEAVE_TRASH_SHARED_REFERENCE");
+  });
+
+  it("finds a clone attached to a historical child note and refuses to omit it", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const course: CourseProject = {
+      id: "native-erase-child-clone", workspaceId: "personal", title: "Historical child clone", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-child-clone-create" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-child-clone-trash" });
+    const oldChild = remote.addChildNote(trashed.readweaveNoteId!, "Historical section placeholder");
+    remote.addClone(oldChild, "root");
+    await expect(api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, { expectedSnapshotHash: trashed.snapshotHash }, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    })).rejects.toThrow("READWEAVE_TRASH_SHARED_REFERENCE");
+  });
+
+  it("allows a scoped release root to remain attached to its live course release container", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch,
+      verifyNativeErase: async () => true });
+    const course: CourseProject = {
+      id: "native-erase-release-parent", workspaceId: "personal", title: "Release parent scope", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-release-parent-course" });
+    const release = { ...releaseWithPage(), id: "native-erase-release-child", courseId: course.id, courseTitle: course.title,
+      moduleId: "native-erase-release-module", moduleTitle: "Module" };
+    await api.publishRelease(release, { ...manifest, id: "native-erase-release-child-manifest", courseReleaseId: release.id },
+      { ...context, idempotencyKey: "native-erase-release-child-publish" });
+    await api.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "native-erase-release-child-draft" });
+    const material = (await api.listTreeNodes()).find(node => node.kind === "material");
+    expect(material).toBeDefined();
+    const trashed = await api.trashTreeNode(material!.id, { ...context, idempotencyKey: "native-erase-release-module-trash" });
+    const plan = await api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, { expectedSnapshotHash: trashed.snapshotHash }, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+    const state = await (api as any).readStateReference(true, false);
+    const releaseNoteId = state.projections.releases[release.id] as string;
+    const releaseRootBranch = plan.branches?.find(branch => branch.noteId === releaseNoteId);
+    expect(plan.rootNoteIds).toContain(releaseNoteId);
+    expect(releaseRootBranch?.parentNoteId).toBeTruthy();
+    expect(plan.noteIds).not.toContain(releaseRootBranch?.parentNoteId);
+    remote.eraseNativeNotes(plan.noteIds);
+    await api.permanentlyDeleteTrash(trashed.id, { ...context, idempotencyKey: "native-erase-release-parent-confirm" }, trashed.deletedAt, {
+      expectedSnapshotHash: trashed.snapshotHash,
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+  });
+
+  it("keeps saved-answer scopes in trash when native erase preflight is requested", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase });
+    const course: CourseProject = {
+      id: "native-erase-answers", workspaceId: "personal", title: "Answer protection", status: "active",
+      createdAt: "2026-10-03T00:00:00.000Z", updatedAt: "2026-10-03T00:00:00.000Z"
+    };
+    await api.createCourse(course, { ...context, idempotencyKey: "native-erase-answers-create" });
+    const pageRelease = { ...releaseWithPage(), id: "native-erase-answers-release", courseId: course.id, courseTitle: course.title };
+    await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, { ...context, idempotencyKey: "native-erase-answers-release-publish" });
+    await api.saveQuestionAttempt({
+      id: "native-erase-answer", selectionId: "selection", sessionId: "session", courseReleaseId: pageRelease.id,
+      pageId: "page-1", questionId: "question", objectiveId: "objective", answer: "saved response", correct: true,
+      usedHintLevel: 0, attemptedAt: "2026-10-03T00:01:00.000Z"
+    }, { ...context, idempotencyKey: "native-erase-answer-save" });
+    const trashed = await api.trashTreeNode(course.id, { ...context, idempotencyKey: "native-erase-answers-trash" });
+    await expect(api.previewTrashNativeErase!(trashed.id, context, trashed.deletedAt, { expectedSnapshotHash: trashed.snapshotHash }, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    })).rejects.toThrow("READWEAVE_TRASH_ANSWERS_PROTECTED");
+    expect(verifyNativeErase).not.toHaveBeenCalled();
+    await expect(api.listTrash()).resolves.toEqual([expect.objectContaining({ id: trashed.id, restoreAvailable: true })]);
   });
 
   it("keeps release-only materials stable across cross-course moves, root restore and trash", async () => {
@@ -3741,14 +3975,16 @@ class FakeEtapi {
     if (noteMatch && (init?.method ?? "GET") === "GET") {
       const note = this.notes.get(noteMatch[1]!);
       if (!note || note.deleted) return new Response("not found", { status: 404 });
-      return Response.json({ noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds });
+      return Response.json({ noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds,
+        childNoteIds: [...this.branches.values()].filter(branch => branch.parentNoteId === noteMatch[1]).map(branch => branch.noteId) });
     }
     if (noteMatch && init?.method === "PATCH") {
       const note = this.notes.get(noteMatch[1]!);
       if (!note || note.deleted) return new Response("not found", { status: 404 });
       const body = JSON.parse(String(init.body)) as { title?: string };
       if (body.title) note.title = body.title;
-      return Response.json({ noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds });
+      return Response.json({ noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds,
+        childNoteIds: [...this.branches.values()].filter(branch => branch.parentNoteId === noteMatch[1]).map(branch => branch.noteId) });
     }
     if (noteMatch && init?.method === "DELETE") {
       const note = this.notes.get(noteMatch[1]!);
@@ -3834,6 +4070,36 @@ class FakeEtapi {
 
   branchIdsForNote(noteId: string): string[] {
     return [...this.branches.values()].filter((branch) => branch.noteId === noteId).map((branch) => branch.branchId);
+  }
+
+  eraseNativeNotes(noteIds: string[]): void {
+    for (const noteId of noteIds) {
+      const note = this.notes.get(noteId);
+      if (note) note.deleted = true;
+    }
+  }
+
+  restoreNativeNote(noteId: string): void {
+    const note = this.notes.get(noteId);
+    if (!note) throw new Error(`missing note ${noteId}`);
+    note.deleted = false;
+  }
+
+  addClone(noteId: string, parentNoteId: string): string {
+    const branchId = `branch${++this.sequence}`;
+    const note = this.notes.get(noteId);
+    if (!note) throw new Error(`missing note ${noteId}`);
+    note.parentBranchIds.push(branchId);
+    this.branches.set(branchId, { branchId, noteId, parentNoteId, notePosition: 10 });
+    return branchId;
+  }
+
+  addChildNote(parentNoteId: string, title: string): string {
+    const noteId = `note${++this.sequence}`;
+    const branchId = `branch${this.sequence}`;
+    this.notes.set(noteId, { title, content: "", labels: {}, type: "text", mime: "text/html", parentBranchIds: [branchId], deleted: false });
+    this.branches.set(branchId, { branchId, noteId, parentNoteId, notePosition: 10 });
+    return noteId;
   }
 
   noteIdForTitle(title: string): string | undefined {

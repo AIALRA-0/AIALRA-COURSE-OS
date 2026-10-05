@@ -60,6 +60,18 @@ const READ_REQUEST_TIMEOUT_MS = 10_000;
 
 export type TaskClearReceipt = { cleared: string[]; skipped: { id: string; reason: string }[]; failed: { id: string; reason: string }[] };
 
+export interface TrashNativeErasePlan {
+  trashId: string;
+  workspaceId: string;
+  nodeId: string;
+  deletedAt: string;
+  snapshotHash: string;
+  revision?: number;
+  rootNoteIds: string[];
+  nativeLinks: Array<{ noteId: string; url: string; title: string }>;
+  noteIds: string[];
+}
+
 // Upload has its own acceptance deadline; a lost response is recovered with the same key.
 function uploadImport<T = ImportRecord>(body: FormData, key: string, onUpload?: (sent: number, total?: number) => void, onUploaded?: () => void, path = "/api/v1/imports"): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -354,9 +366,17 @@ export const api = {
   duplicateTreeNode: (node: CourseTreeNode) => metadataWrite<CourseTreeNode>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:duplicate`, "POST"),
   trashTreeNode: (node: CourseTreeNode) => metadataWrite<TrashRecord>(`/api/v1/tree/nodes/${encodeURIComponent(node.id)}:trash`, "POST"),
   trash: (options?: ApiRequestOptions) => request<TrashRecord[]>("/api/v1/trash", { signal: options?.signal }),
-  trashCapabilities: () => request<{ directPermanentDelete: boolean; requiresNativeUi: boolean; reason?: string }>("/api/v1/trash/capabilities"),
+  trashCapabilities: () => request<{ directPermanentDelete: boolean; requiresNativeUi: boolean; canConfirmNativeErase?: boolean; reason?: string }>("/api/v1/trash/capabilities"),
+  previewTrashNativeErase: (item: TrashRecord) => metadataWrite<TrashNativeErasePlan>(`/api/v1/trash/${encodeURIComponent(item.id)}:preview-native-erase`, "POST", {
+    deletedAt: item.deletedAt,
+    ...(item.snapshotHash ? { snapshotHash: item.snapshotHash } : {})
+  }),
   restoreTrash: (item: TrashRecord, restoreMode: "original" | "root" = "original") => metadataWrite<CourseTreeNode>(`/api/v1/trash/${encodeURIComponent(item.id)}:restore`, "POST", { restoreMode }),
-  permanentlyDeleteTrash: (item: TrashRecord) => metadataWrite<void>(`/api/v1/trash/${encodeURIComponent(item.id)}`, "DELETE", undefined, { "X-Trash-Deleted-At": item.deletedAt }),
+  permanentlyDeleteTrash: (item: TrashRecord, confirmation?: { snapshotHash?: string; revision?: number }) => metadataWrite<void>(`/api/v1/trash/${encodeURIComponent(item.id)}`, "DELETE", undefined, {
+    "X-Trash-Deleted-At": item.deletedAt,
+    ...(confirmation?.snapshotHash ? { "X-Trash-Snapshot-Hash": confirmation.snapshotHash } : {}),
+    ...(confirmation?.revision !== undefined ? { "X-Trash-Revision": String(confirmation.revision) } : {})
+  }),
   deepLink: (noteId: string, options?: ApiRequestOptions) => request<ReadWeaveDeepLink>(`/api/v1/readweave/links/${encodeURIComponent(noteId)}`, { signal: options?.signal }),
   settings: (options?: ApiRequestOptions) => request<WorkspaceSettings>("/api/v1/settings", { signal: options?.signal }),
   saveSettings: (settings: WorkspaceSettings) => request<WorkspaceSettings>("/api/v1/settings", {

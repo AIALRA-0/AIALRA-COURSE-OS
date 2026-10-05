@@ -105,6 +105,26 @@ describe("Course OS API", () => {
     expect(second.body).toEqual(first.body);
     expect(second.body.revision).toBe((created.body.revision ?? 0) + 1);
   });
+  it("replays a completed trash deletion after its row is gone while keeping unknown selectors at 404", async () => {
+    const { app, readweave, release } = await seededApp();
+    const materialId = `material:${release.courseId}:${release.moduleId}`;
+    const trashed = (await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}:trash`)
+      .set("Idempotency-Key", "trash-delete-replay-trash").expect(201)).body;
+    const path = `/api/v1/trash/${encodeURIComponent(trashed.id)}`;
+    const selectorHeaders = { "Idempotency-Key": "trash-delete-lost-response", "X-Trash-Deleted-At": trashed.deletedAt };
+
+    await request(app).delete(path).set(selectorHeaders).expect(204);
+    expect((await readweave.listTrash()).some(item => item.id === trashed.id)).toBe(false);
+    await request(app).delete(path).set(selectorHeaders).expect(204);
+
+    await request(app).delete("/api/v1/trash/unknown-trash").set("Idempotency-Key", "trash-delete-no-selector").expect(404);
+    await request(app).delete("/api/v1/trash/unknown-trash")
+      .set({ "Idempotency-Key": "trash-delete-unknown", "X-Trash-Deleted-At": trashed.deletedAt }).expect(404);
+    await request(app).delete("/api/v1/trash/unknown-trash")
+      .set({ ...selectorHeaders, "X-Trash-Deleted-At": trashed.deletedAt }).expect(404);
+    await request(app).delete(path)
+      .set({ ...selectorHeaders, "X-Workspace-Id": "other-workspace" }).expect(404);
+  });
   it("reports adapter deletion capability separately from the presence of a trash button", async () => {
     const { app, readweave } = await seededApp();
     await request(app).get("/api/v1/trash/capabilities").expect(200).expect(({ body }) => {
@@ -114,6 +134,73 @@ describe("Course OS API", () => {
     await request(app).get("/api/v1/trash/capabilities").expect(200).expect(({ body }) => {
       expect(body).toEqual({ directPermanentDelete: false, requiresNativeUi: true, reason: "READWEAVE_NATIVE_ERASE_REQUIRED" });
     });
+  });
+  it("previews native erasure only for the current workspace and frozen trash snapshot", async () => {
+    const { app, dependencies, readweave, release } = await seededApp();
+    const materialId = `material:${release.courseId}:${release.moduleId}`;
+    const trashed = (await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}:trash`)
+      .set("Idempotency-Key", "native-preview-trash").expect(201)).body;
+    const snapshotHash = trashed.snapshotHash || "native-snapshot-a";
+    vi.spyOn(readweave, "getTrashCapabilities").mockResolvedValue({ directPermanentDelete: false, requiresNativeUi: true, canConfirmNativeErase: true });
+    const preview = vi.fn(async (trashId: string, _context: IdempotentWriteContext, deletedAt?: string,
+      selector?: { expectedSnapshotHash?: string; expectedRevision?: number }) => ({
+      trashId, workspaceId: "personal", nodeId: materialId, deletedAt: deletedAt!, snapshotHash: selector?.expectedSnapshotHash || snapshotHash,
+      rootNoteIds: ["root-note-a"], nativeLinks: [{ noteId: "root-note-a", url: "https://readweave.example/notes/root-note-a", title: "课程根笔记" }],
+      noteIds: ["root-note-a", "child-note-a"]
+    }));
+    (readweave as ReadWeaveCourseApi).previewTrashNativeErase = preview;
+    const path = `/api/v1/trash/${encodeURIComponent(trashed.id)}:preview-native-erase`;
+    const headers = { "Idempotency-Key": "native-preview-current", "X-Workspace-Id": "personal" };
+
+    await request(app).post(path).set({ ...headers, "X-Workspace-Id": "another-workspace" })
+      .send({ deletedAt: trashed.deletedAt, snapshotHash }).expect(404);
+    await request(app).post(path).set(headers)
+      .send({ deletedAt: "2026-01-01T00:00:00.000Z", snapshotHash }).expect(409);
+    await request(app).post(path).set(headers)
+      .send({ deletedAt: trashed.deletedAt, snapshotHash: "stale-snapshot" }).expect(409);
+    expect(preview).not.toHaveBeenCalled();
+
+    const result = await request(app).post(path).set(headers)
+      .send({ deletedAt: trashed.deletedAt, snapshotHash }).expect(200);
+    expect(result.body).toMatchObject({ trashId: trashed.id, workspaceId: "personal", snapshotHash, rootNoteIds: ["root-note-a"] });
+    expect(preview).toHaveBeenCalledWith(trashed.id, expect.objectContaining({ workspaceId: "personal" }), trashed.deletedAt,
+      { expectedSnapshotHash: snapshotHash, expectedRevision: undefined }, expect.objectContaining({ checkExternalReferences: expect.any(Function) }));
+    const confirmDelete = vi.spyOn(readweave, "permanentlyDeleteTrash").mockResolvedValue(undefined);
+    const deletePath = `/api/v1/trash/${encodeURIComponent(trashed.id)}`;
+    await request(app).delete(deletePath).set("Idempotency-Key", "native-confirm-missing-snapshot")
+      .set("X-Trash-Deleted-At", trashed.deletedAt).expect(400);
+    await request(app).delete(deletePath).set("Idempotency-Key", "native-confirm-stale-snapshot")
+      .set("X-Trash-Deleted-At", trashed.deletedAt).set("X-Trash-Snapshot-Hash", "stale-snapshot").expect(409);
+    await request(app).delete(deletePath).set("Idempotency-Key", "native-confirm-current-snapshot")
+      .set("X-Trash-Deleted-At", trashed.deletedAt).set("X-Trash-Snapshot-Hash", snapshotHash).expect(204);
+    expect(confirmDelete).toHaveBeenCalledWith(trashed.id, expect.objectContaining({ idempotencyKey: "native-confirm-current-snapshot" }), trashed.deletedAt,
+      expect.objectContaining({ expectedSnapshotHash: snapshotHash, checkExternalReferences: expect.any(Function) }));
+    confirmDelete.mockRejectedValueOnce(new Error("READWEAVE_NATIVE_ERASE_UNVERIFIED"));
+    await request(app).delete(deletePath).set("Idempotency-Key", "native-confirm-unverified-evidence")
+      .set("X-Trash-Deleted-At", trashed.deletedAt).set("X-Trash-Snapshot-Hash", snapshotHash)
+      .expect(409).expect(({ body }) => expect(body.error.message).toContain("原生擦除成功记录"));
+  });
+  it("blocks native erase preview when the API external-reference check reports a protected activity", async () => {
+    const { app, dependencies, readweave, release } = await seededApp();
+    const materialId = `material:${release.courseId}:${release.moduleId}`;
+    const trashed = (await request(app).post(`/api/v1/tree/nodes/${encodeURIComponent(materialId)}:trash`)
+      .set("Idempotency-Key", "native-preview-protected-trash").expect(201)).body;
+    vi.spyOn(readweave, "getTrashCapabilities").mockResolvedValue({ directPermanentDelete: false, requiresNativeUi: true, canConfirmNativeErase: true });
+    vi.spyOn(dependencies.operations, "read").mockResolvedValue({
+      ...(await dependencies.operations.read()),
+      jobs: [{ workspaceId: "personal", state: "running", materialVersionId: release.id, pageIds: [] } as unknown as GenerationJob]
+    });
+    const preview = vi.fn(async (_trashId: string, _context: IdempotentWriteContext, _deletedAt: string | undefined,
+      _selector: { expectedSnapshotHash?: string; expectedRevision?: number } | undefined,
+      options?: { checkExternalReferences?: (scope: { trashId: string; workspaceId: string; nodeIds: string[]; courseIds: string[]; releaseIds: string[]; pageIds: string[] }) => Promise<{ active: boolean; answers: boolean }> }) => {
+      const reference = await options?.checkExternalReferences?.({ trashId: trashed.id, workspaceId: "personal", nodeIds: [materialId], courseIds: [], releaseIds: [release.id], pageIds: [] });
+      if (reference?.active || reference?.answers) throw new Error("READWEAVE_TRASH_ACTIVITY_PROTECTED");
+      throw new Error("test expected a protected reference");
+    });
+    (readweave as ReadWeaveCourseApi).previewTrashNativeErase = preview;
+    await request(app).post(`/api/v1/trash/${encodeURIComponent(trashed.id)}:preview-native-erase`)
+      .set("Idempotency-Key", "native-preview-protected").send({ deletedAt: trashed.deletedAt, snapshotHash: trashed.snapshotHash })
+      .expect(409).expect(({ body }) => expect(body.error.code).toBe("TRASH_REFERENCE_PROTECTED"));
   });
   it("confirms an archived operation replay without resurrecting a trashed node or accepting another workspace", async () => {
     const { app, readweave } = await seededApp();

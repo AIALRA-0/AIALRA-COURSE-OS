@@ -107,6 +107,27 @@ Never substitute an index-only removal, global erase, copied browser credentials
 or direct database deletion. Verify authority absence and shared references before
 reporting that a selected object has been permanently removed.
 
+For installations with native erasure, configure the optional
+`READWEAVE_NATIVE_ERASE_AUDIT_PATH` to the dedicated read-only JSONL log.
+`deploy/vps/native-erase-audit.nginx.example` shows the bounded log fields and
+scoped native DELETE filter. Preserve the existing access logs and authentication.
+The public ReadWeave URL must point to the actual native editor, not another
+application. Without this server-side evidence, Course OS leaves the trash record
+intact; neither a browser assertion nor ETAPI 404 alone proves erasure.
+
+Prepare each selected trash object's server-side preview before native erasure.
+Its persisted receipt binds the current workspace, revision, snapshot, owned note
+roots and branches. Use only those links in the authenticated native UI, then
+confirm reconciliation in Course OS. Reconciliation rechecks references and the
+receipt, verifies selective native erasure and every owned note's absence, and
+removes only that matching record. Shared or protected objects remain intact.
+An interrupted confirmation must reuse its original idempotency key.
+
+Returning from the native editor explicitly confirms the edited page against
+ReadWeave before updating its reading copy. Ordinary reading remains independent
+of this confirmation. Verify both an edit and restoration using a dedicated test
+note; do not change a learner's formal content for deployment acceptance.
+
 Keep the prior Compose file and images until internal health, reading readiness, external HTTPS, authentication, static assets, restart persistence, and a second no-op ReadWeave dry-run all pass. Keep all database, authority, and data-volume backups under the existing 7-daily, 4-weekly, and 6-monthly retention schedule; deployment and rollback do not shorten or reset retention.
 
 ## Rollback

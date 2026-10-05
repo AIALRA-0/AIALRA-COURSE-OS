@@ -57,7 +57,7 @@ import { convertMaterial, FileConversionQueueClient, removeConversionOutput, typ
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
-import type { CourseReleaseIndex, ReadWeaveCourseApi } from "@course-os/readweave-adapter";
+import type { CourseReleaseIndex, ReadWeaveCourseApi, TrashNativeErasePlan } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, filterDismissedTasks, type FailedTaskSelection } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type GenerationTaskMutationState, type OperationalState } from "./store.js";
@@ -428,6 +428,49 @@ export function createApp(dependencies: AppDependencies): Express {
     } catch (error) { next(error); }
   });
 
+  app.post(/^\/api\/v1\/trash\/[^/]+:preview-native-erase$/, async (request, response, next) => {
+    try {
+      const trashId = decodeURIComponent(request.path.slice("/api/v1/trash/".length, -":preview-native-erase".length));
+      const context = writeContext(request, requireIdempotencyKey(request));
+      const expectedDeletedAt = request.body?.deletedAt;
+      const expectedSnapshotHash = request.body?.snapshotHash;
+      const expectedRevision = request.body?.revision;
+      if (typeof expectedDeletedAt !== "string" || !expectedDeletedAt
+        || typeof expectedSnapshotHash !== "string" || !expectedSnapshotHash
+        || (expectedRevision !== undefined && (!Number.isInteger(expectedRevision) || expectedRevision < 0))) {
+        return sendError(request, response, 400, "TRASH_PREVIEW_SELECTION_REQUIRED", "原生擦除预检需要当前删除时间及有效快照", false);
+      }
+      const current = (await dependencies.readweave.listTrash()).find(item => item.id === trashId && item.workspaceId === context.workspaceId);
+      if (!current) return sendError(request, response, 404, "TRASH_NOT_FOUND", "没有找到这条回收站记录", false);
+      if (!current.restoreAvailable || current.deletedAt !== expectedDeletedAt || current.snapshotHash !== expectedSnapshotHash) {
+        return sendError(request, response, 409, "TRASH_CHANGED", "回收站对象或快照已变化，请重新载入后预检", false);
+      }
+      const capabilities = await dependencies.readweave.getTrashCapabilities?.();
+      if (!capabilities?.requiresNativeUi || !capabilities.canConfirmNativeErase) {
+        return sendError(request, response, 409, "NATIVE_ERASE_CONFIRM_UNAVAILABLE", "当前适配器未开放原生擦除核销", false);
+      }
+      const preview = dependencies.readweave.previewTrashNativeErase;
+      if (!preview) return sendError(request, response, 409, "NATIVE_ERASE_PREVIEW_UNAVAILABLE", "当前适配器不支持原生擦除预检", false);
+      const plan = await preview.call(dependencies.readweave, trashId, context, expectedDeletedAt,
+        { expectedSnapshotHash, expectedRevision }, trashDeleteOptions(context.workspaceId));
+      if (plan.trashId !== trashId || plan.workspaceId !== context.workspaceId || plan.nodeId !== current.nodeId
+        || plan.deletedAt !== expectedDeletedAt || !plan.snapshotHash
+        || (expectedSnapshotHash !== undefined && plan.snapshotHash !== expectedSnapshotHash)
+        || (expectedRevision !== undefined && plan.revision !== expectedRevision)
+        || !Array.isArray(plan.rootNoteIds) || plan.rootNoteIds.length === 0
+        || !Array.isArray(plan.nativeLinks) || plan.nativeLinks.length !== plan.rootNoteIds.length
+        || plan.nativeLinks.some(link => !link || typeof link !== "object" || typeof link.noteId !== "string" || typeof link.title !== "string")
+        || new Set(plan.rootNoteIds).size !== plan.rootNoteIds.length
+        || !Array.isArray(plan.noteIds)
+        || new Set(plan.noteIds).size !== plan.noteIds.length
+        || plan.rootNoteIds.some(noteId => !plan.noteIds.includes(noteId)
+          || plan.nativeLinks.filter(link => link.noteId === noteId && typeof link.title === "string" && isHttpUrl(link.url)).length !== 1)) {
+        return sendError(request, response, 409, "NATIVE_ERASE_PLAN_INVALID", "原生擦除计划与当前回收站对象不匹配，已停止操作", false);
+      }
+      response.json(plan satisfies TrashNativeErasePlan);
+    } catch (error) { next(error); }
+  });
+
   app.post(/^\/api\/v1\/trash\/[^/]+:restore$/, async (request, response, next) => {
     try {
       const trashId = decodeURIComponent(request.path.slice("/api/v1/trash/".length, -":restore".length));
@@ -485,10 +528,42 @@ export function createApp(dependencies: AppDependencies): Express {
     try {
       const context = writeContext(request, requireIdempotencyKey(request));
       const expectedDeletedAt = request.header("X-Trash-Deleted-At");
-      const current = (await dependencies.readweave.listTrash()).find(item => item.id === request.params.id && item.workspaceId === context.workspaceId);
-      if (!current) return sendError(request, response, 404, "TRASH_NOT_FOUND", "没有找到这条回收站记录", false);
-      if (!expectedDeletedAt || current.deletedAt !== expectedDeletedAt || !current.restoreAvailable) return sendError(request, response, 409, "TRASH_CHANGED", "回收站对象已变化，请重新确认", false);
-      await dependencies.readweave.permanentlyDeleteTrash(request.params.id, context, expectedDeletedAt, trashDeleteOptions(context.workspaceId));
+      const expectedSnapshotHash = request.header("X-Trash-Snapshot-Hash");
+      const revisionHeader = request.header("X-Trash-Revision");
+      const expectedRevision = revisionHeader === undefined ? undefined : Number(revisionHeader);
+      const trashRecords = await dependencies.readweave.listTrash();
+      const current = trashRecords.find(item => item.id === request.params.id && item.workspaceId === context.workspaceId);
+      if (!current) {
+        // Keep foreign-workspace and unknown IDs indistinguishable. A deleted
+        // row may still have an exact, selector-bound adapter replay.
+        if (trashRecords.some(item => item.id === request.params.id) || !expectedDeletedAt) {
+          return sendError(request, response, 404, "TRASH_NOT_FOUND", "没有找到这条回收站记录", false);
+        }
+        try {
+          await dependencies.readweave.permanentlyDeleteTrash(request.params.id, context, expectedDeletedAt, {
+            ...trashDeleteOptions(context.workspaceId),
+            expectedSnapshotHash: expectedSnapshotHash || undefined
+          });
+        } catch (error) {
+          if (String(error).includes("READWEAVE_TRASH_IDEMPOTENCY_CONFLICT")) {
+            return sendError(request, response, 404, "TRASH_NOT_FOUND", "没有找到这条回收站记录", false);
+          }
+          throw error;
+        }
+        response.status(204).end();
+        return;
+      }
+      if (!expectedDeletedAt) return sendError(request, response, 409, "TRASH_CHANGED", "回收站对象已变化，请重新确认", false);
+      if (revisionHeader !== undefined && (!Number.isInteger(expectedRevision) || expectedRevision! < 0)) return sendError(request, response, 400, "TRASH_REVISION_INVALID", "回收站修订号无效", false);
+      const capabilities = await dependencies.readweave.getTrashCapabilities?.();
+      if (capabilities?.requiresNativeUi && !expectedSnapshotHash) return sendError(request, response, 400, "TRASH_SNAPSHOT_REQUIRED", "原生擦除核销必须提交预检快照", false);
+      if (current.deletedAt !== expectedDeletedAt || !current.restoreAvailable) return sendError(request, response, 409, "TRASH_CHANGED", "回收站对象已变化，请重新确认", false);
+      if (expectedSnapshotHash && current.snapshotHash && current.snapshotHash !== expectedSnapshotHash) return sendError(request, response, 409, "TRASH_CHANGED", "回收站快照已变化，请重新预检", false);
+      await dependencies.readweave.permanentlyDeleteTrash(request.params.id, context, expectedDeletedAt, {
+        ...trashDeleteOptions(context.workspaceId),
+        expectedSnapshotHash: expectedSnapshotHash || undefined,
+        expectedRevision
+      });
       response.status(204).end();
     } catch (error) { next(error); }
   });
@@ -2781,8 +2856,14 @@ function mapApiError(raw: string): { status: number; code: string; message: stri
   if (raw.includes("NOT_FOUND")) return { status: 404, code: "RESOURCE_NOT_FOUND", message: "没有找到请求的课程内容，请重新载入后再试", retryable: false };
   if (/^READWEAVE_TRASH_(?:ACTIVITY_PROTECTED|ANSWERS_PROTECTED|SHARED_REFERENCE|EXTERNAL_REFERENCES_UNCHECKED)$/u.test(raw)) return { status: 409, code: "TRASH_REFERENCE_PROTECTED", message: "该对象仍有任务、学习记录或共享引用，已保留在回收站", retryable: false };
   if (/^READWEAVE_TRASH_(?:CHANGED|NOT_DELETED|IDEMPOTENCY_CONFLICT|SNAPSHOT_REQUIRED)$/u.test(raw)) return { status: 409, code: "TRASH_CHANGED", message: "回收站对象或确认信息已变化，请重新确认", retryable: false };
+  if (raw.includes("READWEAVE_NATIVE_ERASE_UNVERIFIED")) return { status: 409, code: "NATIVE_ERASE_UNVERIFIED", message: "没有找到与这份快照和全部根笔记匹配的原生擦除成功记录；回收站对象已保留", retryable: false };
   if (raw.includes("PERMANENT_DELETE_UNSUPPORTED")) return { status: 409, code: "PERMANENT_DELETE_UNSUPPORTED", message: "当前 ReadWeave 不支持安全永久删除，这条记录会继续保留在回收站", retryable: false };
   return { status: 500, code: "INTERNAL_ERROR", message: "系统处理失败，请根据请求编号重试或排查", retryable: true };
+}
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
 }
 
 function buildCourseTree(courses: CourseProject[], releases: CourseRelease[], drafts: LessonDraft[], metadataNodes: CourseTreeNode[] = [], _trashRecords: TrashRecord[] = []): CourseTreeNode[] {

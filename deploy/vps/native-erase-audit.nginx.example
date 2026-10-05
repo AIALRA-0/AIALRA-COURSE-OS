@@ -1,0 +1,15 @@
+# Place log_format/map in nginx's existing http context. Keep current auth intact.
+log_format course_os_native_erase escape=json
+  '{"at":"$time_iso8601","host":"$host","method":"$request_method","uri":"$request_uri","status":$status}';
+map "$request_method:$uri" $course_os_native_erase_request {
+  default 0;
+  ~^DELETE:/api/(notes|branches)/[A-Za-z0-9_-]+$ 1;
+}
+# In the existing ReadWeave TLS server block, set the exact Course OS-owned path:
+# Preserve its existing access_log explicitly: a server-level log overrides
+# inherited logs. Add the conditional audit alongside that existing log.
+# access_log /ABSOLUTE/COURSE_OS/deploy/vps/native-erase-audit/native-erase.jsonl
+#   course_os_native_erase if=$course_os_native_erase_request;
+# Configure rotation in the existing logging tooling; no cookies/body/IP are logged.
+# The Course OS API mounts only this dedicated directory read-only. Missing proof
+# leaves the trash record intact; ETAPI 404 is never sufficient to authorize it.

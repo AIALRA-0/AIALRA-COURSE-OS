@@ -28,7 +28,8 @@ import type {
 } from "@course-os/contracts";
 import { writeJsonAtomic } from "@course-os/storage";
 import { courseTreeNode, isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, selectMaterialRelease, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
-import { assertTrashReferencesSafe, trashDeleteIdempotencyKey, trashDeleteReplay, trashDeleteScope, type TrashDeleteOptions } from "./trash-safety.js";
+import { assertTrashReferencesSafe, trashDeleteIdempotencyKey, trashDeleteReplay, trashDeleteScope, type TrashDeleteOptions, type TrashNativeErasePlan } from "./trash-safety.js";
+export type { TrashNativeErasePlan } from "./trash-safety.js";
 export * from "./trash-safety.js";
 
 export { selectMaterialRelease };
@@ -44,6 +45,7 @@ export type MasteryReducer = (previous: MasteryRecord | undefined) => MasteryRec
 export interface TrashCapabilities {
   directPermanentDelete: boolean;
   requiresNativeUi: boolean;
+  canConfirmNativeErase?: boolean;
   reason?: string;
 }
 
@@ -130,6 +132,8 @@ export interface ReadWeaveCourseApi {
   trashTreeNode(nodeId: string, context: IdempotentWriteContext): Promise<TrashRecord>;
   listTrash(): Promise<TrashRecord[]>;
   getTrashCapabilities?(): Promise<TrashCapabilities>;
+  previewTrashNativeErase?(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string,
+    selector?: { expectedSnapshotHash?: string; expectedRevision?: number }, options?: Pick<TrashDeleteOptions, "checkExternalReferences">): Promise<TrashNativeErasePlan>;
   restoreTrash(trashId: string, context: IdempotentWriteContext, options?: { restoreMode?: "original" | "root" }): Promise<CourseTreeNode>;
   permanentlyDeleteTrash(trashId: string, context: IdempotentWriteContext, expectedDeletedAt?: string, options?: TrashDeleteOptions): Promise<void>;
   getTreeNodeProperties(nodeId: string): Promise<TreeNodeProperties | undefined>;

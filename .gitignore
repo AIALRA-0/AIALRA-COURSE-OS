@@ -1,4 +1,5 @@
 node_modules/
+deploy/vps/native-erase-audit/
 dist/
 coverage/
 .playwright-cli/

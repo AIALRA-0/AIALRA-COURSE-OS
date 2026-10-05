@@ -18,6 +18,33 @@ afterEach(async () => {
 });
 
 describe("ReadingRuntime", () => {
+  it("explicit native-editor confirmation reconciles notes instead of reusing a stale draft snapshot", async () => {
+    const root = await temporaryRoot();
+    const store = new FileReadWeaveCourseApi(join(root, "authority.json"));
+    const release = await publishFixture(store);
+    const before = await store.saveDraft(makeDraft(release, 1, "before native edit"), 0, writeContext("native-before"));
+    let reconcileReads = 0;
+    const authority = new Proxy(store, {
+      get(target, property) {
+        if (property === "getDraftSnapshotByPage") return async () => structuredClone(before);
+        if (property === "getDraftByPage") return async (pageId: string) => {
+          reconcileReads += 1;
+          return target.getDraftByPage(pageId);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as ReadWeaveCourseApi;
+    const runtime = new ReadingRuntime(root, authority, workspaceId, authorityIdentity, buildReadingTree);
+    await runtime.initialize();
+    await runtime.materialize();
+    await store.saveDraft(makeDraft(release, 2, "native UI edit"), before.revision, writeContext("native-after"));
+    await runtime.confirmPage(before.pageId, release.id);
+    expect(reconcileReads).toBe(1);
+    expect(await runtime.replica.getDraft(workspaceId, before.pageId, release.id))
+      .toMatchObject({ revision: 2, page: { blocks: [{ markdown: "native UI edit" }] } });
+    runtime.close();
+  });
   it("serves confirmed catalog and page copies through an authority outage and records degraded sync", async () => {
     const root = await temporaryRoot();
     const authority = new FileReadWeaveCourseApi(join(root, "readweave-course-store.json"));

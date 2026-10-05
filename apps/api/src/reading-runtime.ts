@@ -338,7 +338,9 @@ export class ReadingRuntime {
   async confirmPage(pageId: string, releaseId?: string): Promise<void> {
     try {
       await withReadBudget({ timeoutMs: 8_000 }, async () => {
-        const draft = await this.readDraftSnapshot(pageId);
+        // Explicit return from the native editor reconciles that page's notes;
+        // a cached draft snapshot cannot confirm an external edit.
+        const draft = await this.authority.getDraftByPage(pageId);
         const invalidations = this.replica.projectionInvalidations(this.workspaceId)
           .filter((item) => item.reason === "draft" && item.targetId === pageId);
         const clear = draft && (!releaseId || draft.sourceReleaseId === releaseId)

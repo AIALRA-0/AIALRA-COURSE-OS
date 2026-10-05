@@ -9,6 +9,7 @@ import { ReadingRuntime, observeReadingWrites } from "./reading-runtime.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
 import { EtapiSettingsRuntime, registerEtapiSettingsRoutes } from "./etapi-settings-routes.js";
 import { SecretVault } from "./secret-vault.js";
+import { createNativeEraseVerifier } from "./native-erase-evidence.js";
 
 // Stable database-scoped key pair reserved for the Course OS API writer singleton.
 const apiWriterLockClass = 0x434f5552;
@@ -132,6 +133,7 @@ export async function startApiServer(): Promise<void> {
             token: "",
             parentNoteId: process.env.READWEAVE_ROOT_NOTE_ID || "root",
             publicUrl: process.env.READWEAVE_PUBLIC_URL,
+            verifyNativeErase: createNativeEraseVerifier(process.env.READWEAVE_NATIVE_ERASE_AUDIT_PATH, process.env.READWEAVE_PUBLIC_URL),
             workspaceId: process.env.COURSE_OS_WORKSPACE_ID || "personal",
             seedStatePath: resolve(dataDir, "readweave-course-store.json")
           })
@@ -142,6 +144,7 @@ export async function startApiServer(): Promise<void> {
           token,
           parentNoteId: process.env.READWEAVE_ROOT_NOTE_ID || "root",
           publicUrl: process.env.READWEAVE_PUBLIC_URL,
+          verifyNativeErase: createNativeEraseVerifier(process.env.READWEAVE_NATIVE_ERASE_AUDIT_PATH, process.env.READWEAVE_PUBLIC_URL),
           workspaceId: process.env.COURSE_OS_WORKSPACE_ID || "personal",
           seedStatePath: resolve(dataDir, "readweave-course-store.json")
         }
@@ -154,7 +157,9 @@ export async function startApiServer(): Promise<void> {
       vault: credentialVault,
       initialAdapter: initialReadweave,
       initialConfig: initialEtapiConfig,
-      fallbackAdapter: fallbackReadweave
+      fallbackAdapter: fallbackReadweave,
+      createAdapter: config => new EtapiReadWeaveCourseApi({ ...config,
+        verifyNativeErase: createNativeEraseVerifier(process.env.READWEAVE_NATIVE_ERASE_AUDIT_PATH, config.publicUrl) })
     });
     const readweave = await etapiSettings.initialize();
     // Generation always uses the saved provider routes and the same teaching path.

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type CSSProperties } from "react";
 import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry, GenerationJob, GenerationPlan, ImportRecord, LearningSession, LessonDraft, ModelProviderConfig, ModelRoutePolicy, PageLesson, ReadWeaveSyncStatus, ReviewMap, TrashRecord, WorkspaceMode, WorkspaceSettings, WorkspaceTree } from "@course-os/contracts";
-import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy } from "./api.js";
+import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy, type TrashNativeErasePlan } from "./api.js";
 import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
@@ -2019,6 +2019,26 @@ export function canDirectlyDeleteTrashRecords(
   return records.length > 0 && records.every((record) => canDirectlyDeleteTrashRecord(capabilities, record));
 }
 
+export function canConfirmNativeErasePlan(
+  capabilities: TrashCapabilities | undefined,
+  item: Pick<TrashRecord, "id" | "workspaceId" | "nodeId" | "deletedAt" | "snapshotHash">,
+  plan: TrashNativeErasePlan | undefined
+): plan is TrashNativeErasePlan {
+  if (capabilities?.requiresNativeUi !== true || capabilities.canConfirmNativeErase !== true || !plan) return false;
+  if (plan.trashId !== item.id || plan.workspaceId !== item.workspaceId || plan.nodeId !== item.nodeId || plan.deletedAt !== item.deletedAt
+    || !item.snapshotHash || !plan.snapshotHash || plan.snapshotHash !== item.snapshotHash) return false;
+  if (!Array.isArray(plan.rootNoteIds) || plan.rootNoteIds.length === 0 || new Set(plan.rootNoteIds).size !== plan.rootNoteIds.length
+    || !Array.isArray(plan.nativeLinks) || plan.nativeLinks.length !== plan.rootNoteIds.length
+    || !Array.isArray(plan.noteIds)) return false;
+  return plan.rootNoteIds.every((noteId) => plan.noteIds.includes(noteId)
+    && plan.nativeLinks.filter((link) => link.noteId === noteId && typeof link.title === "string" && isHttpLink(link.url)).length === 1);
+}
+
+function isHttpLink(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
+}
+
 function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
   const [items, setItems] = useState<TrashRecord[]>([]);
   const [capabilities, setCapabilities] = useState<TrashCapabilities>();
@@ -2027,6 +2047,7 @@ function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [nativeErasePlans, setNativeErasePlans] = useState<Record<string, TrashNativeErasePlan>>({});
   const visibleItems = useMemo(() => latestRestorableTrashRecords(items), [items]);
   const directDeleteAvailable = capabilities?.directPermanentDelete === true && capabilities.requiresNativeUi === false;
   const nativeUiRequired = capabilities?.requiresNativeUi === true;
@@ -2074,6 +2095,39 @@ function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "项目恢复失败"); }
     finally { setBusyId(""); }
   };
+  const previewNativeErase = async (item: TrashRecord) => {
+    if (busyId || !capabilities?.requiresNativeUi || !capabilities.canConfirmNativeErase) return;
+    if (!item.snapshotHash) { setError("回收站记录缺少冻结快照 hash，无法安全预检；对象仍保留在回收站"); return; }
+    setBusyId(`preview-native-erase:${item.id}`); setError(""); setNotice("");
+    setNativeErasePlans((current) => { const next = { ...current }; delete next[item.id]; return next; });
+    try {
+      const plan = await api.previewTrashNativeErase(item);
+      if (!canConfirmNativeErasePlan(capabilities, item, plan)) throw new Error("服务器预检计划与当前回收站快照或根笔记链接不匹配，已停止操作；请重新载入后预检");
+      setNativeErasePlans((current) => ({ ...current, [item.id]: plan }));
+      setNotice(`预检完成：请在 ReadWeave 原生回收站逐项核对并擦除以下 ${plan.rootNoteIds.length} 个根笔记，完成后回到此处核销。Course OS 不会自动擦除。`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "原生擦除预检失败；对象仍保留在回收站"); }
+    finally { setBusyId(""); }
+  };
+  const confirmNativeErase = async (item: TrashRecord, plan: TrashNativeErasePlan | undefined) => {
+    if (busyId || !canConfirmNativeErasePlan(capabilities, item, plan)) return;
+    const rootList = plan.rootNoteIds.join("、");
+    if (!window.confirm(`确认已在 ReadWeave 原生回收站完成以下 ${plan.rootNoteIds.length} 个根笔记的擦除，并核销这次擦除？\n\n${rootList}\n\n当前快照：${plan.snapshotHash}`)) return;
+    setBusyId(item.id); setError(""); setNotice("");
+    try {
+      await api.permanentlyDeleteTrash(item, { snapshotHash: plan.snapshotHash, revision: plan.revision });
+      setNativeErasePlans((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      const refreshedRecords = await load();
+      await onRefresh();
+      const remainsRestorable = refreshedRecords && latestRestorableTrashRecords(refreshedRecords)
+        .some((record) => record.workspaceId === item.workspaceId && record.nodeId === item.nodeId);
+      setNotice(refreshedRecords
+        ? remainsRestorable
+          ? "核销请求已返回，但对象仍出现在最新可恢复列表中；内容保留，请重新预检并核对状态。"
+          : "原生擦除核销完成；已重新读取回收站和课程树。"
+        : "核销请求已返回，但回收站重新读取失败；内容状态未能确认，请重新载入核对。");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "原生擦除尚未核销；对象仍保留在回收站。请核对原生擦除记录后重试"); }
+    finally { setBusyId(""); }
+  };
   const permanentlyDelete = async (item: TrashRecord) => {
     if (busyId || !canDirectlyDeleteTrashRecord(capabilities, item)) return;
     if (!window.confirm(`确认通过当前适配器直接永久删除“${item.title}”吗？此操作无法撤回。`)) return;
@@ -2104,23 +2158,14 @@ function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "直接删除结果尚未确认，请重新读取回收站"); }
     finally { setBusyId(""); }
   };
-  const openNativeReadWeaveNote = async (item: TrashRecord) => {
-    if (busyId || !nativeUiRequired || !item.readweaveNoteId) return;
-    const actionId = `open-readweave:${item.id}`;
-    setBusyId(actionId); setError(""); setNotice("");
-    try {
-      await openVerifiedReadWeaveDeepLink(item.readweaveNoteId);
-      setNotice("已打开经过验证的 ReadWeave 笔记链接。请在 ReadWeave 原生回收站登录并核对对象；Course OS 未执行删除。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法打开经过验证的 ReadWeave 笔记链接"); }
-    finally { setBusyId(""); }
-  };
-
   const capabilityMessage = capabilitiesLoading
     ? "正在单独检查永久删除能力；检查完成前，直接删除和清空操作均已停用。"
     : capabilityError
       ? `无法确认当前适配器的永久删除能力，直接删除和清空操作已停用。${capabilityError}`
       : nativeUiRequired
-        ? "永久删除必须在 ReadWeave 原生回收站中完成。请使用 ReadWeave 登录状态核对并确认；Course OS 只会打开经过验证的笔记链接，不会执行删除。"
+        ? capabilities?.canConfirmNativeErase
+          ? "需要先准备服务器原生擦除预检；只会展示计划绑定的根笔记 ID 和可信链接。你在 ReadWeave 完成逐项擦除后，才能回到此处核销。"
+          : "永久删除必须在 ReadWeave 原生回收站中完成；当前服务端未开放核销能力，所有回收站内容都会保留。"
         : directDeleteAvailable
           ? "当前适配器报告支持直接永久删除。操作只会对下方最新可恢复记录开放，并要求存在 ReadWeave 笔记 ID。"
           : `当前适配器未报告可用的直接永久删除能力，相关操作已停用。${capabilities?.reason || ""}`;
@@ -2132,20 +2177,30 @@ function TrashPanel({ onRefresh }: { onRefresh: () => Promise<void> }) {
       const canRestoreOriginal = Boolean(item.originalParentId || item.originalPath?.length);
       const canDelete = canDirectlyDeleteTrashRecord(capabilities, item);
       const actionIsBusy = busyId === item.id;
-      const nativeLinkIsBusy = busyId === `open-readweave:${item.id}`;
+      const nativePreviewIsBusy = busyId === `preview-native-erase:${item.id}`;
+      const nativePlan = nativeErasePlans[item.id];
+      const nativePlanMatches = canConfirmNativeErasePlan(capabilities, item, nativePlan);
       return <article className="trash-item" key={`${item.workspaceId}:${item.nodeId}`}>
         <div><strong>{item.title}</strong><span>{item.nodeKind} · 删除于 {formatDateTime(item.deletedAt)}</span><small>原路径：{item.originalPath?.join(" / ") || "未记录"}</small></div>
         <div className="trash-actions">
           <button className="quiet-button" disabled={Boolean(busyId) || !canRestoreOriginal} title={!canRestoreOriginal ? "原路径已经不存在，请选择恢复到工作区根目录" : busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "original")}>恢复原路径</button>
           <button className="quiet-button" disabled={Boolean(busyId)} title={busyId ? "正在处理上一项操作" : undefined} onClick={() => void restore(item, "root")}>恢复到根目录</button>
           {directDeleteAvailable && <button className="quiet-button danger-button" data-action="trash-permanent-delete" disabled={Boolean(busyId) || !canDelete} title={!item.readweaveNoteId ? "缺少 ReadWeave 笔记 ID，不能直接永久删除" : busyId ? "正在处理上一项操作" : "适配器直接永久删除后无法撤回"} onClick={() => void permanentlyDelete(item)}>{actionIsBusy ? "正在删除" : "永久删除"}</button>}
-          {nativeUiRequired && item.readweaveNoteId && <button className="quiet-button" data-action="trash-open-native-note" disabled={Boolean(busyId)} title={busyId ? "正在打开经过验证的笔记链接" : "打开经过验证的 ReadWeave 笔记；删除需在 ReadWeave 原生回收站中完成"} onClick={() => void openNativeReadWeaveNote(item)}>{nativeLinkIsBusy ? "正在打开" : "在 ReadWeave 中核对"}</button>}
-          {nativeUiRequired && !item.readweaveNoteId && <span className="trash-native-note-missing">没有可验证的 ReadWeave 笔记链接</span>}
+          {nativeUiRequired && <button className="quiet-button" data-action="trash-preview-native-erase" disabled={Boolean(busyId) || !capabilities?.canConfirmNativeErase || !item.snapshotHash} title={!item.snapshotHash ? "回收站记录缺少冻结快照 hash，无法安全预检" : !capabilities?.canConfirmNativeErase ? "服务端尚未开放原生擦除预检与核销" : busyId ? "正在准备服务器预检计划" : "读取当前冻结快照及其原生根笔记链接"} onClick={() => void previewNativeErase(item)}>{nativePreviewIsBusy ? "正在预检" : "准备原生擦除"}</button>}
         </div>
+        {nativePlanMatches && <section className="trash-native-erase-plan" aria-label={`原生擦除计划：${item.title}`}>
+          <strong>预检计划：{nativePlan.rootNoteIds.length} 个根笔记</strong>
+          <p>快照 {nativePlan.snapshotHash} · 删除时间 {nativePlan.deletedAt}</p>
+          <ol>{nativePlan.rootNoteIds.map((noteId) => {
+            const link = nativePlan.nativeLinks.find((candidate) => candidate.noteId === noteId)!;
+            return <li key={noteId}><code>{noteId}</code> · <a href={link.url} target="_blank" rel="noopener noreferrer">{link.title || noteId}</a></li>;
+          })}</ol>
+          <button className="quiet-button danger-button" data-action="trash-confirm-native-erase" disabled={Boolean(busyId)} onClick={() => void confirmNativeErase(item, nativePlan)}>{actionIsBusy ? "正在核销" : "已在 ReadWeave 擦除，确认核销"}</button>
+        </section>}
       </article>;
     })}{visibleItems.length === 0 && !error && <p className="empty-inline">当前没有可恢复的回收站项目</p>}</div>
     {notice && <p className="settings-notice"><Icon name="check" />{notice}</p>}
-    {error && <p className="settings-error"><Icon name="warning" />{error}</p>}
+    {error && <p className="settings-error" role="alert" aria-live="assertive"><Icon name="warning" />{error}</p>}
   </div>;
 }
 

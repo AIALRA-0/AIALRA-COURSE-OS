@@ -51,6 +51,7 @@ services:
       READWEAVE_ROOT_NOTE_ID: ${READWEAVE_ROOT_NOTE_ID:-root}
       READWEAVE_PUBLIC_URL: ${READWEAVE_PUBLIC_URL:-https://readweave.example.com}
       READWEAVE_API_TOKEN_FILE: /run/secrets/readweave_api_token
+      READWEAVE_NATIVE_ERASE_AUDIT_PATH: ${READWEAVE_NATIVE_ERASE_AUDIT_PATH:-}
     command:
       - sh
       - -c
@@ -60,6 +61,7 @@ services:
     secrets: [postgres_password, readweave_api_token, course_os_worker_token, course_os_settings_key]
     volumes:
       - ./data:/data
+      - ./native-erase-audit:/native-erase-audit:ro
     ports:
       - ${COURSE_OS_API_BIND:-127.0.0.1:14100}:4100
     depends_on:
