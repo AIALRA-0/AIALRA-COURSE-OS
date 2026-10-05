@@ -17,9 +17,6 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     : page.blocks.some(block => block.kind === "core" && block.markdown.trim());
   const bridgeReady = page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim());
   const pseudocode = page.atoms.filter((atom): atom is PseudoCodeLine => atom.kind === "pseudocode_line");
-  const [qaRecords, setQaRecords] = useState<PageQuestion[]>([]);
-  const [nativeQuestions, setNativeQuestions] = useState<ReadWeavePageQuestions>({ pageId: page.id, questions: [] });
-  const [nativeQuestionsError, setNativeQuestionsError] = useState("");
   const [interactiveReady, setInteractiveReady] = useState(false);
   const interactiveMarkerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -43,33 +40,12 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     observer.observe(marker);
     return () => observer.disconnect();
   }, [page.id, loadRootRef]);
-  useEffect(() => {
-    if (!interactiveReady) return;
-    let active = true;
-    api.pageQuestions(page.id).then((records) => active && setQaRecords(records)).catch(() => active && setQaRecords([]));
-    return () => { active = false; };
-  }, [interactiveReady, page.id]);
-  useEffect(() => {
-    if (!interactiveReady) return;
-    let active = true;
-    const refresh = () => {
-      if (document.visibilityState === "hidden") return;
-      api.readweaveQuestions(page.id).then((result) => {
-        if (active) { setNativeQuestions(result); setNativeQuestionsError(""); }
-      }).catch(() => { if (active) setNativeQuestionsError("ReadWeave 问答记录暂时无法读取"); });
-    };
-    setNativeQuestions({ pageId: page.id, questions: [] });
-    refresh();
-    const timer = window.setInterval(refresh, 30_000);
-    window.addEventListener("focus", refresh);
-    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
-  }, [interactiveReady, page.id]);
   return <section className="explanation-panel" aria-label="教师讲解">
     <header className="lesson-header"><div><span className="eyebrow">第 {page.pageNumber} 页 · {release.lifecycle === "draft_source" ? "当前预览草稿" : release.lifecycle === "published" ? `已发布 v${release.version}${unpublishedDraftRevision ? " · 有未发布修改（当前预览草稿）" : ""}` : unpublishedDraftRevision ? "当前预览草稿" : "课程材料"}</span><h2>{page.title}</h2></div><span className={`quality-badge ${bodyReadable && summaryReady && bridgeReady ? "pass" : "hold"}`}>{!bodyReadable ? "讲解尚未生成" : !summaryReady ? "正文可读 · 主要内容待补齐" : bridgeReady ? "教学内容可读" : "正文可读 · 承接待补齐"}</span></header>
     {sections.map((section, index) => <LessonSectionView key={section.id} section={section} number={String(index + 1).padStart(2, "0")}>{section.kind === "full_explanation" && pseudocode.length > 0 && <PseudoCodeWalkthrough lines={pseudocode} />}</LessonSectionView>)}
     <div ref={interactiveMarkerRef} className="lesson-interactive-marker" aria-hidden="true" />
     {interactiveReady && <>
-      <article className="lesson-block random-questions"><SectionTitle number="07" english="ACTIVE RECALL" title="问答" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /><SelfRetellingPanel release={release} page={page} /><details className="qa-records"><summary>学习问答记录</summary><ReadWeaveQuestions records={nativeQuestions} legacy={qaRecords} error={nativeQuestionsError} /></details></article>
+      <article className="lesson-block random-questions"><SectionTitle number="07" english="ACTIVE RECALL" title="问答" /><RandomQuestions release={release} page={page} sessionId={sessionId} onEnterStudio={onEnterStudio} /><SelfRetellingPanel release={release} page={page} /><QuestionHistory key={page.id} pageId={page.id} /></article>
     </>}
   </section>;
 }
@@ -220,13 +196,61 @@ function teacherSummaryFor(line: PseudoCodeLine): string {
   return legacy[line.code] || `这一行执行“${line.semantic}”，并把得到的状态交给后续步骤继续处理`;
 }
 
-function ReadWeaveQuestions({ records, legacy, error }: { records: ReadWeavePageQuestions; legacy: PageQuestion[]; error: string }) {
+export function QuestionHistory({ pageId }: { pageId: string }) {
+  const [open, setOpen] = useState(false);
+  const [records, setRecords] = useState<ReadWeavePageQuestions>({ pageId, questions: [] });
+  const [legacy, setLegacy] = useState<PageQuestion[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    let running = false;
+    const refresh = async () => {
+      if (running || document.visibilityState === "hidden") return;
+      running = true;
+      setLoading(true);
+      const [nativeResult, legacyResult] = await Promise.allSettled([
+        api.readweaveQuestions(pageId, { signal: controller.signal }),
+        api.pageQuestions(pageId, { signal: controller.signal })
+      ]);
+      if (controller.signal.aborted) return;
+      if (nativeResult.status === "fulfilled") setRecords(nativeResult.value);
+      if (legacyResult.status === "fulfilled") setLegacy(legacyResult.value);
+      setError([
+        nativeResult.status === "rejected" ? "ReadWeave 问答记录暂时无法读取" : "",
+        legacyResult.status === "rejected" ? "Course OS 历史问答暂时无法读取" : ""
+      ].filter(Boolean).join("；"));
+      setLoading(false);
+      running = false;
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [open, pageId, retry]);
+  return <details className="qa-records" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>学习问答记录</summary>
+    {open && <>
+      {loading && <p role="status">正在读取已保存的问答记录…</p>}
+      <ReadWeaveQuestions records={records} legacy={legacy} error={error} loading={loading} />
+      {error && <button className="quiet-button" type="button" disabled={loading} onClick={() => setRetry(value => value + 1)}>重试读取问答记录</button>}
+    </>}
+  </details>;
+}
+
+function ReadWeaveQuestions({ records, legacy, error, loading }: { records: ReadWeavePageQuestions; legacy: PageQuestion[]; error: string; loading: boolean }) {
   const historical = legacy.filter((item) => item.status === "active");
   return <div className="qa-history">
     <p className="empty-inline">在 ReadWeave 打开本页原图并直接提问，保存后的问题会自动出现在这里</p>
     {records.noteUrl && <p><a href={records.noteUrl} target="_blank" rel="noopener noreferrer">在 ReadWeave 打开本页与原图 ↗</a></p>}
     {error && <p className="qa-action-error" role="alert">{error}</p>}
-    {records.questions.length ? records.questions.map((item) => <article key={item.objectId}><header><strong>{item.title}</strong></header>{item.excerpt && <p>{item.excerpt}</p>}</article>) : <p className="empty-inline">本页尚无已保存的 ReadWeave 问答</p>}
+    {records.questions.length ? records.questions.map((item) => <article key={item.objectId}><header><strong>{item.title}</strong></header>{item.excerpt && <p>{item.excerpt}</p>}</article>) : !loading && !error ? <p className="empty-inline">本页尚无已保存的 ReadWeave 问答</p> : null}
     {historical.length > 0 && <details><summary>查看此前在 Course OS 保存的 {historical.length} 条问答</summary>{historical.map((item) => <article key={item.id}><header><strong>{item.question}</strong></header><Markdown>{item.response}</Markdown></article>)}</details>}
   </div>;
 }

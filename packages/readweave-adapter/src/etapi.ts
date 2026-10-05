@@ -249,6 +249,9 @@ const metadataIdempotencyKinds = new Set(["course", "tree_node", "trash", "resto
 const metadataIndexLabel = "courseOsMetadataIndex";
 const metadataMigrationLabel = "courseOsMetadataMigration";
 const metadataIndexTitlePrefix = "Course OS Metadata Index";
+const workspaceRootTitle = "Course OS";
+const workspaceIndexTitle = "00 Course OS 结构化索引";
+const activityIndexTitle = "01 Course OS 学习活动索引";
 const backgroundSharedReadBudgetMs = 30_000;
 const maximumSharedReadBudgetMs = 180_000;
 
@@ -644,10 +647,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (workspaceId !== this.workspaceId || !/^[A-Za-z0-9:._-]{1,256}$/.test(pageId) || !/^[A-Za-z0-9:._-]{1,256}$/.test(workspaceId)) return { pageId, questions: [] };
     // The structured index is tens of megabytes. Search the verified workspace
     // and page labels instead of loading it for every learner-side QA refresh.
-    const workspaceQuery = new URLSearchParams({ search: `#courseOsType="workspace" AND #courseOsWorkspaceId="${workspaceId}"`, ancestorNoteId: this.config.parentNoteId, ancestorDepth: "lt5", fastSearch: "true" });
-    const workspaces = (await this.request<SearchResponse>(`/notes?${workspaceQuery.toString()}`)).results;
-    if (workspaces.length !== 1) return { pageId, questions: [] };
-    const pageQuery = new URLSearchParams({ search: `#courseOsObjectId="${pageId}"`, ancestorNoteId: workspaces[0]!.noteId, ancestorDepth: "lt12", fastSearch: "true" });
+    const workspaceRootNoteId = await this.findWorkspaceRootNoteId();
+    if (!workspaceRootNoteId) return { pageId, questions: [] };
+    const pageQuery = new URLSearchParams({ search: `#courseOsObjectId=${quoteSearchValue(pageId)}`, ancestorNoteId: workspaceRootNoteId, ancestorDepth: "lt12", fastSearch: "true" });
     const pages = (await this.request<SearchResponse>(`/notes?${pageQuery.toString()}`)).results.filter((item) => item.type === "text");
     if (pages.length !== 1) return { pageId, questions: [] };
     const pageNoteId = pages[0]!.noteId;
@@ -4075,18 +4077,83 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async findActivityStateNoteId(): Promise<string | undefined> {
     const known = this.activityStateNoteId ?? this.activityRoutes?.activityStateNoteId ?? this.stateCache?.state.projections.activityStateNoteId;
     if (known) return known;
+    const workspaceRootNoteId = await this.findWorkspaceRootNoteId();
+    if (!workspaceRootNoteId) return undefined;
     const query = new URLSearchParams({
-      search: `#courseOsActivityIndex="${this.workspaceId}"`,
+      search: `#courseOsActivityIndex=${quoteSearchValue(this.workspaceId)}`,
+      ancestorNoteId: workspaceRootNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    const [workspaceRoot, response] = await Promise.all([
+      this.getNote(workspaceRootNoteId),
+      this.request<SearchResponse>(`/notes?${query.toString()}`)
+    ]);
+    const directChildIds = new Set(workspaceRoot.childNoteIds ?? []);
+    const matches = response.results.filter((note) => directChildIds.has(note.noteId) && note.title === activityIndexTitle);
+    if (matches.length > 1) throw new Error("READWEAVE_ACTIVITY_INDEX_DUPLICATE");
+    if (matches.length === 0) return undefined;
+    this.activityStateNoteId = matches[0]!.noteId;
+    if (this.activityRoutes) this.activityRoutes.activityStateNoteId = this.activityStateNoteId;
+    return this.activityStateNoteId;
+  }
+
+  private trustedWorkspaceRootNoteId(): string | undefined {
+    const bootstrapRoot = this.bootstrapCache?.projection.courseRootNoteId;
+    if (bootstrapRoot) return bootstrapRoot;
+
+    const now = Date.now();
+    const stateCache = this.stateCache;
+    if (stateCache && stateCache.expiresAt > now && stateCache.state.projections.courseRootNoteId) {
+      return stateCache.state.projections.courseRootNoteId;
+    }
+
+    const metadataCache = this.metadataIndexCache;
+    if (metadataCache && metadataCache.expiresAt > now
+      && metadataCache.index.workspaceId === this.workspaceId
+      && metadataCache.index.status === "active") {
+      return metadataCache.index.projections.courseRootNoteId;
+    }
+    return undefined;
+  }
+
+  private async findWorkspaceRootNoteId(): Promise<string | undefined> {
+    const trusted = this.trustedWorkspaceRootNoteId();
+    if (trusted) return trusted;
+
+    const query = new URLSearchParams({
+      search: `#courseOsType=${quoteSearchValue("workspace")} AND #courseOsWorkspaceId=${quoteSearchValue(this.workspaceId)}`,
       ancestorNoteId: this.config.parentNoteId,
       ancestorDepth: "lt5",
       fastSearch: "true"
     });
-    const matches = (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results
-      .filter((note) => note.title === "01 Course OS 学习活动索引");
-    if (matches.length !== 1) return undefined;
-    this.activityStateNoteId = matches[0]!.noteId;
-    if (this.activityRoutes) this.activityRoutes.activityStateNoteId = this.activityStateNoteId;
-    return this.activityStateNoteId;
+    const [parent, response] = await Promise.all([
+      this.getNote(this.config.parentNoteId),
+      this.request<SearchResponse>(`/notes?${query.toString()}`)
+    ]);
+    const directChildIds = new Set(parent.childNoteIds ?? []);
+    const workspaceMatches = response.results.filter((note) => note.type === "text");
+    const directMatches = workspaceMatches.filter((note) => directChildIds.has(note.noteId));
+    if (directMatches.length > 1) throw new Error("READWEAVE_WORKSPACE_ROOT_AMBIGUOUS");
+    if (directMatches.length === 1) return directMatches[0]!.noteId;
+    if (response.results.length > 0) throw new Error("READWEAVE_WORKSPACE_ROOT_NOT_FOUND");
+    return undefined;
+  }
+
+  private async findCourseIndexNotes(ancestorNoteId: string, directChildrenOnly = true): Promise<EtapiNote[]> {
+    const query = new URLSearchParams({
+      search: `#courseOsIndex=${this.workspaceId}`,
+      ancestorNoteId,
+      ancestorDepth: "lt5",
+      fastSearch: "true"
+    });
+    if (!directChildrenOnly) return (await this.request<SearchResponse>(`/notes?${query.toString()}`)).results;
+    const [parent, response] = await Promise.all([
+      this.getNote(ancestorNoteId),
+      this.request<SearchResponse>(`/notes?${query.toString()}`)
+    ]);
+    const directChildIds = new Set(parent.childNoteIds ?? []);
+    return response.results.filter((note) => directChildIds.has(note.noteId));
   }
 
   private async questionAttemptNoteParent(releaseId: string, pageId: string): Promise<string | undefined> {
@@ -4411,29 +4478,41 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async bootstrap(markIndependent?: () => void): Promise<BootstrapResult> {
-    const query = new URLSearchParams({
-      search: `#courseOsIndex=${this.workspaceId}`,
-      ancestorNoteId: this.config.parentNoteId,
-      ancestorDepth: "lt5",
-      fastSearch: "true"
-    });
-    const search = await this.request<SearchResponse>(`/notes?${query.toString()}`);
-    const existing = search.results[0];
+    const workspaceRootNoteId = await this.findWorkspaceRootNoteId();
+    const indexes = await this.findCourseIndexNotes(workspaceRootNoteId ?? this.config.parentNoteId, workspaceRootNoteId !== undefined);
+    if (indexes.length > 1) throw new Error("READWEAVE_COURSE_INDEX_DUPLICATE");
+    const existing = indexes[0];
     if (existing) {
       const content = await this.getContent(existing.noteId);
       const parsed = await decodeReadWeaveStateContentAsync(content) as Partial<EtapiState>;
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
+      const indexedWorkspaceRoot = parsed.projections.courseRootNoteId;
+      if (workspaceRootNoteId) {
+        if (indexedWorkspaceRoot !== workspaceRootNoteId) throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+      } else {
+        // Preserve a single legacy index only when its declared root is an
+        // actual direct child of the configured parent and the index is below it.
+        const parent = await this.getNote(this.config.parentNoteId);
+        if (!indexedWorkspaceRoot || !(parent.childNoteIds ?? []).includes(indexedWorkspaceRoot)) {
+          throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+        }
+        const legacyIndexes = await this.findCourseIndexNotes(indexedWorkspaceRoot);
+        if (legacyIndexes.length !== 1 || legacyIndexes[0]!.noteId !== existing.noteId) {
+          throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+        }
+      }
       return { projection: parsed.projections, stateSnapshot: parsed };
     }
+    if (workspaceRootNoteId) throw new Error("READWEAVE_COURSE_INDEX_NOT_FOUND");
     // Initial workspace materialization creates remote notes. Once the empty
     // workspace is confirmed, let this bounded bootstrap finish independently
     // so a disconnect cannot strand a half-created workspace.
     markIndependent?.();
-    const root = await this.createNote(this.config.parentNoteId, "Course OS", "<h2>Course OS</h2><p>课程制作、学习和长期复习的权威知识树</p>", "text", undefined, {
+    const root = await this.createNote(this.config.parentNoteId, workspaceRootTitle, "<h2>Course OS</h2><p>课程制作、学习和长期复习的权威知识树</p>", "text", undefined, {
       courseOsType: "workspace",
       courseOsWorkspaceId: this.workspaceId
     });
-    const stateNote = await this.createNote(root.noteId, "00 Course OS 结构化索引", "{}", "code", "application/json", {
+    const stateNote = await this.createNote(root.noteId, workspaceIndexTitle, "{}", "code", "application/json", {
       courseOsIndex: this.workspaceId,
       courseOsType: "system_index"
     });

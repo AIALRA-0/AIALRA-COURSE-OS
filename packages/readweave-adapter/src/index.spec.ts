@@ -1594,6 +1594,169 @@ describe("ReadWeave ETAPI adapter", () => {
     ]);
   });
 
+  it("scopes cold activity and bootstrap reads to the renamed direct workspace ahead of nested clones", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const attempt = {
+      id: "active-workspace-attempt", selectionId: "selection-1", sessionId: "session-1", courseReleaseId: pageRelease.id,
+      pageId: "page-1", questionId: "question-1", objectiveId: "objective-1", answer: "active", correct: true,
+      usedHintLevel: 0, attemptedAt: "2026-09-15T00:01:00.000Z"
+    };
+    await writer.saveQuestionAttempt(attempt, { ...context, idempotencyKey: "active-workspace-attempt" });
+
+    const activeCoreId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const activeActivityId = remote.noteIdByTitle("01 Course OS 学习活动索引");
+    const activeRootId = (decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      projections: { courseRootNoteId: string };
+    }).projections.courseRootNoteId;
+    const archiveContainerId = remote.addChildNote("root", "Archived workspace copies");
+    const archivedRootId = remote.addNoteCopy(activeRootId, archiveContainerId);
+    const archivedCoreId = remote.addNoteCopy(activeCoreId, archivedRootId);
+    const archivedActivityId = remote.addNoteCopy(activeActivityId, archivedRootId);
+    remote.renameNote(activeRootId, "Renamed Course OS workspace");
+    remote.renameNote(activeCoreId, "Renamed structured index");
+    remote.removeNoteLabel(activeActivityId, "courseOsType");
+    const nestedIndexArchiveId = remote.addChildNote(activeRootId, "Archived index copies");
+    const nestedCoreId = remote.addNoteCopy(activeCoreId, nestedIndexArchiveId);
+    const nestedActivityId = remote.addNoteCopy(activeActivityId, nestedIndexArchiveId);
+    remote.replaceNoteContent(archivedActivityId, encodeReadWeaveStateContent({
+      questionAttempts: [{ ...attempt, id: "archived-workspace-attempt", pageId: "archived-page", answer: "stale" }]
+    }));
+
+    const workspaceResultOrders: string[][] = [];
+    const contentReads: string[] = [];
+    const coreIndexAncestors: Array<string | null> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/u, "");
+      const response = await remote.fetch(input, init);
+      if (path === "/notes" && (init?.method ?? "GET") === "GET") {
+        const data = await response.json() as { results: Array<{ noteId: string }> };
+        if (url.searchParams.get("search")?.includes("courseOsIndex")) coreIndexAncestors.push(url.searchParams.get("ancestorNoteId"));
+        data.results.reverse();
+        if (url.searchParams.get("search")?.includes("courseOsWorkspaceId")) {
+          workspaceResultOrders.push(data.results.map((item) => item.noteId));
+        }
+        return Response.json(data);
+      }
+      const contentMatch = /^\/notes\/([^/]+)\/content$/u.exec(path);
+      if (contentMatch && (init?.method ?? "GET") === "GET") contentReads.push(contentMatch[1]!);
+      return response;
+    };
+
+    const coldActivityReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await expect(coldActivityReader.listQuestionAttempts("page-1")).resolves.toEqual([attempt]);
+    expect(workspaceResultOrders[0]!.indexOf(archivedRootId)).toBeLessThan(workspaceResultOrders[0]!.indexOf(activeRootId));
+    expect(contentReads).toContain(activeActivityId);
+    expect(contentReads).not.toContain(archivedActivityId);
+    expect(contentReads).not.toContain(nestedActivityId);
+    expect(contentReads).not.toContain(activeCoreId);
+
+    contentReads.length = 0;
+    const coldBootstrapReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await expect(coldBootstrapReader.listReleaseIndexes()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: pageRelease.id })]));
+    expect(contentReads).toContain(activeCoreId);
+    expect(contentReads).not.toContain(archivedCoreId);
+    expect(contentReads).not.toContain(nestedCoreId);
+    expect(coreIndexAncestors).toEqual([activeRootId]);
+  });
+
+  it("rejects multiple direct workspace roots before any bootstrap writes", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const activeRootId = (decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      projections: { courseRootNoteId: string };
+    }).projections.courseRootNoteId;
+    remote.addNoteCopy(activeRootId, "root");
+
+    const before = remote.requests.length;
+    const coldReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(coldReader.listReleaseIndexes()).rejects.toThrow("READWEAVE_WORKSPACE_ROOT_AMBIGUOUS");
+    expect(remote.requests.slice(before).filter((item) => item.method !== "GET")).toEqual([]);
+  });
+
+  it("preserves a single legacy core index after validating its unlabeled direct workspace", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const activeCoreId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const activeRootId = (decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      projections: { courseRootNoteId: string };
+    }).projections.courseRootNoteId;
+    remote.removeNoteLabel(activeRootId, "courseOsType");
+    remote.removeNoteLabel(activeRootId, "courseOsWorkspaceId");
+
+    const before = remote.requests.length;
+    const coldReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(coldReader.listReleaseIndexes()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: pageRelease.id })]));
+    const reads = remote.requests.slice(before);
+    expect(reads.some((item) => item.method === "GET" && item.path === `/notes/${activeCoreId}/content`)).toBe(true);
+    expect(reads.filter((item) => item.method !== "GET")).toEqual([]);
+  });
+
+  it("rejects multiple legacy core indexes below the configured parent without provisioning", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const pageRelease = releaseWithPage();
+    await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+    const activeCoreId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const activeRootId = (decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      projections: { courseRootNoteId: string };
+    }).projections.courseRootNoteId;
+    remote.removeNoteLabel(activeRootId, "courseOsType");
+    remote.removeNoteLabel(activeRootId, "courseOsWorkspaceId");
+    remote.addNoteCopy(activeCoreId, activeRootId);
+
+    const before = remote.requests.length;
+    const coldReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    await expect(coldReader.listReleaseIndexes()).rejects.toThrow("READWEAVE_COURSE_INDEX_DUPLICATE");
+    const requests = remote.requests.slice(before);
+    expect(requests.filter((item) => item.method !== "GET")).toEqual([]);
+    expect(requests.some((item) => item.path.endsWith("/content"))).toBe(false);
+  });
+
+  it("rejects duplicate direct core and activity indexes without reading either snapshot", async () => {
+    const setup = async () => {
+      const remote = new FakeEtapi();
+      const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+      const pageRelease = releaseWithPage();
+      await writer.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
+      await writer.saveQuestionSelection({ id: "duplicate-index-selection", sessionId: "session-1", courseReleaseId: pageRelease.id,
+        pageId: "page-1", seed: "seed", questionIds: ["question-1"], createdAt: "2026-09-15T00:00:00.000Z" },
+      { ...context, idempotencyKey: "duplicate-index-selection" });
+      const state = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+        projections: { courseRootNoteId: string };
+      };
+      return {
+        remote,
+        activeRootId: state.projections.courseRootNoteId,
+        coreId: remote.noteIdByTitle("00 Course OS 结构化索引"),
+        activityId: remote.noteIdByTitle("01 Course OS 学习活动索引")
+      };
+    };
+
+    const coreFixture = await setup();
+    coreFixture.remote.addNoteCopy(coreFixture.coreId, coreFixture.activeRootId);
+    const coreReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: coreFixture.remote.fetch });
+    const coreBefore = coreFixture.remote.requests.length;
+    await expect(coreReader.listReleaseIndexes()).rejects.toThrow("READWEAVE_COURSE_INDEX_DUPLICATE");
+    expect(coreFixture.remote.requests.slice(coreBefore).filter((item) => item.method !== "GET")).toEqual([]);
+    expect(coreFixture.remote.requests.slice(coreBefore).some((item) => item.path.endsWith("/content"))).toBe(false);
+
+    const activityFixture = await setup();
+    activityFixture.remote.addNoteCopy(activityFixture.activityId, activityFixture.activeRootId);
+    const activityReader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: activityFixture.remote.fetch });
+    const activityBefore = activityFixture.remote.requests.length;
+    await expect(activityReader.listQuestionAttempts("page-1")).rejects.toThrow("READWEAVE_ACTIVITY_INDEX_DUPLICATE");
+    expect(activityFixture.remote.requests.slice(activityBefore).filter((item) => item.method !== "GET")).toEqual([]);
+    expect(activityFixture.remote.requests.slice(activityBefore).some((item) => item.path.endsWith("/content"))).toBe(false);
+  });
+
   it("lists course, tree, and trash data without waiting for the activity index", async () => {
     const remote = new FakeEtapi();
     const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -1708,6 +1871,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const remote = new FakeEtapi();
     let pageNoteId = "";
     const nativeRequests: string[] = [];
+    const workspaceResultOrders: string[][] = [];
     let linkReads = 0;
     let peakLinkReads = 0;
     let failLinkReads = false;
@@ -1717,6 +1881,8 @@ describe("ReadWeave ETAPI adapter", () => {
       if (path === "/notes" && url.searchParams.get("search")?.includes("courseOsWorkspaceId") && pageNoteId) {
         const result = await remote.fetch(input, init);
         const data = await result.json() as { results: unknown[] };
+        data.results.reverse();
+        workspaceResultOrders.push(data.results.map((item) => (item as { noteId: string }).noteId));
         // Saved learner notes carry the workspace label too, but are not containers.
         if (!url.searchParams.get("search")?.includes('#courseOsType="workspace"')) data.results.push({ noteId: "learner-attempt", type: "text" });
         return Response.json(data);
@@ -1746,15 +1912,25 @@ describe("ReadWeave ETAPI adapter", () => {
     const pageRelease = releaseWithPage();
     await api.publishRelease(pageRelease, { ...manifest, courseReleaseId: pageRelease.id }, context);
     pageNoteId = (await api.saveDraft(draftFor(pageRelease), 0, { ...context, idempotencyKey: "native-qa-draft" })).readweaveNoteId!;
+    const activeRootId = (decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      projections: { courseRootNoteId: string };
+    }).projections.courseRootNoteId;
+    const archiveContainerId = remote.addChildNote("root", "Archived workspace copies");
+    const archivedRootId = remote.addNoteCopy(activeRootId, archiveContainerId);
+    remote.addLabeledChildNote(archivedRootId, "archived-page-clone", "Archived page clone", {
+      courseOsObjectId: "page-1", courseOsType: "page"
+    });
+    const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", publicUrl: "https://readweave.example.com", fetchImpl });
     const writesBefore = remote.requests.filter((item) => item.method !== "GET").length;
     const requestsBefore = remote.requests.length;
-    const result = await api.listNativePageQuestions("page-1");
+    const result = await reader.listNativePageQuestions("page-1");
     expect(result.questions).toEqual([{ objectId: "object-1", title: "为什么要保留状态？", excerpt: "因为下一步需要它", updatedAt: undefined }]);
     expect(result.noteUrl).toContain(pageNoteId);
-    expect(await api.listNativePageQuestions("page-1", "another-workspace")).toEqual({ pageId: "page-1", questions: [] });
+    expect(await reader.listNativePageQuestions("page-1", "another-workspace")).toEqual({ pageId: "page-1", questions: [] });
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBefore);
     const readRequests = remote.requests.slice(requestsBefore);
     expect(readRequests.filter((item) => item.path === "/notes")).toHaveLength(2);
+    expect(workspaceResultOrders[0]!.indexOf(archivedRootId)).toBeLessThan(workspaceResultOrders[0]!.indexOf(activeRootId));
     expect(nativeRequests.filter((item) => item === "GET /notes/_readweaveLinks")).toHaveLength(1);
     expect(peakLinkReads).toBe(4);
     expect(nativeRequests).not.toContain("GET /notes/object-other/content");
@@ -4618,6 +4794,41 @@ class FakeEtapi {
     this.notes.set(noteId, { title, content: "", labels: {}, type: "text", mime: "text/html", parentBranchIds: [branchId], deleted: false });
     this.branches.set(branchId, { branchId, noteId, parentNoteId, notePosition: 10 });
     return noteId;
+  }
+
+  addLabeledChildNote(parentNoteId: string, noteId: string, title: string, labels: Record<string, string>, type = "text", content = ""): string {
+    const branchId = `branch${++this.sequence}`;
+    this.notes.set(noteId, { title, content, labels: { ...labels }, type, mime: type === "code" ? "application/json" : "text/html", parentBranchIds: [branchId], deleted: false });
+    this.branches.set(branchId, { branchId, noteId, parentNoteId, notePosition: 10 });
+    return noteId;
+  }
+
+  addNoteCopy(noteId: string, parentNoteId: string): string {
+    const source = this.notes.get(noteId);
+    if (!source) throw new Error(`missing note ${noteId}`);
+    const copyId = `note${++this.sequence}`;
+    const branchId = `branch${this.sequence}`;
+    this.notes.set(copyId, { ...source, labels: { ...source.labels }, parentBranchIds: [branchId], deleted: false });
+    this.branches.set(branchId, { branchId, noteId: copyId, parentNoteId, notePosition: 10 });
+    return copyId;
+  }
+
+  renameNote(noteId: string, title: string): void {
+    const note = this.notes.get(noteId);
+    if (!note) throw new Error(`missing note ${noteId}`);
+    note.title = title;
+  }
+
+  removeNoteLabel(noteId: string, label: string): void {
+    const note = this.notes.get(noteId);
+    if (!note) throw new Error(`missing note ${noteId}`);
+    delete note.labels[label];
+  }
+
+  replaceNoteContent(noteId: string, content: string): void {
+    const note = this.notes.get(noteId);
+    if (!note) throw new Error(`missing note ${noteId}`);
+    note.content = content;
   }
 
   noteIdForTitle(title: string): string | undefined {
