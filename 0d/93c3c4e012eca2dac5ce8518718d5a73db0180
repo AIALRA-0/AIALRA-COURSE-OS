@@ -1,0 +1,29 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_d26021307a2e88 1533,1568-1584,1595-1613,1877,1879-1880,3062-3063,3072-3075
+  s_e8850ef125fb32::t_d8e99f7b0c98ff 1936
+  s_e8850ef125fb32::t_f1f1392feaab92 1686-1687,1690,1692,1698,1712-1713,1715,1719,1721-1726,1895,1924-1935,1937
+  s_e8850ef125fb32::t_2dc8c04a621b34 1740-1742
+  s_e8850ef125fb32::t_9bffa5d21b3e14 248,1711,1727-1729,1731-1737,1746-1747,1757-1799,1813,1859-1876,1878
+  s_e8850ef125fb32::t_2037e949a875c1 1699-1700,1702-1708,1730,1738-1739,1743-1745,4805-4808,4832
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_865847a4fef093 2966,2986,3066,3114,3118
+  s_e8850ef125fb32::t_0a43523355634c 3124,3126-3127
+  s_e8850ef125fb32::t_1bd6b669c45a34 3125
+  s_e8850ef125fb32::t_20c13a21ade7d3 2961-2965,2967-2985,2987-3065,3067-3113,3115-3117,3119-3123,3128-3145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d93c3c4e012eca2dac5ce8518718d5a73db0180",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
