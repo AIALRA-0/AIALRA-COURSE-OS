@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, PageLesson, ReleaseManifest } from "@course-os/contracts";
+import type { CourseConflict, CourseProject, CourseRelease, CourseTreeNode, GenerationCostEntry, IdempotentWriteContext, LessonDraft, PageLesson, ReleaseManifest } from "@course-os/contracts";
 import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi, defaultModelProviders, defaultModelRoutePolicy, selectMaterialRelease, withReadBudget } from "./index.js";
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
 import { EMPTY_STATE } from "./index.js";
@@ -2397,6 +2397,97 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(await reader.listConflicts()).toHaveLength(49);
   });
 
+  it("lists conflicts from the reference and hydrated page records without copying full state or reading activity", async () => {
+    const remote = new FakeEtapi();
+    const writer = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const release = releaseWithPage();
+    await writer.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const saved = await writer.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "list-conflicts-initial" });
+    const stalePage = structuredClone(saved.page);
+    stalePage.blocks[0]!.markdown = "stale conflict content";
+    await expect(writer.saveDraft({ ...saved, page: stalePage }, 0, { ...context, idempotencyKey: "list-conflicts-stale" }))
+      .rejects.toThrow("READWEAVE_REVISION_CONFLICT:");
+
+    const pageRecord = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as {
+      conflicts: CourseConflict[];
+      [key: string]: unknown;
+    };
+    const pageConflict = pageRecord.conflicts[0]!;
+    const resolvedPageConflict: CourseConflict = {
+      ...pageConflict,
+      status: "resolved",
+      resolution: "merged",
+      resolvedAt: "2026-10-05T19:00:00.000Z"
+    };
+    pageRecord.conflicts = [resolvedPageConflict];
+    remote.editByTitle("Course OS draft record · page-1", encodeReadWeaveStateContent(pageRecord));
+
+    const legacyOpenConflict: CourseConflict = {
+      ...pageConflict,
+      status: "open",
+      resolution: undefined,
+      resolvedAt: undefined,
+      localContent: "older legacy conflict content"
+    };
+    const legacyOnlyConflict: CourseConflict = {
+      ...pageConflict,
+      id: "legacy-only-conflict",
+      objectId: release.id,
+      objectType: "release",
+      status: "open",
+      resolution: undefined,
+      resolvedAt: undefined
+    };
+    const index = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as {
+      conflicts: CourseConflict[];
+      [key: string]: unknown;
+    };
+    index.conflicts = [...index.conflicts.filter((conflict) => conflict.id !== pageConflict.id), legacyOpenConflict, legacyOnlyConflict];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(index));
+
+    const reader = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const internals = reader as unknown as {
+      readActivityReference: (noteId?: string, requireFresh?: boolean) => Promise<unknown>;
+      findActivityStateNoteId: () => Promise<string | undefined>;
+      mergeDraftPageRecord: (state: unknown, record: unknown) => void;
+      draftPageRecordCache: Map<string, { record: { conflicts: CourseConflict[] } }>;
+    };
+    const activityRead = vi.spyOn(internals, "readActivityReference");
+    const activityLookup = vi.spyOn(internals, "findActivityStateNoteId");
+    const fullMerge = vi.spyOn(internals, "mergeDraftPageRecord");
+    const nativeClone = globalThis.structuredClone;
+    const cloneInputs: unknown[] = [];
+    const cloneSpy = vi.spyOn(globalThis, "structuredClone").mockImplementation(((value: unknown, options?: StructuredSerializeOptions) => {
+      cloneInputs.push(value);
+      return nativeClone(value, options);
+    }) as typeof structuredClone);
+    try {
+      const conflicts = await reader.listConflicts();
+      expect(conflicts).toEqual([resolvedPageConflict, legacyOnlyConflict]);
+      expect(conflicts[0]).toMatchObject({
+        status: "resolved",
+        resolution: "merged",
+        resolvedAt: resolvedPageConflict.resolvedAt,
+        baseContent: pageConflict.baseContent,
+        localContent: pageConflict.localContent,
+        remoteContent: pageConflict.remoteContent
+      });
+      expect(internals.draftPageRecordCache.has("page-1")).toBe(true);
+      expect(activityRead).not.toHaveBeenCalled();
+      expect(activityLookup).not.toHaveBeenCalled();
+      expect(fullMerge).not.toHaveBeenCalled();
+      const nonTemplateClones = cloneInputs.filter((value) => value !== EMPTY_STATE);
+      expect(nonTemplateClones).toHaveLength(1);
+      expect(nonTemplateClones[0]).toEqual(conflicts);
+      expect(conflicts[0]).not.toBe(internals.draftPageRecordCache.get("page-1")!.record.conflicts[0]);
+
+      conflicts[0]!.localContent = "caller mutation";
+      expect(internals.draftPageRecordCache.get("page-1")!.record.conflicts[0]!.localContent).toBe(pageConflict.localContent);
+    } finally {
+      cloneSpy.mockRestore();
+    }
+  });
+
   it("stores a generated draft and its cost in one idempotent ReadWeave mutation", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -4655,6 +4746,324 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(moved.parentId).toBeUndefined();
     expect(remote.parentTitleOf(moved.readweaveNoteId!)).toBe("00 工作区根材料");
   });
+});
+
+describe("confirmed conflict metadata regression", () => {
+  let fixtureNumber = 0;
+  const metadataTitle = "Course OS Metadata Index · personal";
+
+  async function fixture(resolved = false) {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: `http://confirmed-conflicts-${++fixtureNumber}.test`, token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const source = releaseWithPage();
+    await setup.publishRelease(source, { ...manifest, courseReleaseId: source.id }, context);
+    const saved = await setup.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "confirmed-fixture-draft" });
+    const pageConflict: CourseConflict = {
+      id: "conflict:page-1:1000", workspaceId: "personal", objectId: saved.pageId, objectType: "lesson_draft",
+      baseRevision: 0, localRevision: 1, remoteRevision: 1,
+      baseContent: "legacy base content", localContent: JSON.stringify(saved.page), remoteContent: JSON.stringify(saved.page),
+      status: resolved ? "resolved" : "open", createdAt: "2026-10-05T00:00:00.000Z",
+      ...(resolved ? { resolution: "remote" as const, resolvedAt: "2026-10-05T00:01:00.000Z" } : {})
+    };
+    const legacyConflict: CourseConflict = { ...pageConflict, id: "legacy-only-conflict", objectId: source.id, objectType: "release", status: "open", resolution: undefined, resolvedAt: undefined };
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { conflicts: CourseConflict[] };
+    record.conflicts = [pageConflict];
+    remote.editByTitle("Course OS draft record · page-1", encodeReadWeaveStateContent(record));
+    const root = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { conflicts: CourseConflict[] };
+    root.conflicts = [legacyConflict, { ...pageConflict, status: "open", resolution: undefined, resolvedAt: undefined }];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(root));
+    const api = new EtapiReadWeaveCourseApi(config);
+    await api.ensureMetadataIndex();
+    return { remote, config, api, source, saved, pageConflict, legacyConflict };
+  }
+
+  it("backfills legacy-only and durable page conflicts once with resolved authority taking precedence", async () => {
+    const { remote, api, pageConflict, legacyConflict } = await fixture(true);
+    const indexed = decodeReadWeaveStateContent(remote.contentByTitle(metadataTitle)) as { confirmedConflicts: CourseConflict[] };
+    expect(indexed.confirmedConflicts).toEqual([legacyConflict, pageConflict]);
+    const before = remote.requests.length;
+    await api.ensureMetadataIndex();
+    expect(remote.requests.slice(before).every(request => request.method === "GET" && request.path === `/notes/${remote.noteIdByTitle(metadataTitle)}/content`)).toBe(true);
+    await expect(api.listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+  });
+
+  it.each(["unavailable", "stalled"])("reads fresh confirmed conflicts after cold reopen with the root %s and no draft scan", async (mode) => {
+    const { remote, config, pageConflict, legacyConflict } = await fixture();
+    const rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    let forbiddenRootReads = 0;
+    const cold = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === `/etapi/notes/${rootId}/content`) {
+        forbiddenRootReads += 1;
+        if (mode === "unavailable") return new Response("root unavailable", { status: 503 });
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(init?.signal?.reason ?? new Error("root stalled"));
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      return remote.fetch(input, init);
+    } });
+    const internals = cold as unknown as {
+      readStateReference: () => Promise<unknown>;
+      hydrateDraftPageRecords: () => Promise<void>;
+      readDraftPageRecords: () => Promise<unknown>;
+    };
+    const rootRead = vi.spyOn(internals, "readStateReference");
+    const hydration = vi.spyOn(internals, "hydrateDraftPageRecords");
+    const records = vi.spyOn(internals, "readDraftPageRecords");
+    const before = remote.requests.length;
+    const conflicts = await withReadBudget({ timeoutMs: 300 }, () => cold.listConflicts());
+    expect(conflicts).toEqual([legacyConflict, pageConflict]);
+    expect(forbiddenRootReads).toBe(0);
+    expect(rootRead).not.toHaveBeenCalled();
+    expect(hydration).not.toHaveBeenCalled();
+    expect(records).not.toHaveBeenCalled();
+    const reads = remote.requests.slice(before);
+    expect(reads.every(request => request.method === "GET")).toBe(true);
+    expect(reads.filter(request => request.path.endsWith("/content")).map(request => request.path)).toEqual([`/notes/${remote.noteIdByTitle(metadataTitle)}/content`]);
+    conflicts[0]!.localContent = "caller-only mutation";
+    conflicts.pop();
+    await expect(cold.listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+  });
+
+  it("registers a subsequent revision conflict, indexes its resolution and replays without writing", async () => {
+    const { remote, config, api, saved, pageConflict, legacyConflict } = await fixture();
+    const stalePage = structuredClone(saved.page);
+    stalePage.blocks[0]!.markdown = "new stale attempt";
+    await expect(api.saveDraft({ ...saved, page: stalePage }, 0, { ...context, idempotencyKey: "confirmed-new-conflict" })).rejects.toThrow("READWEAVE_REVISION_CONFLICT:");
+    const cold = new EtapiReadWeaveCourseApi(config);
+    const conflicts = await cold.listConflicts();
+    const created = conflicts.find(conflict => conflict.id !== pageConflict.id && conflict.id !== legacyConflict.id);
+    expect(created).toMatchObject({ status: "open", objectId: saved.pageId, localContent: JSON.stringify(stalePage) });
+    const write = { ...context, idempotencyKey: "confirmed-resolve" };
+    const resolved = await api.resolveConflict(created!.id, "remote", undefined, write);
+    expect(resolved).toMatchObject({ status: "resolved", resolution: "remote" });
+    await expect(cold.listConflicts()).resolves.toEqual(expect.arrayContaining([resolved, pageConflict, legacyConflict]));
+    const beforeReplay = remote.requests.length;
+    await expect(api.resolveConflict(created!.id, "local", undefined, write)).resolves.toEqual(resolved);
+    expect(remote.requests.slice(beforeReplay).filter(request => request.method !== "GET")).toEqual([]);
+  });
+
+  it("rejects a fresh metadata GET failure instead of returning cached or empty conflicts", async () => {
+    const { remote, config, pageConflict, legacyConflict } = await fixture();
+    const metadataId = remote.noteIdByTitle(metadataTitle);
+    let fail = false;
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (fail && url.pathname === `/etapi/notes/${metadataId}/content`) return new Response("denied", { status: 403 });
+      return remote.fetch(input, init);
+    } });
+    await expect(reader.listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+    fail = true;
+    await expect(reader.listConflicts()).rejects.toThrow("READWEAVE_ETAPI_403:");
+    fail = false;
+    await expect(reader.listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+  });
+
+  it("reports failed conflict index readback and subsequently reads the actual persisted conflict", async () => {
+    const { remote, config, saved, pageConflict, legacyConflict } = await fixture();
+    const metadataId = remote.noteIdByTitle(metadataTitle);
+    const oldMetadata = remote.contentByTitle(metadataTitle);
+    let corruptReadback = false;
+    const writer = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === `/etapi/notes/${metadataId}/content`) {
+        if (init?.method === "PUT") {
+          const response = await remote.fetch(input, init);
+          corruptReadback = true;
+          return response;
+        }
+        if (corruptReadback && (init?.method ?? "GET") === "GET") {
+          corruptReadback = false;
+          return new Response(oldMetadata, { status: 200 });
+        }
+      }
+      return remote.fetch(input, init);
+    } });
+    await expect(writer.saveDraft(saved, 0, { ...context, idempotencyKey: "confirmed-failed-readback" })).rejects.toThrow("READWEAVE_METADATA_INDEX_READBACK_FAILED");
+    const current = await new EtapiReadWeaveCourseApi(config).listConflicts();
+    expect(current).toEqual(expect.arrayContaining([pageConflict, legacyConflict]));
+    expect(current.filter(conflict => conflict.id !== pageConflict.id && conflict.id !== legacyConflict.id)).toHaveLength(1);
+  });
+
+  it("keeps a resolved conflict when a second adapter submits a delayed old open snapshot", async () => {
+    const { config, api, pageConflict } = await fixture();
+    const late = new EtapiReadWeaveCourseApi(config) as unknown as { updateConfirmedConflicts(conflicts: CourseConflict[]): Promise<void> };
+    let releaseOld!: () => void;
+    const gate = new Promise<void>(resolve => { releaseOld = resolve; });
+    const oldUpdate = gate.then(() => late.updateConfirmedConflicts([structuredClone(pageConflict)]));
+    try {
+      const resolved = await api.resolveConflict(pageConflict.id, "remote", undefined, { ...context, idempotencyKey: "confirmed-before-late-open" });
+      releaseOld();
+      await oldUpdate;
+      expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(resolved);
+    } finally {
+      releaseOld();
+      await oldUpdate;
+    }
+  });
+
+  it("retains an observed open conflict across a failed page PUT and adapter restart", async () => {
+    const { remote, config, saved, pageConflict, legacyConflict } = await fixture();
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const writer = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === `/etapi/notes/${recordId}/content` && init?.method === "PUT") return new Response("page PUT denied", { status: 403 });
+      return remote.fetch(input, init);
+    } });
+    const stalePage = structuredClone(saved.page);
+    stalePage.blocks[0]!.markdown = "observed despite failed page PUT";
+    await expect(writer.saveDraft({ ...saved, page: stalePage }, 0, { ...context, idempotencyKey: "confirmed-page-put-failure" })).rejects.toThrow("READWEAVE_ETAPI_403:");
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { conflicts: CourseConflict[] };
+    expect(record.conflicts).toEqual([pageConflict]);
+    const observed = await new EtapiReadWeaveCourseApi(config).listConflicts();
+    expect(observed).toEqual(expect.arrayContaining([pageConflict, legacyConflict]));
+    expect(observed.filter(conflict => conflict.id !== pageConflict.id && conflict.id !== legacyConflict.id)).toEqual([
+      expect.objectContaining({ status: "open", objectId: saved.pageId, localContent: JSON.stringify(stalePage) })
+    ]);
+  });
+
+  it.each(["replay", "already-resolved"])("repairs a failed resolution projection through the %s path after verifying the page authority", async (repair) => {
+    const { remote, config, pageConflict } = await fixture();
+    const metadataId = remote.noteIdByTitle(metadataTitle);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let failIndexPut = true;
+    const writer = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (failIndexPut && url.pathname === `/etapi/notes/${metadataId}/content` && init?.method === "PUT") return new Response("index PUT denied", { status: 403 });
+      return remote.fetch(input, init);
+    } });
+    const write = { ...context, idempotencyKey: "confirmed-resolution-lost-index" };
+    await expect(writer.resolveConflict(pageConflict.id, "remote", undefined, write)).rejects.toThrow("READWEAVE_ETAPI_403:");
+    const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { conflicts: CourseConflict[] };
+    const resolved = record.conflicts.find(conflict => conflict.id === pageConflict.id)!;
+    expect(resolved).toMatchObject({ status: "resolved", resolution: "remote" });
+    expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(pageConflict);
+    failIndexPut = false;
+    const pageWrites = remote.contentWriteCount(recordId);
+    const retry = repair === "replay" ? write : { ...context, idempotencyKey: "confirmed-already-resolved-repair" };
+    await expect(writer.resolveConflict(pageConflict.id, "local", undefined, retry)).resolves.toEqual(resolved);
+    expect(remote.contentWriteCount(recordId)).toBe(pageWrites);
+    expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(resolved);
+  });
+
+  it("does not project a resolution when the page record confirmation returns stale content", async () => {
+    const { remote, config, pageConflict } = await fixture();
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const oldRecord = remote.contentByTitle("Course OS draft record · page-1");
+    let staleReadback = false;
+    const writer = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname === `/etapi/notes/${recordId}/content`) {
+        if (init?.method === "PUT") {
+          const response = await remote.fetch(input, init);
+          staleReadback = true;
+          return response;
+        }
+        if (staleReadback && (init?.method ?? "GET") === "GET") {
+          staleReadback = false;
+          return new Response(oldRecord, { status: 200 });
+        }
+      }
+      return remote.fetch(input, init);
+    } });
+    await expect(writer.resolveConflict(pageConflict.id, "remote", undefined, { ...context, idempotencyKey: "confirmed-stale-page-readback" })).rejects.toThrow("READWEAVE_DRAFT_RECORD_READBACK_FAILED");
+    expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(pageConflict);
+  });
+
+  it("repairs a lost resolved projection through saveDraft replay without re-saving the page", async () => {
+    const { remote, config, saved, pageConflict } = await fixture(true);
+    const metadataId = remote.noteIdByTitle(metadataTitle);
+    const index = decodeReadWeaveStateContent(remote.contentByTitle(metadataTitle)) as { confirmedConflicts: CourseConflict[] };
+    index.confirmedConflicts = index.confirmedConflicts.filter(conflict => conflict.id !== pageConflict.id);
+    remote.editByTitle(metadataTitle, encodeReadWeaveStateContent(index));
+    let failIndexPut = true;
+    const writer = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (failIndexPut && url.pathname === `/etapi/notes/${metadataId}/content` && init?.method === "PUT") return new Response("index PUT denied", { status: 403 });
+      return remote.fetch(input, init);
+    } });
+    const write = { ...context, idempotencyKey: "confirmed-draft-lost-index" };
+    await expect(writer.saveDraft(saved, saved.revision, write)).rejects.toThrow("READWEAVE_ETAPI_403:");
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const pageWrites = remote.contentWriteCount(recordId);
+    failIndexPut = false;
+    await expect(writer.saveDraft(saved, saved.revision, write)).resolves.toMatchObject({ revision: saved.revision + 1 });
+    expect(remote.contentWriteCount(recordId)).toBe(pageWrites);
+    expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(pageConflict);
+  });
+
+  it("repairs the confirmed projection on a core publish replay without rewriting the root", async () => {
+    const { remote, config, api, source, pageConflict } = await fixture(true);
+    const next = { ...structuredClone(source), id: "confirmed-core-replay-release", version: source.version + 1 };
+    const write = { ...context, idempotencyKey: "confirmed-core-replay" };
+    await api.publishRelease(next, { ...manifest, courseReleaseId: next.id }, write);
+    const index = decodeReadWeaveStateContent(remote.contentByTitle(metadataTitle)) as { confirmedConflicts: CourseConflict[] };
+    index.confirmedConflicts = index.confirmedConflicts.filter(conflict => conflict.id !== pageConflict.id);
+    remote.editByTitle(metadataTitle, encodeReadWeaveStateContent(index));
+    const rootWrites = remote.contentWriteCount(remote.noteIdByTitle("00 Course OS 结构化索引"));
+    await expect(api.publishRelease(next, { ...manifest, courseReleaseId: next.id }, write)).resolves.toMatchObject({ id: next.id });
+    expect(remote.contentWriteCount(remote.noteIdByTitle("00 Course OS 结构化索引"))).toBe(rootWrites);
+    expect((await new EtapiReadWeaveCourseApi(config).listConflicts()).find(conflict => conflict.id === pageConflict.id)).toEqual(pageConflict);
+  }, 2_000);
+
+  it("retains both different-page conflicts from concurrent independent adapter writes", async () => {
+    const { config, api, source, pageConflict, legacyConflict } = await fixture();
+    const secondPage = { ...structuredClone(source.pages[0]!), id: "confirmed-concurrent-page-2", pageNumber: 2 };
+    const next = { ...structuredClone(source), id: "confirmed-concurrent-release", version: source.version + 1,
+      pageIds: [...source.pageIds, secondPage.id], pages: [...source.pages, secondPage] };
+    await api.publishRelease(next, { ...manifest, courseReleaseId: next.id }, { ...context, idempotencyKey: "confirmed-concurrent-publish" });
+    const drafts = await Promise.all(next.pageIds.map(async (pageId) => {
+      const writer = new EtapiReadWeaveCourseApi(config);
+      const current = await writer.getDraftByPage(pageId);
+      return writer.saveDraft(current ?? draftFor(next, pageId), current?.revision ?? 0, { ...context, idempotencyKey: `confirmed-concurrent-initial-${pageId}` });
+    }));
+    const stale = drafts.map(draft => {
+      const page = structuredClone(draft.page);
+      page.blocks[0]!.markdown = `concurrent stale content for ${draft.pageId}`;
+      return { ...draft, page };
+    });
+    const attempts = await Promise.allSettled(stale.map(draft => new EtapiReadWeaveCourseApi(config).saveDraft(
+      draft, 0, { ...context, idempotencyKey: `confirmed-concurrent-conflict-${draft.pageId}` }
+    )));
+    for (const attempt of attempts) {
+      expect(attempt.status).toBe("rejected");
+      if (attempt.status === "rejected") expect(String(attempt.reason)).toContain("READWEAVE_REVISION_CONFLICT:");
+    }
+    const rows = await new EtapiReadWeaveCourseApi(config).listConflicts();
+    expect(rows).toEqual(expect.arrayContaining([legacyConflict, pageConflict]));
+    const created = rows.filter(row => row.id !== legacyConflict.id && row.id !== pageConflict.id);
+    expect(created).toHaveLength(2);
+    for (const draft of stale) {
+      expect(created).toEqual(expect.arrayContaining([
+        expect.objectContaining({ objectId: draft.pageId, status: "open", localContent: JSON.stringify(draft.page) })
+      ]));
+    }
+  }, 2_000);
+
+  it("preserves confirmed conflicts across metadata rename and restores them through rollback", async () => {
+    const { remote, config, api, source, pageConflict, legacyConflict } = await fixture(true);
+    const course = (await api.listTreeNodes()).find(node => node.id === source.courseId)!;
+    const rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const rootWrites = remote.contentWriteCount(rootId);
+    await api.updateTreeNode(course.id, { title: "renamed with confirmed conflicts" }, course.revision ?? 0, { ...context, idempotencyKey: "confirmed-rename" });
+    expect(remote.contentWriteCount(rootId)).toBe(rootWrites);
+    await expect(new EtapiReadWeaveCourseApi(config).listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+    await api.prepareMetadataRollback();
+    const root = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as { conflicts: CourseConflict[]; projections: { metadataIndexNoteId?: string } };
+    expect(root.projections.metadataIndexNoteId).toBeUndefined();
+    expect(root.conflicts.find(conflict => conflict.id === pageConflict.id)).toEqual(pageConflict);
+    await expect(new EtapiReadWeaveCourseApi(config).listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+  });
+
+  it("publishes a core release with a nonempty conflict page record without re-entering its own queue", async () => {
+    const { config, api, source, pageConflict, legacyConflict } = await fixture();
+    const next = { ...structuredClone(source), id: "confirmed-core-next-release", version: source.version + 1 };
+    await expect(api.publishRelease(next, { ...manifest, courseReleaseId: next.id }, { ...context, idempotencyKey: "confirmed-core-publish" })).resolves.toMatchObject({ id: next.id });
+    await expect(new EtapiReadWeaveCourseApi(config).listConflicts()).resolves.toEqual([legacyConflict, pageConflict]);
+  }, 2_000);
 });
 
 describe("material release identity", () => {

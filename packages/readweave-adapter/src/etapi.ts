@@ -166,6 +166,8 @@ interface EtapiMetadataIndex {
   courses: CourseProject[];
   treeNodes: CourseTreeNode[];
   trash: TrashRecord[];
+  /** Confirmed conflict read projection; absent until a controlled full backfill. */
+  confirmedConflicts?: CourseConflict[];
   projections: Pick<ProjectionIndex, "courseRootNoteId" | "rootMaterialsNoteId" | "trashNoteId" | "materialReleaseSelections"> & {
     courses: Record<string, CourseProjection>;
   };
@@ -598,7 +600,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const pageRecord = await this.findDraftPageRecord(page.id);
         if (pageRecord) {
           const refreshed = this.makeDraftPageRecord(state, draft, projection, pageRecord.record);
-          await this.writeDraftPageRecord(refreshed, pageRecord.noteId, state);
+          await this.writeDraftPageRecord(refreshed, pageRecord.noteId, state, false);
         }
       }
       this.upsertStableMaterialNodes(state);
@@ -1104,6 +1106,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           const migrated = this.makeDraftPageRecord(state, existing, projection);
           await this.writeDraftPageRecord(migrated, undefined, fallbackState());
         }
+        await this.updateConfirmedConflicts(previous?.conflicts ?? state.conflicts);
         await this.syncMetadataMaterialFromDraft(this.stateCache?.state ?? fallbackState(), existing, context);
         if (cost) await this.writeContext.run(context, () => this.ensureCostNoteOnce(projection!.sectionNoteIds.quality, cost));
         return structuredClone(existing);
@@ -1172,7 +1175,17 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   async listConflicts(): Promise<CourseConflict[]> {
-    return (await this.readState()).conflicts;
+    const metadata = await this.metadataIndexForRead();
+    if (metadata?.index.confirmedConflicts !== undefined) {
+      return structuredClone(metadata.index.confirmedConflicts);
+    }
+    const reference = await this.readStateReference(false, false);
+    await this.hydrateDraftPageRecords();
+    const conflictsById = new Map(reference.conflicts.map((conflict) => [conflict.id, conflict]));
+    for (const { record } of this.draftPageRecordCache.values()) {
+      for (const conflict of record.conflicts) conflictsById.set(conflict.id, conflict);
+    }
+    return structuredClone([...conflictsById.values()]);
   }
 
   async resolveConflict(conflictId: string, resolution: "local" | "remote" | "merged", mergedContent: string | undefined, context: IdempotentWriteContext): Promise<CourseConflict> {
@@ -1193,11 +1206,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (replay) {
           const existing = state.conflicts.find((item) => item.id === replay.objectId);
           if (!existing) throw new Error("READWEAVE_IDEMPOTENCY_CORRUPT");
+          await this.updateConfirmedConflicts(state.conflicts);
           return existing;
         }
         const conflict = state.conflicts.find((item) => item.id === conflictId);
         if (!conflict) throw new Error("READWEAVE_CONFLICT_NOT_FOUND");
-        if (conflict.status === "resolved") return conflict;
+        if (conflict.status === "resolved") {
+          await this.updateConfirmedConflicts(state.conflicts);
+          return conflict;
+        }
         if (resolution === "merged" && !mergedContent?.trim()) throw new Error("READWEAVE_MERGED_CONTENT_REQUIRED");
         const selected = resolution === "local" ? conflict.localContent : resolution === "remote" ? conflict.remoteContent : mergedContent!;
         const previousDraft = structuredClone(draft);
@@ -2171,10 +2188,43 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   /** Run or resume the one-time legacy metadata split and return its active authority. */
   async ensureMetadataIndex(): Promise<{ noteId: string; revision: number; status: "active" }> {
     return this.enqueueWrite(async () => {
-      const located = await this.metadataIndexForMutation();
+      let located = await this.metadataIndexForMutation();
       if (located.index.status !== "active") throw new Error("READWEAVE_METADATA_MIGRATION_NOT_ACTIVE");
+      if (located.index.confirmedConflicts === undefined) {
+        // This operator-only pass uses authority records, not a partial hot cache.
+        const root = await this.readRawState();
+        if (root.projections.stateNoteId !== located.index.stateNoteId
+          || root.projections.metadataIndexNoteId !== located.noteId) throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+        let conflicts = root.conflicts;
+        for (const { record } of (await this.readDraftPageRecords()).values()) {
+          if (record.conflicts.length) conflicts = mergeConfirmedConflicts(conflicts, record.conflicts);
+        }
+        located = await this.writeMetadataIndex(located, {
+          ...located.index, revision: located.index.revision + 1,
+          confirmedConflicts: structuredClone(conflicts)
+        }, located.index.revision);
+        this.commitMetadataIndex(located);
+      }
       return { noteId: located.noteId, revision: located.index.revision, status: "active" };
     });
+  }
+
+  private async updateConfirmedConflicts(conflicts: CourseConflict[], serialize = true): Promise<void> {
+    if (!conflicts.length) return;
+    const work = async () => {
+      const located = await this.metadataIndexForRead();
+      if (!located || located.index.status !== "active" || located.index.confirmedConflicts === undefined) return;
+      const merged = mergeConfirmedConflicts(located.index.confirmedConflicts, conflicts);
+      if (JSON.stringify(merged) === JSON.stringify(located.index.confirmedConflicts)) return;
+      const saved = await this.writeMetadataIndex(located, {
+        ...located.index, revision: located.index.revision + 1, confirmedConflicts: merged
+      }, located.index.revision);
+      this.commitMetadataIndex(saved);
+    };
+    // Page operations already hold their page lock. Core writes already own
+    // the metadata queue and must not enqueue themselves a second time.
+    if (serialize) await this.enqueueWrite(work, this.writeContext.getStore());
+    else await work();
   }
 
   /** Rebuild the legacy root snapshot from the current core and metadata overlay before retiring the split. */
@@ -3404,6 +3454,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const index = parsed as EtapiMetadataIndex;
     if (index.workspaceId !== this.workspaceId) throw new Error("READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH");
+    if (index.confirmedConflicts !== undefined && (!Array.isArray(index.confirmedConflicts)
+      || index.confirmedConflicts.some(conflict => !conflict || typeof conflict.id !== "string"
+        || conflict.workspaceId !== this.workspaceId || !["open", "resolved"].includes(conflict.status)))) {
+      throw new Error("READWEAVE_METADATA_INDEX_INVALID");
+    }
     return { noteId, index };
   }
 
@@ -3879,9 +3934,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async writeDraftPageRecord(
     record: EtapiDraftPageRecord,
     noteId: string | undefined,
-    fallbackState?: EtapiState
+    fallbackState?: EtapiState,
+    updateConflicts = true
   ): Promise<string> {
     try {
+      // Persist observed open conflicts before changing their page record.
+      // A lost page PUT must not hide a detected conflict after restart.
+      if (updateConflicts) await this.updateConfirmedConflicts(record.conflicts.filter(conflict => conflict.status === "open"));
       const content = await encodeReadWeaveStateContentAsync(record);
       let savedNoteId = noteId;
       if (savedNoteId) {
@@ -3901,6 +3960,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         || readback.draft?.contentHash !== sha256(JSON.stringify(readback.draft.page))) {
         throw new Error("READWEAVE_DRAFT_RECORD_READBACK_FAILED");
       }
+      if (JSON.stringify(readback.conflicts ?? []) !== JSON.stringify(record.conflicts)) {
+        throw new Error("READWEAVE_DRAFT_RECORD_READBACK_FAILED");
+      }
+      if (updateConflicts) await this.updateConfirmedConflicts(record.conflicts);
       const located: LocatedDraftPageRecord = {
         noteId: savedNoteId,
         record: {
@@ -3982,6 +4045,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       await this.putContent(state.projections.stateNoteId, content, timingEnabled
         ? (durationMs) => { stateNotePutMs = durationMs; }
         : undefined);
+      await this.updateConfirmedConflicts(state.conflicts, false);
+      const metadata = this.metadataIndexCache;
+      if (metadata && state.projections.metadataIndexNoteId === metadata.noteId) {
+        state.projections.metadataIndexRevision = metadata.index.revision;
+      }
       this.lastWriteAt = new Date().toISOString();
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
       const commitCoreSnapshot = async () => {
@@ -4444,6 +4512,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           // Learning routes own the separate activity index. A core snapshot
           // clone must never write that note or roll back concurrent activity.
           await this.writeState(state);
+        } else {
+          await this.updateConfirmedConflicts(state.conflicts, false);
         }
         return result;
       } catch (error) {
@@ -4883,6 +4953,19 @@ function metadataIdempotency(idempotency: ReadWeaveFileState["idempotency"]): Re
     .filter(([, entry]) => metadataIdempotencyKinds.has(entry.kind)));
 }
 
+function mergeConfirmedConflicts(previous: CourseConflict[], incoming: CourseConflict[]): CourseConflict[] {
+  const byId = new Map(previous.map(conflict => [conflict.id, conflict]));
+  for (const conflict of incoming) {
+    const existing = byId.get(conflict.id);
+    // A late core snapshot must not reopen an already confirmed resolution.
+    if (existing?.status === "resolved" && conflict.status === "open") continue;
+    if (existing?.status === "resolved" && conflict.status === "resolved"
+      && (existing.resolvedAt ?? "") > (conflict.resolvedAt ?? "")) continue;
+    byId.set(conflict.id, conflict);
+  }
+  return structuredClone([...byId.values()]);
+}
+
 function metadataPayload(value: EtapiMetadataIndex | EtapiState): unknown {
   const projections = value.projections;
   return {
@@ -4989,6 +5072,7 @@ function applyMetadataIndex(state: EtapiState, index: EtapiMetadataIndex, noteId
   state.courses = structuredClone(index.courses);
   state.treeNodes = structuredClone(index.treeNodes);
   state.trash = structuredClone(index.trash);
+  if (index.confirmedConflicts !== undefined) state.conflicts = mergeConfirmedConflicts(state.conflicts, index.confirmedConflicts);
   for (const [key, entry] of Object.entries(state.idempotency)) {
     // Older native confirmations stored their receipt in the core. Preserve
     // it until a real core write moves it to metadata; no cleanup rewrite.

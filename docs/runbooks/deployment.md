@@ -87,6 +87,15 @@ writer lease, resumes interrupted activation and verifies the authority index.
 It does not generate lessons. Rename/move/archive subsequently update that index
 instead of copying teaching bodies. Keep the pre-switch Compose file and images.
 
+Run this same controlled command when upgrading an older metadata index that
+does not yet contain its confirmed conflict read projection. It backfills legacy
+and page-record conflicts once, verifies the persisted result, and resumes safely
+after an interrupted confirmation. Subsequent conflict lists read the small
+authority index rather than downloading every lesson. New observed conflicts and
+confirmed resolutions update it through the existing serialized write path;
+older snapshots cannot reopen a resolved conflict. No lesson regeneration or
+startup-wide scan is required. Keep the authority index in rollback backups.
+
 A lost metadata-write response is an unknown result, not a failed transaction.
 The browser preserves the original idempotency key for an explicit retry,
 including after refresh or reopening a tab when browser storage is available. Do not replace that key or show a saved
