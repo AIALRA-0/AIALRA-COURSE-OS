@@ -1946,7 +1946,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const add = (id?: string) => { if (id) expected.add(id); };
     for (const releaseId of scope.releaseIds) {
       const id = state.projections.releases[releaseId];
-      if (!id) throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_CHANGED");
+      if (!id) {
+        const release = state.releases.find(candidate => candidate.id === releaseId);
+        // registerDraftSource creates catalog authority without a published note.
+        if (release?.lifecycle === "draft_source" && !state.manifests.some(manifest => manifest.courseReleaseId === releaseId)) continue;
+        throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_CHANGED");
+      }
       add(id);
     }
     for (const draft of state.drafts) if (scope.pageIds.includes(draft.pageId)) {
@@ -2041,7 +2046,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const releaseNotes: string[] = [];
     for (const releaseId of scope.releaseIds) {
       const noteId = state.projections.releases[releaseId];
-      if (!noteId) throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_INCOMPLETE");
+      if (!noteId) {
+        const release = state.releases.find(candidate => candidate.id === releaseId);
+        if (release?.lifecycle === "draft_source" && !state.manifests.some(manifest => manifest.courseReleaseId === releaseId)) continue;
+        throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_INCOMPLETE");
+      }
       add(noteId); releaseNotes.push(noteId);
     }
     const pageIds = new Set(scope.pageIds);

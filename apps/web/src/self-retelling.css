@@ -1,11 +1,12 @@
 .self-retelling-panel { display: grid; gap: 14px; margin: 24px 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
-.self-retelling-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.self-retelling-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.self-retelling-heading > div { flex: 1 1 240px; min-width: 0; }
 .self-retelling-heading > div > span, .self-retelling-review-header > div > span { color: var(--muted); font-size: 11px; letter-spacing: .08em; font-weight: 700; }
 .self-retelling-heading h3 { margin: 5px 0; font-size: 17px; }
 .self-retelling-heading p, .self-retelling-review-header p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-.self-retelling-progress { flex: 0 0 auto; padding: 7px 10px; border-radius: 999px; background: var(--soft-2); color: var(--ink-soft); font-size: 12px; }
+.self-retelling-progress { flex: 0 1 auto; max-width: 100%; padding: 7px 10px; border-radius: 999px; background: var(--soft-2); color: var(--ink-soft); font-size: 12px; white-space: normal; }
 .self-retelling-input { display: grid; gap: 7px; color: var(--ink-soft); font-size: 13px; font-weight: 650; }
-.self-retelling-input textarea { width: 100%; min-height: 112px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 15px; line-height: 1.7; }
+.self-retelling-input textarea { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; min-height: 112px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 15px; line-height: 1.7; }
 .self-retelling-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
 .self-retelling-message { margin: 0; color: var(--green); font-size: 13px; line-height: 1.6; }
 .self-retelling-message.is-error { color: var(--red); }
@@ -26,4 +27,4 @@
 .self-retelling-ratings { display: flex; flex-wrap: wrap; gap: 9px; }
 .self-retelling-empty h2 { margin: 0; font-size: 20px; }
 .self-retelling-empty p { max-width: 620px; margin: 0; color: var(--muted); line-height: 1.75; }
-@media (max-width: 640px) { .self-retelling-heading, .self-retelling-review-header { flex-direction: column; align-items: stretch; } .self-retelling-progress { justify-self: start; } .review-header-actions { flex-direction: column-reverse; align-items: stretch; } .self-retelling-review { padding: 20px 13px 50px; } .self-retelling-ratings { width: 100%; } .self-retelling-ratings button { flex: 1 1 100%; justify-content: center; } }
+@media (max-width: 640px) { .self-retelling-heading, .self-retelling-review-header { flex-direction: column; align-items: stretch; } .self-retelling-heading > div { flex: initial; } .self-retelling-progress { justify-self: start; } .review-header-actions { flex-direction: column-reverse; align-items: stretch; } .self-retelling-review { padding: 20px 13px 50px; } .self-retelling-ratings { width: 100%; } .self-retelling-ratings button { flex: 1 1 100%; justify-content: center; } }
