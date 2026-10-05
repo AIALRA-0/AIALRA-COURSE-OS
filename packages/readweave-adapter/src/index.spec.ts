@@ -3398,6 +3398,193 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(restarted.getRelease(release.id)).resolves.toMatchObject({ id: release.id });
   });
 
+  it("fresh-reads changed metadata after TTL expiry and renews the cache before the next metadata write", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await setup.ensureMetadataIndex();
+
+    const reader = new EtapiReadWeaveCourseApi(config);
+    await expect(reader.listTrash()).resolves.toEqual([]);
+    (reader as any).metadataIndexCache.expiresAt = Date.now() - 1;
+    const trashed = await setup.trashTreeNode(release.courseId, { ...context, idempotencyKey: "expired-metadata-trash" });
+    const coreId = remote.noteIdByTitle("00 Course OS 结构化索引");
+    const before = remote.requests.length;
+
+    await expect(reader.listTrash()).resolves.toEqual([expect.objectContaining({ id: trashed.id, nodeId: release.courseId })]);
+    expect(remote.requests.slice(before).filter(request => request.path === "/notes")).toEqual([]);
+    expect((reader as any).metadataIndexCache.expiresAt).toBeGreaterThan(Date.now());
+    const course: CourseProject = { id: "post-expiry-metadata-write", workspaceId: "personal", title: "Post-expiry metadata write", status: "active",
+      createdAt: "2026-10-05T00:00:00Z", updatedAt: "2026-10-05T00:00:00Z" };
+    await expect(reader.createCourse(course, { ...context, idempotencyKey: "post-expiry-metadata-write" })).resolves.toMatchObject({ id: course.id });
+    expect(remote.requests.slice(before).filter(request => request.path === `/notes/${coreId}/content`)).toEqual([]);
+  });
+
+  it.each(["workspaceId", "stateNoteId", "courseRootNoteId", "migrationId"] as const)(
+    "rejects and clears a cached locator when its %s binding changes",
+    async (binding) => {
+      const remote = new FakeEtapi();
+      const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+      const setup = new EtapiReadWeaveCourseApi(config);
+      await setup.ensureMetadataIndex();
+      const reader = new EtapiReadWeaveCourseApi(config);
+      await reader.listTrash();
+      const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+      const index = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+      if (binding === "workspaceId") index.workspaceId = "other-workspace";
+      else if (binding === "stateNoteId") index.stateNoteId = "different-state";
+      else if (binding === "courseRootNoteId") index.projections.courseRootNoteId = "different-course-root";
+      else index.migration.id = "different-migration";
+      remote.replaceNoteContent(metadataId, encodeReadWeaveStateContent(index));
+      const before = remote.requests.length;
+
+      const expected = binding === "workspaceId" ? "READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH" : "READWEAVE_METADATA_INDEX_SOURCE_MISMATCH";
+      await expect(reader.listTrash()).rejects.toThrow(expected);
+      expect((reader as any).metadataIndexCache).toBeUndefined();
+      expect(remote.requests.slice(before).filter(request => request.path === "/notes")).toEqual([]);
+    }
+  );
+
+  it.each([false, true])("rediscovers a 404 metadata locator and checks the replacement binding (changed: %s)", async (changeBinding) => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    await setup.ensureMetadataIndex();
+    const reader = new EtapiReadWeaveCourseApi(config);
+    await reader.listTrash();
+    const originalId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    const replacementId = remote.addNoteCopy(originalId, "root");
+    if (changeBinding) {
+      const replacement = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+      replacement.migration.id = "replacement-migration";
+      remote.replaceNoteContent(replacementId, encodeReadWeaveStateContent(replacement));
+    }
+    remote.eraseNativeNotes([originalId]);
+    const before = remote.requests.length;
+
+    if (changeBinding) {
+      await expect(reader.listTrash()).rejects.toThrow("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+      expect((reader as any).metadataIndexCache).toBeUndefined();
+    } else {
+      await expect(reader.listTrash()).resolves.toEqual([]);
+      expect((reader as any).metadataIndexCache.noteId).toBe(replacementId);
+    }
+    expect(remote.requests.slice(before).filter(request => request.path === "/notes")).toHaveLength(1);
+  });
+
+  it("rejects cold duplicate metadata indexes without writing", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    await setup.ensureMetadataIndex();
+    const activeId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    remote.addNoteCopy(activeId, "root");
+    const cold = new EtapiReadWeaveCourseApi(config);
+    const before = remote.requests.length;
+
+    await expect(cold.listTrash()).rejects.toThrow("READWEAVE_METADATA_INDEX_DUPLICATE");
+    expect(remote.requests.slice(before).filter(request => request.method !== "GET")).toEqual([]);
+  });
+
+  it("does not rediscover a malformed known metadata note and recovers on the next fresh GET", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    await setup.ensureMetadataIndex();
+    const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    let corruptNextRead = false;
+    let contentGets = 0;
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "GET" && url.pathname === "/etapi/notes") searches += 1;
+      if ((init?.method ?? "GET") === "GET" && url.pathname === `/etapi/notes/${metadataId}/content`) {
+        contentGets += 1;
+        if (corruptNextRead) {
+          corruptNextRead = false;
+          return new Response("{ malformed", { status: 200 });
+        }
+      }
+      return remote.fetch(input, init);
+    };
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    await reader.listTrash();
+    searches = 0;
+    contentGets = 0;
+    corruptNextRead = true;
+
+    await expect(reader.listTrash()).rejects.toThrow();
+    expect(contentGets).toBe(1);
+    expect(searches).toBe(0);
+    expect((reader as any).metadataIndexCache.noteId).toBe(metadataId);
+    await expect(reader.listTrash()).resolves.toEqual([]);
+    expect(contentGets).toBe(2);
+    expect(searches).toBe(0);
+  });
+
+  it("does not rediscover after a metadata read deadline and retries the known note on the next call", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    await setup.ensureMetadataIndex();
+    const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    let stallNextRead = false;
+    let contentGets = 0;
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "GET" && url.pathname === "/etapi/notes") searches += 1;
+      if ((init?.method ?? "GET") === "GET" && url.pathname === `/etapi/notes/${metadataId}/content`) {
+        contentGets += 1;
+        if (stallNextRead) {
+          stallNextRead = false;
+          return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) { reject(new Error("missing abort signal")); return; }
+            const onAbort = () => reject(signal.reason ?? new Error("aborted"));
+            signal.addEventListener("abort", onAbort, { once: true });
+            if (signal.aborted) onAbort();
+          });
+        }
+      }
+      return remote.fetch(input, init);
+    };
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    await reader.listTrash();
+    searches = 0;
+    contentGets = 0;
+    stallNextRead = true;
+
+    await expect(withReadBudget({ timeoutMs: 100 }, () => reader.listTrash())).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+    expect(contentGets).toBe(1);
+    expect(searches).toBe(0);
+    expect((reader as any).metadataIndexCache.noteId).toBe(metadataId);
+    await expect(reader.listTrash()).resolves.toEqual([]);
+    expect(contentGets).toBe(2);
+    expect(searches).toBe(0);
+  });
+
+  it("returns freshly read rolling-back metadata without searching for another locator", async () => {
+    const remote = new FakeEtapi();
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    await setup.ensureMetadataIndex();
+    const reader = new EtapiReadWeaveCourseApi(config);
+    await reader.listTrash();
+    const metadataId = remote.noteIdByTitle("Course OS Metadata Index · personal");
+    const index = decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as any;
+    index.status = "rolling_back";
+    index.migration.phase = "rolling_back";
+    remote.replaceNoteContent(metadataId, encodeReadWeaveStateContent(index));
+    const before = remote.requests.length;
+
+    await expect(reader.listTrash()).resolves.toEqual([]);
+    expect((reader as any).metadataIndexCache.index.status).toBe("rolling_back");
+    expect(remote.requests.slice(before).filter(request => request.path === "/notes")).toEqual([]);
+  });
+
   it.each(["course", "module"])("trashes a mapped %s through metadata without reading, writing, or cloning the large core", async (kind) => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
@@ -3719,6 +3906,10 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(interruptedRoot.courses).toEqual([]);
     expect(interruptedRoot.projections.metadataIndexNoteId).toBe(metadataNoteId);
     expect((decodeReadWeaveStateContent(remote.contentByTitle("Course OS Metadata Index · personal")) as { status: string }).status).toBe("staged");
+    const stagedReader = new EtapiReadWeaveCourseApi(config);
+    const stagedMetadataWrites = remote.contentWriteCount(metadataNoteId!);
+    await expect(stagedReader.listCourses()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: oldCourse.id })]));
+    expect(remote.contentWriteCount(metadataNoteId!)).toBe(stagedMetadataWrites);
 
     blockActivation = false;
     const restarted = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch });

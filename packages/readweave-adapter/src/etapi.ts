@@ -177,6 +177,13 @@ interface LocatedMetadataIndex {
   index: EtapiMetadataIndex;
 }
 
+function sameMetadataIndexBinding(previous: EtapiMetadataIndex, current: EtapiMetadataIndex): boolean {
+  return previous.workspaceId === current.workspaceId
+    && previous.stateNoteId === current.stateNoteId
+    && previous.projections.courseRootNoteId === current.projections.courseRootNoteId
+    && previous.migration.id === current.migration.id;
+}
+
 interface EtapiActivityState {
   schemaVersion: "1.0.0";
   questionSelections: QuestionSelection[];
@@ -3194,15 +3201,42 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async metadataIndexForRead(): Promise<LocatedMetadataIndex | undefined> {
     const cached = this.metadataIndexCache;
-    if (cached && cached.expiresAt > Date.now()) {
-      const latest = await this.readMetadataIndex(cached.noteId);
-      if (latest.index.status === "active" || latest.index.status === "rolling_back") {
-        this.cacheMetadataIndex(latest);
-        return latest;
+    const previousBinding = cached?.index;
+    if (cached) {
+      let latest: LocatedMetadataIndex | undefined;
+      try {
+        latest = await this.readMetadataIndex(cached.noteId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message.startsWith("READWEAVE_ETAPI_404:")) {
+          this.metadataIndexCache = undefined;
+        } else if (message === "READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH") {
+          this.metadataIndexCache = undefined;
+          throw error;
+        } else {
+          throw error;
+        }
+      }
+      if (latest) {
+        if (!sameMetadataIndexBinding(previousBinding!, latest.index)) {
+          this.metadataIndexCache = undefined;
+          throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+        }
+        if (latest.index.status === "active" || latest.index.status === "rolling_back") {
+          // Never serve the cached payload here; renew its existing TTL only
+          // from the authority content just read.
+          this.cacheMetadataIndex(latest);
+          return latest;
+        }
+        this.metadataIndexCache = undefined;
       }
     }
     const located = await this.findMetadataIndexForWorkspace();
     if (!located) return undefined;
+    if (previousBinding && !sameMetadataIndexBinding(previousBinding, located.index)) {
+      this.metadataIndexCache = undefined;
+      throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+    }
     if (located.index.status === "active" || located.index.status === "rolling_back") {
       this.cacheMetadataIndex(located);
       return located;
