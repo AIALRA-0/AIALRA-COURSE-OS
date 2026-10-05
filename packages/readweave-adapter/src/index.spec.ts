@@ -3621,6 +3621,93 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(verifyNativeErase).toHaveBeenCalledTimes(1);
   });
 
+  it("prepares and confirms native erase for a mapped legacy core draft with no independent record", async () => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+    await api.registerDraftSource(source, { ...context, idempotencyKey: "legacy-native-source" });
+    const saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "legacy-native-draft" });
+    await api.ensureMetadataIndex();
+    const recordTitle = `Course OS draft record · ${saved.pageId}`;
+    const recordId = remote.noteIdByTitle(recordTitle);
+    const record = decodeReadWeaveStateContent(remote.contentByTitle(recordTitle)) as any;
+    const core = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as any;
+    core.drafts = [saved];
+    core.projections.drafts[saved.id] = record.projection;
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(core));
+    remote.eraseNativeNotes([recordId]);
+    const trashed = await api.trashTreeNode(`material:${source.courseId}:${source.moduleId}`, { ...context, idempotencyKey: "legacy-native-trash" });
+    const options = { expectedSnapshotHash: trashed.snapshotHash, checkExternalReferences: async () => ({ active: false, answers: false }) };
+    const scan = vi.spyOn(api as any, "readDraftPageRecords");
+    const headers = vi.spyOn(api as any, "searchDraftRecordLabel");
+    const plan = await api.previewTrashNativeErase(trashed.id, context, trashed.deletedAt, options, options);
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(scan).toHaveBeenCalledWith();
+    expect(headers).toHaveBeenCalledWith("root", "courseOsDraftRecordPageId", saved.pageId);
+    expect((api as any).draftPageRecordCache.has(saved.pageId)).toBe(false);
+    expect(plan.noteIds).toContain(saved.readweaveNoteId);
+    expect(plan.noteIds).not.toContain(recordId);
+    expect(plan.rootNoteIds).toEqual([trashed.readweaveNoteId]);
+    await expect(new EtapiReadWeaveCourseApi(config).previewTrashNativeErase(trashed.id, context, trashed.deletedAt, options, options)).resolves.toEqual(plan);
+    remote.eraseNativeNotes(plan.noteIds);
+    const confirmContext = { ...context, idempotencyKey: "legacy-native-confirm" };
+    await new EtapiReadWeaveCourseApi(config).permanentlyDeleteTrash(trashed.id, confirmContext, trashed.deletedAt, options);
+    const reopened = new EtapiReadWeaveCourseApi(config);
+    await expect(reopened.listTrash()).resolves.toEqual([]);
+    await expect(reopened.getRelease(source.id)).resolves.toBeUndefined();
+    await expect(reopened.getDraftSnapshotByPage(saved.pageId)).resolves.toBeUndefined();
+    await reopened.permanentlyDeleteTrash(trashed.id, confirmContext, trashed.deletedAt, options);
+    expect(verifyNativeErase).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["malformed-record", "label-only-record", "missing-projection", "foreign-clone", "search-error"])("rejects native erase legacy absence with %s", async (failure) => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase };
+    const api = new EtapiReadWeaveCourseApi(config);
+    const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+    await api.registerDraftSource(source, { ...context, idempotencyKey: "legacy-unsafe-source" });
+    const saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "legacy-unsafe-draft" });
+    await api.ensureMetadataIndex();
+    const recordTitle = `Course OS draft record · ${saved.pageId}`;
+    const recordId = remote.noteIdByTitle(recordTitle);
+    const record = decodeReadWeaveStateContent(remote.contentByTitle(recordTitle)) as any;
+    const core = decodeReadWeaveStateContent(remote.contentByTitle("00 Course OS 结构化索引")) as any;
+    core.drafts = [saved];
+    core.projections.drafts[saved.id] = record.projection;
+    if (failure === "missing-projection") delete core.projections.drafts[saved.id];
+    remote.editByTitle("00 Course OS 结构化索引", encodeReadWeaveStateContent(core));
+    if (failure === "malformed-record" || failure === "label-only-record") {
+      delete record.projection;
+      remote.editByTitle(recordTitle, encodeReadWeaveStateContent(record));
+      if (failure === "label-only-record") await remote.fetch(`http://readweave/notes/${recordId}`, {
+        method: "PATCH", body: JSON.stringify({ title: "Renamed malformed record" })
+      });
+    } else remote.eraseNativeNotes([recordId]);
+    if (failure === "foreign-clone") remote.addClone(saved.readweaveNoteId!, "root");
+    const trashed = await api.trashTreeNode(`material:${source.courseId}:${source.moduleId}`, { ...context, idempotencyKey: "legacy-unsafe-trash" });
+    // Warm old cache must not turn a skipped malformed record into absence.
+    const previewApi = failure === "malformed-record" || failure === "label-only-record" ? api : new EtapiReadWeaveCourseApi({ ...config,
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+        if (failure === "search-error" && url.pathname === "/etapi/notes"
+          && url.searchParams.get("search") === `"${recordTitle}"`) return new Response("search unavailable", { status: 400 });
+        return remote.fetch(input, init);
+      }
+    });
+    const metadataBefore = remote.contentByTitle("Course OS Metadata Index · personal");
+    const preview = previewApi.previewTrashNativeErase(trashed.id, context, trashed.deletedAt, { expectedSnapshotHash: trashed.snapshotHash }, {
+      checkExternalReferences: async () => ({ active: false, answers: false })
+    });
+    if (failure === "search-error") await expect(preview).rejects.toThrow();
+    else await expect(preview).rejects.toThrow(failure === "foreign-clone" ? "READWEAVE_TRASH_SHARED_REFERENCE" : "READWEAVE_NATIVE_ERASE_MAPPING_INCOMPLETE");
+    expect(verifyNativeErase).not.toHaveBeenCalled();
+    expect(remote.contentByTitle("Course OS Metadata Index · personal")).toBe(metadataBefore);
+    await expect(previewApi.listTrash()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: trashed.id })]));
+  });
+
   it.each(["published", "draft_source"] as const)("rejects native erase when a %s release with a manifest has lost its note mapping", async (lifecycle) => {
     const remote = new FakeEtapi();
     const verifyNativeErase = vi.fn(async () => true);

@@ -1751,7 +1751,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // An unchecked scope still needs the complete fresh scan and later checks.
     const knownScope = trashDeleteScope(state, item, context, deleteOptions);
     await assertTrashReferencesSafe(state, knownScope, deleteOptions);
-    await this.readDraftPageRecords();
+    const freshRecords = await this.readDraftPageRecords();
+    const freshPageIds = new Set(freshRecords.map(located => located.record.pageId));
+    for (const pageId of knownScope.pageIds) {
+      if (!freshPageIds.has(pageId)) this.draftPageRecordCache.delete(pageId);
+    }
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     return state;
   }
@@ -2061,7 +2065,19 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       for (const noteId of [projection.pageNoteId, projection.sourceNoteId, projection.atomsNoteId, projection.sourceImageNoteId,
         ...Object.values(projection.blockNoteIds), ...Object.values(projection.sectionNoteIds)]) add(noteId);
       const record = this.draftPageRecordCache.get(draft.pageId);
-      if (!record) throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_INCOMPLETE");
+      if (!record) {
+        // Legacy core drafts need no independent record, but skipped malformed
+        // records are not proof of absence. Check this affected page's headers.
+        const title = `Course OS draft record · ${draft.pageId}`;
+        const query = new URLSearchParams({ search: quoteSearchValue(title), ancestorNoteId: this.config.parentNoteId,
+          ancestorDepth: "lt5", fastSearch: "true" });
+        const byTitle = await this.request<SearchResponse>(`/notes?${query.toString()}`);
+        const byLabel = await this.searchDraftRecordLabel(this.config.parentNoteId, "courseOsDraftRecordPageId", draft.pageId);
+        if (!Array.isArray(byTitle.results) || byTitle.results.some(note => note.title === title) || byLabel.size) {
+          throw new Error("READWEAVE_NATIVE_ERASE_MAPPING_INCOMPLETE");
+        }
+        continue;
+      }
       add(record.noteId);
       add(record.record.draft.readweaveNoteId);
       for (const noteId of [record.record.projection.pageNoteId, record.record.projection.sourceNoteId,
