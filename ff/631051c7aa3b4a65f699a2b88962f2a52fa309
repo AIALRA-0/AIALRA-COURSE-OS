@@ -1,0 +1,26 @@
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_2a367ae071c3ca 1949-1954,2049-2053
+apps/web/src/self-retelling.css
+  s_e8850ef125fb32::t_dc8e99d790c235 30
+  s_e8850ef125fb32::t_d89d31ff83e483 2-3,7,9
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_d34e36c182d4a8 3588-3595,3597-3623,3625-3631,3633-3635,3638-3648
+  s_e8850ef125fb32::t_03817693017ce9 3624,3636-3637
+  s_e8850ef125fb32::t_7a66a70828a429 3596,3632
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff631051c7aa3b4a65f699a2b88962f2a52fa309",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
