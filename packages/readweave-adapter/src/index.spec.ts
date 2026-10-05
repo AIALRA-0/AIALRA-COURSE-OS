@@ -3107,7 +3107,7 @@ describe("ReadWeave ETAPI adapter", () => {
     const metadataWrites = remote.contentWriteCount(metadataId);
     await expect(api.previewTrashNativeErase(trash.id, context, trash.deletedAt, options, options)).resolves.toEqual(plan);
     expect(remote.contentWriteCount(metadataId)).toBe(metadataWrites);
-    expect(options.checkExternalReferences).toHaveBeenCalledTimes(4);
+    expect(options.checkExternalReferences).toHaveBeenCalledTimes(6);
     remote.eraseNativeNotes(plan.noteIds);
     const confirmContext = { ...context, idempotencyKey: "empty-confirm" };
     await api.permanentlyDeleteTrash(trash.id, confirmContext, trash.deletedAt, options);
@@ -3125,6 +3125,53 @@ describe("ReadWeave ETAPI adapter", () => {
     await expect(reopened.getRelease(release.id)).resolves.toMatchObject({ id: release.id });
     await expect(reopened.getDraftByPage(draft.pageId)).resolves.toMatchObject({ revision: draft.revision });
     expect((await (reopened as any).readStateReference(true, false)).courses.some((item: CourseProject) => item.id === course.id)).toBe(false);
+  });
+
+  it.each([
+    { operation: "preview", protection: "job" }, { operation: "preview", protection: "answers" },
+    { operation: "confirm", protection: "job" }, { operation: "confirm", protection: "answers" }
+  ])("rejects native erase $operation with known $protection protection before any draft record content GET", async ({ operation, protection }) => {
+    const remote = new FakeEtapi();
+    const verifyNativeErase = vi.fn(async () => true);
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch, verifyNativeErase };
+    const setup = new EtapiReadWeaveCourseApi(config);
+    const release = releaseWithPage();
+    await setup.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await setup.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "early-protection-draft" });
+    const trash = await setup.trashTreeNode(release.courseId, { ...context, idempotencyKey: "early-protection-trash" });
+    const selector = { expectedSnapshotHash: trash.snapshotHash };
+    const plan = await setup.previewTrashNativeErase(trash.id, context, trash.deletedAt, selector,
+      { checkExternalReferences: async () => ({ active: false, answers: false }) });
+    if (protection === "answers") {
+      await new EtapiReadWeaveCourseApi(config).saveQuestionAttempt({ id: "early-protected-answer", sessionId: "session",
+        selectionId: "selection", courseReleaseId: release.id, pageId: "page-1", questionId: "question", objectiveId: "objective",
+        answer: "saved answer", correct: true, usedHintLevel: 0, attemptedAt: "2026-10-05T00:00:00Z"
+      }, { ...context, idempotencyKey: "early-protected-answer-save" });
+    }
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    if (operation === "confirm") remote.eraseNativeNotes(plan.noteIds);
+    let recordGets = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "GET" && url.pathname === `/etapi/notes/${recordId}/content`) {
+        recordGets += 1;
+        return new Response("draft content should not be requested for an already protected scope", { status: 400 });
+      }
+      return remote.fetch(input, init);
+    };
+    const reader = new EtapiReadWeaveCourseApi({ ...config, fetchImpl });
+    const checkExternalReferences = vi.fn(async (_scope: unknown) => ({ active: protection === "job", answers: false }));
+    const before = remote.requests.length;
+    const request = operation === "preview"
+      ? reader.previewTrashNativeErase(trash.id, context, trash.deletedAt, selector, { checkExternalReferences })
+      : reader.permanentlyDeleteTrash(trash.id, { ...context, idempotencyKey: "early-protected-confirm" }, trash.deletedAt,
+        { ...selector, checkExternalReferences });
+    await expect(request).rejects.toThrow(protection === "job" ? "READWEAVE_TRASH_ACTIVITY_PROTECTED" : "READWEAVE_TRASH_ANSWERS_PROTECTED");
+    expect(recordGets).toBe(0);
+    expect(remote.requests.slice(before).filter(item => item.method !== "GET")).toEqual([]);
+    expect(verifyNativeErase).not.toHaveBeenCalled();
+    if (protection === "job") expect(checkExternalReferences).toHaveBeenCalledWith(expect.objectContaining({ releaseIds: [release.id], pageIds: ["page-1"] }));
+    await expect(reader.listTrash()).resolves.toEqual([expect.objectContaining({ id: trash.id, restoreAvailable: true })]);
   });
 
   it("scans all independent draft records once on the first native erase preview and stays fresh on reopen", async () => {

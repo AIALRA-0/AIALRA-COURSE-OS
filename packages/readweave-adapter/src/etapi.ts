@@ -1700,7 +1700,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         try { saved = JSON.parse(existing.objectId) as TrashNativeErasePlan; }
         catch { throw new Error("READWEAVE_NATIVE_ERASE_PREFLIGHT_CORRUPT"); }
         this.assertNativeErasePlanMetadataBindings(metadata, item, metadataScope, saved);
-        const state = await this.readNativeEraseScopeState(metadata);
+        const state = await this.readNativeEraseScopeState(metadata, item, context, deleteOptions);
         const scope = trashDeleteScope(state, item, context, deleteOptions);
         this.assertFrozenNativeErasePlan(state, item, scope, saved);
         await assertTrashReferencesSafe(state, scope, deleteOptions);
@@ -1712,7 +1712,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         await assertTrashReferencesSafe(state, scope, deleteOptions);
         return saved;
       }
-      const state = await this.readNativeEraseScopeState(metadata);
+      const state = await this.readNativeEraseScopeState(metadata, item, context, deleteOptions);
       const scope = trashDeleteScope(state, item, context, deleteOptions);
       await assertTrashReferencesSafe(state, scope, deleteOptions);
       const plan = await this.makeTrashNativeErasePlan(state, item, scope);
@@ -1730,7 +1730,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return legacy.value;
   }
 
-  private async readNativeEraseScopeState(metadata: EtapiState): Promise<EtapiState> {
+  private async readNativeEraseScopeState(metadata: EtapiState, item: TrashRecord,
+    context: IdempotentWriteContext, deleteOptions: TrashDeleteOptions): Promise<EtapiState> {
     const reference = await this.readStateReference(true, false);
     const state: EtapiState = {
       ...reference, courses: metadata.courses, treeNodes: metadata.treeNodes, trash: metadata.trash,
@@ -1746,6 +1747,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       const content = await this.getContent(activityNoteId);
       this.applyActivityState(state, this.activityStateFrom(decodeReadWeaveStateContent(content) as Partial<EtapiActivityState>));
     }
+    // Existing positive protection can reject before downloading every draft.
+    // An unchecked scope still needs the complete fresh scan and later checks.
+    const knownScope = trashDeleteScope(state, item, context, deleteOptions);
+    await assertTrashReferencesSafe(state, knownScope, deleteOptions);
     await this.readDraftPageRecords();
     for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
     return state;
@@ -1762,7 +1767,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (trashDeleteReplay(metadata, trashId, context, deleteOptions)) return true;
       const item = metadata.trash.find(candidate => candidate.id === trashId);
       if (!item) return false;
-      const state = await this.readNativeEraseScopeState(metadata);
+      const state = await this.readNativeEraseScopeState(metadata, item, context, deleteOptions);
       const scope = trashDeleteScope(state, item, context, deleteOptions);
       // A scope with any core release/page authority still needs the existing
       // full-state prune and readback. Only metadata-only scopes use this path.
