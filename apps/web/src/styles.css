@@ -13,10 +13,8 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .icon-button, .quiet-button, .primary-button, .primary, .sync-indicator { border: 1px solid var(--line); background: var(--panel-strong); border-radius: 8px; min-height: var(--control-height); }
 .icon-button { width: var(--control-height); min-width: var(--control-height); height: var(--control-height); display: grid; place-items: center; padding: 0; }
 .quiet-button, .primary-button, .primary { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 0; max-width: 100%; padding: 8px 12px; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1.35; text-align: center; white-space: normal; overflow-wrap: anywhere; }
-.quiet-button:has(> svg), .primary-button:has(> svg), .primary:has(> svg), .quiet-button.compact:has(> svg), .primary-button.compact:has(> svg) { padding-inline: 24px; }
-.quiet-button > svg:first-child, .primary-button > svg:first-child, .primary > svg:first-child { position: absolute; inset-inline-start: 4px; }
-.quiet-button > svg:last-child:not(:first-child), .primary-button > svg:last-child:not(:first-child), .primary > svg:last-child:not(:first-child) { inset-inline-start: auto; inset-inline-end: 4px; }
-.quiet-button.button-icon-trailing > svg:first-child:last-child, .primary-button.button-icon-trailing > svg:first-child:last-child, .primary.button-icon-trailing > svg:first-child:last-child { inset-inline-start: auto; inset-inline-end: 4px; }
+.quiet-button:has(> svg), .primary-button:has(> svg), .primary:has(> svg) { gap: 8px; }
+.quiet-button > svg, .primary-button > svg, .primary > svg { position: static; }
 .quiet-button:disabled { opacity: 1; color: var(--muted); background: var(--soft); border-color: var(--line); }
 .primary-button:disabled, .primary:disabled { opacity: 1; color: var(--muted); background: var(--soft-2); border-color: var(--line); box-shadow: none; filter: none; }
 .quiet-button:hover:not(:disabled), .icon-button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--soft); }
@@ -51,10 +49,7 @@ kbd, code { font-family: "IBM Plex Mono", "Cascadia Code", Consolas, monospace; 
 .tree-chevron svg { width: 12px; height: 12px; flex: 0 0 12px; transform-origin: center; transition: transform 140ms ease; }
 .tree-chevron.is-open svg { transform: rotate(90deg); }
 .tree-chevron.empty { visibility: hidden; }
-svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: fill-box; transform-origin: center; transition: transform 140ms ease; }
-svg[data-icon-name="chevronDown"] { transform: rotate(90deg); }
-svg[data-icon-name="chevronLeft"] { transform: rotate(180deg); }
-svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
+svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: view-box; transform-origin: center; transition: transform 140ms ease; }
 .tree-kind { color: var(--muted); display: grid; place-items: center; }
 .tree-kind svg { width: 14px; height: 14px; }
 .tree-row.selected .tree-kind { color: var(--brand); }
@@ -1375,8 +1370,8 @@ svg[data-icon-name="chevronUp"] { transform: rotate(270deg); }
 .task-technical-details > summary { min-height: 32px; display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 8px; list-style: none; cursor: pointer; }
 .task-technical-details > summary::marker { content: ""; }
 .task-technical-details > summary::-webkit-details-marker { display: none; }
-.task-technical-details > summary > svg[data-icon-name^="chevron"] { display: block; width: 14px; height: 14px; flex: 0 0 14px; transform: rotate(0deg); }
-.task-technical-details[open] > summary > svg[data-icon-name^="chevron"] { transform: rotate(90deg); }
+.task-technical-details > summary > svg[data-icon-name^="chevron"] { display: block; width: 14px; height: 14px; flex: 0 0 14px; transform: rotate(-90deg); }
+.task-technical-details[open] > summary > svg[data-icon-name^="chevron"] { transform: none; }
 .tree-task-summary-chevron { width: 16px; height: 16px; display: grid; place-items: center; color: var(--faint); }
 .tree-task-summary-chevron svg { display: block; width: 13px; height: 13px; flex: 0 0 13px; }
 .tree-task-history[open] > summary .tree-task-summary-chevron svg, .tree-task-attention[open] > summary .tree-task-summary-chevron svg { transform: rotate(90deg); }

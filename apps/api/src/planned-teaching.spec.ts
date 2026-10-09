@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelRouterInput, TeachingPackage } from "./model-router.js";
-import { policyExplanationFramework, policyFormatRules, policyFormulaExplanation, policySkill, teachingPackageSchema } from "./generation-harness.js";
+import { writingPolicyInstructions, teachingPackageSchema } from "./generation-harness.js";
 import {
   normalizePlannedOpening,
   normalizePlannedQuestionPunctuation,
@@ -482,7 +482,7 @@ describe("planned teaching core writer", () => {
       expect(request.instructions).toContain(plannedWritingPrompt.trim());
       expect(request.instructions).toContain(writingFormatContract.trim());
       expect(request.instructions.split(plannedWritingPrompt.trim()).length - 1).toBe(1);
-      for (const policy of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
+      for (const policy of [writingPolicyInstructions("zh")]) {
         expect(request.instructions).toContain(policy.trim());
         expect(request.instructions.split(policy.trim()).length - 1).toBe(1);
       }
@@ -864,7 +864,7 @@ describe("planned teaching core writer", () => {
       if (request.phase === "teaching") return initial;
       expect(Object.keys(request.schema?.properties ?? {})).toEqual(["questions"]);
       expect(request.instructions).not.toContain("一次写出所有主体栏目");
-      expect(request.instructions.indexOf(policySkill.trim())).toBeLessThan(request.instructions.indexOf(writingFormatContract));
+      expect(request.instructions.indexOf(writingPolicyInstructions("zh").trim())).toBeLessThan(request.instructions.indexOf(writingFormatContract));
       expect(request.instructions.endsWith("输出仅为这些字段组成的 JSON 对象，不返回整页讲义、对话回复或完整教学包。")).toBe(true);
       expect(request.instructions).toContain("其余教学内容已经保存");
       const repairPrompt = JSON.parse(request.prompt) as {
@@ -954,6 +954,14 @@ describe("planned teaching core writer", () => {
       .rejects.toThrow("TEACHING_PACKAGE_INVALID:");
   });
 
+  it("preserves every supplied prerequisite and objective while normalizing typography", () => {
+    const priorKnowledge = Array.from({ length: 6 }, (_, index) => `前提${index + 1}：该前提决定后续步骤的成立条件`);
+    const learningObjectives = Array.from({ length: 5 }, (_, index) => `操作${index + 1}：能够根据输入检查对应结果`);
+    const opening = normalizePlannedOpening({ priorKnowledge, learningObjectives });
+    expect(opening.priorKnowledge).toEqual(priorKnowledge);
+    expect(opening.learningObjectives).toEqual(learningObjectives);
+  });
+
   it("keeps deterministic typography and provider-shape normalizers", () => {
     const opening = normalizePlannedOpening({
       chapterBridgeMarkdown: "",
@@ -993,8 +1001,8 @@ describe("planned teaching core writer", () => {
     expect(plannedFormatIssues(malformed)).toContain("TEACHING_PRESENTATION:priorKnowledge:TERM_PAIR_MISSING");
     const instructions = plannedInstructions(["fullExplanationMarkdown", "coverageEvidence"]);
     expect(instructions).toContain("一次输出整个主体教学包");
-    expect(instructions).toContain("FMT-001");
-    for (const policy of [policySkill, policyFormatRules, policyExplanationFramework, policyFormulaExplanation]) {
+    expect(instructions).toContain("## 29. 普通链接格式规范");
+    for (const policy of [writingPolicyInstructions("zh")]) {
       expect(instructions).toContain(policy.trim());
       expect(instructions.indexOf(policy.trim())).toBeLessThan(instructions.indexOf(plannedWritingPrompt));
     }

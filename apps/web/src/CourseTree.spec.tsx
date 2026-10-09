@@ -348,10 +348,10 @@ describe("CourseTree search navigation", () => {
 });
 
 describe("shared directional chevron icon", () => {
-  it("uses the same SVG path for each direction so CSS can rotate one centered icon", () => {
+  it("uses distinct centered paths so named directions do not depend on CSS compensation", () => {
     const names = ["chevronRight", "chevronDown", "chevronLeft", "chevronUp"] as const;
     const paths = names.map((name) => renderToStaticMarkup(createElement(Icon, { name })).match(/<path d="([^"]+)"/)?.[1]);
-    expect(new Set(paths).size).toBe(1);
+    expect(new Set(paths).size).toBe(4);
     expect(paths[0]).toBe("m8.5 5 7 7-7 7");
   });
 });

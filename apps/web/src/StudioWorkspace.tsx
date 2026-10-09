@@ -5,6 +5,7 @@ import { Icon } from "./Icon.js";
 import { Markdown } from "./Markdown.js";
 import type { ImageResourceCache } from "./reading-prefetch.js";
 import { SlideViewer } from "./SlideViewer.js";
+import { WorkbenchSelect } from "./WorkbenchSelect.js";
 import "./studio-workbench.css";
 
 const BLOCK_LABELS: Record<ExplanationBlock["kind"], string> = {
@@ -219,6 +220,7 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
             <div className="section-heading"><div><span className="section-kicker">TEACHING DRAFT</span><h2>教授级讲解</h2></div><div className="segmented" role="group" aria-label="讲解显示模式" data-action-slot="studio-editor-mode"><button type="button" className={editorMode === "edit" ? "active" : ""} aria-pressed={editorMode === "edit"} onClick={() => setEditorMode("edit")}>编辑</button><button type="button" className={editorMode === "preview" ? "active" : ""} aria-pressed={editorMode === "preview"} onClick={() => setEditorMode("preview")}>学习预览</button></div></div>
             <div className="studio-editor-content">
               <div className="editor-block-list">
+                {visibleBlocks.length === 0 && <div className="studio-editor-empty" role="status"><Icon name="document" /><div><strong>{busy === "load" ? "正在读取讲解草稿" : "本页还没有讲解草稿"}</strong><p>{busy === "load" ? "题库与讲解读取完成后显示在这里" : "可使用“生成本页”建立讲解，题库仍可在下方编辑"}</p></div></div>}
                 {visibleBlocks.map((block, index) => (
                   <article key={block.id} className={`editor-block ${changedBlocks.has(block.id) ? "changed" : ""}`}>
                     <header><span className="block-index">{String(index + 1).padStart(2, "0")}</span><div><span>{BLOCK_LABELS[block.kind]}</span><input value={block.title} onChange={(event) => updateBlock(block.id, { title: event.target.value })} aria-label={`${BLOCK_LABELS[block.kind]}标题`} /></div><span className="block-state">{changedBlocks.has(block.id) ? "已修改" : "已同步"}</span></header>
@@ -271,8 +273,8 @@ function QuestionBankEditor({ page, dirty, busy, onRefill, onChange }: {
   const questions = page.questionBank ?? [];
   const approved = questions.filter((item) => item.status === "approved").length;
   return <section className="question-bank-editor">
-    <header className="question-bank-editor-heading"><div><span className="section-kicker">QUESTION BANK</span><h3>随机问题题库</h3><p>每页至少保留 4 道可用题目；新题保存后即可用于正式学习</p></div><button className="quiet-button" disabled={busy || dirty || approved >= 4} title={dirty ? "请先保存当前修改" : approved >= 4 ? "可用题目已经达到 4 道" : "补齐题目"} onClick={onRefill}>{busy ? "补充中" : "补齐题库"}</button></header>
-    <div className="question-bank-summary"><strong>{approved} / 4</strong><span>可用题目</span><em>{questions.filter((item) => item.status === "draft").length} 道草稿</em></div>
+    <header className="question-bank-editor-heading"><div><span className="section-kicker">QUESTION BANK</span><h3>随机问题题库</h3><p>题量按本页内容组织；保存后的有效题目即可用于学习，按需补充题库</p></div><button className="quiet-button" disabled={busy || dirty || approved >= 4} title={dirty ? "请先保存当前修改" : approved >= 4 ? "可用题目已经达到 4 道" : "补齐题目"} onClick={onRefill}>{busy ? "补充中" : "补齐题库"}</button></header>
+    <div className="question-bank-summary"><strong>{approved}</strong><span>可用题目</span><em>{questions.filter((item) => item.status === "draft").length} 道草稿</em></div>
     {questions.length === 0 && <p className="empty-inline">当前页面还没有题目，可以点击补齐题库</p>}
     <div className="question-bank-list">{questions.map((question, index) => <QuestionBankRow key={question.id} index={index} question={question} onChange={onChange} />)}</div>
   </section>;
@@ -280,7 +282,7 @@ function QuestionBankEditor({ page, dirty, busy, onRefill, onChange }: {
 
 function QuestionBankRow({ index, question, onChange }: { index: number; question: QuestionBankItem; onChange: (questionId: string, patch: Partial<QuestionBankItem>) => void }) {
   return <article className="question-bank-row">
-    <header><span>{String(index + 1).padStart(2, "0")}</span><select value={question.kind} onChange={(event) => onChange(question.id, { kind: event.target.value as QuestionBankItem["kind"], options: event.target.value === "multiple_choice" ? question.options ?? [question.expectedAnswer] : undefined })}><option value="comprehension">理解题</option><option value="multiple_choice">选择题</option></select><select value={question.status} onChange={(event) => onChange(question.id, { status: event.target.value as QuestionBankItem["status"] })}><option value="draft">草稿</option><option value="approved">可用</option><option value="retired">已停用</option></select></header>
+    <header><span>{String(index + 1).padStart(2, "0")}</span><WorkbenchSelect aria-label={`第 ${index + 1} 题类型`} value={question.kind} onChange={(kind) => onChange(question.id, { kind: kind as QuestionBankItem["kind"], options: kind === "multiple_choice" ? question.options ?? [question.expectedAnswer] : undefined })} options={[{ value: "comprehension", label: "理解题" }, { value: "multiple_choice", label: "选择题" }]} /><WorkbenchSelect aria-label={`第 ${index + 1} 题状态`} value={question.status} onChange={(status) => onChange(question.id, { status: status as QuestionBankItem["status"] })} options={[{ value: "draft", label: "草稿" }, { value: "approved", label: "可用" }, { value: "retired", label: "已停用" }]} /></header>
     <label><span>题目</span><textarea value={question.prompt} onChange={(event) => onChange(question.id, { prompt: event.target.value })} /></label>
     {question.kind === "multiple_choice" && <label><span>选项</span><textarea value={(question.options ?? []).join("\n")} onChange={(event) => onChange(question.id, { options: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) })} placeholder="每行一个选项" /></label>}
     <div className="question-bank-fields"><label><span>标准答案</span><input value={question.expectedAnswer} onChange={(event) => onChange(question.id, { expectedAnswer: event.target.value })} /></label><label><span>答案说明</span><textarea value={question.explanation} onChange={(event) => onChange(question.id, { explanation: event.target.value })} /></label></div>

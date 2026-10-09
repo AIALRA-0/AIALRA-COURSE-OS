@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { GenerationStage, ModelProviderConfig, ModelRoutePolicy, ProviderHealth, TeachingBlueprint } from "@course-os/contracts";
 import { writingPolicyInstructions } from "./generation-harness.js";
+import { withApprovedWritingInstructions } from "./writing-standards.js";
+import { normalizeHumanReadableChineseMarkdown } from "@course-os/quality";
 import { estimateMicrousd, priceSnapshotFor } from "./pricing.js";
 import { writePlannedLesson, type PlannedCall, type PlannedCheckpoint, type PlannedTrace } from "./planned-teaching.js";
 import type { TeachingResearchEvidence, TeachingResearchQuery } from "./teaching-plan.js";
@@ -310,7 +312,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       : (response.content as { chapterBridgeMarkdown?: unknown })?.chapterBridgeMarkdown;
     if (typeof markdown !== "string" || !markdown.trim()) throw new ModelRouterGenerationError("MODEL_PROVIDER_BRIDGE_INVALID",
       response.model, response.usage, response.provider);
-    return { markdown: markdown.trim(), provider: response.provider, model: response.model, usage: response.usage };
+    return { markdown: input.language === "en" ? markdown.trim() : normalizeHumanReadableChineseMarkdown(markdown.trim()), provider: response.provider, model: response.model, usage: response.usage };
   }
 
   private async requestJson(url: string, init: RequestInit, started: number, phase: string): Promise<{ response: Response; body: ProviderResponseBody }> {
@@ -461,6 +463,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
   }
 
   private async requestPlannedStage(input: ModelRouterInput, request: PlannedCall, budget: number) {
+    request = { ...request, instructions: withApprovedWritingInstructions(request.instructions, input.language) };
     const stageStarted = Date.now();
     const price = priceSnapshotFor(this.connection.providerId, this.connection.model);
     if (!price) throw new Error("MODEL_PROVIDER_COST_UNAVAILABLE");

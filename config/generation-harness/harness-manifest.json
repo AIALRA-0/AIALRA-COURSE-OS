@@ -1,15 +1,13 @@
 {
   "id": "course-os-teaching",
-  "version": "2.5.4",
+  "version": "2.5.5",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": [
     "page-plan-prompt.md",
     "planned-writing-prompt.md",
     "writing-format-contract.md",
-    "policy-skill.md",
-    "policy-format-rules.md",
-    "policy-explanation-framework.md",
-    "policy-formula-explanation.md"
+    "writing-standard-source.md",
+    "style-standard-source.md"
   ],
   "schemaFile": "teaching-package.schema.json",
   "writingPolicySnapshotRequired": true

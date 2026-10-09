@@ -1,3 +1,4 @@
+import { loadWritingStandards } from "./writing-standards.js";
 export { applySemanticAuditFindings } from "./teaching-patches.js";
 import { meterModelRouter } from "./model-usage-meter.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -55,7 +56,7 @@ import { selectMaterialRelease, toCourseReleaseIndex, withReadBudget } from "@co
 import { COURSE_API_VERSION } from "@course-os/contracts";
 import { convertMaterial, FileConversionQueueClient, removeConversionOutput, type ConversionProgressCallback } from "@course-os/converter";
 import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurrent, renewGenerationLease, sha256Text, stableStringify, transitionJob } from "@course-os/domain";
-import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizePriorDefinitionClauseCount, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
+import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi, TrashNativeErasePlan } from "@course-os/readweave-adapter";
 import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, filterDismissedTasks, type FailedTaskSelection } from "@course-os/storage";
@@ -70,7 +71,6 @@ import { readCodeLayoutHint } from "./source-layout.js";
 import { parsePdfLayout } from "./pdf-layout.js";
 import { previousLessonContext } from "./teaching-plan.js";
 import { planningPrompt, plannedWritingPrompt, writingFormatContract, type PlannedTrace } from "./planned-teaching.js";
-import { policyFormatRules } from "./generation-harness.js";
 import { probeSearchConnection, type CourseSearchConnection } from "./search-providers.js";
 import { prepareIncrementalVersion } from "./incremental-import.js";
 import { treeCapabilities } from "./tree-capabilities.js";
@@ -996,28 +996,31 @@ export function createApp(dependencies: AppDependencies): Express {
         response.setHeader("X-Reading-Source", "confirmed-replica");
         return response.json(saved);
       }
-      const startedAt = snapshotView ? performance.now() : 0;
-      const source = await findWorkspacePageSource(dependencies.readweave, workspaceId, pageId);
-      const sourceLookupMs = snapshotView ? performance.now() - startedAt : 0;
+      const startedAt = performance.now();
+      // Editing still reconciles this page's native notes, but a confirmed page
+      // already supplies its owner and source without loading the remote store.
+      const confirmedSource = await dependencies.reading?.replica.getPageSource(workspaceId, pageId, requestedReleaseId);
+      const source = confirmedSource ?? await findWorkspacePageSource(dependencies.readweave, workspaceId, pageId);
+      const sourceLookupMs = performance.now() - startedAt;
       if (!source) {
         if (snapshotView) response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=0.0`);
         return sendError(request, response, 404, "PAGE_NOT_FOUND", "没有找到这个课程页面", false);
       }
       // Learning previews only need the saved teaching snapshot. Editing still
       // uses the reconciled read so external ReadWeave changes remain visible.
-      const draftStartedAt = snapshotView ? performance.now() : 0;
+      const draftStartedAt = performance.now();
       const saved = snapshotView && dependencies.readweave.getDraftSnapshotByPage
         ? await dependencies.readweave.getDraftSnapshotByPage(pageId)
         : await dependencies.readweave.getDraftByPage(pageId);
-      if (snapshotView) {
-        const draftLookupMs = performance.now() - draftStartedAt;
-        response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}`);
-      }
+      const draftLookupMs = performance.now() - draftStartedAt;
       if (saved && saved.workspaceId === workspaceId && saved.courseId === source.release.courseId
         && saved.sourceReleaseId === source.release.id && saved.pageId === pageId) {
+        const projectionStartedAt = performance.now();
         if (dependencies.reading) await dependencies.reading.replica.upsertDraft(saved);
+        response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}, projection;dur=${(performance.now() - projectionStartedAt).toFixed(1)}`);
         return response.json(saved);
       }
+      response.setHeader("Server-Timing", `source;dur=${sourceLookupMs.toFixed(1)}, draft;dur=${draftLookupMs.toFixed(1)}, projection;dur=0.0`);
       response.json(createVirtualDraft(source.release, source.page, workspaceId));
     } catch (error) { next(error); }
   });
@@ -2395,7 +2398,7 @@ export function createApp(dependencies: AppDependencies): Express {
   });
 
   app.get("/api/v1/review-map", async (request, response, next) => {
-    try { response.json(await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal")); }
+    try { response.json(await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal", dependencies.reading)); }
     catch (error) { next(error); }
   });
 
@@ -2632,15 +2635,15 @@ export function createApp(dependencies: AppDependencies): Express {
        const workspaceId = request.header("X-Workspace-Id") || "personal";
        const session = [...state.reviewSessions].reverse().find((item) => item.status === "active" && item.workspaceId === workspaceId);
       if (!session) return response.json({ session: null });
-      const map = await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal");
+      const map = await buildReviewMap(dependencies.readweave, new Date(), workspaceId, dependencies.reading);
       const objective = map.objectives.find((item) => item.objectiveId === session.currentObjectiveId);
-      response.json({ session, objective, question: objective ? await reviewQuestionFor(dependencies.readweave, session, objective) : undefined });
+      response.json({ session, objective, question: objective ? await reviewQuestionFor(dependencies.readweave, session, objective, dependencies.reading) : undefined });
     } catch (error) { next(error); }
   });
 
   app.get("/api/v1/review-queue", async (request, response, next) => {
     try {
-      const map = await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal");
+      const map = await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal", dependencies.reading);
       const mastery = await dependencies.readweave.listMastery();
       const dueIds = new Set(map.objectives.filter((item) => item.due).map((item) => item.objectiveId));
       response.json(mastery.filter((record) => dueIds.has(record.objectiveId)).sort((a, b) => (a.nextReviewAt || "").localeCompare(b.nextReviewAt || "")));
@@ -2699,9 +2702,9 @@ export function createApp(dependencies: AppDependencies): Express {
        const workspaceId = request.header("X-Workspace-Id") || "personal";
        const session = (await dependencies.operations.read()).reviewSessions.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!session) return sendError(request, response, 404, "REVIEW_SESSION_NOT_FOUND", "没有找到这个复习会话", false);
-      const map = await buildReviewMap(dependencies.readweave, new Date(), request.header("X-Workspace-Id") || "personal");
+      const map = await buildReviewMap(dependencies.readweave, new Date(), workspaceId, dependencies.reading);
       const objective = map.objectives.find((item) => item.objectiveId === session.currentObjectiveId);
-      response.json({ session, objective, question: objective ? await reviewQuestionFor(dependencies.readweave, session, objective) : undefined });
+      response.json({ session, objective, question: objective ? await reviewQuestionFor(dependencies.readweave, session, objective, dependencies.reading) : undefined });
     } catch (error) { next(error); }
   });
 
@@ -3055,21 +3058,57 @@ function findTreeNode(nodes: CourseTreeNode[], nodeId: string): CourseTreeNode |
   return undefined;
 }
 
-async function buildReviewMap(readweave: ReadWeaveCourseApi, now = new Date(), workspaceId = "personal"): Promise<ReviewMap> {
-  const [releases, mastery, questionAttempts, assessmentAttempts] = await Promise.all([
-    listWorkspaceReleases(readweave, workspaceId),
-    readweave.listMastery(),
-    readweave.listQuestionAttempts(),
-    readweave.listAssessmentAttempts()
-  ]);
-  const currentByModule = new Map<string, CourseRelease>();
+function currentReviewReleases<T extends CourseRelease>(releases: T[]): T[] {
+  const currentByModule = new Map<string, T>();
   for (const release of releases) {
     if (release.lifecycle === "draft_source" || isRegressionAsset(release.id, `${release.courseTitle} ${release.moduleTitle}`)) continue;
     const key = `${release.courseId}:${release.moduleId}`;
     const current = currentByModule.get(key);
     if (!current || release.version > current.version || (release.version === current.version && release.publishedAt > current.publishedAt)) currentByModule.set(key, release);
   }
-  const currentReleases = [...currentByModule.values()].sort((left, right) => left.courseTitle.localeCompare(right.courseTitle, "zh-CN") || left.moduleTitle.localeCompare(right.moduleTitle, "zh-CN") || left.version - right.version);
+  return [...currentByModule.values()].sort((left, right) => left.courseTitle.localeCompare(right.courseTitle, "zh-CN") || left.moduleTitle.localeCompare(right.moduleTitle, "zh-CN") || left.version - right.version);
+}
+
+function assertReviewReadingAvailable(reading: ReadingRuntime): void {
+  reading.assertAccess();
+  if (!reading.status().ready) throw new Error("READING_NOT_READY");
+}
+
+async function confirmedReviewReleases(readweave: ReadWeaveCourseApi, reading: ReadingRuntime, workspaceId: string): Promise<CourseRelease[]> {
+  const indexes = currentReviewReleases(await reading.replica.listIndexes(workspaceId));
+  const releases: CourseRelease[] = [];
+  for (const index of indexes) {
+    const pages: PageLesson[] = [];
+    for (const page of index.pages) {
+      const source = await reading.replica.getPageSource(workspaceId, page.id, index.id);
+      if (!source) throw new Error("READING_NOT_READY");
+      // Review identities and text belong to the published page, not an editing draft.
+      pages.push(source.page);
+    }
+    let assessments: CourseRelease["assessments"] = [];
+    // Legacy pages can take their objective identity from release assessments,
+    // which are deliberately absent from the lightweight directory.
+    if (pages.some(page => !page.questionBank?.some(question => question.objectiveId))) {
+      const legacy = await readweave.getRelease(index.id);
+      if (!legacy || legacy.courseId !== index.courseId || legacy.moduleId !== index.moduleId || legacy.version !== index.version) {
+        throw new Error("READING_NOT_READY");
+      }
+      assessments = legacy.assessments;
+    }
+    releases.push({ ...index, pages, assessments });
+  }
+  return releases;
+}
+
+async function buildReviewMap(readweave: ReadWeaveCourseApi, now = new Date(), workspaceId = "personal", reading?: ReadingRuntime): Promise<ReviewMap> {
+  if (reading) assertReviewReadingAvailable(reading);
+  const [releases, mastery, questionAttempts, assessmentAttempts] = await Promise.all([
+    reading ? confirmedReviewReleases(readweave, reading, workspaceId) : listWorkspaceReleases(readweave, workspaceId),
+    readweave.listMastery(),
+    readweave.listQuestionAttempts(),
+    readweave.listAssessmentAttempts()
+  ]);
+  const currentReleases = currentReviewReleases(releases);
   const masteryByObjective = new Map(mastery.map((item) => [item.objectiveId, item]));
   const attemptByObjective = new Map<string, Array<{ attemptedAt: string; usedHintLevel: number; misconception?: string }>>();
   for (const attempt of [...questionAttempts, ...assessmentAttempts]) {
@@ -3206,14 +3245,24 @@ function uniqueQuestionBank(...banks: QuestionBankItem[][]): QuestionBankItem[] 
   });
 }
 
-async function reviewQuestionFor(readweave: ReadWeaveCourseApi, session: ReviewSession, objective: ReviewObjective): Promise<QuestionBankItem | undefined> {
-  const release = await getWorkspaceRelease(readweave, objective.releaseId, session.workspaceId);
+async function reviewQuestionFor(readweave: ReadWeaveCourseApi, session: ReviewSession, objective: ReviewObjective, reading?: ReadingRuntime): Promise<QuestionBankItem | undefined> {
+  if (reading) assertReviewReadingAvailable(reading);
+  const source = reading ? await reading.replica.getPageSource(session.workspaceId, objective.pageId, objective.releaseId) : undefined;
+  if (reading && !source) throw new Error("READING_NOT_READY");
+  const release = source ? { ...source.release, pages: [source.page] } : await getWorkspaceRelease(readweave, objective.releaseId, session.workspaceId);
   const page = release?.pages.find((item) => item.id === objective.pageId);
   if (!release || !page) return undefined;
   const candidateDraft = await readweave.getDraftByPage(page.id);
   const draft = candidateDraft?.workspaceId === session.workspaceId ? candidateDraft : undefined;
-  const bank = uniqueQuestionBank(page.questionBank ?? [], draft?.page.questionBank ?? [], legacyQuestionBank(release, page.id));
+  let bank = uniqueQuestionBank(page.questionBank ?? [], draft?.page.questionBank ?? [], legacyQuestionBank(release, page.id));
   const questionId = session.questionIdsByObjective?.[objective.objectiveId]?.[0];
+  if (source && !bank.some(item => item.status === "approved" && (questionId ? item.id === questionId : item.objectiveId === objective.objectiveId))) {
+    const legacy = await readweave.getRelease(release.id);
+    if (!legacy || legacy.courseId !== release.courseId || legacy.moduleId !== release.moduleId || legacy.version !== release.version) {
+      throw new Error("READING_NOT_READY");
+    }
+    bank = uniqueQuestionBank(bank, legacyQuestionBank(legacy, page.id));
+  }
   return bank.find((item) => item.status === "approved" && item.id === questionId)
     ?? bank.find((item) => item.status === "approved" && item.objectiveId === objective.objectiveId);
 }
@@ -4842,7 +4891,7 @@ export function normalizeTeachingPackageMath(content: TeachingPackage, sourceTex
       normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(punctuation)), quotedSourceLabels));
   };
   const priorKnowledge = content.priorKnowledge.flatMap((value) => {
-    const normalizedValue = normalizePriorDefinitionClauseCount(normalize(normalizePriorDefinitionAbbreviation(value)));
+    const normalizedValue = normalize(normalizePriorDefinitionAbbreviation(value));
     const lines = normalizedValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (lines.filter(line => /^[^：\n]{2,100}：$/u.test(line)).length > 1) {
       const definitions: string[] = [];
@@ -5719,7 +5768,11 @@ async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
   if (aggregate !== manifest.aggregateSha256 || manifest.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) issues.push("WRITING_POLICY_MANIFEST_HASH_MISMATCH");
   if (manifest.files.some((file) => !file.path || !/^[a-f0-9]{64}$/.test(file.sha256) || file.sourcePath.includes("..") || /^[A-Za-z]:|^[\\/]/.test(file.sourcePath))) issues.push("WRITING_POLICY_FILE_ENTRY_INVALID");
 
-  const configuredSkillRoot = process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
+  const bundled = "standardVersion" in manifest;
+  if (bundled) {
+    try { loadWritingStandards(); } catch (error) { issues.push(error instanceof Error ? error.message : "WRITING_STANDARD_INVALID"); }
+  }
+  const configuredSkillRoot = bundled ? undefined : process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
   if (configuredSkillRoot) {
     for (const file of manifest.files) {
       try {
@@ -5741,7 +5794,7 @@ async function currentWritingPolicy(): Promise<WritingPolicyCurrent> {
     promptTemplate: `${plannedWritingPrompt}\n\n${writingFormatContract}`,
     files: manifest.files.map(({ path, sha256 }) => ({ path, sha256 })),
     aggregateSha256: manifest.aggregateSha256,
-    validator: { status: issues.length ? "failed" : "passed", sourceVerification: configuredSkillRoot ? "source_and_manifest" : "manifest_only", issues }
+    validator: { status: issues.length ? "failed" : "passed", sourceVerification: bundled || configuredSkillRoot ? "source_and_manifest" : "manifest_only", issues }
   };
 }
 

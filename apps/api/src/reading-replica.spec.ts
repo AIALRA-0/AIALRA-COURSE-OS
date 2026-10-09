@@ -1,9 +1,9 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, CourseTreeNode, LessonDraft, PageLesson, TrashRecord, WorkspaceTree } from "@course-os/contracts";
-import { toCourseReleaseIndex } from "@course-os/readweave-adapter";
+import { toCourseReleaseIndex, withReadBudget } from "@course-os/readweave-adapter";
 import { ReadingReplica, readingProjectionInvalidationId, type ReadingReplicaInput } from "./reading-replica.js";
 
 const roots: string[] = [];
@@ -11,6 +11,7 @@ const stamp = "2026-09-30T12:00:00.000Z";
 const questionAnswer = "confirmed question answer sentinel";
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -116,6 +117,39 @@ function input(courses: CourseProject[], releases: CourseRelease[], workspaceId 
 }
 
 describe("ReadingReplica", () => {
+  it.each(["cancel", "deadline"])("releases a %s queued projection without committing it after the lock clears", async (mode) => {
+    const replica = new ReadingReplica(await temporaryRoot(), "queued-reading-budget");
+    await replica.initialize();
+    const internals = replica as unknown as { readCatalogFile(): Promise<unknown> };
+    const readCatalog = internals.readCatalogFile.bind(replica);
+    let unblock!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(internals, "readCatalogFile").mockImplementationOnce(async () => {
+      started();
+      await gate;
+      return readCatalog();
+    });
+    const first = replica.updateMetadata({ courses: [course()] });
+    await entered;
+    const cancellation = new AbortController();
+    const queued = withReadBudget({ timeoutMs: mode === "deadline" ? 25 : 1000, signal: cancellation.signal },
+      () => replica.updateMetadata({ courses: [course("must-not-commit")] }));
+    const rejected = expect(queued).rejects.toThrow(mode === "deadline" ? "READ_DEADLINE_EXCEEDED" : "READ_CANCELLED");
+    if (mode === "cancel") cancellation.abort();
+    try {
+      await rejected;
+      expect(replica.revision).toBe(0);
+    } finally { unblock(); }
+    await first;
+    // A fresh operation must wait for the original owner and commit normally.
+    await replica.updateMetadata({ courses: [course("recovered")] });
+    expect(replica.revision).toBe(2);
+    expect(replica.getCourse("workspace-a", "must-not-commit")).toBeUndefined();
+    expect(replica.getCourse("workspace-a", "recovered")).toBeDefined();
+  });
+
   it("keeps TestingSample visible while hiding regression courses and releases", async () => {
     const root = await temporaryRoot();
     const replica = new ReadingReplica(root, "authority:visibility-tests");

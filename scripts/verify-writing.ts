@@ -5,6 +5,7 @@ import type { CourseRelease, MathExpression, PageLesson, PseudoCodeLine } from "
 import { sha256Text, stableStringify } from "@course-os/domain";
 import type { ReadWeaveFileState } from "@course-os/readweave-adapter";
 import { validateMarkdownMath, validateMathAtoms, validatePageForPublication, validatePseudoCodeLines } from "@course-os/quality";
+import { loadWritingStandards } from "../apps/api/src/writing-standards.js";
 
 interface WritingPolicyManifest {
   schemaVersion: "1.0.0";
@@ -14,6 +15,7 @@ interface WritingPolicyManifest {
   summary?: string;
   files: Array<{ path: string; sourcePath: string; sha256: string }>;
   aggregateSha256: string;
+  standardVersion?: string;
 }
 
 const manifestPath = resolve("config/writing-policy-manifest.json");
@@ -29,12 +31,15 @@ try {
 if (manifest) {
   validateManifest(manifest, "CURRENT");
   knownPolicyIds.add(manifest.policySnapshotId);
-  const bundledPolicyFiles = new Map([
+  const bundledPolicyFiles = manifest.standardVersion ? new Map(manifest.files.map(file => [file.sourcePath, resolve("config/generation-harness", file.path)])) : new Map([
     ["SKILL.md", resolve("config/generation-harness/policy-skill.md")],
     ["references/format-rules.md", resolve("config/generation-harness/policy-format-rules.md")],
     ["references/explanation-framework.md", resolve("config/generation-harness/policy-explanation-framework.md")],
     ["references/formula-explanation.md", resolve("config/generation-harness/policy-formula-explanation.md")]
   ]);
+  if (manifest.standardVersion) {
+    try { loadWritingStandards(); } catch (error) { policyIssues.push(error instanceof Error ? error.message : "WRITING_STANDARD_INVALID"); }
+  }
   for (const [sourcePath, bundledPath] of bundledPolicyFiles) {
     const expected = manifest.files.find((file) => file.sourcePath === sourcePath)?.sha256;
     if (!expected) {
@@ -66,8 +71,8 @@ try {
   policyIssues.push("WRITING_POLICY_HISTORY_MISSING");
 }
 
-const configuredSkillRoot = process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
-const sourceVerification = configuredSkillRoot ? "source_and_manifest" : "manifest_only";
+const configuredSkillRoot = manifest?.standardVersion ? undefined : process.env.HUMAN_READABLE_SKILL_DIR || process.env.HUMAN_WRITING_SKILL_DIR;
+const sourceVerification = manifest?.standardVersion || configuredSkillRoot ? "source_and_manifest" : "manifest_only";
 if (manifest && configuredSkillRoot) {
   const skillRoot = resolve(configuredSkillRoot);
   for (const file of manifest.files) {

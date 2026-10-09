@@ -24,9 +24,10 @@
 .product-content.learning-content-layout { border: 0; border-radius: 0; background: transparent; }
 .learning-content-slot { flex: 1; min-height: 0; }
 .product-content > .studio-workspace, .product-content > .review-workspace { flex: 1; min-height: 0; }
-.mode-switcher { min-height: 48px; flex: none; display: flex; align-items: stretch; gap: 0; justify-content: center; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
-.mode-switcher button { min-width: 92px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-size: 14px; font-weight: 500; }
-.mode-switcher button.active { color: var(--ink); border-bottom-color: var(--ink); background: var(--canvas); }
+.mode-switcher { min-height: 48px; flex: none; display: flex; align-items: center; gap: 4px; justify-content: center; padding: 5px 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.mode-switcher button { min-width: 92px; height: 36px; min-height: 36px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 500; }
+.mode-switcher button:hover { background: var(--hover); color: var(--ink); }
+.mode-switcher button.active { color: var(--ink); border-color: var(--line); background: var(--selected); }
 .mode-switcher button svg { position: static; width: 16px; height: 16px; }
 .workbench-panel-header { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .workbench-panel-header h2 { min-width: 0; display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
@@ -189,9 +190,9 @@
   .product-body, .product-body.left-collapsed { grid-template-columns: 48px minmax(0, 1fr); gap: 8px; padding: 8px 8px 8px 0; }
   .product-body > .course-sidebar { display: none; }
   .workbench-rail { width: 48px; }
-  .mode-switcher { min-height: 44px; padding: 0 8px; }
-  .mode-switcher button { flex: 1; min-width: 0; padding: 0 8px; }
-  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px auto auto minmax(0, 1fr) var(--workbench-footer-height, 52px); }
+  .mode-switcher { min-height: 56px; padding: 5px 8px; }
+  .mode-switcher button { min-width: 0; min-height: 44px; height: 44px; padding: 0 8px; }
+  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 56px auto auto minmax(0, 1fr) var(--workbench-footer-height, 52px); }
   .learning-workspace > .mode-switcher, .learning-workspace.panes-swapped > .mode-switcher { grid-column: 1; grid-row: 1; }
   .learning-workspace > .learning-header, .learning-workspace.panes-swapped > .learning-header { grid-column: 1; grid-row: 2; padding: 8px 12px; }
   .learning-header .breadcrumbs { max-width: none; }

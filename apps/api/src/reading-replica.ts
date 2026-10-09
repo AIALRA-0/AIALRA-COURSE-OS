@@ -12,7 +12,7 @@ import type {
 } from "@course-os/contracts";
 import { sha256Text, stableStringify } from "@course-os/domain";
 import { writeJsonAtomic } from "@course-os/storage";
-import { toCourseReleaseIndex, type CourseReleaseIndex } from "@course-os/readweave-adapter";
+import { currentReadBudget, toCourseReleaseIndex, withReadBudget, type CourseReleaseIndex } from "@course-os/readweave-adapter";
 import { treeCapabilities } from "./tree-capabilities.js";
 
 const FORMAT_VERSION = 1;
@@ -150,14 +150,24 @@ export type ReadingMediaVisibility = "confirmed" | "blocked" | "unindexed";
 
 const processLocks = new Map<string, Promise<void>>();
 
+function assertReplicaReadActive(): void {
+  const budget = currentReadBudget();
+  if (budget?.signal.aborted) throw budget.signal.reason instanceof Error ? budget.signal.reason : new Error("READ_CANCELLED");
+  if (budget?.deadline !== undefined && Date.now() >= budget.deadline) throw new Error("READ_DEADLINE_EXCEEDED");
+}
+
 async function withProcessLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
   const previous = processLocks.get(key) ?? Promise.resolve();
   let unlock!: () => void;
   const gate = new Promise<void>((resolveGate) => { unlock = resolveGate; });
   const tail = previous.then(() => gate);
   processLocks.set(key, tail);
-  await previous;
+  const budget = currentReadBudget();
   try {
+    if (budget) {
+      await withReadBudget({ signal: budget.signal, deadline: budget.deadline }, () => previous);
+      assertReplicaReadActive();
+    } else await previous;
     return await operation();
   } finally {
     unlock();
@@ -1121,6 +1131,7 @@ export class ReadingReplica {
       this.catalog = current;
       try {
         const proposed = await build(current);
+        assertReplicaReadActive();
         if (!proposed) {
           await this.cleanupUnreferenced(current).catch(() => undefined);
           return false;

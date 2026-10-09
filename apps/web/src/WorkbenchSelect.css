@@ -9,7 +9,7 @@
 .workbench-select-shell .workbench-select:disabled { color: var(--muted); cursor: not-allowed; }
 .workbench-select-chevron {
   position: absolute; top: 50%; right: 10px; width: 16px; height: 16px; color: var(--ink-soft);
-  transform: translateY(-50%) rotate(90deg); pointer-events: none;
+  transform: translateY(-50%); pointer-events: none;
 }
 .question-batch-size .workbench-select-shell { flex: 0 0 auto; width: auto; }
 .question-batch-size .workbench-select-shell .workbench-select { width: auto; min-width: 96px; }

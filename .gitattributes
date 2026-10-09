@@ -5,3 +5,5 @@
 *.pdf binary
 *.pptx binary
 docs/research/2026-08-28-course-os-decision-report.md -text whitespace=-trailing-space
+# Distributed standards retain the exact LOCK-pinned source bytes on every OS.
+config/generation-harness/*-standard-source.md -text whitespace=-trailing-space

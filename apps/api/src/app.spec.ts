@@ -1088,8 +1088,8 @@ describe("Course OS API", () => {
     content.fullExplanationMarkdown += "\n\n动作概率由软最大函数函数计算";
     const normalized = normalizeTeachingPackageMath(content);
     expect(normalized.priorKnowledge[0]).toMatch(/^MDP 马尔可夫决策过程（Markov Decision Process）：/u);
-    expect(normalized.priorKnowledge[0]!.split("；")).toHaveLength(5);
-    expect(normalized.priorKnowledge[0]).toContain("不同于单步分类，补充说明适用边界");
+    expect(normalized.priorKnowledge[0]!.split("；")).toHaveLength(6);
+    expect(normalized.priorKnowledge[0]).toContain("不同于单步分类；补充说明适用边界");
     expect(normalized.fullExplanationMarkdown).toContain("动作概率由软最大函数计算");
     expect(normalized.fullExplanationMarkdown).not.toContain("函数函数");
   });
@@ -1344,7 +1344,7 @@ describe("Course OS API", () => {
     expect(["queued", "running", "failed"]).toContain(ready.generationState);
     expect(ready.generationJobId).toBeTruthy();
     const job = await waitForJob(app, ready.generationJobId);
-    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5", budgetUsd: 2 });
+    expect(job).toMatchObject({ sourceImportId: ready.id, qualityMode: "economy", language: "zh-CN", writingPolicySnapshotId: "writing-policy:e80ace58d560a2b0", budgetUsd: 2 });
     const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "auto-generate-import").attach("file", source, { filename: "partitioning.md", contentType: "text/markdown" }).expect(200);
     expect(replay.body.id).toBe(ready.id);
     expect((await dependencies.operations.read()).jobs).toHaveLength(1);
@@ -1362,7 +1362,7 @@ describe("Course OS API", () => {
 
   it("returns a safe candidate writing policy without private paths", async () => {
     const policy = await request(await testApp()).get("/api/v1/writing-policy/current").expect(200);
-    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:a4dc46c3432bf1d5", sourceCommit: "d4d4b11d6122c0f538186b2f5553f7cce7eb2480", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
+    expect(policy.body).toMatchObject({ policySnapshotId: "writing-policy:e80ace58d560a2b0", sourceCommit: "", status: "approved", taskContract: "GENERATE + TEACHING", validator: { status: "passed" } });
     expect(policy.body.promptTemplate).toContain("SOURCE");
     expect(JSON.stringify(policy.body)).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
@@ -1378,7 +1378,7 @@ describe("Course OS API", () => {
       .set("Idempotency-Key", "candidate-release-1")
       .send({ baseReleaseId: "test-release-v1", releaseId: "test-release-v2-candidate", budgetUsd: 2, qualityMode: "economy" })
       .expect(202);
-    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" });
+    expect(created.body.candidate).toMatchObject({ id: "test-release-v2-candidate", lifecycle: "draft_source", candidateBaseReleaseId: "test-release-v1", pageIds: ["test-release-v2-candidate:page:1"], writingPolicySnapshotId: "writing-policy:e80ace58d560a2b0" });
     expect(created.body.candidate.pages[0].id).not.toBe("page-1");
     expect(created.body.candidate.pages[0].blocks[0].id).toContain("test-release-v2-candidate:page:1");
     expect((await readweave.listReleases()).filter((item) => item.lifecycle !== "draft_source")).toHaveLength(1);
@@ -1492,7 +1492,7 @@ describe("Course OS API", () => {
         return testTeachingResult(0.001);
       }
     };
-    const releaseWithCurrentPolicy = { ...testRelease(), writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" };
+    const releaseWithCurrentPolicy = { ...testRelease(), writingPolicySnapshotId: "writing-policy:e80ace58d560a2b0" };
     const { app, operations, release } = await seededApp(modelRouter, releaseWithCurrentPolicy);
     const created = await request(app).post("/api/v1/generation-plans")
       .set("Idempotency-Key", "failed-plan-retry-create")
@@ -1515,7 +1515,7 @@ describe("Course OS API", () => {
       .expect((response) => expect(response.body.error).toMatchObject({ code: "WRITING_POLICY_SNAPSHOT_CHANGED" }));
     await operations.mutate((state) => {
       const plan = state.generationPlans.find((item) => item.id === failed.id)!;
-      plan.writingPolicySnapshotId = "writing-policy:a4dc46c3432bf1d5";
+      plan.writingPolicySnapshotId = "writing-policy:e80ace58d560a2b0";
       for (const job of state.jobs.filter((item) => item.planId === failed.id)) {
         job.writingPolicySnapshotId = plan.writingPolicySnapshotId;
       }
@@ -1563,7 +1563,7 @@ describe("Course OS API", () => {
           usage: testTeachingResult(0.001).usage };
       }
     };
-    const source = { ...testReleaseWithPages(2), writingPolicySnapshotId: "writing-policy:a4dc46c3432bf1d5" };
+    const source = { ...testReleaseWithPages(2), writingPolicySnapshotId: "writing-policy:e80ace58d560a2b0" };
     const { app, operations, readweave, release } = await seededApp(modelRouter, source);
     const completedPageId = release.pageIds[0]!;
     const bridgePageId = release.pageIds[1]!;

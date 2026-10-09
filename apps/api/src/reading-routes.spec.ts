@@ -6,7 +6,7 @@ import { gunzipSync } from "node:zlib";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CourseProject, CourseRelease, LessonDraft, PageLesson } from "@course-os/contracts";
-import { FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
+import { currentReadBudget, FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { buildReadingTree, createApp, createDefaultDependencies } from "./app.js";
 import { ReadingRuntime } from "./reading-runtime.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
@@ -73,6 +73,149 @@ async function harness() {
 }
 
 describe("replica-backed reading routes", () => {
+  it("keeps the review map identical while reading only current confirmed published pages", async () => {
+    const { app, authority, dependencies, reading, release, draft } = await harness();
+    const courses = await reading.replica.listCourses("personal");
+    const page = { ...testPage(), blocks: [{ ...testPage().blocks[0]!, kind: "objective" as const, markdown: "Published objective text" }] };
+    const latest = { ...release, id: "release-latest", version: 2, publishedAt: "2026-10-01T12:00:00.000Z", pages: [page] };
+    const releases = [release, { ...latest, id: "release-earlier", publishedAt: stamp }, latest,
+      { ...release, id: "release-draft", version: 9, lifecycle: "draft_source" as const },
+      { ...release, id: "regression-release", moduleId: "other-module" }];
+    await reading.replica.replace({ courses, releases, drafts: [{ ...draft, sourceReleaseId: latest.id,
+      page: { ...page, questionBank: [{ ...page.questionBank![0]!, objectiveId: "unpublished-objective" }] } }],
+      tree: buildReadingTree(courses, [], [], "personal"), trash: [] });
+    vi.spyOn(authority, "listCourses").mockResolvedValue(courses);
+    vi.spyOn(authority, "listReleases").mockResolvedValue(releases);
+    vi.spyOn(authority, "listTrash").mockResolvedValue([]);
+    vi.spyOn(authority, "listMastery").mockResolvedValue([{ objectiveId: "objective-a", state: "needs_review",
+      unaidedCorrect: true, delayedOrTransferCorrect: false, nextReviewAt: stamp, intervalStep: 2,
+      algorithmVersion: "review-ladder-v1", updatedAt: stamp }]);
+    vi.spyOn(authority, "listAssessmentAttempts").mockResolvedValue([{ id: "attempt-a", itemId: "question-a", objectiveId: "objective-a",
+      answer: "yes", correct: true, usedHintLevel: 1, misconception: "Earlier misconception", attemptedAt: stamp }]);
+    const baseline = await request(createApp({ ...dependencies, reading: undefined })).get("/api/v1/review-map").expect(200);
+    const forbidden = ["listCourses", "listReleases", "listReleaseIndexes", "listTreeNodes", "listTrash", "getRelease", "getDraftByPage"] as const;
+    for (const method of forbidden) vi.spyOn(authority, method).mockClear().mockRejectedValue(new Error("FULL_AUTHORITY_READ_MUST_NOT_RUN"));
+    const sourceRead = vi.spyOn(reading.replica, "getPageSource");
+    const confirmed = await request(app).get("/api/v1/review-map").expect(200);
+    expect({ ...confirmed.body, generatedAt: null }).toEqual({ ...baseline.body, generatedAt: null });
+    expect(confirmed.body.objectives[0]).toMatchObject({ objectiveId: "objective-a", objectiveText: "Published objective text",
+      releaseId: latest.id, due: true, attemptCount: 1, hintDependencyCount: 1, lastMisconception: "Earlier misconception" });
+    expect(sourceRead).toHaveBeenCalledExactlyOnceWith("personal", "page-a", latest.id);
+    await request(app).get("/api/v1/review-queue").expect(200).expect(response => expect(response.body).toHaveLength(1));
+    for (const method of forbidden) expect(authority[method]).not.toHaveBeenCalled();
+  });
+
+  it("preserves legacy review objective identity using only its authorized selected release", async () => {
+    const { app, authority, reading, release } = await harness();
+    const legacy = { ...release, id: "release-old-format", version: 2, pages: [{ ...release.pages[0]!, questionBank: [] }], assessments: [{ id: "assessment-a",
+      objectiveId: "legacy-objective", pageId: "page-a", prompt: "Legacy prompt", expectedAnswer: "yes", transfer: false }] };
+    await reading.replica.upsertRelease(legacy);
+    const selected = vi.spyOn(authority, "getRelease").mockResolvedValue(legacy);
+    const all = vi.spyOn(authority, "listReleases").mockRejectedValue(new Error("FULL_AUTHORITY_READ_MUST_NOT_RUN"));
+    const map = await request(app).get("/api/v1/review-map").expect(200);
+    expect(map.body.objectives[0].objectiveId).toBe("legacy-objective");
+    expect(selected).toHaveBeenCalledExactlyOnceWith(legacy.id);
+    expect(all).not.toHaveBeenCalled();
+  });
+
+  it("restores a review session from its confirmed page without loading full versions", async () => {
+    const { app, authority, dependencies, draft } = await harness();
+    await dependencies.operations.mutate(state => { state.reviewSessions.push({ id: "review-a", workspaceId: "personal",
+      source: "manual", seed: "seed-a", objectiveIds: ["objective-a"], currentIndex: 0, status: "active",
+      currentObjectiveId: "objective-a", questionIdsByObjective: { "objective-a": ["question-a"] }, createdAt: stamp, updatedAt: stamp }); });
+    const forbidden = ["getRelease", "listReleases", "listReleaseIndexes", "listCourses", "listTreeNodes", "listTrash"] as const;
+    for (const method of forbidden) vi.spyOn(authority, method).mockRejectedValue(new Error("FULL_AUTHORITY_READ_MUST_NOT_RUN"));
+    const native = vi.spyOn(authority, "getDraftByPage").mockResolvedValue(draft);
+    for (const path of ["/api/v1/review-sessions/current", "/api/v1/review-sessions/review-a"]) {
+      const restored = await request(app).get(path).expect(200);
+      expect(restored.body).toMatchObject({ session: { id: "review-a" }, objective: { objectiveId: "objective-a" }, question: { id: "question-a" } });
+    }
+    expect(native).toHaveBeenCalledTimes(2);
+    for (const method of forbidden) expect(authority[method]).not.toHaveBeenCalled();
+    await request(app).get("/api/v1/review-sessions/review-a").set("X-Workspace-Id", "other").expect(404);
+    await request(app).get("/api/v1/review-map").set("X-Workspace-Id", "other").expect(200)
+      .expect(response => expect(response.body).toMatchObject({ pageCount: 0, releaseCount: 0, objectives: [] }));
+  });
+
+  it("blocks the review map after source access denial and never falls back for a missing confirmed page", async () => {
+    const { app, authority, reading } = await harness();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const full = vi.spyOn(authority, "listReleases").mockRejectedValue(new Error("FULL_AUTHORITY_READ_MUST_NOT_RUN"));
+    vi.spyOn(reading.replica, "getPageSource").mockResolvedValue(undefined);
+    const missing = await request(app).get("/api/v1/review-map").expect(503);
+    expect(missing.body.error.code).toBe("READING_NOT_READY");
+    vi.spyOn(reading, "assertAccess").mockImplementation(() => { throw new Error("READING_ACCESS_DENIED"); });
+    const activities = vi.spyOn(authority, "listMastery").mockClear();
+    for (const path of ["/api/v1/review-map", "/api/v1/review-queue"]) {
+      await request(app).get(path).expect(403);
+    }
+    expect(activities).not.toHaveBeenCalled();
+    expect(full).not.toHaveBeenCalled();
+  });
+
+  it("cancels a hung native draft at the existing eight-second deadline and permits a fresh read", async () => {
+    const { app, authority, draft } = await harness();
+    let signal: AbortSignal | undefined;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reconcile = vi.spyOn(authority, "getDraftByPage").mockImplementationOnce(async () => {
+      signal = currentReadBudget()?.signal;
+      if (!signal) throw new Error("READ_BUDGET_REQUIRED");
+      return new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+    }).mockResolvedValue(draft);
+    const timedOut = await request(app).get("/api/v1/pages/page-a/draft").expect(504);
+    expect(timedOut.body.error.code).toBe("READ_DEADLINE_EXCEEDED");
+    expect(signal?.aborted).toBe(true);
+    await request(app).get("/api/v1/pages/page-a/draft").expect(200);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it("forwards a disconnected editing request to the native draft read and permits recovery", async () => {
+    const { app, authority, draft } = await harness();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let signal: AbortSignal | undefined;
+    let entered!: () => void;
+    let cancelled!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const aborted = new Promise<void>(resolve => { cancelled = resolve; });
+    vi.spyOn(authority, "getDraftByPage").mockImplementationOnce(async () => {
+      signal = currentReadBudget()?.signal;
+      if (!signal) throw new Error("READ_BUDGET_REQUIRED");
+      entered();
+      return new Promise((_resolve, reject) => signal!.addEventListener("abort", () => {
+        cancelled();
+        reject(signal!.reason);
+      }, { once: true }));
+    }).mockResolvedValue(draft);
+    const server = app.listen(0);
+    try {
+      await new Promise<void>(resolve => server.once("listening", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("TEST_SERVER_ADDRESS_UNAVAILABLE");
+      const client = httpRequest({ host: "127.0.0.1", port: address.port, path: "/api/v1/pages/page-a/draft" });
+      client.on("error", () => undefined);
+      client.end();
+      await started;
+      client.destroy();
+      await aborted;
+      expect(signal?.aborted).toBe(true);
+      await request(app).get("/api/v1/pages/page-a/draft").expect(200);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it("reuses the confirmed source for editing while reconciling only the selected native draft", async () => {
+    const { app, authority, draft, reading } = await harness();
+    const reads = ["getRelease", "listReleases", "listReleaseIndexes", "listCourses", "listTreeNodes", "listTrash"] as const;
+    for (const method of reads) vi.spyOn(authority, method).mockRejectedValue(new Error("UNRELATED_AUTHORITY_READ_MUST_NOT_RUN"));
+    const updated = { ...draft, revision: draft.revision + 1, contentHash: "native-edit-hash", page: { ...draft.page, title: "Native edit" } };
+    const reconcile = vi.spyOn(authority, "getDraftByPage").mockResolvedValue(updated);
+    const result = await request(app).get("/api/v1/pages/page-a/draft").set("X-Workspace-Id", "personal").expect(200);
+    expect(result.body).toMatchObject({ revision: updated.revision, contentHash: updated.contentHash, page: { title: "Native edit" } });
+    expect(result.headers["server-timing"]).toMatch(/source;dur=.*draft;dur=.*projection;dur=/u);
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith("page-a");
+    for (const method of reads) expect(authority[method]).not.toHaveBeenCalled();
+    expect(await reading.replica.getDraft("personal", "page-a", "release-a")).toMatchObject({ contentHash: updated.contentHash });
+  });
+
   it("reads container properties from the confirmed directory without rebuilding authority indexes", async () => {
     const { app, authority } = await harness();
     for (const method of ["listCourses", "listReleases", "listDrafts", "listTreeNodes", "listTrash", "getTreeNodeProperties"] as const) {

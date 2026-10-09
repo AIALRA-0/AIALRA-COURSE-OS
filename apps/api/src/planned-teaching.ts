@@ -314,10 +314,10 @@ export function normalizePlannedOpening<T extends Partial<TeachingPackage>>(cont
     ...content,
     chapterBridgeMarkdown: typeof content.chapterBridgeMarkdown === "string" ? normalize(content.chapterBridgeMarkdown) : content.chapterBridgeMarkdown,
     priorKnowledge: Array.isArray(content.priorKnowledge)
-      ? content.priorKnowledge.slice(0, 5).map(value => typeof value === "string" ? normalize(value) : value) as string[]
+      ? content.priorKnowledge.map(value => typeof value === "string" ? normalize(value) : value) as string[]
       : content.priorKnowledge,
     learningObjectives: Array.isArray(content.learningObjectives)
-      ? content.learningObjectives.slice(0, 4).map(value => typeof value === "string" ? normalize(value) : value) as string[]
+      ? content.learningObjectives.map(value => typeof value === "string" ? normalize(value) : value) as string[]
       : content.learningObjectives
   } as T;
   if (content.chapterBridgeMarkdown === undefined) delete normalized.chapterBridgeMarkdown;

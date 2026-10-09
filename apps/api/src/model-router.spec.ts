@@ -54,17 +54,15 @@ describe("generation harness", () => {
   });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.4", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.5", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/planned-teaching.ts")).toBe(true);
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "policy-skill.md", "policy-format-rules.md", "policy-explanation-framework.md", "policy-formula-explanation.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "writing-standard-source.md", "style-standard-source.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/writing-standards.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(snapshot.files.find((file) => file.path === "policy-skill.md")?.sha256).toBe("c0a8122648c926e06d6a43d27e9097f48e818fce17e19ab8429151ffc4d6d457");
-    expect(snapshot.files.find((file) => file.path === "policy-format-rules.md")?.sha256).toBe("d834bf4624dbf0fb850a63ae35061864122afe090ce16e51a9845506af35a563");
-    expect(snapshot.files.find((file) => file.path === "policy-explanation-framework.md")?.sha256).toBe("8034dfb53735e479f97d82dfc74a846d6170aa3415e80f809d17bd3502c06463");
-    expect(snapshot.files.find((file) => file.path === "policy-formula-explanation.md")?.sha256).toBe("65e589994e5f5da5514d57ad5aca6d63b49adf6975e6af988598115008802c8e");
+    expect(snapshot.files.find((file) => file.path === "writing-standard-source.md")?.sha256).toBe("ba0f450a1f8f30a5f9328376739081e4ff9f501904f376bc36c55aca743ddc6f");
+    expect(snapshot.files.find((file) => file.path === "style-standard-source.md")?.sha256).toBe("97f49d1a670616b8546ed5eb1f1dfca4f45ec48d49d791a9c8c41662c3e03d76");
   });
 
   it("hashes the same Harness source identically across Windows and Linux line endings", () => {
@@ -261,7 +259,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       apiKey: "synthetic-example-token", model: "deepseek-flash", protocol: "responses" });
     const result = await client.generateBridge({ ...providerInput("bridge-page"), previousPageContext: "前页解释了输入",
       currentSummary: "本页讨论处理规则" });
-    expect(result).toMatchObject({ markdown: "课程举例说明：AI provider temporarily unavailable 是系统提示语，本页继续讨论处理规则。", provider: "deepseek",
+    expect(result).toMatchObject({ markdown: "课程举例说明：AI provider temporarily unavailable 是系统提示语，本页继续讨论处理规则", provider: "deepseek",
       usage: { apiEquivalentUsd: 0.001 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -325,7 +323,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await client.generateBridge({ ...providerInput("bridge-first-page"), pageNumber: 1,
       previousPageContext: firstPageContext, currentSummary: "本页讨论处理规则如何改变输出" });
 
-    expect(result.markdown).toBe("本页关注处理规则怎样改变输出。");
+    expect(result.markdown).toBe("本页关注处理规则怎样改变输出");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -463,7 +461,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
 
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ max_output_tokens: 700, stream: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.markdown).toBe("本页继续核对前述条件。");
+    expect(result.markdown).toBe("本页继续核对前述条件");
     expect(result.usage).toMatchObject({ inputTokens: 125, outputTokens: 34, apiEquivalentUsd: 0.002 });
     expect(result.usage.unreportedCostReserveUsd).toBeGreaterThan(0);
   });
@@ -562,7 +560,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const metered = meterModelRouter(configuredKuafuFallbackClient());
-    const result = await metered.client.generateTeachingPackage({ ...providerInput(`opaque-relay-fallback-${scenario.expectReserve}`), maxCostUsd: 0.05 });
+    const result = await metered.client.generateTeachingPackage({ ...providerInput(`opaque-relay-fallback-${scenario.expectReserve}`), maxCostUsd: 0.072 });
 
     expect(result).toMatchObject({ provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910",
       usage: { inputTokens: scenario.primaryUsage ? 240 : 100, outputTokens: 200, apiEquivalentUsd: scenario.expectedCost } });
@@ -1036,10 +1034,12 @@ function providerInput(idempotencyKey: string, withImage = false) {
     pageNumber: 1,
     sourceText: "来源内容：输入经过规则处理后得到输出",
     sourceImageDataUrl: withImage ? "data:image/png;base64,iVBORw0KGgo=" : undefined,
-    writingPolicySnapshotId: "writing-policy:test",
+      writingPolicySnapshotId: "writing-policy:test",
     language: "zh-CN",
     qualityMode: "balanced",
     idempotencyKey,
+    // Protocol/fallback tests fund the complete standards prompt; low-budget tests override this.
+    maxCostUsd: 0.2,
     teachingPlan: "先说明页面的核心问题，再按课件顺序解释关键对象及其关系。"
   };
 }
