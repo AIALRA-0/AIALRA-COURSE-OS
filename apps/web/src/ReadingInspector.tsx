@@ -10,10 +10,10 @@ const chapters = [
   ["main_content", "主要内容"], ["misconceptions", "易错点"], ["questions", "问答与自我重述"],
 ] as const;
 
-export function ReadingInspector({ release, page, view, onView, imageResources, lessonRef, onClose, onSwap, onStudio, terminalError } : {
+export function ReadingInspector({ release, page, view, onView, imageResources, lessonRef, onClose, onSwap, terminalError } : {
   release: CourseRelease; page: PageLesson; view: ViewState; onView: (next: ViewState) => void;
   imageResources: ImageResourceCache; lessonRef: RefObject<HTMLDivElement | null>;
-  onClose: () => void; onSwap: () => void; onStudio: () => void; terminalError?: string;
+  onClose: () => void; onSwap: () => void; terminalError?: string;
 }) {
   const [tab, setTab] = useState<"source" | "outline">("source");
   const selectTab = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -53,7 +53,6 @@ export function ReadingInspector({ release, page, view, onView, imageResources, 
       <div id="reading-outline-panel" role="tabpanel" aria-labelledby="reading-outline-tab" hidden={tab !== "outline"} className="reading-outline-panel">
         <div className="page-identity"><Icon name="document" /><div><strong>{page.title}</strong><span>{state}</span></div></div>
         <dl className="page-properties"><div><dt>课程</dt><dd>{release.courseTitle}</dd></div><div><dt>材料</dt><dd>{release.moduleTitle}</dd></div><div><dt>页面</dt><dd>{page.pageNumber} / {release.pages.length}</dd></div><div><dt>已有题库</dt><dd>{page.questionBank?.length ?? 0} 题</dd></div></dl>
-        <button type="button" className="quiet-button" data-action="inspector-open-studio" onClick={onStudio}><Icon name="edit" />制作本页</button>
       </div>
       <nav className="reading-outline" aria-label="本页教学目录"><h3>阅读目录</h3>{chapters.map(([kind, title], index) => <button key={kind} type="button" data-action={`reading-jump:${kind}`} onClick={() => jump(kind)}><span>{String(index + 1).padStart(2, "0")}</span>{title}<Icon name="chevronRight" /></button>)}</nav>
     </div>

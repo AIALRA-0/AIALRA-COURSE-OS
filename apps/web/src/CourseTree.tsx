@@ -352,6 +352,7 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
       <TaskRows tasks={backgroundTasks} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} onClearFailed={onClearFailed} clearFailedBusy={clearFailedBusy} />
     </div>
 
+    <div className="course-bottom-space" aria-hidden="true" />
     {onResizeStart && <div
       className="sidebar-resize-handle"
       role="separator"

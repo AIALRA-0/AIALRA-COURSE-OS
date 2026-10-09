@@ -1,8 +1,15 @@
 .course-sidebar.course-navigator {
   min-width: 0;
   overflow: hidden;
-  grid-template-rows: 56px 56px 48px minmax(0, 1fr);
+  grid-template-rows: 56px 56px 48px minmax(0, 1fr) var(--workbench-footer-height, 52px);
   background: var(--canvas);
+}
+
+.course-bottom-space {
+  grid-row: 5;
+  min-height: 0;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .course-sidebar.course-navigator .sidebar-heading {

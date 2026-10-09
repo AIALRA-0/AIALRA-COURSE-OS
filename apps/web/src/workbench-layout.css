@@ -1,5 +1,5 @@
 /* Application chrome and document layout: the former layout rules are retired. */
-.product-shell { width: 100%; height: 100dvh; min-height: 0; display: grid; grid-template-rows: var(--topbar) minmax(0, 1fr); overflow: hidden; background: var(--app); }
+.product-shell { --workbench-footer-height: 52px; width: 100%; height: 100dvh; min-height: 0; display: grid; grid-template-rows: var(--topbar) minmax(0, 1fr); overflow: hidden; background: var(--app); }
 .product-topbar { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(200px, 400px) minmax(180px, 1fr); align-items: center; gap: 24px; padding: 0 24px; border-bottom: 1px solid var(--line); background: var(--app); z-index: 30; }
 .product-brand { min-width: 0; display: flex; align-items: center; gap: 12px; }
 .brand-symbol { width: 30px; height: 30px; position: relative; display: grid; place-items: center; border: 1px solid var(--input-line); border-radius: 6px; color: var(--ink); font-size: 12px; font-weight: 600; }
@@ -15,7 +15,6 @@
 .command-button svg { width: 16px; height: 16px; position: static; }
 .command-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .command-button kbd { margin-left: auto; padding: 1px 4px; flex: none; font-size: 11px; color: var(--faint); border: 1px solid var(--line); border-radius: 3px; white-space: nowrap; }
-.profile-button { width: 32px; height: 32px; display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--input-line); border-radius: 6px; background: var(--surface); font-size: 12px; font-weight: 600; }
 .product-actions .sync-indicator { border: 0; background: transparent; min-height: 32px; padding: 0 24px 0 16px; font-size: 12px; }
 .product-actions .sync-indicator .live-dot { left: 0; }
 .product-body { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-columns: var(--activity-rail) var(--course-sidebar) minmax(0, 1fr); gap: 16px; padding: 16px 16px 16px 0; }
@@ -25,7 +24,7 @@
 .product-content.learning-content-layout { border: 0; border-radius: 0; background: transparent; }
 .learning-content-slot { flex: 1; min-height: 0; }
 .product-content > .studio-workspace, .product-content > .review-workspace { flex: 1; min-height: 0; }
-.mode-switcher { min-height: 48px; flex: none; display: flex; align-items: stretch; gap: 0; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.mode-switcher { min-height: 48px; flex: none; display: flex; align-items: stretch; gap: 0; justify-content: center; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .mode-switcher button { min-width: 92px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-size: 14px; font-weight: 500; }
 .mode-switcher button.active { color: var(--ink); border-bottom-color: var(--ink); background: var(--canvas); }
 .mode-switcher button svg { position: static; width: 16px; height: 16px; }
@@ -33,7 +32,7 @@
 .workbench-panel-header h2 { min-width: 0; display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
 .workbench-panel-header > div { display: flex; gap: 4px; }
 .workbench-panel-header .icon-button { width: 32px; height: 32px; min-height: 32px; border: 0; background: transparent; }
-.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(220px, min(1040px, var(--source-width, 480px))) 16px minmax(0, 1fr); grid-template-rows: 48px auto minmax(0, 1fr) 52px; overflow: hidden; }
+.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(220px, min(1040px, var(--source-width, 480px))) 16px minmax(0, 1fr); grid-template-rows: 48px auto minmax(0, 1fr) var(--workbench-footer-height, 52px); overflow: hidden; }
 .learning-workspace.panes-swapped { grid-template-columns: minmax(0, 1fr) 16px minmax(220px, min(1040px, var(--source-width, 480px))); }
 .learning-workspace > .mode-switcher { grid-column: 3; grid-row: 1; border: 1px solid var(--line); border-radius: 8px 8px 0 0; }
 .learning-workspace.panes-swapped > .mode-switcher { grid-column: 1; }
@@ -76,7 +75,7 @@
 .learning-grid.source-is-collapsed .visual-column { display: none; }
 .learning-grid.source-is-collapsed .lesson-column { grid-column: 1; }
 .learning-grid.source-is-collapsed .source-collapsed-rail { display: flex; justify-content: center; grid-column: 2; grid-row: 1 / span 4; padding-top: 8px; background: var(--surface); border-left: 1px solid var(--line); }
-.reading-inspector { height: 100%; min-height: 0; display: grid; grid-template-rows: 48px 40px minmax(0, 1fr) 40px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.reading-inspector { height: 100%; min-height: 0; display: grid; grid-template-rows: 48px 40px minmax(0, 1fr) var(--workbench-footer-height, 52px); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .reading-inspector-tabs { display: flex; gap: 16px; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .reading-inspector-tabs button { flex: 1; padding: 0 4px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; }
 .reading-inspector-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
@@ -124,7 +123,7 @@
 .lesson-section-title small { display: none; }
 .lesson-section-title h3 { margin: 0; font-size: 18px; font-weight: 600; }
 .explanation-panel .lesson-block { padding-top: 24px !important; margin-top: 24px; border-top: 1px solid var(--line) !important; background: transparent; border-radius: 0; font-weight: 400; }
-.page-dock { grid-column: 3; grid-row: 4; position: relative; min-width: 0; height: 52px; min-height: 52px; z-index: 12; border: 1px solid var(--line); border-radius: 0 0 8px 8px; background: var(--surface); }
+.page-dock { grid-column: 3; grid-row: 4; position: relative; min-width: 0; height: var(--workbench-footer-height, 52px); min-height: var(--workbench-footer-height, 52px); z-index: 12; border: 1px solid var(--line); border-radius: 0 0 8px 8px; background: var(--surface); }
 .learning-workspace.panes-swapped > .page-dock, .learning-workspace.source-is-collapsed > .page-dock, .learning-workspace.right-is-collapsed > .page-dock { grid-column: 1; }
 .page-dock-summary { height: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 0 12px; }
 .page-dock-summary > button { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 36px; min-height: 36px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; font-size: 14px; }
@@ -153,6 +152,12 @@
 .page-dock-drawer .lesson-strip > button > span { width: 36px; height: 36px; border-radius: 7px; font-size: 14px; }
 .page-dock-drawer .lesson-strip strong { font-size: 15px; }
 .page-dock-drawer .lesson-strip small { font-size: 13px; }
+.page-dock-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.page-view-switch { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; }
+.page-dock .page-view-switch > button { width: auto; min-width: 48px; height: 32px; min-height: 32px; padding: 0 8px; font-size: 13px; }
+.page-dock .page-view-switch > button[aria-pressed="true"] { background: var(--selected); color: var(--ink); }
+.page-dock.view-strip .lesson-strip { display: flex; flex-direction: row; align-items: stretch; overflow-x: auto; overflow-y: hidden; padding-bottom: 14px; }
+.page-dock.view-strip .lesson-strip > button { width: 224px; min-width: 224px; flex: 0 0 224px; }
 .settings-card { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 24px 0; background: transparent; box-shadow: none; }
 .settings-main-header { background: var(--canvas); padding: 24px; }
 .settings-main-header h3 { font-size: 24px; letter-spacing: 0; }
@@ -186,7 +191,7 @@
   .workbench-rail { width: 48px; }
   .mode-switcher { min-height: 44px; padding: 0 8px; }
   .mode-switcher button { flex: 1; min-width: 0; padding: 0 8px; }
-  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px auto auto minmax(0, 1fr) 52px; }
+  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px auto auto minmax(0, 1fr) var(--workbench-footer-height, 52px); }
   .learning-workspace > .mode-switcher, .learning-workspace.panes-swapped > .mode-switcher { grid-column: 1; grid-row: 1; }
   .learning-workspace > .learning-header, .learning-workspace.panes-swapped > .learning-header { grid-column: 1; grid-row: 2; padding: 8px 12px; }
   .learning-header .breadcrumbs { max-width: none; }
@@ -210,11 +215,13 @@
   .product-topbar { gap: 8px; padding-inline: 8px; }
   .command-button { padding-inline: 12px; font-size: 12px; gap: 8px; }
   .product-actions { gap: 4px; }
-  .product-actions .profile-button { display: none; }
   .page-dock-summary { grid-template-columns: 36px minmax(0, 1fr) 36px; padding-inline: 4px; gap: 4px; }
   .page-dock-summary > button { padding: 4px; gap: 4px; }
   .page-dock-summary > button:not(.page-dock-toggle) { width: 36px; min-width: 36px; padding: 4px; font-size: 0; }
   .page-dock-drawer-header > :first-child { align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; white-space: normal; }
+  .page-dock-drawer-header { flex-wrap: wrap; gap: 8px; padding: 8px; }
+  .page-dock-drawer-header > :first-child { flex: 1 1 100%; }
+  .page-dock-actions { width: 100%; justify-content: space-between; }
   .explanation-panel { padding-inline: 16px; }
   .lesson-header h2 { font-size: 22px; }
 }
