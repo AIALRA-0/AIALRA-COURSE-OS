@@ -68,7 +68,7 @@ const treeStatusPresentation = {
   conflict: { icon: "warning", label: "存在冲突", visibleLabel: "冲突" }
 } as const;
 
-export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, onClearFailed, clearFailedBusy = false, collapsed = false, onCollapse, sidebarWidth, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
+export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, onClearFailed, clearFailedBusy = false, collapsed = false, onCollapse, sidebarWidth, sidebarMaxWidth = 640, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
   selectedTaskId?: string;
@@ -80,6 +80,7 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   collapsed?: boolean;
   onCollapse?: () => void;
   sidebarWidth?: number;
+  sidebarMaxWidth?: number;
   onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onResizeKeyboard?: (delta: number) => void;
   onSelectPage: (releaseId: string, pageId: string) => void;
@@ -363,8 +364,8 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
       role="separator"
       tabIndex={0}
       aria-orientation="vertical"
-      aria-valuemin={220}
-      aria-valuemax={420}
+      aria-valuemin={180}
+      aria-valuemax={sidebarMaxWidth}
       aria-valuenow={sidebarWidth}
       aria-label="调整课程树宽度"
       title="拖动调整课程树宽度；键盘使用左右箭头"

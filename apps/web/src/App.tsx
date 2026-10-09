@@ -6,6 +6,7 @@ import { Icon } from "./Icon.js";
 import { WorkbenchRail } from "./WorkbenchRail.js";
 import { useWorkspaceOverlays } from "./overlay-focus.js";
 import { LearningWorkspace } from "./LearningWorkspace.js";
+import { SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, sidebarWidthLimit } from "./reading-layout.js";
 import { readViewPreference, saveViewPreference } from "./view-preferences.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
@@ -289,8 +290,6 @@ function readCandidateSnapshotOnce(inFlight: Map<string, SharedReadRequest<Lesso
   return readOnce(inFlight, pageSnapshotCacheKey(releaseId, pageId), (signal) => api.draftSnapshot(pageId, { signal, releaseId }));
 }
 
-const SIDEBAR_MIN_WIDTH = 220;
-const SIDEBAR_MAX_WIDTH = 420;
 export const SIDEBAR_DEFAULT_WIDTH = 256;
 const OFFLINE_SYNC: ReadWeaveSyncStatus = { state: "offline", authority: "readweave", mode: "http", pendingWrites: 0, conflicts: 0, message: "ReadWeave 暂时不可访问" };
 
@@ -391,6 +390,14 @@ export function App() {
   const [rightCollapsed, setRightCollapsed] = useState(() => localStorage.getItem("course-os-right-collapsed") === "true");
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const sidebarLimit = sidebarWidthLimit(viewportWidth);
+  const visibleSidebarWidth = Math.min(sidebarWidth, sidebarLimit);
+  useEffect(() => {
+    const measure = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
   const sidebarResizeCleanup = useRef<(() => void) | undefined>(undefined);
   const metadataReadyImports = useRef(new Set<string>());
   const [historyNode, setHistoryNode] = useState<CourseTreeNode>();
@@ -958,14 +965,14 @@ export function App() {
     setTree((current) => current ? { ...current, courses: replace(current.courses), rootMaterials: replace(current.rootMaterials ?? []) } : current);
   };
 
-  const adjustSidebarWidth = (delta: number) => setSidebarWidth((current) => clampSidebarWidth(current + delta));
+  const adjustSidebarWidth = (delta: number) => setSidebarWidth(Math.min(sidebarLimit, clampSidebarWidth(visibleSidebarWidth + delta)));
   const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (window.innerWidth <= 900 || event.button !== 0) return;
     event.preventDefault();
     sidebarResizeCleanup.current?.();
-    const startX = event.clientX, startWidth = sidebarWidth;
+    const startX = event.clientX, startWidth = visibleSidebarWidth, originalPreference = sidebarWidth;
     const oldSelect = document.body.style.userSelect, oldCursor = document.body.style.cursor;
-    const move = (moveEvent: globalThis.PointerEvent) => setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+    const move = (moveEvent: globalThis.PointerEvent) => setSidebarWidth(Math.min(sidebarLimit, clampSidebarWidth(startWidth + moveEvent.clientX - startX)));
     const finish = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
@@ -974,7 +981,7 @@ export function App() {
       document.body.style.userSelect = oldSelect; document.body.style.cursor = oldCursor;
       sidebarResizeCleanup.current = undefined;
     };
-    const cancel = () => { setSidebarWidth(startWidth); finish(); };
+    const cancel = () => { setSidebarWidth(originalPreference); finish(); };
     const key = (next: KeyboardEvent) => { if (next.key === "Escape") { next.preventDefault(); next.stopPropagation(); cancel(); } };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish, { once: true });
@@ -984,7 +991,7 @@ export function App() {
     sidebarResizeCleanup.current = finish;
   };
 
-  const shellStyle = { "--course-sidebar": `${sidebarWidth}px` } as CSSProperties;
+  const shellStyle = { "--course-sidebar": `${visibleSidebarWidth}px` } as CSSProperties;
   const searchMaterials = useMemo<CourseTreeSearchMaterial[]>(() => {
     const byId = new Map(releases.map(item => [item.id, item]));
     return flattenTree([...(tree?.courses ?? []), ...(tree?.rootMaterials ?? [])]).flatMap(({ node }) => {
@@ -1075,7 +1082,7 @@ export function App() {
     <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>学习工作台</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
        <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
-        <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} /><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
+        <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} /><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={visibleSidebarWidth} sidebarMaxWidth={sidebarLimit} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
       <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
@@ -1106,7 +1113,7 @@ export function App() {
       <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
         <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} />
-        <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
+        <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={visibleSidebarWidth} sidebarMaxWidth={sidebarLimit} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
           {(mode !== "learn" || activeImportId) && modeTabs}
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}

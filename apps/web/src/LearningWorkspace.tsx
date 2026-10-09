@@ -7,6 +7,7 @@ import { readViewPreference, saveViewPreference } from "./view-preferences.js";
 import type { ImageResourceCache } from "./reading-prefetch.js";
 import type { ViewState } from "./SlideViewer.js";
 import { preloadExplanationPanel } from "./reader-core.js";
+import { normalizeSourceWidth, sourceWidthLimit, SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH } from "./reading-layout.js";
 const ExplanationPanel = lazy(() => preloadExplanationPanel().then(module => ({ default: module.ExplanationPanel })));
 type MobileMode = "visual" | "lesson" | "practice";
 function WorkspaceLoader({ compact = false }: { compact?: boolean }) { return <div className={`workspace-loader ${compact ? "compact" : ""}`} role="status"><div className="loader" /><span>正在准备阅读内容</span></div>; }
@@ -41,13 +42,23 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
   const page = release.pages[pageIndex]!;
   const canShowContent = contentReady && !contentTerminalError;
   const lessonColumnRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState(0);
   const lessonStripRef = useRef<HTMLElement>(null);
   const [sourceHidden, setSourceHidden] = useState(false);
   const [panesSwapped, setPanesSwapped] = useState(() => readViewPreference("course-os-source-side") !== "left");
-  const [sourceWidth, setSourceWidth] = useState(() => {
-    const saved = Number(readViewPreference("course-os-inspector-width"));
-    return Number.isFinite(saved) && saved >= 240 && saved <= 480 ? saved : 272;
-  });
+  const [sourceWidth, setSourceWidth] = useState(() => normalizeSourceWidth(readViewPreference("course-os-inspector-width")));
+  const sourceLimit = availableWidth > 0 ? sourceWidthLimit(availableWidth) : SOURCE_MAX_WIDTH;
+  const visibleSourceWidth = Math.min(sourceWidth, sourceLimit);
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const measure = () => setAvailableWidth(workspace.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, []);
   const [layoutNotice, setLayoutNotice] = useState("");
   useEffect(() => {
     if (!saveViewPreference("course-os-inspector-width", String(sourceWidth)) || !saveViewPreference("course-os-source-side", panesSwapped ? "right" : "left")) {
@@ -69,7 +80,7 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
     });
   }, [page.id, pageDockOpen, release.id]);
 
-  return <div className={`learning-workspace ${panesSwapped ? "panes-swapped" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${rightCollapsed ? "right-is-collapsed" : ""}`} style={{ "--source-width": `${sourceWidth}px` } as CSSProperties}>
+  return <div ref={workspaceRef} className={`learning-workspace ${panesSwapped ? "panes-swapped" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${rightCollapsed ? "right-is-collapsed" : ""}`} style={{ "--source-width": `${visibleSourceWidth}px` } as CSSProperties}>
     {modeTabs}
     <header className="learning-header">
       <div><div className="breadcrumbs"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span></div><span className="reading-document-label"><Icon name="book" />教学讲解</span></div>
@@ -86,10 +97,10 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
       <button className={mobileMode === "practice" ? "active" : ""} data-action="mobile-practice" onClick={() => { if (rightCollapsed) onToggleRight(); setMobileMode("practice"); }}>提问与测验</button>
     </nav>
 
-    <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${panesSwapped ? "panes-swapped" : ""}`} style={{ "--source-width": `${sourceWidth}px` } as CSSProperties}>
+    <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${panesSwapped ? "panes-swapped" : ""}`} style={{ "--source-width": `${visibleSourceWidth}px` } as CSSProperties}>
       {sourceHidden && <aside className="source-collapsed-rail"><button className="icon-button" data-action="expand-source-pane" aria-label="展开原始课件" title="展开原始课件" onClick={() => setSourceHidden(false)}><Icon name="eye" /></button></aside>}
       <div className="visual-column"><ReadingInspector release={release} page={page} view={view} onView={updateView} imageResources={imageResources} lessonRef={lessonColumnRef} onClose={() => { if (rightCollapsed) onToggleRight(); setSourceHidden(true); }} onSwap={() => setPanesSwapped(value => !value)} onStudio={onEnterStudio} terminalError={contentTerminalError ? contentError || "当前页面已无权访问或已删除" : undefined} /></div>
-      {!sourceHidden && !rightCollapsed && <PaneResizeHandle value={sourceWidth} onChange={setSourceWidth} reversed={panesSwapped} min={240} max={480} unit="px" />}
+      {!sourceHidden && !rightCollapsed && <PaneResizeHandle value={visibleSourceWidth} onChange={setSourceWidth} onCancel={() => setSourceWidth(sourceWidth)} reversed={panesSwapped} min={SOURCE_MIN_WIDTH} max={sourceLimit} unit="px" />}
       {rightCollapsed
           ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={toggleLessonPane} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
         : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span><Icon name="book" />讲解</span><button data-action="right-collapse-learn" onClick={toggleLessonPane} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}

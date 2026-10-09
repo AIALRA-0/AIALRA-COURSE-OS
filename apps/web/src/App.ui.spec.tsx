@@ -15,7 +15,9 @@ describe("workspace tree and incremental import UI inputs", () => {
     expect(normalizeSidebarWidth("80")).toBe(SIDEBAR_DEFAULT_WIDTH);
     expect(normalizeSidebarWidth("not-a-width")).toBe(SIDEBAR_DEFAULT_WIDTH);
     expect(normalizeSidebarWidth("220")).toBe(220);
-    expect(normalizeSidebarWidth("999")).toBe(420);
+    expect(normalizeSidebarWidth("180")).toBe(180);
+    expect(normalizeSidebarWidth("600")).toBe(600);
+    expect(normalizeSidebarWidth("999")).toBe(640);
   });
 
   it("offers only draft source releases from the selected course for incremental upload", () => {

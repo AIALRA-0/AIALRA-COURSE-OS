@@ -86,8 +86,16 @@
   padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--app);
+  background: var(--surface);
+  background-image: none;
+  box-shadow: none;
   color: var(--muted);
+}
+
+.course-sidebar.course-navigator .tree-search:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .course-sidebar.course-navigator .tree-search > svg {
@@ -101,6 +109,12 @@
   height: 100%;
   flex: 1 1 auto;
   padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: var(--surface);
+  background-image: none;
+  box-shadow: none;
   color: var(--ink);
   font-size: 13px;
 }

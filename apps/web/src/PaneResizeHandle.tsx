@@ -1,6 +1,6 @@
 import { useEffect, useRef, type PointerEvent } from "react";
 
-export function PaneResizeHandle({ value, onChange, reversed = false, min = 25, max = 65, unit = "%" }: { value: number; onChange: (value: number) => void; reversed?: boolean; min?: number; max?: number; unit?: "%" | "px" }) {
+export function PaneResizeHandle({ value, onChange, onCancel, reversed = false, min = 25, max = 65, unit = "%" }: { value: number; onChange: (value: number) => void; onCancel?: () => void; reversed?: boolean; min?: number; max?: number; unit?: "%" | "px" }) {
   const cleanup = useRef<() => void>(() => undefined);
   useEffect(() => () => cleanup.current(), []);
   const change = (next: number) => onChange(Math.max(min, Math.min(max, next)));
@@ -18,7 +18,7 @@ export function PaneResizeHandle({ value, onChange, reversed = false, min = 25, 
       document.body.style.cursor = previousCursor; document.body.style.userSelect = previousSelect;
       cleanup.current = () => undefined;
     };
-    const cancel = () => { change(original); finish(); };
+    const cancel = () => { if (onCancel) onCancel(); else change(original); finish(); };
     const key = (next: KeyboardEvent) => { if (next.key === "Escape") { next.preventDefault(); next.stopPropagation(); cancel(); } };
     document.body.style.cursor = "col-resize"; document.body.style.userSelect = "none";
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", finish, { once: true });
