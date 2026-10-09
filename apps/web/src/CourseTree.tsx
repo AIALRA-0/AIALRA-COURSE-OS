@@ -556,6 +556,7 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
   ].filter(Boolean).join(" · ");
   const statusDescription = [
     publication ? `材料版本：${publication.label}` : undefined,
+    materialInfo?.lifecycle === "draft_source" ? "材料来源已保存；草稿标签不代表讲解已生成" : undefined,
     runtime ? `材料状态：${treeStatusPresentation[runtime].label}` : undefined
   ].filter((label): label is string => Boolean(label)).join("；");
   return <div className="tree-node" data-node-id={node.id} data-dragging={draggingNodeId === node.id || pointerDraggingNodeId === node.id ? "true" : undefined} draggable={draggable} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", node.id); onDragStart(node); }} onDragEnd={onDragEnd}>

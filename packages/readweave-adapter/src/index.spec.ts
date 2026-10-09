@@ -5428,6 +5428,268 @@ function draftFor(pageRelease: CourseRelease, pageId = pageRelease.pages[0]!.id)
   };
 }
 
+it("TR8 appends fourteen page costs without reading or cloning a sixteen-megabyte core", async () => {
+  const remote = new FakeEtapi();
+  let forbiddenIds = new Set<string>();
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if ((init?.method ?? "GET") === "GET" && [...forbiddenIds].some(id => path.endsWith(`/notes/${id}/content`))) {
+      throw new Error("TR8_UNRELATED_INDEX_READ");
+    }
+    return remote.fetch(input, init);
+  };
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = releaseWithPage();
+  source.lifecycle = "draft_source";
+  source.pages = Array.from({ length: 56 }, (_, index) => ({ ...structuredClone(source.pages[0]!), id: `tr8-page-${index}`, pageNumber: index + 1 }));
+  source.pageIds = source.pages.map(page => page.id);
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-source" });
+  const pages = source.pages.slice(0, 14);
+  await Promise.all(pages.map(page => api.appendCostEntry({ ...costEntryFor(source, `tr8-first-${page.id}`), pageId: page.id },
+    { ...context, idempotencyKey: `tr8-first-${page.id}` })));
+  await api.saveQuestionSelection({ id: "tr8-concurrent-selection", sessionId: "tr8-concurrent-session", courseReleaseId: source.id, pageId: pages[0]!.id, seed: "seed", questionIds: [], createdAt: source.publishedAt },
+    { ...context, idempotencyKey: "tr8-concurrent-selection" });
+  const cache = (api as any).stateCache;
+  cache.state.researchArchives.push({ id: "unrelated", content: "x".repeat(16 * 1024 * 1024) });
+  cache.expiresAt = 0;
+  forbiddenIds = new Set([remote.noteIdByTitle("00 Course OS 结构化索引"), remote.noteIdByTitle("01 Course OS 学习活动索引")]);
+  const nativeClone = globalThis.structuredClone;
+  const spy = vi.spyOn(globalThis, "structuredClone").mockImplementation(((value: any, options?: StructuredSerializeOptions) => {
+    if (value?.researchArchives?.some((archive: any) => archive.id === "unrelated")) throw new Error("TR8_FULL_CORE_CLONE");
+    return nativeClone(value, options);
+  }) as typeof structuredClone);
+  const entries = pages.map(page => ({ ...costEntryFor(source, `tr8-vision-${page.id}`), pageId: page.id, stage: "extract" as const }));
+  const before = remote.requests.length;
+  try {
+    await expect(Promise.all(entries.map(entry => api.appendCostEntry(entry, { ...context, idempotencyKey: entry.id })))).resolves.toEqual(entries);
+    await expect(Promise.all(entries.map(entry => api.appendCostEntry(entry, { ...context, idempotencyKey: entry.id })))).resolves.toEqual(entries);
+  } finally { spy.mockRestore(); }
+  const requests = remote.requests.slice(before);
+  expect(requests.filter(request => request.method === "PUT" && pages.some(page => request.path === `/notes/${remote.noteIdByTitle(`Course OS draft record · ${page.id}`)}/content`))).toHaveLength(14);
+  expect(requests.filter(request => request.path.includes("/revision"))).toHaveLength(14);
+  expect(requests.filter(request => request.method === "PUT").every(request => request.headers["idempotency-key"]?.startsWith("tr8-vision-"))).toBe(true);
+  forbiddenIds.clear();
+  const reopened = new EtapiReadWeaveCourseApi(config);
+  const costs = await reopened.listCostEntries({ materialVersionId: source.id });
+  expect(costs).toHaveLength(28);
+  expect(costs.filter(cost => cost.stage === "extract")).toEqual(expect.arrayContaining(entries));
+});
+
+it("TR8 saves a recorded page with an expired core cache and unavailable root and activity", async () => {
+  const remote = new FakeEtapi();
+  let forbiddenIds = new Set<string>();
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if ((init?.method ?? "GET") === "GET" && [...forbiddenIds].some(id => path.endsWith(`/notes/${id}/content`))) return new Response("unrelated unavailable", { status: 400 });
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = releaseWithPage();
+  await api.publishRelease(source, { ...manifest, courseReleaseId: source.id }, context);
+  await api.saveQuestionSelection({ id: "tr8-selection", sessionId: "tr8-session", courseReleaseId: source.id, pageId: "page-1", seed: "seed", questionIds: [], createdAt: source.publishedAt },
+    { ...context, idempotencyKey: "tr8-selection" });
+  const saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "tr8-draft-initial" });
+  (api as any).stateCache.expiresAt = 0;
+  forbiddenIds = new Set([remote.noteIdByTitle("00 Course OS 结构化索引"), remote.noteIdByTitle("01 Course OS 学习活动索引")]);
+  const next = structuredClone(saved);
+  next.page.blocks[0]!.markdown = "TR8 saved teaching";
+  const cost = costEntryFor(source, "tr8-teaching-cost");
+  const write = { ...context, idempotencyKey: "tr8-draft-next" };
+  await expect(api.saveDraftWithCost(next, 1, write, cost)).resolves.toMatchObject({ revision: 2 });
+  await expect(api.saveDraftWithCost(next, 1, write, cost)).resolves.toMatchObject({ revision: 2 });
+  const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] };
+  expect(record.costEntries).toEqual([cost]);
+});
+
+it.each([false, true])("TR8 uploads the first source image once with cost-created placeholder %s and reuses its receipt after restart", async (costFirst) => {
+  const remote = new FakeEtapi();
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  await api.registerDraftSource(source, { ...context, idempotencyKey: `tr8-image-source-${costFirst}` });
+  if (costFirst) await api.appendCostEntry(costEntryFor(source, "tr8-image-vision"), { ...context, idempotencyKey: "tr8-image-vision" });
+  const bytes = Buffer.from("synthetic source image");
+  const asset = { fileName: "tr8-page.png", mediaType: "image/png" as const, sha256: createHash("sha256").update(bytes).digest("hex"), bytes };
+  const saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "tr8-image-first" }, asset);
+  const imageId = remote.noteIdByTitle(asset.fileName);
+  expect(remote.contentWriteCount(imageId)).toBe(1);
+  expect(remote.contentByTitle("第 001 页 · 测试页面")).toContain(`api/images/${imageId}`);
+  expect(remote.contentByTitle("00 来源与原始截图")).toContain(`api/images/${imageId}`);
+  const reopened = new EtapiReadWeaveCourseApi(config);
+  const regenerated = await reopened.saveDraft(saved, 1, { ...context, idempotencyKey: "tr8-image-regenerated" }, asset);
+  expect(remote.contentWriteCount(imageId)).toBe(1);
+  const changed = { ...asset, bytes: Buffer.from("changed image"), sha256: "changed-sha" };
+  const updated = await reopened.saveDraft(regenerated, 2, { ...context, idempotencyKey: "tr8-image-changed" }, changed);
+  expect(remote.contentWriteCount(imageId)).toBe(2);
+  await reopened.saveDraft(updated, 3, { ...context, idempotencyKey: "tr8-image-changed-again" }, changed);
+  expect(remote.contentWriteCount(imageId)).toBe(2);
+});
+
+it("TR8 does not confirm an image hash after a failed binary upload", async () => {
+  const remote = new FakeEtapi();
+  let failUpload = false;
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    if (failUpload && init?.method === "PUT" && new Headers(init.headers).get("X-Course-Asset-Type") === "image/png") return new Response("image rejected", { status: 400 });
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-upload-source" });
+  await api.appendCostEntry(costEntryFor(source, "tr8-upload-vision"), { ...context, idempotencyKey: "tr8-upload-vision" });
+  const asset = { fileName: "tr8-retry.png", mediaType: "image/png" as const, bytes: Buffer.from("image"), sha256: "tr8-retry-hash" };
+  const write = { ...context, idempotencyKey: "tr8-upload-retry" };
+  failUpload = true;
+  await expect(api.saveDraft(draftFor(source), 0, write, asset)).rejects.toThrow("READWEAVE_ETAPI_400");
+  const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { projection: { sourceImageHash?: string } };
+  expect(record.projection.sourceImageHash).toBeUndefined();
+  failUpload = false;
+  const saved = await api.saveDraft(draftFor(source), 0, write, asset);
+  expect(saved.revision).toBe(1);
+  expect(remote.contentByTitle("第 001 页 · 测试页面")).toContain("api/images/");
+  await api.saveDraft(saved, 1, { ...context, idempotencyKey: "tr8-upload-reuse" }, asset);
+  const receipt = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { projection: { sourceImageNoteId: string; sourceImageHash: string } };
+  expect(receipt.projection.sourceImageHash).toBe(asset.sha256);
+  expect(remote.contentWriteCount(receipt.projection.sourceImageNoteId)).toBe(1);
+});
+
+it("TR8 keeps page cost writes alive after their caller read deadline and replays the bill once", async () => {
+  const remote = new FakeEtapi();
+  let delayedId: string | undefined;
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if (delayedId && (init?.method ?? "GET") === "GET" && path.endsWith(`/notes/${delayedId}/content`)) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 40);
+        init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); }, { once: true });
+      });
+    }
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-caller-source" });
+  await api.appendCostEntry(costEntryFor(source, "tr8-caller-first"), { ...context, idempotencyKey: "tr8-caller-first" });
+  delayedId = remote.noteIdByTitle("Course OS draft record · page-1");
+  const cost = costEntryFor(source, "tr8-caller-second");
+  const write = { ...context, idempotencyKey: cost.id };
+  let pending!: Promise<GenerationCostEntry>;
+  await expect(withReadBudget({ timeoutMs: 10 }, () => pending = api.appendCostEntry(cost, write))).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+  await expect(pending).resolves.toEqual(cost);
+  await expect(api.appendCostEntry(cost, write)).resolves.toEqual(cost);
+  const record = decodeReadWeaveStateContent(remote.contentByTitle("Course OS draft record · page-1")) as { costEntries: GenerationCostEntry[] };
+  expect(record.costEntries.filter(entry => entry.id === cost.id)).toEqual([cost]);
+});
+
+it("TR8 stops a stalled page cost GET after the existing thirty-second three-attempt limit", async () => {
+  const remote = new FakeEtapi();
+  let stalledId: string | undefined;
+  let attempts = 0;
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if (stalledId && (init?.method ?? "GET") === "GET" && path.endsWith(`/notes/${stalledId}/content`)) {
+      attempts += 1;
+      return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
+    }
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-stall-source" });
+  await api.appendCostEntry(costEntryFor(source, "tr8-stall-first"), { ...context, idempotencyKey: "tr8-stall-first" });
+  const before = remote.contentByTitle("Course OS draft record · page-1");
+  stalledId = remote.noteIdByTitle("Course OS draft record · page-1");
+  vi.useFakeTimers();
+  try {
+    const outcome = api.appendCostEntry(costEntryFor(source, "tr8-stall-second"), { ...context, idempotencyKey: "tr8-stall-second" }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect((await outcome).message).toContain("READWEAVE_ETAPI_NETWORK");
+    expect(attempts).toBe(3);
+    expect(remote.contentByTitle("Course OS draft record · page-1")).toBe(before);
+  } finally { vi.useRealTimers(); }
+  stalledId = undefined;
+  await expect(api.appendCostEntry(costEntryFor(source, "tr8-stall-second"), { ...context, idempotencyKey: "tr8-stall-second" })).resolves.toMatchObject({ id: "tr8-stall-second" });
+});
+
+it("TR8 bounds all necessary page-save GETs without extending individual request timeouts", async () => {
+  const remote = new FakeEtapi();
+  let slow = false;
+  let aborted = 0;
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if (slow && (init?.method ?? "GET") === "GET" && path.endsWith("/content")) {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { aborted += 1; clearTimeout(timer); reject(init?.signal?.reason); };
+        const timer = setTimeout(() => { init?.signal?.removeEventListener("abort", abort); resolve(); }, 29_000);
+        init?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-save-budget-source" });
+  const saved = await api.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "tr8-save-budget-first" });
+  const next = structuredClone(saved);
+  next.page.blocks[0]!.markdown = "teaching after bounded retry";
+  const write = { ...context, idempotencyKey: "tr8-save-budget-next" };
+  const before = remote.contentByTitle("Course OS draft record · page-1");
+  vi.useFakeTimers();
+  try {
+    slow = true;
+    const outcome = api.saveDraft(next, 1, write).catch(error => error);
+    await vi.advanceTimersByTimeAsync(180_001);
+    expect((await outcome).message).toBe("READ_DEADLINE_EXCEEDED");
+    expect(aborted).toBeGreaterThan(0);
+    expect(remote.contentByTitle("Course OS draft record · page-1")).toBe(before);
+  } finally { slow = false; vi.useRealTimers(); }
+  await expect(api.saveDraft(next, 1, write)).resolves.toMatchObject({ revision: 2 });
+});
+
+it("TR8 shares one expired root read between fourteen page writers and a cancelled reader", async () => {
+  const remote = new FakeEtapi();
+  let rootId: string | undefined;
+  let rootReads = 0;
+  const signals: AbortSignal[] = [];
+  let unblock!: () => void;
+  const gate = new Promise<void>(resolve => { unblock = resolve; });
+  const config = { baseUrl: "http://readweave:8080", token: "secret", parentNoteId: "root", fetchImpl: (async (input, init) => {
+    const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+    if (rootId && (init?.method ?? "GET") === "GET" && path.endsWith(`/notes/${rootId}/content`)) {
+      rootReads += 1;
+      if (init?.signal) signals.push(init.signal);
+      await gate;
+    }
+    return remote.fetch(input, init);
+  }) as typeof fetch };
+  const api = new EtapiReadWeaveCourseApi(config);
+  const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+  source.pages = Array.from({ length: 14 }, (_, index) => ({ ...structuredClone(source.pages[0]!), id: `tr8-shared-${index}`, pageNumber: index + 1 }));
+  source.pageIds = source.pages.map(page => page.id);
+  await api.registerDraftSource(source, { ...context, idempotencyKey: "tr8-shared-source" });
+  (api as any).stateCache.expiresAt = 0;
+  rootId = remote.noteIdByTitle("00 Course OS 结构化索引");
+  const entries = source.pages.map(page => ({ ...costEntryFor(source, `tr8-shared-${page.id}`), pageId: page.id }));
+  const writes = entries.map(entry => api.appendCostEntry(entry, { ...context, idempotencyKey: entry.id }));
+  let observedFailure: unknown;
+  try {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(rootReads).toBe(1);
+    await expect(withReadBudget({ timeoutMs: 10 }, () => (api as any).readStateReference(true, false))).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+    expect(rootReads).toBe(1);
+    expect(signals.every(signal => !signal.aborted)).toBe(true);
+  } catch (error) { observedFailure = error; }
+  finally { unblock(); }
+  await expect(Promise.all(writes)).resolves.toEqual(entries);
+  if (observedFailure) throw observedFailure;
+  expect(rootReads).toBe(1);
+  expect((api as any).stateReadInFlight).toBeUndefined();
+  const costs = await new EtapiReadWeaveCourseApi(config).listCostEntries({ materialVersionId: source.id });
+  expect(costs).toHaveLength(14);
+});
+
 function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; value: string }>; operator: "AND" | "OR" } | undefined {
   const clause = /#([^\s=]+)\s*=\s*(?:"((?:\\[\s\S]|[^"\\])*)"|([^\s]+))/y;
   const separator = /\s+(AND|OR)\s+/iy;

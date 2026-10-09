@@ -5,7 +5,7 @@ import type { AssessmentAttempt, GenerationJob, GenerationPlan, ImportRecord, Le
 import { advanceTaskIncarnation, pickTaskDismissals, reconcileTaskDismissals, writeJsonAtomic } from "@course-os/storage";
 import { currentReadBudget, withReadBudget } from "@course-os/readweave-adapter";
 import pg from "pg";
-import type { PlannedCheckpoint } from "./planned-teaching.js";
+import type { JobCheckpoint } from "./generation-checkpoint.js";
 import { defaultCourseSearchRoutePolicy, mergeCourseSearchProviderDefaults } from "./search-providers.js";
 import { defaultCourseModelRoutePolicy, mergeCourseModelProviderDefaults, mergeCourseModelRoutePolicyDefaults } from "./provider-settings.js";
 import { applyTaskTimingEvent, isNewGenerationJobAttempt, taskTimingCollectionForEvent } from "./task-timing.js";
@@ -14,7 +14,7 @@ export interface OperationalState {
   schemaVersion: "1.0.0";
   imports: ImportRecord[];
   jobs: GenerationJob[];
-  generationCheckpoints: Record<string, PlannedCheckpoint>;
+  generationCheckpoints: Record<string, JobCheckpoint>;
   generationPlans: GenerationPlan[];
   sessions: LearningSession[];
   reviewPlans: ReviewPlan[];
@@ -69,9 +69,9 @@ export interface GenerationJobMutationContext {
   /** Events already recorded for this job, in stream order. */
   events: OrderedEvent[];
   /** Checkpoints keyed by page ID, scoped to this job. */
-  checkpoints: Record<string, PlannedCheckpoint>;
+  checkpoints: Record<string, JobCheckpoint>;
   appendEvent<T>(type: string, payload: T): void;
-  setCheckpoint(pageId: string, checkpoint: PlannedCheckpoint): void;
+  setCheckpoint(pageId: string, checkpoint: JobCheckpoint): void;
   deleteCheckpoint(pageId: string): void;
 }
 
@@ -605,7 +605,7 @@ export class PostgresOperationalStore extends OperationalStore {
       const eventRows = await client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
         "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events WHERE stream_id = $1 ORDER BY id", [jobId]
       );
-      const checkpointRows = await client.query<{ page_id: string; checkpoint: PlannedCheckpoint }>(
+      const checkpointRows = await client.query<{ page_id: string; checkpoint: JobCheckpoint }>(
         "SELECT page_id, checkpoint FROM generation_job_checkpoints WHERE job_id = $1 ORDER BY page_id", [jobId]
       );
       const context = postgresGenerationJobMutationContext(job, eventRows.rows, checkpointRows.rows);
@@ -716,21 +716,97 @@ export class PostgresOperationalStore extends OperationalStore {
   private async initialize(): Promise<void> {
     await this.pool.query(await readFile(this.schemaPath, "utf8"));
     await this.pool.query("INSERT INTO operational_state (id, state) VALUES (1, $1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(EMPTY)]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM operational_state WHERE id = 1 FOR UPDATE");
+      // Serialize explicit-ID backfill and sequence adjustment with event inserts.
+      // This lock is startup-only; ordinary progress writers keep their scopes.
+      await client.query("LOCK TABLE ordered_events IN SHARE ROW EXCLUSIVE MODE");
+      // The schema backfills generation streams. Import/ReadWeave streams are
+      // text IDs too, and must be durable before dropping their JSON copies.
+      await client.query(`INSERT INTO ordered_events (id, stream_id, event_type, payload, occurred_at)
+        SELECT (event->>'id')::bigint, event->>'streamId', event->>'type',
+          COALESCE(event->'payload', 'null'::jsonb), (event->>'occurredAt')::timestamptz
+        FROM operational_state,
+          jsonb_array_elements(CASE WHEN jsonb_typeof(state->'events') = 'array'
+            THEN state->'events' ELSE '[]'::jsonb END) AS legacy(event)
+        WHERE id = 1 AND event->>'id' ~ '^[0-9]+$'
+          AND event->>'streamId' IS NOT NULL AND event->>'type' IS NOT NULL
+          AND NULLIF(event->>'occurredAt', '') IS NOT NULL
+        ON CONFLICT (id) DO NOTHING`);
+      await client.query(`DO $$
+        DECLARE sequence_name text; sequence_value bigint; greatest_event_id bigint;
+        BEGIN
+          sequence_name := pg_get_serial_sequence('ordered_events', 'id');
+          EXECUTE format('SELECT last_value FROM %s', sequence_name) INTO sequence_value;
+          SELECT COALESCE(MAX(id), 0) INTO greatest_event_id FROM ordered_events;
+          IF greatest_event_id > 0 AND greatest_event_id >= sequence_value THEN
+            PERFORM setval(sequence_name, greatest_event_id, true);
+          END IF;
+        END $$`);
+      await client.query(`WITH source AS MATERIALIZED (
+          SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1
+        ), compacted AS (
+          SELECT state, COALESCE((SELECT jsonb_agg(event ORDER BY ordinal)
+            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(state->'events') = 'array'
+              THEN state->'events' ELSE '[]'::jsonb END) WITH ORDINALITY AS legacy(event, ordinal)
+            WHERE NOT EXISTS (SELECT 1 FROM ordered_events
+              WHERE id::text = event->>'id' AND stream_id = event->>'streamId'
+                AND event_type = event->>'type' AND payload IS NOT DISTINCT FROM COALESCE(event->'payload', 'null'::jsonb)
+                AND occurred_at = (event->>'occurredAt')::timestamptz
+                AND event - ARRAY['id','streamId','type','payload','occurredAt'] = '{}'::jsonb)), '[]'::jsonb) AS events,
+            COALESCE((SELECT jsonb_object_agg(key, value)
+            FROM jsonb_each(CASE WHEN jsonb_typeof(state->'generationCheckpoints') = 'object'
+              THEN state->'generationCheckpoints' ELSE '{}'::jsonb END) AS legacy(key, value)
+            WHERE NOT EXISTS (SELECT 1 FROM generation_job_checkpoints
+              WHERE job_id::text || ':' || page_id = key AND checkpoint IS NOT DISTINCT FROM value)), '{}'::jsonb) AS checkpoints
+          FROM source
+        ) UPDATE operational_state SET state = jsonb_set(jsonb_set(compacted.state, '{events}', compacted.events),
+            '{generationCheckpoints}', compacted.checkpoints), updated_at = now()
+          FROM compacted WHERE id = 1 AND (compacted.events IS DISTINCT FROM compacted.state->'events'
+            OR compacted.checkpoints IS DISTINCT FROM compacted.state->'generationCheckpoints')`);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  private async projectPostgresState(client: pg.PoolClient, state: OperationalState): Promise<void> {
+  private async projectPostgresState(client: pg.PoolClient, state: OperationalState): Promise<{
+    eventIds: Set<number>; checkpointKeys: Set<string>;
+    legacyEventConflicts: OrderedEvent[]; legacyCheckpointConflicts: Record<string, JobCheckpoint>;
+  }> {
     const jobRows = await client.query<{ job_data: GenerationJob }>(
       "SELECT job_data FROM generation_jobs WHERE job_data IS NOT NULL ORDER BY created_at, id"
     );
     const eventRows = await client.query<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>(
       "SELECT id, stream_id, event_type, payload, occurred_at FROM ordered_events ORDER BY id"
     );
-    const checkpointRows = await client.query<{ job_id: string; page_id: string; checkpoint: PlannedCheckpoint }>(
+    const checkpointRows = await client.query<{ job_id: string; page_id: string; checkpoint: JobCheckpoint }>(
       "SELECT job_id, page_id, checkpoint FROM generation_job_checkpoints ORDER BY job_id, page_id"
     );
+    const eventIds = new Set(eventRows.rows.map(row => Number(row.id)));
+    // Startup removes only byte-equivalent receipts. Anything still present in
+    // the original JSON must survive hydration, even when its ID/key collides.
+    const legacyEventConflicts = state.events.filter(event => eventIds.has(event.id));
+    const legacyCheckpointConflicts: Record<string, JobCheckpoint> = {};
+    for (const row of checkpointRows.rows) {
+      const key = `${row.job_id}:${row.page_id}`;
+      if (Object.hasOwn(state.generationCheckpoints, key)) {
+        legacyCheckpointConflicts[key] = state.generationCheckpoints[key]!;
+      }
+    }
     state.jobs = mergeGenerationJobs(state.jobs, jobRows.rows.map(row => row.job_data));
     state.events = mergeOrderedEvents(state.events, eventRows.rows);
     for (const row of checkpointRows.rows) state.generationCheckpoints[`${row.job_id}:${row.page_id}`] = row.checkpoint;
+    return {
+      eventIds,
+      checkpointKeys: new Set(checkpointRows.rows.map(row => `${row.job_id}:${row.page_id}`)),
+      legacyEventConflicts, legacyCheckpointConflicts
+    };
   }
 
   private async writePostgresState<T>(change: (state: OperationalState) => T | Promise<T>): Promise<T> {
@@ -742,13 +818,13 @@ export class PostgresOperationalStore extends OperationalStore {
       await client.query("BEGIN");
       const locked = await client.query<{ state: Partial<OperationalState> }>("SELECT state FROM operational_state WHERE id = 1 FOR UPDATE");
       const state = normalizeOperationalState(locked.rows[0]?.state);
-      await this.projectPostgresState(client, state);
+      const projection = await this.projectPostgresState(client, state);
       const before = structuredClone(state);
       const beforeEvents = state.events.length;
       result = await change(state);
       reconcileTaskDismissals(state, before);
       await persistChangedGenerationJobs(client, before.jobs, state.jobs);
-      await persistChangedCheckpoints(client, before.generationCheckpoints, state.generationCheckpoints, state.jobs);
+      const savedCheckpointKeys = await persistChangedCheckpoints(client, before.generationCheckpoints, state.generationCheckpoints, state.jobs);
       emitted = state.events.slice(beforeEvents);
       for (const event of emitted) {
         const inserted = await client.query<{ id: string }>(
@@ -757,9 +833,25 @@ export class PostgresOperationalStore extends OperationalStore {
           [event.streamId, event.type, JSON.stringify(event.payload), event.occurredAt]
         );
         event.id = Number(inserted.rows[0]!.id);
+        projection.eventIds.add(event.id);
       }
       state.events.sort((left, right) => left.id - right.id);
-      await client.query("UPDATE operational_state SET state = $1::jsonb, updated_at = now() WHERE id = 1", [JSON.stringify(state)]);
+      // Hydration is a read view, not another persistence authority. Keeping
+      // those large receipts here makes every jsonb_set of import progress
+      // rewrite the entire history. Keep unmatched and conflicting legacy data;
+      // a matching ID alone does not prove that its payload has been persisted.
+      const persistedState = {
+        ...state,
+        events: [...state.events.filter(event => !projection.eventIds.has(event.id)), ...projection.legacyEventConflicts]
+          .sort((left, right) => left.id - right.id),
+        generationCheckpoints: {
+          ...Object.fromEntries(Object.entries(state.generationCheckpoints)
+            .filter(([key]) => !projection.checkpointKeys.has(key) && !savedCheckpointKeys.has(key))),
+          ...Object.fromEntries(Object.entries(projection.legacyCheckpointConflicts)
+            .filter(([key]) => Object.hasOwn(state.generationCheckpoints, key)))
+        }
+      };
+      await client.query("UPDATE operational_state SET state = $1::jsonb, updated_at = now() WHERE id = 1", [JSON.stringify(persistedState)]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -965,7 +1057,7 @@ interface PendingGenerationEvent {
 
 interface InternalGenerationJobMutationContext extends GenerationJobMutationContext {
   pendingEvents: PendingGenerationEvent[];
-  checkpointChanges: Map<string, PlannedCheckpoint | undefined>;
+  checkpointChanges: Map<string, JobCheckpoint | undefined>;
 }
 
 function localGenerationJobMutationContext(
@@ -998,7 +1090,7 @@ function localGenerationJobMutationContext(
 function postgresGenerationJobMutationContext(
   job: GenerationJob,
   eventRows: Array<{ id: string; stream_id: string; event_type: string; payload: unknown; occurred_at: Date }>,
-  checkpointRows: Array<{ page_id: string; checkpoint: PlannedCheckpoint }>
+  checkpointRows: Array<{ page_id: string; checkpoint: JobCheckpoint }>
 ): InternalGenerationJobMutationContext {
   const events = eventRows.map(row => ({
     id: Number(row.id), streamId: row.stream_id, type: row.event_type,
@@ -1006,7 +1098,7 @@ function postgresGenerationJobMutationContext(
   }));
   const checkpoints = Object.fromEntries(checkpointRows.map(row => [row.page_id, row.checkpoint]));
   const pendingEvents: PendingGenerationEvent[] = [];
-  const checkpointChanges = new Map<string, PlannedCheckpoint | undefined>();
+  const checkpointChanges = new Map<string, JobCheckpoint | undefined>();
   return {
     events,
     checkpoints,
@@ -1124,10 +1216,11 @@ async function persistChangedGenerationJobs(
 
 async function persistChangedCheckpoints(
   client: pg.PoolClient,
-  before: Record<string, PlannedCheckpoint>,
-  after: Record<string, PlannedCheckpoint>,
+  before: Record<string, JobCheckpoint>,
+  after: Record<string, JobCheckpoint>,
   jobs: GenerationJob[]
-): Promise<void> {
+): Promise<Set<string>> {
+  const savedKeys = new Set<string>();
   const jobIds = [...jobs].map(job => job.id).sort((left, right) => right.length - left.length);
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const key of keys) {
@@ -1144,13 +1237,15 @@ async function persistChangedCheckpoints(
       );
       continue;
     }
-    await client.query(
+    const persisted = await client.query(
       `INSERT INTO generation_job_checkpoints (job_id, page_id, checkpoint) VALUES ($1, $2, $3::jsonb)
        ON CONFLICT (job_id, page_id) DO UPDATE SET checkpoint = EXCLUDED.checkpoint
        WHERE generation_job_checkpoints.checkpoint IS NOT DISTINCT FROM $4::jsonb`,
       [parts.jobId, parts.pageId, JSON.stringify(after[key]), hadPrevious ? JSON.stringify(before[key]) : null]
     );
+    if (persisted.rowCount === 1) savedKeys.add(key);
   }
+  return savedKeys;
 }
 
 function splitGenerationCheckpointKey(key: string, jobIds: string[]): { jobId: string; pageId: string } | undefined {

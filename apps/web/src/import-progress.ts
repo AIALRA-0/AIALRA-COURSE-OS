@@ -133,6 +133,7 @@ export function summarizeImportProgress(
     ["completed", "done", "finished", "completedPages", "completedPageCount", "coreCompleted", "coreCompletedPageCount", "bodyCoreCompleted", "bodyCoreCompletedPageCount"],
     ["total", "totalPages", "pageCount", "totalPageCount", "coreTotal", "coreTotalPageCount", "bodyCoreTotal", "bodyCoreTotalPageCount"]
   ) ?? countFromArrays(coreSources, ["coreCompletedPageIds", "bodyCoreCompletedPageIds", "generationCoreCompletedPageIds"], ["pageIds"], ["coreTotal", "coreTotalPageCount"])
+    ?? countFromArrays(sources, ["generationCompletedPageIds"], ["pageIds"], ["coreTotal", "coreTotalPageCount"])
     ?? (plan && plan.pageIds.length > 0 ? { completed: plan.completedPageIds.length, total: plan.pageIds.length }
       : record.generationJobId && record.pageIds?.length
         ? { completed: new Set(record.generationCompletedPageIds ?? []).size, total: record.pageIds.length }
@@ -143,7 +144,7 @@ export function summarizeImportProgress(
     ["crossPage", "crossPageCarryover", "carryover", "handoff", "bridge", "crossPageProgress", "carryoverProgress"],
     ["completed", "done", "finished", "completedPages", "completedPageCount", "crossPageCompleted", "crossPageCompletedPages", "carryoverCompleted", "carryoverCompletedPages"],
     ["total", "totalPages", "pageCount", "totalPageCount", "crossPageTotal", "crossPageTotalPages", "carryoverTotal", "carryoverTotalPages"]
-  ) ?? countFromArrays(crossPageSources, ["crossPageCompletedPageIds", "carryoverCompletedPageIds", "bridgeCompletedPageIds"], ["pageIds"], ["crossPageTotal", "carryoverTotal"]);
+  ) ?? countFromArrays(crossPageSources, ["crossPageCompletedPageIds", "carryoverCompletedPageIds", "bridgeCompletedPageIds", "generationBridgeCompletedPageIds"], ["pageIds"], ["crossPageTotal", "carryoverTotal"]);
   if (plan?.retryOfPlanId && record.pageIds?.length && record.generationCompletedPageIds) {
     core = { completed: record.generationCompletedPageIds.length, total: record.pageIds.length };
     crossPage = undefined;
@@ -194,6 +195,13 @@ export function summarizeImportProgress(
 
 export function formatProgressCount(value?: ProgressCount): string {
   return value ? `${value.completed}/${value.total}` : "—";
+}
+
+/** Upload bytes are transport evidence only, never import acceptance. */
+export function formatUploadStatus(sent: number, total?: number): string {
+  return Number.isFinite(sent) && sent >= 0 && total !== undefined && Number.isFinite(total) && total > 0 && sent <= total
+    ? `正在上传 ${Math.floor(sent / total * 100)}%`
+    : "正在上传文件";
 }
 
 export type ImportTaskState = "queued" | "running" | "completed" | "failed" | "cancelled" | "paused" | "awaiting_review";
@@ -542,7 +550,7 @@ export function getImportActivity(
     : record.state === "processing"
       ? conversionStageLabel(record)
       : record.state === "syncing"
-        ? "写入课程草稿"
+        ? "保存材料来源"
         : record.state !== "ready"
           ? "导入已停止"
         : record.generationState === "failed" ? "生成失败"

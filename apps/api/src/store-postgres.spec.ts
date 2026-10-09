@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EMPTY, OperationalStore, PostgresOperationalStore } from "./store.js";
 import type { OperationalState } from "./store.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
+import type { SavedPageGeneration } from "./generation-checkpoint.js";
 import { dismissFailedTasks, isTaskDismissed, selectFailedTasks } from "@course-os/storage";
 import { withReadBudget } from "@course-os/readweave-adapter";
 
@@ -20,6 +21,26 @@ const postgresDescribe = connectionString ? describe : describe.skip;
 const schemaPath = fileURLToPath(new URL("../../../infra/postgres/operational-schema.postgres", import.meta.url));
 
 describe("OperationalStore generation job mutation", () => {
+  it("round-trips legacy checkpoints and complete recovery receipts without reshaping them", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "course-os-recovery-receipt-"));
+    try {
+      const path = join(directory, "operations.json");
+      const store = new OperationalStore(path);
+      const job = makeJob(randomUUID());
+      const receipt = makeSavedCheckpoint("source-fingerprint");
+      const legacy = makeCheckpoint("planned-fingerprint");
+      await store.mutate(state => { state.jobs.push(job); });
+      await store.mutateGenerationJob(job.id, (_, context) => {
+        context.setCheckpoint("page-1", receipt);
+        context.setCheckpoint("legacy-page", legacy);
+      });
+      const reopened = new OperationalStore(path);
+      await reopened.mutateGenerationJob(job.id, (_, context) => {
+        expect(context.checkpoints).toEqual({ "page-1": receipt, "legacy-page": legacy });
+      });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("reads events from one generation job stream", async () => {
     const directory = await mkdtemp(join(tmpdir(), "course-os-job-events-"));
     try {
@@ -312,6 +333,110 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("compacts only durable history, including text import streams, preserving canonical precedence and unmapped legacy data", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job], true);
+    const streamId = `import:${randomUUID()}`;
+    let reopened: PostgresOperationalStore | undefined;
+    try {
+      const canonical = (await fixture.store.readGenerationJobEvents(job.id))[0]!;
+      // A legacy explicit ID ahead of the sequence must not collide with the
+      // first generated ID after startup backfill.
+      const id = Number(canonical.id) + 100000;
+      const imported = { id, streamId, type: "readweave.sync.completed", payload: { legacy: "preserve bytes" }, occurredAt: job.createdAt };
+      const legacyCheckpoint = makeCheckpoint("unmapped-legacy");
+      const raw = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      const conflicting = { ...canonical, payload: { differentHistoricalPayload: true } };
+      raw.events = [conflicting, imported];
+      raw.generationCheckpoints = {
+        [`${job.id}:page-1`]: makeCheckpoint("stale-json"),
+        "unmapped:page": legacyCheckpoint
+      };
+      raw.idempotency ??= {};
+      raw.idempotency["existing-import-replay"] = { kind: "import", objectId: streamId };
+      await fixture.pool.query("UPDATE operational_state SET state=$1::jsonb WHERE id=1", [JSON.stringify(raw)]);
+      reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
+      await reopened.whenReady();
+      const compacted = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect(compacted.events).toEqual([conflicting]);
+      expect(compacted.generationCheckpoints).toEqual(raw.generationCheckpoints);
+      expect({ ...compacted, events: raw.events, generationCheckpoints: raw.generationCheckpoints }).toEqual(raw);
+      expect(await reopened.readGenerationJobEvents(job.id)).toEqual([canonical]);
+      expect(await reopened.readGenerationJobEvents(streamId)).toEqual([imported]);
+      const projected = await reopened.read();
+      expect(projected.generationCheckpoints[`${job.id}:page-1`]).toEqual(makeCheckpoint("legacy-checkpoint"));
+      expect(projected.generationCheckpoints["unmapped:page"]).toEqual(legacyCheckpoint);
+      expect(projected.idempotency["existing-import-replay"]).toEqual(raw.idempotency["existing-import-replay"]);
+      await reopened.mutate(state => { state.idempotency["ordinary-write"] = { kind: "job", objectId: job.id }; });
+      const persisted = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect(persisted.events).toEqual([conflicting]);
+      expect(persisted.generationCheckpoints).toEqual(raw.generationCheckpoints);
+      await reopened.mutateGenerationJob(job.id, (_, context) => {
+        context.appendEvent("job.running", { sequenceProbe: true });
+      });
+      const afterAppend = await reopened.readGenerationJobEvents(job.id);
+      expect(afterAppend.at(-1)!.id).toBeGreaterThan(id);
+      await reopened.close();
+      reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
+      await reopened.whenReady();
+      expect(await reopened.readGenerationJobEvents(job.id)).toEqual(afterAppend);
+      expect(await reopened.readGenerationJobEvents(streamId)).toEqual([imported]);
+      const restarted = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect(restarted.events).toEqual([conflicting]);
+      expect(restarted.generationCheckpoints).toEqual(raw.generationCheckpoints);
+    } finally {
+      await reopened?.close();
+      await fixture.pool.query("DELETE FROM ordered_events WHERE stream_id=$1", [streamId]);
+      await stopFixture(fixture);
+    }
+  });
+
+  it("stores recovery receipts independently of the operational row and preserves them after a failed update and full mutation", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job], true);
+    const receipt = makeSavedCheckpoint("vision-and-teaching-source");
+    const blocker = await fixture.pool.connect();
+    let reopened: PostgresOperationalStore | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM operational_state WHERE id=1 FOR UPDATE");
+      await fixture.store.mutateGenerationJob(job.id, (_, context) => {
+        expect(context.checkpoints["page-1"]).toEqual(makeCheckpoint("legacy-checkpoint"));
+        context.setCheckpoint("recovery-page", receipt);
+      });
+      await blocker.query("COMMIT");
+      await expect(fixture.store.mutateGenerationJob(job.id, (current, context) => {
+        current.spentUsd = 0.5;
+        context.setCheckpoint("recovery-page", { ...receipt, fingerprint: "should-rollback" });
+        context.appendEvent("generation.cost.recorded", { shouldRollback: true });
+        throw new Error("synthetic-cost-failure");
+      })).rejects.toThrow("synthetic-cost-failure");
+      await fixture.store.mutate(state => {
+        expect(state.generationCheckpoints[`${job.id}:recovery-page`]).toEqual(receipt);
+        state.generationCheckpoints[`${job.id}:full-write-page`] = receipt;
+        state.idempotency["receipt-replay"] = { kind: "job", objectId: job.id };
+      });
+      const raw = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect(raw.generationCheckpoints).toEqual({});
+      expect((await fixture.store.readGenerationJob(job.id))?.spentUsd).toBe(0);
+      expect((await fixture.store.readGenerationJobEvents(job.id)).some(event => event.type === "generation.cost.recorded")).toBe(false);
+      reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
+      await reopened.whenReady();
+      await reopened.mutateGenerationJob(job.id, (_, context) => {
+        expect(context.checkpoints["recovery-page"]).toEqual(receipt);
+        expect(context.checkpoints["full-write-page"]).toEqual(receipt);
+        expect(context.checkpoints["page-1"]).toEqual(makeCheckpoint("legacy-checkpoint"));
+        context.deleteCheckpoint("recovery-page");
+      });
+      expect((await reopened.read()).generationCheckpoints[`${job.id}:recovery-page`]).toBeUndefined();
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+      await reopened?.close();
+      await stopFixture(fixture);
+    }
+  }, 15000);
+
   it("reads one canonical job without querying operational state and overrides the legacy copy", async () => {
     const job = makeJob(randomUUID());
     const fixture = await startFixture([job]);
@@ -519,8 +644,18 @@ postgresDescribe("PostgreSQL operational job storage", () => {
         events: Array.from({ length: 45306 }, (_, i) => ({ id: i + 1, streamId: job.id, type: "synthetic.history", payload: { text: "x".repeat(280) }, occurredAt: job.createdAt })),
         generationCheckpoints: { [`${job.id}:page-1`]: { ...makeCheckpoint("bounded-history"), evidence: "x".repeat(3000000) } } };
       await fixture.pool.query("UPDATE operational_state SET state=$1::jsonb WHERE id=1", [JSON.stringify(state)]);
+      // The relational history is a separate range, not conflicting legacy
+      // IDs with different timestamps that must now remain archived in JSON.
+      await fixture.pool.query("SELECT setval(pg_get_serial_sequence('ordered_events','id'), GREATEST(45306, COALESCE((SELECT MAX(id) FROM ordered_events),0)), true)");
       await fixture.pool.query("INSERT INTO ordered_events (stream_id,event_type,payload,occurred_at) SELECT $1,'synthetic.history',jsonb_build_object('text',repeat('x',280)),now() FROM generate_series(1,41365)", [job.id]);
       const beforeBytes = (await fixture.pool.query("SELECT octet_length(state::text)::int AS bytes FROM operational_state WHERE id=1")).rows[0].bytes;
+      await fixture.store.close();
+      const startup = performance.now();
+      fixture.store = new PostgresOperationalStore({ connectionString: connectionString!, max: 3 });
+      await fixture.store.whenReady();
+      const startupCompactionMs = performance.now() - startup;
+      const compactedBytes = (await fixture.pool.query("SELECT octet_length(state::text)::int AS bytes FROM operational_state WHERE id=1")).rows[0].bytes;
+      expect(compactedBytes).toBeLessThan(100000);
       let started = performance.now();
       await fixture.store.mutate(current => { current.imports[0]!.state = "processing"; });
       const fullMutationMs = performance.now() - started;
@@ -536,7 +671,8 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       const scopedReadMs = performance.now() - started;
       const after = (await fixture.pool.query("SELECT md5((state-'imports'-'idempotency')::text) AS hash FROM operational_state WHERE id=1")).rows[0].hash;
       expect(after).toBe(before);
-      console.log(JSON.stringify({ probe: "scoped-import-isolated-pg", beforeBytes, fullMutationMs, scopedMutationMs, scopedReadMs, restUnchanged: after === before }));
+      console.log(JSON.stringify({ probe: "scoped-import-isolated-pg", beforeBytes, compactedBytes,
+        startupCompactionMs, fullMutationMs, scopedMutationMs, scopedReadMs, restUnchanged: after === before }));
     } finally { await stopFixture(fixture); }
   }, 60000);
 
@@ -940,7 +1076,8 @@ postgresDescribe("scoped generation tasks", () => {
       await fixture.pool.query(`INSERT INTO generation_job_checkpoints(job_id,page_id,checkpoint)
         SELECT $1,'heavy-page',state->'generationCheckpoints'->$2 FROM operational_state WHERE id=1`,
         [original.id, `${original.id}:heavy-page`]);
-      const size = await fixture.pool.query(`SELECT octet_length((state->'events')::text) AS events,
+      const size = await fixture.pool.query(`SELECT octet_length(state::text) AS state_bytes,
+        octet_length((state->'events')::text) AS events,
         octet_length((state->'generationCheckpoints')::text) AS checkpoints
         FROM operational_state WHERE id=1`);
       expect(size.rows[0].events).toBeGreaterThan(19000000);
@@ -966,7 +1103,9 @@ postgresDescribe("scoped generation tasks", () => {
         fixture.store.appendEvent(state, added.id, "job.queued", { synthetic: true });
         return true;
       });
+      const preCompactionWriteStart = performance.now();
       expect(await persist()).toBe(true);
+      const preCompactionScopedMs = performance.now() - preCompactionWriteStart;
       expect(await persist()).toBe(false);
       expect(fullRead).not.toHaveBeenCalled();
       fullRead.mockRestore();
@@ -980,8 +1119,16 @@ postgresDescribe("scoped generation tasks", () => {
           FROM ordered_events e WHERE stream_id=$1) AS events
         FROM operational_state WHERE id=1`, [original.id]);
       expect(after.rows).toEqual(baseline.rows);
+      const preCompactionReadStart = performance.now();
+      await fixture.store.readTaskIndex();
+      const preCompactionReadMs = performance.now() - preCompactionReadStart;
+      const compactStart = performance.now();
       reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
       await reopened.whenReady();
+      const startupCompactionMs = performance.now() - compactStart;
+      const postCompactionReadStart = performance.now();
+      await reopened.readTaskIndex();
+      const postCompactionReadMs = performance.now() - postCompactionReadStart;
       expect(await reopened.readGenerationJob(added.id)).toEqual(added);
       expect(await reopened.mutateGenerationTasks(state => Boolean(state.idempotency[`synthetic-task:${added.id}`]))).toBe(true);
       const sizes = await fixture.pool.query(`SELECT
@@ -1004,10 +1151,26 @@ postgresDescribe("scoped generation tasks", () => {
         state.idempotency[`synthetic-bench-full:${added.id}`] = { kind: "job", objectId: added.id };
       });
       const fullMs = performance.now()-fullStart;
+      const compacted = await fixture.pool.query(`SELECT octet_length(state::text) AS bytes,
+        jsonb_array_length(state->'events') AS events,
+        (SELECT count(*) FROM jsonb_each(state->'generationCheckpoints')) AS checkpoints,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(c) ORDER BY job_id,page_id),'[]'::jsonb)::text)
+          FROM generation_job_checkpoints c) AS checkpoint_hash,
+        (SELECT md5(COALESCE(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text)
+          FROM ordered_events e WHERE stream_id=$1) AS event_hash
+        FROM operational_state WHERE id=1`, [original.id]);
+      expect(compacted.rows[0].bytes).toBeLessThan(100000);
+      expect(compacted.rows[0].events).toBe(0);
+      expect(Number(compacted.rows[0].checkpoints)).toBe(0);
+      expect(compacted.rows[0].checkpoint_hash).toBe(baseline.rows[0].checkpoints);
+      expect(compacted.rows[0].event_hash).toBe(baseline.rows[0].events);
       // One scoped and one existing full mutation, same association change.
       // Record measurements without a hardware-dependent timing assertion.
       const benchmark = { fixture: "isolated-synthetic-19MB-events-3MB-checkpoints",
-        measurements: 1, scopedMs, fullMs, ...sizes.rows[0] };
+        measurements: 1, preCompactionStateBytes: size.rows[0].state_bytes,
+        preCompactionScopedMs, preCompactionReadMs, startupCompactionMs, postCompactionReadMs,
+        scopedMs, fullMs, ...sizes.rows[0], afterFullStateBytes: compacted.rows[0].bytes,
+        historyHashesPreserved: true };
       console.info("scoped generation task benchmark", JSON.stringify(benchmark));
       const benchmarkPath = process.env.COURSE_OS_TASK_BENCH_OUTPUT;
       if (benchmarkPath) await writeFile(benchmarkPath, JSON.stringify(benchmark,null,2)+"\n", "utf8");
@@ -1253,5 +1416,22 @@ function makeCheckpoint(fingerprint: string): PlannedCheckpoint {
     content: { chapterBridgeMarkdown: fingerprint },
     completedPhases: ["opening"],
     trace: { version: 1, plan: {} as PlannedCheckpoint["trace"]["plan"], phases: [] }
+  };
+}
+
+function makeSavedCheckpoint(fingerprint: string): SavedPageGeneration {
+  return {
+    kind: "page-generation-recovery-v1", fingerprint,
+    understanding: { sourceDescription: "complete visual result", teachingPlan: "complete teaching plan",
+      provider: "synthetic", model: "synthetic-vision",
+      usage: { inputTokens: 17, outputTokens: 23, cachedInputTokens: 0, apiEquivalentUsd: 0.01, durationMs: 11 } },
+    teaching: { content: {
+      chapterBridgeMarkdown: "complete bridge", learningObjectives: ["objective"],
+      mainContentMarkdown: "complete teaching result", priorKnowledge: ["prior"],
+      fullExplanationMarkdown: "complete explanation", misconceptions: ["misconception"],
+      coverageEvidence: [{ atomId: "atom-1", coveredFields: ["mainContentMarkdown"], explanation: "covered" }],
+      questions: [{ kind: "comprehension", prompt: "question", expectedAnswer: "answer", explanation: "reason" }]
+    }, provider: "synthetic", model: "synthetic-teaching",
+      usage: { inputTokens: 29, outputTokens: 31, cachedInputTokens: 0, apiEquivalentUsd: 0.02, durationMs: 13 } }
   };
 }

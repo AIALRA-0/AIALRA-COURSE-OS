@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/readweave-adapter";
+import { sha256Text } from "@course-os/domain";
 import type { CourseProject, CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, LessonDraft, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
 import { applyTeachingPackage, buildReadingTree, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
@@ -1351,6 +1352,42 @@ describe("Course OS API", () => {
     expect((await readweave.listReleases()).filter((release) => release.lifecycle !== "draft_source")).toHaveLength(0);
   }, 45_000);
 
+  it("makes a 56-page source ready without synchronizing 56 empty ReadWeave drafts before generation", async () => {
+    const previous = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const root = await mkdtemp(join(tmpdir(), "course-os-import-source-ready-"));
+      const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+      const dependencies = createDefaultDependencies(root, readweave);
+      const emptySave = vi.spyOn(readweave, "saveDraft").mockRejectedValue(new Error("EMPTY_DRAFT_MUST_NOT_DELAY_GENERATION"));
+      dependencies.conversion = { enqueueAndWait: async input => {
+        await mkdir(input.outputDir, { recursive: true });
+        const pages = await Promise.all(Array.from({ length: 56 }, async (_, index) => {
+          const imagePath = join(input.outputDir, `page-${index + 1}.svg`);
+          await writeFile(imagePath, `<svg xmlns="http://www.w3.org/2000/svg"><text>Page ${index + 1}</text></svg>`);
+          return { pageNumber: index + 1, title: `Page ${index + 1}`, text: `Source ${index + 1}`, imagePath, imageMediaType: "image/svg+xml" as const };
+        }));
+        return { requestId: input.id, state: "completed" as const, pages, issues: [], startedAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+      } };
+      const app = createApp(dependencies);
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "source-ready-56")
+        .field("autoGenerate", "true").attach("file", Buffer.from("# Isolated source"), { filename: "source.md", contentType: "text/markdown" }).expect(201);
+      const ready = await waitForImport(app, accepted.body.id);
+      expect(ready).toMatchObject({ state: "ready", conversionProgress: { pageCount: 56, completedPages: 56 } });
+      expect(ready.generationPlanId).toBeTruthy();
+      const source = await readweave.getRelease(ready.materialVersionId);
+      expect(source?.pages.map(page => page.pageNumber)).toEqual(Array.from({ length: 56 }, (_, index) => index + 1));
+      expect(emptySave).not.toHaveBeenCalled();
+      for (const page of source!.pages) {
+        const image = await dependencies.cas.get(page.imageUrl.split("/").at(-1)!);
+        expect(image.toString()).toContain(`Page ${page.pageNumber}`);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previous;
+    }
+  }, 15_000);
+
   it("fails generation when no configured model is available instead of saving a local substitute", async () => {
     const { app, readweave } = await seededApp();
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "missing-provider-job")
@@ -2133,13 +2170,13 @@ describe("Course OS API", () => {
     }
   }, 15_000);
 
-  it("retries only the page that failed to save and preserves completed page drafts", async () => {
+  it("recovers a saved model response after exhausted storage retries without regenerating completed pages", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: vi.fn(async () => testTeachingResult(0))
     };
     const { app, dependencies, readweave, release } = await seededApp(modelRouter, testReleaseWithPages(2));
     const originalSave = readweave.saveDraftWithCost.bind(readweave);
-    let saveFailures = 2;
+    let saveFailures = 6;
     vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((draft, revision, context, cost, asset) => {
       if (draft.pageId === "page-2" && saveFailures > 0) {
         saveFailures -= 1;
@@ -2155,23 +2192,61 @@ describe("Course OS API", () => {
     expect(saveFailures).toBe(0);
     const completedDraft = await readweave.getDraftByPage("page-1");
 
-    // Check core recovery before retry status polling starts reading events.
-    const readJobEvents = vi.spyOn(dependencies.operations, "readGenerationJobEvents");
-    let notifyRetryModelStarted!: () => void;
-    const retryModelStarted = new Promise<void>(resolve => { notifyRetryModelStarted = resolve; });
-    vi.mocked(modelRouter.generateTeachingPackage).mockImplementation(async () => {
-      notifyRetryModelStarted();
-      return testTeachingResult(0);
-    });
-    await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "retry-only-page-2").expect(202);
-    await retryModelStarted;
-    expect(readJobEvents).toHaveBeenCalledTimes(1);
-    expect(readJobEvents).toHaveBeenCalledWith(created.body.id);
-    expect(await waitForJob(app, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
+    expect((await dependencies.operations.read()).generationCheckpoints[`${created.body.id}:page-2`])
+      .toMatchObject({ kind: "page-generation-recovery-v1", teaching: { content: testTeachingResult(0).content } });
+    vi.mocked(modelRouter.generateTeachingPackage).mockImplementation(async () => { throw new Error("MUST_REUSE_PAID_RESPONSE"); });
+    const restarted = createApp(createDefaultDependencies(dependencies.dataDir, readweave, modelRouter));
+    await request(restarted).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "retry-only-page-2").expect(202);
+    expect(await waitForJob(restarted, created.body.id)).toMatchObject({ state: "completed", completedPageIds: ["page-2"], failedPageIds: [] });
 
-    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(3);
-    expect(vi.mocked(modelRouter.generateTeachingPackage).mock.calls.map(([input]) => input.pageNumber)).toEqual([1, 2, 2]);
+    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(modelRouter.generateTeachingPackage).mock.calls.map(([input]) => input.pageNumber)).toEqual([1, 2]);
     expect(await readweave.getDraftByPage("page-1")).toEqual(completedDraft);
+  }, 15_000);
+
+  it("automatically retries transient lesson persistence while reusing the completed model response", async () => {
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
+    const { app, dependencies, readweave, release } = await seededApp(modelRouter);
+    const save = readweave.saveDraftWithCost.bind(readweave);
+    let failures = 2;
+    vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((...args) => {
+      if (failures-- > 0) return Promise.reject(new Error("READWEAVE_ETAPI_503:temporary"));
+      return save(...args);
+    });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-transient-store")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+    const state = await dependencies.operations.read();
+    expect(state.events.filter(event => event.streamId === created.body.id && event.type === "generation.page.storage_retry")).toHaveLength(1);
+    expect(await readweave.getDraftByPage("page-1")).toBeDefined();
+  }, 15_000);
+
+  it("retains a completed visual observation while transient cost persistence recovers", async () => {
+    const usage = testTeachingResult(0.001).usage;
+    const modelRouter: ModelRouterClient = {
+      understandPage: vi.fn(async () => ({ sourceDescription: "The image shows a simple source page", teachingPlan: "Explain the source", provider: "synthetic", model: "vision", usage })),
+      generateTeachingPackage: vi.fn(async () => testTeachingResult(0.001))
+    };
+    const source = testRelease();
+    const image = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><text>source</text></svg>');
+    source.pages[0]!.imageUrl = `/api/v1/media/${sha256Text(image.toString())}`;
+    const { app, dependencies, readweave, release } = await seededApp(modelRouter, source);
+    await dependencies.cas.put(image);
+    const append = readweave.appendCostEntry.bind(readweave);
+    let failed = false;
+    vi.spyOn(readweave, "appendCostEntry").mockImplementation((cost, context) => {
+      if (cost.stage === "extract" && !failed) { failed = true; return Promise.reject(new Error("READWEAVE_ETAPI_503:temporary")); }
+      return append(cost, context);
+    });
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-visual-cost")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ completedPageIds: ["page-1"], failedPageIds: [] });
+    expect(modelRouter.understandPage).toHaveBeenCalledTimes(1);
+    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+    const costs = await readweave.listCostEntries({ jobId: created.body.id });
+    expect(costs).toHaveLength(2);
+    expect(costs.filter(cost => cost.stage === "extract")).toHaveLength(1);
   }, 15_000);
 
   it("adds refill questions as drafts and keeps the refill idempotent", async () => {

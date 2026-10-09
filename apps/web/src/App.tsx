@@ -3,12 +3,15 @@ import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry
 import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy, type TrashNativeErasePlan } from "./api.js";
 import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
+import { WorkbenchSelect } from "./WorkbenchSelect.js";
+import { ImportMilestones } from "./ImportMilestones.js";
+import { ImportTaskEvents } from "./ImportTaskEvents.js";
 import { WorkbenchRail } from "./WorkbenchRail.js";
 import { useWorkspaceOverlays } from "./overlay-focus.js";
 import { LearningWorkspace } from "./LearningWorkspace.js";
 import { SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, sidebarWidthLimit } from "./reading-layout.js";
 import { readViewPreference, saveViewPreference } from "./view-preferences.js";
-import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { formatActivityAge, formatProgressCount, formatUploadStatus, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
@@ -1644,7 +1647,7 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
       }
       setUploadStatus("正在上传文件");
       const imported = await api.importMaterial(file, courseId || undefined, { qualityMode, language, parentNodeId, autoGenerate, pdfLayout: isPdf ? pdfLayout : undefined, previousMaterialVersionId: previousMaterialVersionId || undefined, operationKey,
-        onUpload: (sent, total) => setUploadStatus(total ? `正在上传 ${Math.floor(sent / total * 100)}%` : "正在上传文件"),
+        onUpload: (sent, total) => setUploadStatus(formatUploadStatus(sent, total)),
         onUploaded: () => setUploadStatus("上传完成，等待文件检查与接单") });
       localStorage.removeItem(storageKey);
       onSubmitted(imported);
@@ -1652,7 +1655,7 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
     finally { setBusy(false); submitting.current = false; }
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <section className="import-dialog material-import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
       <header><div><span className="section-kicker">NEW MATERIAL</span><h2 id="import-title">导入课程材料</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <>
         <label className={`drop-zone ${file ? "has-file" : ""}`}>
@@ -1663,11 +1666,16 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
           <span className="file-types">PPTX · PDF · MD · TXT</span>
         </label>
         {isPdf && <PdfLayoutPreview inspection={pdfInspection} selection={pdfLayout} busy={inspectingPdf || busy} error={inspectionError} onChange={setPdfLayout} />}
-        <div className="import-options"><label><span>目标课程</span><select value={courseId} onChange={(event) => { setCourseId(event.target.value); setPreviousMaterialVersionId(""); }}><option value="">暂不归类</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label><label><span>更新现有材料</span><select value={previousMaterialVersionId} disabled={!courseId || updateSources.length === 0} onChange={(event) => setPreviousMaterialVersionId(event.target.value)}><option value="">作为新材料导入</option>{updateSources.map((release) => <option key={release.id} value={release.id}>{release.moduleTitle} · 草稿 · {release.pages.length} 页</option>)}</select></label><label><span>生成质量</span><select value={qualityMode} onChange={(event) => setQualityMode(event.target.value)}><option value="economy">经济</option><option value="balanced">平衡</option><option value="quality">质量</option></select></label><label><span>内容语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></div>
-        <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
+        <div className="import-options">
+          <label><span>目标课程</span><WorkbenchSelect aria-label="目标课程" value={courseId} disabled={busy} onChange={(value) => { setCourseId(value); setPreviousMaterialVersionId(""); }} options={[{ value: "", label: "暂不归类" }, ...courses.map((course) => ({ value: course.id, label: course.title }))]} /></label>
+          <label><span>更新现有材料</span><WorkbenchSelect aria-label="更新现有材料" value={previousMaterialVersionId} disabled={busy || !courseId || updateSources.length === 0} onChange={setPreviousMaterialVersionId} options={[{ value: "", label: "作为新材料导入" }, ...updateSources.map((release) => ({ value: release.id, label: `${release.moduleTitle} · 材料来源草稿 · ${release.pages.length} 页` }))]} /></label>
+          <label><span>生成质量</span><WorkbenchSelect aria-label="生成质量" value={qualityMode} disabled={busy} onChange={setQualityMode} options={[{ value: "economy", label: "经济" }, { value: "balanced", label: "平衡" }, { value: "quality", label: "质量" }]} /></label>
+          <label><span>内容语言</span><WorkbenchSelect aria-label="内容语言" value={language} disabled={busy} onChange={setLanguage} options={[{ value: "zh-CN", label: "简体中文" }, { value: "en", label: "English" }]} /></label>
+        </div>
+        <label className="import-auto-generate"><input type="checkbox" checked={autoGenerate} disabled={busy} onChange={(event) => setAutoGenerate(event.target.checked)} /><span><strong>导入后自动生成整套讲解</strong><small>默认开启，只写入候选草稿，不会自动发布正式课程</small></span></label>
         {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
-        {busy && <p role="status">{uploadStatus} · 关闭窗口不会取消已提交的导入</p>}
-        <footer><button className="quiet-button" onClick={onClose}>{busy ? "关闭窗口" : "取消"}</button><button className="primary-button" disabled={!file || busy || (isPdf && (inspectingPdf || !pdfInspection))} onClick={upload}><Icon name="sparkles" />{busy ? uploadStatus : "确认方案并导入"}</button></footer>
+        {busy && <div className="import-upload-status" role="status"><strong>{uploadStatus}</strong><span>字节传完后仍需服务端检查与接单，转换、保存和生成进度将在后台任务中分别显示</span></div>}
+        <footer><button className="quiet-button" onClick={onClose}>{busy ? "关闭窗口" : "取消"}</button><button className="primary-button" disabled={!file || busy || (isPdf && (inspectingPdf || !pdfInspection))} onClick={upload}><Icon name="upload" />{busy ? "提交中" : "确认方案并导入"}</button></footer>
       </>
     </section>
   </div>;
@@ -1846,22 +1854,25 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUn
         : "—";
   const confirmedCost = summary.costUsd === undefined ? undefined : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
   const cost = costReadUnavailable ? confirmedCost ? `${confirmedCost}（成本暂不可读，显示上次确认值）` : "成本暂不可读" : confirmedCost ?? (awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用");
-  const progressLabel = failedState ? "生成失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
+  const completionScope = activity.overall ? auto ? "讲解完整完成" : "材料来源已保存" : activity.progressScope;
+  const progressLabel = failedState ? record.state === "ready" ? "生成失败" : "导入失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"
-      : `${progressScopeLabel(activity.progressScope)}${progress}%${activity.overall ? ` · ${activity.overall.completed}/${activity.overall.total}` : ""}`;
+      : `${progressScopeLabel(completionScope)}${progress}%${activity.overall ? ` · ${activity.overall.completed}/${activity.overall.total}` : ""}`;
   const progressDescription = progress === undefined
     ? `${activity.stage}，${failedState ? `${failed} 页失败` : awaitingPlanDetails ? "正在读取任务进度" : activity.stale ? "状态长时间未更新" : "进度百分比暂不可核对"}`
-    : `${activity.progressScope || activity.stage} ${progress}%`;
+    : `${completionScope || activity.stage} ${progress}%`;
   return <section className={`import-task-workspace import-state-${record.state} ${activity.stale && !awaitingPlanDetails ? "task-stale" : ""}`} aria-live="polite">
     <header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>{statusTitle}</h2></div><button className="quiet-button" data-action="close-import-task" onClick={onClose}>返回课程</button></header>
     <p className="import-activity-file">{taskTitle || record.originalName}</p>
-    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${activity.progressScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
+    <ImportMilestones record={record} plan={plan} jobs={activeJobs} />
+    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${completionScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
     <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "已超过 2 分钟没有可核对的工作进展；连接或心跳不代表工作完成" : `最近工作进展：${formatActivityAge(activity.ageSeconds)}`}</small><small>{timing.label}</small></span></div>
-    <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文核心完成</dt><dd>{auto ? formatProgressCount(summary.core) : "未启用"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "未启用"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
-    <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>供应商 / 模型</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
+    <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文可读</dt><dd>{auto ? formatProgressCount(summary.core) : "尚未生成"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "尚未生成"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
+    <ImportTaskEvents record={record} plan={plan} jobs={activeJobs} costs={costs} />
+    <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>运行并发</dt><dd>{concurrency}</dd></div><div><dt>最近记录线路（非整任务）</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
     {Array.isArray(plan?.failureReasons) && plan.failureReasons.length > 0 && <p className="dialog-error" role="alert"><Icon name="warning" />{plan.failureReasons.filter((reason): reason is string => typeof reason === "string").join(" · ")}</p>}
     {(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}
-    <footer><span>{finished ? failedState ? "任务已结束，可查看失败页面" : cancelledState ? "任务已取消" : taskState === "awaiting_review" ? taskStatus.fact : taskState === "paused" ? "任务已暂停" : !auto || record.generationState === "not_requested" ? "材料导入完成，尚未生成讲解" : "任务已完成" : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{taskStatus.action === "open_draft" && <button className="primary-button" data-action="open-task-lesson" onClick={onOpen}>打开讲解</button>}{taskStatus.action === "generate" && <button className="primary-button" data-action="open-task-generation" onClick={onGenerate}>打开材料与生成工具</button>}{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
+    <footer><span>{finished ? failedState ? "任务已结束，请核对失败详情" : cancelledState ? "任务已取消" : taskState === "paused" ? "任务已暂停" : taskStatus.fact : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{taskStatus.action === "open_draft" && <button className="primary-button" data-action="open-task-lesson" onClick={onOpen}>打开讲解</button>}{taskStatus.action === "generate" && <button className="primary-button" data-action="open-task-generation" onClick={onGenerate}>打开材料与生成工具</button>}{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
   </section>;
 }
 

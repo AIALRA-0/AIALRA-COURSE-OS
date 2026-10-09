@@ -398,6 +398,19 @@ svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: view-box; transf
 .import-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 18px; }
 .import-options label { display: grid; gap: 5px; color: var(--muted); font-size: var(--font-small); }
 .import-options select { padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-strong); font-size: var(--font-small); }
+.material-import-dialog { container: material-import / inline-size; }
+.material-import-dialog .import-options { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; }
+.material-import-dialog .import-options label { min-width: 0; gap: 8px; font-size: 14px; }
+.material-import-dialog .workbench-select-shell { width: 100%; }
+.material-import-dialog .import-options .workbench-select { padding: 6px 32px 6px 10px; font-size: 14px; }
+.material-import-dialog .drop-zone, .material-import-dialog .drop-zone > * { min-width: 0; max-width: 100%; }
+.material-import-dialog .drop-zone strong { overflow-wrap: anywhere; }
+.material-import-dialog > footer { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); }
+.import-upload-status { display: grid; gap: 6px; margin: 16px 18px 0; font-size: 14px; line-height: 1.6; }
+.import-upload-status span { color: var(--muted); }
+@container material-import (max-width: 420px) {
+  .material-import-dialog .import-options { grid-template-columns: minmax(0, 1fr); }
+}
 .import-auto-generate { display: flex; align-items: flex-start; gap: 9px; margin: 12px 18px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
 .import-auto-generate input { margin-top: 2px; accent-color: var(--brand); }
 .import-auto-generate span { display: grid; gap: 3px; }
@@ -1436,6 +1449,21 @@ svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: view-box; transf
 .import-task-page-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 0 16px; border-bottom: 1px solid var(--line); }
 .import-task-page-header h2 { margin: 5px 0 0; font-size: 21px; line-height: 1.35; }
 .import-task-workspace .import-activity-file { margin: 18px 0 12px; font-size: 13px; }
+.import-milestones { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 16px; margin: 0 0 24px; padding: 0; list-style: none; }
+.import-milestones li { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.import-milestone-marker { flex: 0 0 24px; width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 14px; }
+.import-milestone-marker svg { width: 16px; height: 16px; }
+.import-milestones li > div { display: grid; gap: 6px; min-width: 0; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.import-milestones li > div > span { color: var(--muted); }
+.import-milestones [data-milestone-state="complete"] .import-milestone-marker { border-color: var(--green); color: var(--green); }
+.import-milestones [data-milestone-state="active"] .import-milestone-marker { border: 2px solid var(--brand); color: var(--brand); }
+.import-milestones [data-milestone-state="failed"] .import-milestone-marker { border-color: var(--red); color: var(--red); }
+.import-milestones [data-milestone-state="waiting"] .import-milestone-marker,
+.import-milestones [data-milestone-state="unknown"] .import-milestone-marker { border-style: dashed; }
+.import-generation-checkpoints { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: -8px 0 24px; font-size: 14px; line-height: 1.6; }
+.import-generation-checkpoints small { flex-basis: 100%; color: var(--muted); font: inherit; }
+.import-storage-retry { margin: 16px 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); font-size: 14px; line-height: 1.6; }
+.import-storage-retry p { margin: 0; }
 .import-task-workspace .import-progress { height: 10px; margin: 0 0 9px; }
 .import-task-workspace .import-progress i { background: var(--brand); }
 .import-task-workspace .import-progress.is-failed { background: color-mix(in srgb, var(--red) 16%, var(--line)); }

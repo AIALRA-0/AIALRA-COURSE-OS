@@ -317,6 +317,7 @@ describe("CourseTree search navigation", () => {
     expect(markup).not.toContain("草稿 v4");
     expect(markup).not.toContain("材料版本：草稿 v4");
     expect(markup).toContain("材料状态：需要审核");
+    expect(markup).toContain("材料来源已保存；草稿标签不代表讲解已生成");
     expect(markup).not.toContain('aria-label="状态：已发布"');
     expect(markup).not.toContain('aria-label="材料版本：已发布 v0"');
     const courseButtonStart = markup.indexOf('<button class="tree-main-button"');

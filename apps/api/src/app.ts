@@ -1,4 +1,5 @@
 import { loadWritingStandards } from "./writing-standards.js";
+import { savedPageGeneration, type SavedPageGeneration } from "./generation-checkpoint.js";
 export { applySemanticAuditFindings } from "./teaching-patches.js";
 import { meterModelRouter } from "./model-usage-meter.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -4030,7 +4031,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     await failGenerationJob(jobId, "GENERATION_HARNESS_SNAPSHOT_CHANGED", dependencies, fenceToken);
     return;
   }
-  for (const pageId of initial.pageIds) {
+  pages: for (const pageId of initial.pageIds) {
     if (initial.completedPageIds.includes(pageId)) continue;
     const currentJob = await dependencies.operations.readGenerationJob(jobId);
     if (!currentJob || currentJob.cancelRequested || currentJob.state !== "running") return;
@@ -4045,13 +4046,30 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     const pageStartedAt = Date.now();
     const timings: Record<string, number> = {};
     const phaseStartedAt = new Map<string, number>();
+    const recoveryFingerprint = sha256Text(stableStringify({ page: sourcePage,
+      policy: initial.writingPolicySnapshotId || release.writingPolicySnapshotId,
+      harness: initial.harnessSnapshotId, language: initial.language, qualityMode: initial.qualityMode }));
+    const recoveryRead = await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => ({
+      checkpoint: context.checkpoints[page.id],
+      accountedCostIds: context.events.filter(event => event.type === "generation.cost.recorded")
+        .map(event => (event.payload as { costEntryId?: string }).costEntryId)
+    }));
+    let recovery: SavedPageGeneration = savedPageGeneration(recoveryRead?.result.checkpoint, recoveryFingerprint);
+    const saveRecovery = async () => {
+      await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
+        if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken) || job.cancelRequested) throw new Error("LEASE_LOST");
+        context.setCheckpoint(page.id, recovery);
+      });
+    };
+    let storageRetries = 0;
     let finalizedCost: GenerationCostEntry | undefined;
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
+    while (true) {
     try {
       if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter,
-        initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined, () => meter.markSettled())) continue;
-      if (currentJob.spentUsd >= currentJob.budgetUsd) {
+        initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined, () => meter.markSettled())) continue pages;
+      if (currentJob.spentUsd >= currentJob.budgetUsd && !recovery.teaching) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
       }
@@ -4076,7 +4094,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       if (sourceImageDataUrl && pageModelRouter.understandPage) {
         await appendGenerationStageEvent(jobId, page.id, "extract", "started", dependencies, { activity: "visual_understanding" });
         const understandingStartedAt = Date.now();
-        const understood = await pageModelRouter.understandPage({ pageTitle: page.title, pageNumber: page.pageNumber,
+        const understood = recovery.understanding ?? await pageModelRouter.understandPage({ pageTitle: page.title, pageNumber: page.pageNumber,
           sourceText: layoutHint ? `${sourceText}\n\n${layoutHint}` : sourceText, courseContext, sourceImageDataUrl, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
           language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
           idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:understand:v1`,
@@ -4086,15 +4104,24 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           sourceDescription = understood.sourceDescription;
           sourceText += `\n\n## 页面图像观察\n${understood.sourceDescription}`;
           teachingPlan = understood.teachingPlan;
-          const visionCost = makeGenerationCostEntry(jobId, currentJob, release, page.id, understood.provider,
+          const visionCost = recovery.understandingCost ?? makeGenerationCostEntry(jobId, currentJob, release, page.id, understood.provider,
             understood.model, understood.usage, "succeeded", true);
-          visionCost.id += ":understanding";
+          if (!recovery.understandingCost) visionCost.id += ":understanding";
           visionCost.stage = "extract";
-          visionSpentUsd = visionCost.costBasis === "provider_reported" && visionCost.actualMicrousd !== null ? visionCost.actualMicrousd / 1_000_000
+          visionSpentUsd = recoveryRead?.result.accountedCostIds.includes(visionCost.id) ? 0 : visionCost.costBasis === "provider_reported" && visionCost.actualMicrousd !== null ? visionCost.actualMicrousd / 1_000_000
             : visionCost.estimatedMicrousd / 1_000_000;
+          if (!recovery.understanding) {
+            recovery.understanding = understood;
+            recovery.understandingCost = visionCost;
+            await saveRecovery();
+          }
+          finalizedCost = visionCost;
+          persistenceStage = "append_cost";
           await dependencies.readweave.appendCostEntry(visionCost, systemWriteContext(visionCost.id, currentJob.workspaceId));
           await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, visionCost, context));
+          persistenceStage = undefined;
           meter.markSettled();
+          finalizedCost = undefined;
           await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, {
             activity: "visual_understanding", provider: understood.provider, model: understood.model,
             durationMs: understood.usage.durationMs, sourceCharacters: understood.sourceDescription.length });
@@ -4107,7 +4134,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       }
       await appendGenerationStageEvent(jobId, page.id, "teach", "started", dependencies);
       const pageCostLimitUsd = currentJob.budgetUsd - currentJob.spentUsd - visionSpentUsd;
-      let generation = await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, courseContext, sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v16`, stage: "teach", maxCostUsd: pageCostLimitUsd,
+      let generation = recovery.teaching ?? await pageModelRouter.generateTeachingPackage({ pageTitle: page.title, pageNumber: page.pageNumber, sourceText, courseContext, sourceImageDataUrl, teachingPlan, writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId, language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd), idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:teach:v16`, stage: "teach", maxCostUsd: pageCostLimitUsd,
         onTeachingPhase: async (phase, state, usage) => {
           if (state === "started") phaseStartedAt.set(phase, Date.now());
           const wallDurationMs = state === "completed" && phaseStartedAt.has(phase)
@@ -4116,6 +4143,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           await appendGenerationStageEvent(jobId, page.id, phase === "format_repair" ? "repair" : "teach", state, dependencies,
             { phase, ...usage, ...(wallDurationMs !== undefined ? { wallDurationMs } : {}) }, fenceToken);
         } });
+      if (!recovery.teaching) {
+        recovery.teaching = generation;
+        await saveRecovery();
+      }
       timings.formatCheckMs = generation.teachingTrace?.formatCheckMs ?? 0;
       if (generation.teachingTrace && sourceDescription) generation.teachingTrace.sourceDescription = sourceDescription;
       const reviewStartedAt = Date.now();
@@ -4147,7 +4178,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         publishable: issues.length === 0 && Boolean(runtimeModelRouter),
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
-      const cost = generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
+      const cost = recovery.teachingCost ?? generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
+      if (!recovery.teachingCost) {
+        recovery.teachingCost = cost;
+        await saveRecovery();
+      }
       finalizedCost = cost;
       timings.pageCompileAndReviewMs = Date.now() - reviewStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
@@ -4180,7 +4215,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       const saveDraftStartedAt = Date.now();
       const draftWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId);
       const bundledCost = Boolean(dependencies.readweave.saveDraftWithCost);
-      const sourceAsset = !existing && release.lifecycle === "draft_source" && release.candidateBaseReleaseId
+      const sourceAsset = release.lifecycle === "draft_source"
         ? await candidateSourceAsset(page, dependencies)
         : undefined;
       const saveDraft = () => bundledCost
@@ -4308,6 +4343,16 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, context);
       });
     } catch (error) {
+      if (isTransientReadWeaveFailure(error) && storageRetries < 2) {
+        storageRetries += 1;
+        await assertGenerationFence(jobId, fenceToken, dependencies);
+        await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
+          context.appendEvent("generation.page.storage_retry", { pageId, attempt: storageRetries,
+            issue: safeGenerationIssue(error), reusedUnderstanding: Boolean(recovery.understanding), reusedTeaching: Boolean(recovery.teaching) });
+        });
+        await new Promise(resolve => setTimeout(resolve, storageRetries * 1000));
+        continue;
+      }
       const failureRoute = classifyGenerationFailure(error);
       const issue = safeGenerationIssue(error);
       console.error(JSON.stringify({
@@ -4321,7 +4366,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         codeLocations: error instanceof Error
           ? (error.stack ?? "").split("\n").slice(1, 4).map((line) => line.trim().replace(/https?:\/\/\S+/gu, "[url]"))
           : [],
-        failureRoute
+        failureRoute,
+        ...(failureRoute.category === "storage" ? { backendFailureKind: safeReadWeaveFailureKind(error), persistenceStage } : {})
       }));
       const billedCalls = meter.groupedUsage();
       const unsettledCost = finalizedCostPersisted ? undefined : finalizedCost;
@@ -4355,8 +4401,11 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
         failureRoute,
         ...(error instanceof ModelRouterGenerationError ? { provider: error.provider, model: error.model, durationMs: error.usage.durationMs, providerErrorCode: error.code.slice(0, 120), responseShape: error.responseShape } : {}),
-        ...(persistenceStage ? { persistenceStage, backendFailureKind: safeReadWeaveFailureKind(error) } : {})
+        ...(failureRoute.category === "storage" ? { backendFailureKind: safeReadWeaveFailureKind(error) } : {}),
+        ...(persistenceStage ? { persistenceStage } : {})
       }, fenceToken);
+    }
+    break;
     }
   }
   await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
@@ -5344,7 +5393,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
       layoutFingerprint: record.layoutFingerprint ?? null
     }));
     const convertedPages: Array<{ page: CourseRelease["pages"][number]; bytes: Buffer; sha256: string; mediaType: "image/png" | "image/svg+xml" }> = [];
-    for (const converted of conversion.pages) {
+    const prepareConvertedPage = async (converted: ConversionResult["pages"][number]) => {
       const bytes = await readFile(converted.imagePath);
       const stored = await dependencies.cas.put(bytes);
       const existingSourcePage = existingSource?.manifestHash === record.sha256
@@ -5354,7 +5403,12 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         ? structuredClone(existingSourcePage)
         : createImportedPage(importPageIdentity, converted.pageNumber, converted.title, converted.text, stored.sha256);
       if (!existingSourcePage && converted.sourceRegion) page.anchors[0]!.sourceRegion = converted.sourceRegion;
-      convertedPages.push({ page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType });
+      return { page, bytes, sha256: stored.sha256, mediaType: converted.imageMediaType };
+    };
+    // Bound independent file IO and preserve source ordering. Progress writes
+    // must not turn every local image into two large operational transactions.
+    for (let offset = 0; offset < conversion.pages.length; offset += 4) {
+      convertedPages.push(...await Promise.all(conversion.pages.slice(offset, offset + 4).map(prepareConvertedPage)));
       await persistConversionProgress({
         requestId: conversionRequestId,
         stage: "saving_pages",
@@ -5362,10 +5416,12 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         completedPages: convertedPages.length,
         updatedAt: new Date().toISOString()
       });
-      await dependencies.operations.mutateImports((state, context) => {
-        context.appendEvent(importId, "conversion.page.completed", { pageId: page.id, pageNumber: page.pageNumber, title: page.title, imageSha256: stored.sha256 });
-      });
     }
+    await dependencies.operations.mutateImports((_state, context) => {
+      for (const { page, sha256 } of convertedPages) {
+        context.appendEvent(importId, "conversion.page.completed", { pageId: page.id, pageNumber: page.pageNumber, title: page.title, imageSha256: sha256 });
+      }
+    });
     const treeNodes = await dependencies.readweave.listTreeNodes();
     const parentNode = record.parentNodeId ? treeNodes.find((node) => node.id === record.parentNodeId) : undefined;
     const parentCourseId = resolveParentCourseId(parentNode, treeNodes, record.courseId);
@@ -5435,6 +5491,9 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         savedDrafts.push(existingDraft);
         continue;
       }
+      // Save a real generated lesson instead of synchronizing every empty
+      // section first. Preserved incremental content must still be copied.
+      if (record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) continue;
       const draft: LessonDraft = prepared?.drafts[index] ?? {
         id: `draft:${converted.page.id}`,
         workspaceId: record.workspaceId,

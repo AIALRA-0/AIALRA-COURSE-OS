@@ -126,6 +126,8 @@ interface DraftProjection {
   sectionNoteIds: Record<SectionKey, string>;
   sourceImageNoteId?: string;
   sourceImageFileName?: string;
+  /** Receipt recorded only after the binary PUT succeeds. */
+  sourceImageHash?: string;
 }
 
 interface ProjectionIndex {
@@ -425,6 +427,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private draftPageRecordsHydration?: SharedRead<void>;
   private readonly costNoteEnsures = new Map<string, Promise<void>>();
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
+  private readonly pageWriteReadBudget = new AsyncLocalStorage<ReadBudget>();
   private stateCache?: { state: EtapiState; expiresAt: number };
   private stateReadInFlight?: SharedRead<EtapiState>;
   private stateVersion = 0;
@@ -842,13 +845,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async appendDraftPageCost(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry | undefined> {
     if (!entry.pageId) return undefined;
     return this.withDraftPageLock(entry.pageId, context, async () => {
-      const state = structuredClone(await this.readStateReference(true));
       const located = await this.findDraftPageRecord(entry.pageId!);
-      if (located) this.mergeDraftPageRecord(state, located.record);
-      const release = state.releases.find((item) => item.id === entry.materialVersionId)
-        ?? state.releases.find((item) => item.courseId === entry.courseId
+      // An independent page record already owns its draft, costs and receipts.
+      // Consult the legacy core only while migrating a page without a record.
+      const reference = located ? undefined : await this.readStateReference(true, false);
+      const release = reference?.releases.find((item) => item.id === entry.materialVersionId)
+        ?? reference?.releases.find((item) => item.courseId === entry.courseId
           && item.pages.some((page) => page.id === entry.pageId));
-      let draft = located?.record.draft ?? state.drafts.find((item) => item.pageId === entry.pageId);
+      let draft = located?.record.draft ?? reference?.drafts.find((item) => item.pageId === entry.pageId);
       if (!draft && release) {
         const page = release.pages.find((item) => item.id === entry.pageId);
         if (page) {
@@ -868,10 +872,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           };
         }
       }
-      if (!draft || !release) return undefined;
+      if (!draft || (!located && !release)) return undefined;
 
+      const state = this.createDraftPageReadContext(reference, draft, located?.record);
+      const legacyState = reference ? { ...reference, ...state, projections: {
+        ...reference.projections, drafts: { ...state.projections.drafts },
+        courses: reference.projections.courses[draft.courseId]
+          ? { [draft.courseId]: structuredClone(reference.projections.courses[draft.courseId]!) } : {}
+      } } : undefined;
       const projection = located?.record.projection ?? state.projections.drafts[draft.id]
-        ?? await this.ensureDraftProjection(state, draft);
+        ?? await this.ensureDraftProjection(legacyState!, draft);
       state.projections.drafts[draft.id] = projection;
       const existingCost = located?.record.costEntries.find((item) => item.id === entry.id)
         ?? state.costEntries.find((item) => item.id === entry.id);
@@ -887,7 +897,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       record.idempotency[context.idempotencyKey] = { kind: "cost_entry", objectId: saved.id };
       record.idempotency[saved.id] = { kind: "cost_entry", objectId: saved.id };
       if (!located || !replay || !existingCost) {
-        await this.writeDraftPageRecord(record, located?.noteId, state);
+        await this.writeDraftPageRecord(record, located?.noteId, legacyState);
       }
       const parentNoteId = projection.sectionNoteIds.quality;
       await this.writeContext.run(context, () => this.ensureCostNoteOnce(parentNoteId, saved));
@@ -1071,8 +1081,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {
     return this.withDraftPageLock(draft.pageId, context, async () => {
-      const reference = await this.readStateReference(true, false);
       const located = await this.findDraftPageRecord(draft.pageId);
+      const reference = located
+        ? this.stateCache?.state ?? await this.draftWriteRouteReference()
+        : await this.readStateReference(true, false);
       const previous = located?.record;
       const currentReference = previous?.draft ?? reference.drafts.find(item => item.pageId === draft.pageId);
       const replay = previous?.idempotency[context.idempotencyKey] ?? reference.idempotency[context.idempotencyKey];
@@ -1172,6 +1184,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.invalidateStateCache();
       throw error;
     });
+  }
+
+  private async draftWriteRouteReference(): Promise<EtapiState> {
+    const projection = await this.ensureWorkspace();
+    // Material selection still needs release metadata after a cold restart.
+    // Without that index, updating an existing page needs only its record.
+    return projection.metadataIndexNoteId
+      ? this.readStateReference(true, false)
+      : normalizeState({}, projection);
   }
 
   async listConflicts(): Promise<CourseConflict[]> {
@@ -2874,7 +2895,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       blockHashes,
       sectionNoteIds,
       sourceImageNoteId,
-      sourceImageFileName: sourceAsset?.fileName
+      sourceImageFileName: sourceAsset?.fileName,
+      sourceImageHash: sourceAsset?.sha256
     };
     state.projections.drafts[draft.id] = projection;
     return projection;
@@ -2915,8 +2937,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           courseOsSourceHash: sourceAsset.sha256
         });
         projection.sourceImageNoteId = sourceImage.noteId;
+        projection.sourceImageHash = undefined;
       }
-      await this.putBinaryContent(projection.sourceImageNoteId, sourceAsset.bytes, sourceAsset.mediaType);
+      if (projection.sourceImageHash !== sourceAsset.sha256) {
+        await this.putBinaryContent(projection.sourceImageNoteId, sourceAsset.bytes, sourceAsset.mediaType);
+        projection.sourceImageHash = sourceAsset.sha256;
+      }
     }
     const updates: Array<() => Promise<void>> = [];
     const blockCreations: Array<() => Promise<void>> = [];
@@ -3620,20 +3646,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const now = Date.now();
     if (this.stateCache && this.stateCache.expiresAt > now) return withActivity(this.stateCache.state);
 
-    if (this.writeContext.getStore()) {
-      const versionAtReadStart = this.stateVersion;
-      const state = await this.readRemoteState();
-      if (this.stateVersion === versionAtReadStart) {
-        this.stateCache = { state, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
-        this.cacheActivityRoutes(state);
-        this.lastReadAt = new Date().toISOString();
-      }
-      return withActivity(state);
-    }
-
+    const isWrite = Boolean(this.writeContext.getStore());
     if (!this.stateReadInFlight) {
       const versionAtReadStart = this.stateVersion;
-      const read = createSharedRead(() => this.readRemoteState());
+      // Root snapshots are immutable inputs to page writers. Give their shared
+      // GET its own lifetime rather than the first writer's context or timer.
+      const read = createSharedRead(() => this.pageWriteReadBudget.exit(() =>
+        this.writeContext.exit(() => this.readRemoteState())), { independent: isWrite });
       this.stateReadInFlight = read;
       void read.promise.then((state) => {
         if (this.stateReadInFlight === read && this.stateVersion === versionAtReadStart) {
@@ -3647,10 +3666,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const pendingRead = this.stateReadInFlight;
     if (!pendingRead) throw new Error("READWEAVE_STATE_READ_MISSING");
-    if (!requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
+    if (!isWrite && !requireFresh && this.stateCache && now < this.stateCache.expiresAt + EtapiReadWeaveCourseApi.maxStaleReadMs) {
       return withActivity(this.stateCache.state);
     }
-    const state = await joinSharedRead(pendingRead, currentReadBudget());
+    const state = await joinSharedRead(pendingRead, isWrite ? this.pageWriteReadBudget.getStore() : currentReadBudget(), { writeOwner: isWrite });
     const current = this.stateCache && this.stateCache.expiresAt > Date.now() ? this.stateCache.state : state;
     return withActivity(current);
   }
@@ -3923,9 +3942,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const current = new Promise<void>((resolve) => { release = resolve; });
     draftPageWriteChains.set(lockKey, current);
     await predecessor.catch(() => undefined);
+    const controller = context ? new AbortController() : undefined;
+    const deadline = Date.now() + maximumSharedReadBudgetMs;
+    const timer = controller ? setTimeout(() => controller.abort(new Error("READ_DEADLINE_EXCEEDED")), maximumSharedReadBudgetMs) : undefined;
     try {
-      return context ? await this.writeContext.run(context, work) : await work();
+      // Bound the necessary GETs independently of the HTTP reader. Keep the
+      // lock until writes actually settle, even if their read budget expires.
+      return context ? await this.pageWriteReadBudget.run({ signal: controller!.signal, deadline },
+        () => this.writeContext.run(context, work)) : await work();
     } finally {
+      if (timer !== undefined) clearTimeout(timer);
       release();
       if (draftPageWriteChains.get(lockKey) === current) draftPageWriteChains.delete(lockKey);
     }
@@ -4820,7 +4846,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const base = this.config.baseUrl.replace(/\/$/, "");
     const input = `${base}/etapi${path}`;
     const method = (init?.method ?? "GET").toUpperCase();
-    const budget = method === "GET" && !writeContext ? currentReadBudget() : undefined;
+    const budget = method === "GET"
+      ? writeContext ? this.pageWriteReadBudget.getStore() : currentReadBudget()
+      : undefined;
     if (budget) return this.rawWithReadBudget(input, init, headers, method, budget);
     return this.rawWithLegacyRetry(input, init, headers, method);
   }
