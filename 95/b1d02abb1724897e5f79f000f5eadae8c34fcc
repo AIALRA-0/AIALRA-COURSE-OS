@@ -1,0 +1,39 @@
+apps/web/src/course-navigator.css
+  s_e8850ef125fb32::t_99f7f0c88292b3 432,476
+  s_e8850ef125fb32::t_b717731eccba7c 54-57,76,81,86,119,127-130
+  s_e8850ef125fb32::t_f8104121c0377f 290,305-306,324-325,374,440-441,455-459
+  s_e8850ef125fb32::t_1371d1bdaf5093 4,10-11,15-16,39
+  s_e8850ef125fb32::t_fad4c0bc3f6aed 215-216,221,225,247,262-265
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_b5af034c455486 293,306-307,1087-1088,1118,1133,1149,1168
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_b5af034c455486 15
+apps/web/src/workbench-layout.css
+  s_e8850ef125fb32::t_45969d85f5cf9f 148
+  s_e8850ef125fb32::t_3101828e4940be 36,90-92,127,130,134,136-143,147,149-155,189,221-222
+  s_e8850ef125fb32::t_7a286888831598 131,144-146,217
+  s_e8850ef125fb32::t_650821af3e6c35 214,216
+  s_e8850ef125fb32::t_a98e01137bcdd0 223
+apps/web/src/LearningWorkspace.tsx
+  s_e8850ef125fb32::t_d7d05adb6a29c0 1,48-50,76-78,84,89-102,129-131,134,137-140
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_1a800b255c0d9e 17,66,84,127,159,164,171,189,251,312
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_404a03d98eb3c2 71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95b1d02abb1724897e5f79f000f5eadae8c34fcc",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
