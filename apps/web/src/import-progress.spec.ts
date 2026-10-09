@@ -3,10 +3,32 @@ import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
 import { deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportTaskPollingMode, getImportTaskState, getImportTaskStatus, getImportTaskTiming, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
+import { formatTaskConcurrency } from "./App.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
   return value as unknown as WebImportRecord;
 }
+
+describe("task concurrency display", () => {
+  it("distinguishes all active tasks from the body concurrency cap without changing counters", () => {
+    const activeJobs = Array.from({ length: 16 }, (_, index) => ({ id: `job-${index}`, state: "running" })) as GenerationJob[];
+    const source = record({ state: "ready", pageIds: [], issues: [] });
+    const currentPlan = plan({ state: "running", pageIds: [], completedPageIds: [], failedPageIds: [], maxConcurrency: 14 });
+    const summary = summarizeImportProgress(source, currentPlan, activeJobs, []);
+    expect(summary.concurrency).toEqual({ running: 16, limit: 14 });
+    expect(formatTaskConcurrency(summary.concurrency)).toBe("16 个活跃任务 · 正文并发上限14");
+    expect(activeJobs).toHaveLength(16);
+    expect(currentPlan.maxConcurrency).toBe(14);
+  });
+  it.each([
+    [{ running: 16 }, "16 个活跃任务 · 正文并发上限待确认"],
+    [{ limit: 14 }, "活跃任务数待确认 · 正文并发上限14"],
+    [{ running: 0, limit: 14 }, "0 个活跃任务 · 正文并发上限14"],
+    [undefined, "—"]
+  ])("keeps unavailable metrics unknown for %j", (value, expected) => {
+    expect(formatTaskConcurrency(value)).toBe(expected);
+  });
+});
 
 function plan(value: Record<string, unknown>): WebGenerationPlan {
   return value as unknown as WebGenerationPlan;

@@ -258,7 +258,7 @@ describe("ReadingReplica", () => {
       workspaceId,
       targetKind: "page",
       targetId: pageId,
-      reason: "draft",
+      reason: "permanent-delete",
       revision: 2
     });
     await invalidatePage("workspace-a", ownerA.id);
@@ -269,6 +269,55 @@ describe("ReadingReplica", () => {
 
     await invalidatePage("workspace-c", ownerOtherWorkspace.id);
     expect(replica.getMediaVisibility("workspace-c", "shared-media-hash")).toBe("blocked");
+  });
+
+  it.each(["draft_source", "published"] as const)("keeps all 56 source pages and images visible through draft fences for %s", async (lifecycle) => {
+    const root = await temporaryRoot();
+    const replica = new ReadingReplica(root, "authority:draft-fenced-source");
+    await replica.initialize();
+    const pages = Array.from({ length: 56 }, (_, index) => ({ ...page(`page-${index + 1}`), pageNumber: index + 1 }));
+    const source = { ...release("source-56", "course-a", pages), lifecycle };
+    await replica.replace({ ...input([course()], [source]), drafts: pages.map(item => draft(source, item)) });
+    const fences = pages.slice(24, 32).map(item => ({
+      id: readingProjectionInvalidationId("workspace-a", "page", item.id),
+      workspaceId: "workspace-a", targetKind: "page" as const, targetId: item.id,
+      reason: "draft" as const, revision: 2
+    }));
+    for (const fence of fences) await replica.invalidateProjection(fence);
+
+    const assertFencedReads = async (reader: ReadingReplica) => {
+      expect((await reader.getReleaseIndex("workspace-a", source.id))?.pageIds).toEqual(source.pageIds);
+      expect((await reader.listIndexes("workspace-a"))[0]?.pages).toHaveLength(56);
+      for (const item of pages) expect(reader.getMediaVisibility("workspace-a", `${item.id}-image-hash`)).toBe("confirmed");
+      for (const item of pages.slice(24, 32)) {
+        expect(await reader.getPageSource("workspace-a", item.id, source.id)).toBeUndefined();
+        expect(await reader.getDraft("workspace-a", item.id, source.id)).toBeUndefined();
+      }
+      expect(await reader.getPageSource("workspace-a", pages[0]!.id, source.id)).toBeDefined();
+      expect(reader.projectionInvalidations()).toEqual(fences);
+    };
+    await assertFencedReads(replica);
+    const restarted = new ReadingReplica(root, "authority:draft-fenced-source");
+    await restarted.initialize();
+    await assertFencedReads(restarted);
+    const confirmed = draft(source, pages[27]!, 2);
+    expect(await restarted.upsertDraft(confirmed, [fences[3]!.id])).toBe(true);
+    expect(await restarted.getDraft("workspace-a", confirmed.pageId, source.id)).toEqual(confirmed);
+    expect(restarted.projectionInvalidations()).toHaveLength(7);
+  });
+
+  it.each(["tree", "trashed", "restored", "release-removed", "permanent-delete"] as const)("still hides source pages and images under a %s page fence", async (reason) => {
+    const replica = new ReadingReplica(await temporaryRoot(), `authority:source-fence:${reason}`);
+    await replica.initialize();
+    const source = release();
+    await replica.replace(input([course()], [source]));
+    await replica.invalidateProjection({
+      id: readingProjectionInvalidationId("workspace-a", "page", "page-a"),
+      workspaceId: "workspace-a", targetKind: "page", targetId: "page-a", reason
+    });
+    expect((await replica.getReleaseIndex("workspace-a", source.id))?.pages).toHaveLength(0);
+    expect(replica.getMediaVisibility("workspace-a", "page-a-image-hash")).toBe("blocked");
+    expect(await replica.getPageSource("workspace-a", "page-a", source.id)).toBeUndefined();
   });
 
   it("restarts offline, refreshes lightweight indexes without replacing bodies, and verifies page hashes", async () => {

@@ -556,7 +556,7 @@ export class ReadingReplica {
         indexedOwner = true;
         if (this.isReleaseVisible(catalog, release)
           && !this.isTombstoned(catalog, workspaceId, "page", page.id)
-          && !this.isProjectionInvalidated(catalog, workspaceId, "page", page.id)
+          && !this.isSourcePageInvalidated(catalog, workspaceId, page.id)
           && !this.isPageArchived(catalog, workspaceId, page.id)) return "confirmed";
       }
     }
@@ -1040,6 +1040,13 @@ export class ReadingReplica {
     return false;
   }
 
+  private isSourcePageInvalidated(catalog: ReplicaCatalog, workspaceId: string, pageId: string): boolean {
+    // A pending draft changes lesson content, not the confirmed source page or its image.
+    // Content reads still honor every invalidation through isProjectionInvalidated.
+    return (catalog.invalidations ?? []).some((item) => item.workspaceId === workspaceId
+      && item.targetKind === "page" && item.targetId === pageId && item.reason !== "draft");
+  }
+
   private isPageArchived(catalog: ReplicaCatalog, workspaceId: string, pageId: string): boolean {
     const tree = catalog.trees.find((item) => item.workspaceId === workspaceId);
     if (!tree) return false;
@@ -1089,7 +1096,7 @@ export class ReadingReplica {
 
   private visibleReleaseIndex(catalog: ReplicaCatalog, release: CatalogRelease): CourseReleaseIndex {
     const pages = release.index.pages.filter((page) => !this.isTombstoned(catalog, release.workspaceId, "page", page.id)
-      && !this.isProjectionInvalidated(catalog, release.workspaceId, "page", page.id));
+      && !this.isSourcePageInvalidated(catalog, release.workspaceId, page.id));
     return { ...jsonClone(release.index), pages, pageIds: pages.map((page) => page.id) };
   }
 

@@ -9,6 +9,7 @@ import type { CourseProject, CourseRelease, LessonDraft, PageLesson } from "@cou
 import { currentReadBudget, FileReadWeaveCourseApi } from "@course-os/readweave-adapter";
 import { buildReadingTree, createApp, createDefaultDependencies } from "./app.js";
 import { ReadingRuntime } from "./reading-runtime.js";
+import { readingProjectionInvalidationId } from "./reading-replica.js";
 import { registerSelfRetellingRoutes } from "./self-retelling-routes.js";
 
 const roots: string[] = [];
@@ -73,6 +74,40 @@ async function harness() {
 }
 
 describe("replica-backed reading routes", () => {
+  it("serves all 56 catalog pages and original images during draft fences but denies deleted images", async () => {
+    const { app, dependencies, reading, release } = await harness();
+    const courses = await reading.replica.listCourses("personal");
+    const pages: PageLesson[] = [];
+    for (let index = 0; index < 56; index += 1) {
+      const image = await dependencies.cas.put(Buffer.from(`original-image-${index + 1}`));
+      pages.push({ ...testPage(), id: `source-page-${index + 1}`, pageNumber: index + 1, imageUrl: `/api/v1/media/${image.sha256}` });
+    }
+    const source = { ...release, lifecycle: "draft_source" as const, pages, pageIds: pages.map(item => item.id) };
+    await reading.replica.replace({ courses, releases: [source], drafts: [], tree: buildReadingTree(courses, [], [], "personal"), trash: [] });
+    for (const item of pages.slice(24, 32)) await reading.replica.invalidateProjection({
+      id: readingProjectionInvalidationId("personal", "page", item.id),
+      workspaceId: "personal", targetKind: "page", targetId: item.id, reason: "draft", revision: 2
+    });
+    const index = await request(app).get(`/api/v1/releases/${source.id}`).expect(200);
+    expect(index.body.pages).toHaveLength(56);
+    expect(index.body.pageIds).toEqual(source.pageIds);
+    for (const item of pages) await request(app).get(item.imageUrl).expect(200);
+    await request(app).get(`/api/v1/pages/${pages[27]!.id}/draft?view=snapshot&releaseId=${source.id}`).expect(409);
+
+    const deleted = pages[27]!;
+    await reading.replica.invalidateProjection({
+      id: readingProjectionInvalidationId("personal", "page", deleted.id),
+      workspaceId: "personal", targetKind: "page", targetId: deleted.id, reason: "permanent-delete"
+    });
+    const unavailable = await request(app).get(deleted.imageUrl).expect(404);
+    expect(unavailable.body.error.code).toBe("MEDIA_NOT_AVAILABLE");
+    const afterDelete = await request(app).get(`/api/v1/releases/${source.id}`).expect(200);
+    expect(afterDelete.body.pages).toHaveLength(55);
+    expect(afterDelete.body.pageIds).not.toContain(deleted.id);
+    await request(app).get(pages[29]!.imageUrl).expect(200);
+    reading.close();
+  });
+
   it("keeps the review map identical while reading only current confirmed published pages", async () => {
     const { app, authority, dependencies, reading, release, draft } = await harness();
     const courses = await reading.replica.listCourses("personal");

@@ -1493,12 +1493,16 @@ describe("Course OS API", () => {
 
   it("continues after a failed page and retries only that page", async () => {
     const keys: string[] = [];
-    let calls = 0;
+    let firstPageFailed = false;
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async (input) => {
         keys.push(input.idempotencyKey);
-        calls += 1;
-        if (calls === 1) throw new ModelRouterGenerationError("MODEL_ROUTER_FAILED:TEMPORARY", "gpt-5.6-sol", { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, apiEquivalentUsd: 0, durationMs: 10 });
+        // Parallel workers need not reach the model in page-number order.
+        // Inject the failure into its intended page, rather than the first call.
+        if (input.idempotencyKey.includes("test-release-v2-retry-candidate:page:1") && !firstPageFailed) {
+          firstPageFailed = true;
+          throw new ModelRouterGenerationError("MODEL_ROUTER_FAILED:TEMPORARY", "gpt-5.6-sol", { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, apiEquivalentUsd: 0, durationMs: 10 });
+        }
         return testTeachingResult(0.001);
       }
     };
@@ -1515,8 +1519,8 @@ describe("Course OS API", () => {
     const recovered = await waitForPlan(app, failedPlan.id);
     expect(recovered).toMatchObject({ state: "completed", failedPageIds: [], completedPageIds: ["test-release-v2-retry-candidate:page:1", "test-release-v2-retry-candidate:page:2"] });
     expect(keys).toHaveLength(3);
-    expect(keys[0]).toContain("test-release-v2-retry-candidate:page:1");
-    expect(keys[1]).toContain("test-release-v2-retry-candidate:page:2");
+    expect(keys.slice(0, 2).filter(key => key.includes("test-release-v2-retry-candidate:page:1"))).toHaveLength(1);
+    expect(keys.slice(0, 2).filter(key => key.includes("test-release-v2-retry-candidate:page:2"))).toHaveLength(1);
     expect(keys[2]).toContain("test-release-v2-retry-candidate:page:1");
   }, 60_000);
 
