@@ -1,0 +1,26 @@
+infra/postgres/operational-schema.postgres
+  s_e8850ef125fb32::t_7b6a06e98d1ef9 137,143-148
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_72261f447ffa2e 750
+  s_e8850ef125fb32::t_657ef879598c43 755-757,765-769
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_108188d2fda385 422-423,427-429,445-446
+  s_e8850ef125fb32::t_6c5a9bd7656fc9 379-421,424-426,430-444,447-452
+  s_e8850ef125fb32::t_e8d64f72f1d728 336-378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "284ef4a50c6fda92b7fd50ee5f591640111d9731",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
