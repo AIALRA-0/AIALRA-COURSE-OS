@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CourseRelease, SelfRetelling } from "@course-os/contracts";
 import { api } from "./api.js";
 import { selfRetellingCards } from "./self-retelling-model.js";
@@ -12,6 +12,11 @@ export function SelfRetellingReview({ releases, onClose }: { releases: CourseRel
   const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const cardHeadingRef = useRef<HTMLHeadingElement>(null);
+  const answerHeadingRef = useRef<HTMLHeadingElement>(null);
+  const emptyHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusAnswerAfterReveal = useRef(false);
+  const focusNextCard = useRef(false);
   useEffect(() => {
     let active = true;
     api.selfRetellings().then((items) => active && setRecords(items))
@@ -22,11 +27,26 @@ export function SelfRetellingReview({ releases, onClose }: { releases: CourseRel
   const cards = useMemo(() => selfRetellingCards(releases, records, Date.now(), !showAll).filter((card) => !reviewedThisRun.has(`${card.release.id}\u0000${card.page.id}`)), [releases, records, showAll, reviewedThisRun]);
   const current = cards[0];
 
+  useEffect(() => {
+    if (!revealed || !focusAnswerAfterReveal.current) return;
+    answerHeadingRef.current?.focus();
+    focusAnswerAfterReveal.current = false;
+  }, [revealed]);
+
+  useEffect(() => {
+    if (!focusNextCard.current) return;
+    const target = current ? cardHeadingRef.current : emptyHeadingRef.current;
+    if (!target) return;
+    target.focus();
+    focusNextCard.current = false;
+  }, [current, loading]);
+
   const rate = async (result: "again" | "remembered") => {
     if (!current || saving) return;
     setSaving(true); setError("");
     try {
       const saved = await api.reviewSelfRetelling(current.release.id, current.page.id, result);
+      focusNextCard.current = true;
       setRecords((items) => items.map((item) => item.releaseId === saved.releaseId && item.pageId === saved.pageId ? saved : item));
       if (showAll) setReviewedThisRun((items) => new Set(items).add(`${saved.releaseId}\u0000${saved.pageId}`));
       setRevealed(false);
@@ -34,16 +54,16 @@ export function SelfRetellingReview({ releases, onClose }: { releases: CourseRel
     finally { setSaving(false); }
   };
 
-  return <main className="self-retelling-review">
-    <header className="self-retelling-review-header"><div><span>FLASHCARDS</span><h1>自我重述卡片</h1><p>正面是课件页标题，翻面后查看你自己的重述。</p></div><button className="quiet-button" data-action="close-self-retelling-review" onClick={onClose}>返回复习中心</button></header>
-    <div className="self-retelling-review-toolbar"><span>{loading ? "正在读取卡片…" : `${cards.length} 张${showAll ? "卡片" : "待复习卡片"}`}</span><button className="quiet-button" data-action="toggle-all-self-retelling-cards" disabled={loading} onClick={() => { setShowAll((value) => !value); setReviewedThisRun(new Set()); setRevealed(false); }}>{showAll ? "只看待复习" : "查看全部卡片"}</button></div>
-    {error && <p className="self-retelling-message is-error" role="alert">{error}</p>}
-    {!loading && !current ? <section className="self-retelling-empty"><h2>{showAll ? records.length ? "本轮卡片已完成" : "还没有已提交的重述" : "当前没有到期卡片"}</h2><p>{showAll ? records.length ? "本轮复习已保存。你可以返回复习中心，或切换到待复习卡片。" : "先在教学页提交自我重述，系统就会用页面标题和你的回答建立卡片。" : "新提交的重述会立即进入复习队列；稍后再次复习会按你的选择安排时间。"}</p><button className="quiet-button" onClick={onClose}>返回复习中心</button></section> : current && <article className="self-retelling-card" aria-live="polite">
+  return <main className="self-retelling-review workbench-page" aria-busy={loading || saving}>
+    <header className="self-retelling-review-header workbench-page-header"><div><span>FLASHCARDS</span><h1>自我重述卡片</h1><p>正面是课件页标题，翻面后查看你自己的重述。</p></div><button className="quiet-button" data-action="close-self-retelling-review" onClick={onClose}>返回复习中心</button></header>
+    <div className="self-retelling-review-toolbar workbench-toolbar"><span role="status" aria-live="polite">{loading ? "正在读取卡片…" : `${cards.length} 张${showAll ? "卡片" : "待复习卡片"}`}</span><button className="quiet-button" data-action="toggle-all-self-retelling-cards" disabled={loading} onClick={() => { setShowAll((value) => !value); setReviewedThisRun(new Set()); setRevealed(false); }}>{showAll ? "只看待复习" : "查看全部卡片"}</button></div>
+    {error && <p className="self-retelling-message workbench-error is-error" role="alert">{error}</p>}
+    {!loading && !current ? <section className="self-retelling-empty workbench-panel"><h2 ref={emptyHeadingRef} tabIndex={-1}>{showAll ? records.length ? "本轮卡片已完成" : "还没有已提交的重述" : "当前没有到期卡片"}</h2><p>{showAll ? records.length ? "本轮复习已保存。你可以返回复习中心，或切换到待复习卡片。" : "先在教学页提交自我重述，系统就会用页面标题和你的回答建立卡片。" : "新提交的重述会立即进入复习队列；稍后再次复习会按你的选择安排时间。"}</p><button className="quiet-button" onClick={onClose}>返回复习中心</button></section> : current && <article className="self-retelling-card workbench-card" aria-live="polite">
       <div className="self-retelling-card-meta"><span>{current.release.courseTitle} · 第 {current.page.pageNumber} 页</span><span>{current.retelling.nextReviewAt && Date.parse(current.retelling.nextReviewAt) <= Date.now() ? "待复习" : "已安排复习"}</span></div>
-      <h2>{current.page.title}</h2>
-      {revealed ? <div className="self-retelling-card-answer"><h3>我的重述</h3><p>{current.retelling.answer}</p></div> : <button className="primary-button" data-action="reveal-self-retelling-answer" onClick={() => setRevealed(true)}>显示我的回答</button>}
+      <h2 ref={cardHeadingRef} tabIndex={-1}>{current.page.title}</h2>
+      {revealed ? <div className="self-retelling-card-answer"><h3 ref={answerHeadingRef} tabIndex={-1}>我的重述</h3><p>{current.retelling.answer}</p></div> : <button className="primary-button" data-action="reveal-self-retelling-answer" onClick={() => { focusAnswerAfterReveal.current = true; setRevealed(true); }}>显示我的回答</button>}
       <details className="self-retelling-source"><summary>预览原始课件页</summary><img src={current.page.imageUrl} alt={`第 ${current.page.pageNumber} 页原始课件`} loading="lazy" /></details>
-      {revealed && <div className="self-retelling-ratings"><button className="quiet-button" data-action="rate-self-retelling-again" disabled={saving} onClick={() => void rate("again")}>{saving ? "正在保存" : "再复习 · 10 分钟后"}</button><button className="primary-button" data-action="rate-self-retelling-remembered" disabled={saving} onClick={() => void rate("remembered")}>{saving ? "正在保存" : "已记住 · 明天复习"}</button></div>}
+      {revealed && <div className="self-retelling-ratings workbench-action-row"><button className="quiet-button" data-action="rate-self-retelling-again" disabled={saving} aria-busy={saving} onClick={() => void rate("again")}>{saving ? "正在保存" : "再复习 · 10 分钟后"}</button><button className="primary-button" data-action="rate-self-retelling-remembered" disabled={saving} aria-busy={saving} onClick={() => void rate("remembered")}>{saving ? "正在保存" : "已记住 · 明天复习"}</button></div>}
     </article>}
   </main>;
 }

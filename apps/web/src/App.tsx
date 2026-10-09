@@ -3,6 +3,10 @@ import type { CourseConflict, CourseRelease, CourseTreeNode, GenerationCostEntry
 import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSettings, type SearchProviderConfig, type SearchRoutePolicy, type TrashNativeErasePlan } from "./api.js";
 import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
+import { WorkbenchRail } from "./WorkbenchRail.js";
+import { useWorkspaceOverlays } from "./overlay-focus.js";
+import { PaneResizeHandle } from "./PaneResizeHandle.js";
+import { readViewPreference, saveViewPreference } from "./view-preferences.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
@@ -291,7 +295,7 @@ function readCandidateSnapshotOnce(inFlight: Map<string, SharedReadRequest<Lesso
 
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
-export const SIDEBAR_DEFAULT_WIDTH = 320;
+export const SIDEBAR_DEFAULT_WIDTH = 256;
 const OFFLINE_SYNC: ReadWeaveSyncStatus = { state: "offline", authority: "readweave", mode: "http", pendingWrites: 0, conflicts: 0, message: "ReadWeave 暂时不可访问" };
 
 function clampSidebarWidth(value: number): number {
@@ -346,6 +350,7 @@ function readSidebarWidth(): number {
 }
 
 export function App() {
+  useWorkspaceOverlays();
   const initialNavigation = useRef(readNavigationHash());
   const [releases, setReleases] = useState<CourseRelease[]>([]);
   const [tree, setTree] = useState<WorkspaceTree>();
@@ -377,7 +382,7 @@ export function App() {
   const [view, setView] = useState<ViewState>({ zoom: 1, panX: 0, panY: 0 });
   const [mobileMode, setMobileMode] = useState<MobileMode>("visual");
   const [pageDockOpen, setPageDockOpen] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">((localStorage.getItem("course-os-theme") as "light" | "dark") || "light");
+  const [theme, setTheme] = useState<"light" | "dark">((localStorage.getItem("course-os-theme") as "light" | "dark") || "dark");
   const [importOpen, setImportOpen] = useState(false);
   const [importParentNodeId, setImportParentNodeId] = useState<string>();
   const [activeImportId, setActiveImportId] = useState(readActiveImportId);
@@ -820,7 +825,7 @@ export function App() {
         setUtilityPanel("search");
         setGlobalSearchFocusRequest((current) => current + 1);
       }
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !event.defaultPrevented) {
         setUtilityPanel(null);
         setMobileTreeOpen(false);
         setHistoryNode(undefined);
@@ -959,25 +964,27 @@ export function App() {
 
   const adjustSidebarWidth = (delta: number) => setSidebarWidth((current) => clampSidebarWidth(current + delta));
   const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (window.innerWidth <= 900) return;
+    if (window.innerWidth <= 900 || event.button !== 0) return;
     event.preventDefault();
     sidebarResizeCleanup.current?.();
-    const startX = event.clientX;
-    const startWidth = sidebarWidth;
+    const startX = event.clientX, startWidth = sidebarWidth;
+    const oldSelect = document.body.style.userSelect, oldCursor = document.body.style.cursor;
     const move = (moveEvent: globalThis.PointerEvent) => setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
     const finish = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", finish);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", key, true);
+      document.body.style.userSelect = oldSelect; document.body.style.cursor = oldCursor;
       sidebarResizeCleanup.current = undefined;
     };
+    const cancel = () => { setSidebarWidth(startWidth); finish(); };
+    const key = (next: KeyboardEvent) => { if (next.key === "Escape") { next.preventDefault(); next.stopPropagation(); cancel(); } };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish, { once: true });
-    window.addEventListener("pointercancel", finish, { once: true });
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointercancel", cancel, { once: true });
+    window.addEventListener("keydown", key, true);
+    document.body.style.userSelect = "none"; document.body.style.cursor = "col-resize";
     sidebarResizeCleanup.current = finish;
   };
 
@@ -1061,9 +1068,10 @@ export function App() {
   if (error) return <main className="empty-state"><span className="empty-logo">CO</span><h1>Course OS 暂时无法启动</h1><p>{error}</p><button className="primary-button" data-action="release-retry" onClick={() => { setError(""); setExplicitReleaseReload((value) => value + 1); }}>重试</button></main>;
   if (loading) return <main className="empty-state"><div className="loader" /><h1>正在建立课程工作区</h1><p>正在读取 ReadWeave、课程树和固定发布版本</p></main>;
   if (!release || !page) return <div className="product-shell" style={shellStyle}>
-    <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
+    <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>课程学习工作台</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
-       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
+       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
+        <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} /><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
       <MobileTreeDrawer tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={(id) => { setMobileTreeOpen(false); trackImport(id); }} actions={treeActions} onClose={() => setMobileTreeOpen(false)} open={mobileTreeOpen} onSelectPage={() => setMobileTreeOpen(false)} onImport={() => { setMobileTreeOpen(false); setImportOpen(true); }} onCreateCourse={() => { setMobileTreeOpen(false); setCreateCourseOpen(true); }} onSettings={() => { setMobileTreeOpen(false); setUtilityPanel("settings"); }} />
       {importOpen && <ImportDialog courses={tree?.courses ?? []} releases={releases} parentNodeId={importParentNodeId} onClose={() => { setImportOpen(false); setImportParentNodeId(undefined); }} onSubmitted={(record) => { setImportOpen(false); setImportParentNodeId(undefined); rememberImport(record); trackImport(record.id); setToast("材料已加入后台任务，可从课程树打开进度"); }} />}
     {createCourseOpen && <CreateCourseDialog onClose={() => setCreateCourseOpen(false)} onCreated={() => refreshMetadata().catch(() => undefined)} />}
@@ -1077,7 +1085,7 @@ export function App() {
   return (
     <div className="product-shell" style={shellStyle}>
       <header className="product-topbar">
-        <div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>Course intelligence workspace</small></div></div>
+        <div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>课程学习工作台</small></div></div>
 
         <nav className="mode-switcher" aria-label="工作模式">
           <ModeButton actionId="mode-learn" active={mode === "learn"} icon="play" label="学习" onClick={() => setMode("learn")} />
@@ -1088,7 +1096,7 @@ export function App() {
          <div className="product-actions">
            <button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button>
            <button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已同步" : "同步状态异常"}</span>{conflicts.length > 0 && <b>{conflicts.length}</b>}</button>
-          <button className="command-button" data-action="open-global-search" onClick={() => setUtilityPanel("search")}><Icon name="command" /><span>全局搜索</span><kbd>⌘ K</kbd></button>
+          <button className="command-button" data-action="open-global-search" onClick={() => setUtilityPanel("search")}><Icon name="command" /><span>全局搜索</span><kbd>{typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd></button>
           <button className="icon-button" data-action="toggle-theme" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={theme === "light" ? "切换深色模式" : "切换浅色模式"}><Icon name={theme === "light" ? "moon" : "sun"} /></button>
           <button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button>
         </div>
@@ -1096,6 +1104,7 @@ export function App() {
 
       <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
       <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
+        <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} />
         <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
@@ -1123,7 +1132,7 @@ export function App() {
 }
 
 function ModeButton({ actionId, active, icon, label, onClick }: { actionId: string; active: boolean; icon: "edit" | "play" | "review"; label: string; onClick: () => void }) {
-  return <button className={active ? "active" : ""} data-action={actionId} onClick={onClick}><Icon name={icon} />{label}</button>;
+  return <button className={active ? "active" : ""} data-action={actionId} aria-pressed={active} onClick={onClick}><Icon name={icon} />{label}</button>;
 }
 
 function MobileTreeDrawer({ tree, searchMaterials, selectedPageId, selectedTaskId, backgroundTasks, onSelectTask, onClearFailed, clearFailedBusy, actions, open, onClose, onSelectPage, onImport, onCreateCourse, onSettings }: {
@@ -1181,6 +1190,20 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   const canShowContent = contentReady && !contentTerminalError;
   const lessonColumnRef = useRef<HTMLDivElement>(null);
   const lessonStripRef = useRef<HTMLElement>(null);
+  const [sourceHidden, setSourceHidden] = useState(false);
+  const [panesSwapped, setPanesSwapped] = useState(() => readViewPreference("course-os-panes-swapped") === "true");
+  const [sourceWidth, setSourceWidth] = useState(() => {
+    const saved = Number(readViewPreference("course-os-source-width"));
+    return Number.isFinite(saved) && saved >= 25 && saved <= 65 ? saved : 42;
+  });
+  const [layoutNotice, setLayoutNotice] = useState("");
+  useEffect(() => {
+    if (!saveViewPreference("course-os-source-width", String(sourceWidth)) || !saveViewPreference("course-os-panes-swapped", String(panesSwapped))) {
+      setLayoutNotice("布局偏好无法保存在此浏览器，本次调整仍可使用");
+    } else setLayoutNotice("");
+  }, [sourceWidth, panesSwapped]);
+  const toggleLessonPane = () => { if (!rightCollapsed && sourceHidden) setSourceHidden(false); onToggleRight(); };
+
 
   useEffect(() => {
     lessonColumnRef.current?.scrollTo({ top: 0, behavior: "auto" });
@@ -1197,22 +1220,28 @@ function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, i
   return <div className="learning-workspace">
     <header className="learning-header">
       <div><div className="breadcrumbs"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span></div><h1>{page.title}</h1></div>
-      <div className="learning-header-actions"><button className="quiet-button" data-action="learn-open-studio" onClick={onEnterStudio}><Icon name="edit" />制作本页</button><div className="learning-progress"><span>学习进度</span><strong>{pageIndex + 1} / {release.pages.length}</strong><div><i style={{ width: `${(pageIndex + 1) / release.pages.length * 100}%` }} /></div></div></div>
+      <div className="learning-header-actions"><div className="reading-layout-tools" role="group" aria-label="阅读面板布局">
+        <button className="icon-button" data-action="toggle-source-pane" aria-label={sourceHidden ? "展开原始课件" : "收起原始课件"} title={sourceHidden ? "展开原始课件" : "收起原始课件"} aria-pressed={!sourceHidden} onClick={() => { if (!sourceHidden && rightCollapsed) onToggleRight(); setSourceHidden(value => !value); }}><Icon name="eye" /></button>
+        <button className="icon-button" data-action="swap-reading-panes" aria-label="交换原图与讲解位置" title="交换原图与讲解位置" aria-pressed={panesSwapped} onClick={() => setPanesSwapped(value => !value)}><Icon name="swap" /></button>
+      </div><button className="quiet-button" data-action="learn-open-studio" onClick={onEnterStudio}><Icon name="edit" />制作本页</button><div className="learning-progress"><span>学习进度</span><strong>{pageIndex + 1} / {release.pages.length}</strong><div><i style={{ width: `${(pageIndex + 1) / release.pages.length * 100}%` }} /></div></div></div>
+      {layoutNotice && <span className="layout-preference-notice" role="status">{layoutNotice}</span>}
     </header>
 
     <nav className="mobile-tabs" aria-label="手机学习模式">
       <button className={mobileMode === "visual" ? "active" : ""} data-action="mobile-visual" onClick={() => setMobileMode("visual")}>原始课件</button>
-      <button className={mobileMode === "lesson" ? "active" : ""} data-action="mobile-lesson" onClick={() => setMobileMode("lesson")}>老师讲解</button>
-      <button className={mobileMode === "practice" ? "active" : ""} data-action="mobile-practice" onClick={() => setMobileMode("practice")}>提问与测验</button>
+      <button className={mobileMode === "lesson" ? "active" : ""} data-action="mobile-lesson" onClick={() => { if (rightCollapsed) onToggleRight(); setMobileMode("lesson"); }}>老师讲解</button>
+      <button className={mobileMode === "practice" ? "active" : ""} data-action="mobile-practice" onClick={() => { if (rightCollapsed) onToggleRight(); setMobileMode("practice"); }}>提问与测验</button>
     </nav>
 
-    <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""}`}>
+    <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${panesSwapped ? "panes-swapped" : ""}`} style={{ "--source-width": `${sourceWidth}%` } as CSSProperties}>
+      {sourceHidden && <aside className="source-collapsed-rail"><button className="icon-button" data-action="expand-source-pane" aria-label="展开原始课件" title="展开原始课件" onClick={() => setSourceHidden(false)}><Icon name="eye" /></button></aside>}
       <div className="visual-column">{contentTerminalError
         ? <div className="empty-inline" role="alert">{contentError || "当前页面已无权访问或已删除"}</div>
         : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
+      {!sourceHidden && !rightCollapsed && <PaneResizeHandle value={sourceWidth} onChange={setSourceWidth} reversed={panesSwapped} />}
       {rightCollapsed
-          ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={onToggleRight} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={onToggleRight} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}
+          ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={toggleLessonPane} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
+        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={toggleLessonPane} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
     <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
@@ -1270,6 +1299,8 @@ function UtilityDialog({ panel, focusRequest, releases, tree, sync, conflicts, t
     onClose();
   };
   const onSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Escape" && query) { event.preventDefault(); event.stopPropagation(); setQuery(""); setActiveSearchIndex(0); return; }
     const action = resolveSearchInputKeyAction(event.key, activeSearchIndex, results.length);
     if (action.kind === "none") return;
     event.preventDefault();
@@ -1290,8 +1321,8 @@ function UtilityDialog({ panel, focusRequest, releases, tree, sync, conflicts, t
   };
   return <div className="modal-backdrop utility-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="utility-dialog" role="dialog" aria-modal="true" aria-label={panelTitle(panel)}>
-      <header><div><span className="section-kicker">COURSE OS</span><h2>{panelTitle(panel)}</h2></div><button className="icon-button" data-action="close-utility-panel" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
-      {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input ref={searchInput} data-action="search-pages" autoFocus role="combobox" aria-autocomplete="list" aria-expanded={results.length > 0} aria-controls="global-search-results" aria-activedescendant={results[activeSearchIndex] ? `global-search-result-${activeSearchIndex}` : undefined} onKeyDown={onSearchKeyDown} value={query} onChange={(event) => { setQuery(event.target.value); setActiveSearchIndex(0); }} placeholder="搜索课程、材料、页面或页码" /></label><div ref={searchResults} id="global-search-results" className="search-results" role="listbox" aria-label="搜索结果">{results.map(({ release, page }, index) => <button key={`${release.id}:${page.id}`} id={`global-search-result-${index}`} role="option" aria-selected={index === activeSearchIndex} className={index === activeSearchIndex ? "active" : undefined} style={index === activeSearchIndex ? { background: "var(--soft)" } : undefined} data-action="search-open-page" onMouseEnter={() => setActiveSearchIndex(index)} onClick={() => selectSearchResult({ release, page })}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline" role="status">没有找到匹配页面</p>}</div></div>}
+      <header><div><span className="section-kicker">COURSE OS</span><h2>{panelTitle(panel)}</h2></div><button className="icon-button" data-action="close-utility-panel" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
+      {panel === "search" && <div className="utility-content"><label className="utility-search"><Icon name="search" /><input ref={searchInput} aria-label="搜索课程、材料、页面或页码" data-action="search-pages" autoFocus role="combobox" aria-autocomplete="list" aria-expanded={results.length > 0} aria-controls="global-search-results" aria-activedescendant={results[activeSearchIndex] ? `global-search-result-${activeSearchIndex}` : undefined} onKeyDown={onSearchKeyDown} value={query} onChange={(event) => { setQuery(event.target.value); setActiveSearchIndex(0); }} placeholder="搜索课程、材料、页面或页码" />{query && <button type="button" className="icon-button" aria-label="清除搜索" onClick={() => { setQuery(""); setActiveSearchIndex(0); searchInput.current?.focus(); }}><Icon name="close" /></button>}</label><div ref={searchResults} id="global-search-results" className="search-results" role="listbox" aria-label="搜索结果">{results.map(({ release, page }, index) => <button key={`${release.id}:${page.id}`} id={`global-search-result-${index}`} role="option" aria-selected={index === activeSearchIndex} className={index === activeSearchIndex ? "active" : undefined} style={index === activeSearchIndex ? { background: "var(--soft)" } : undefined} data-action="search-open-page" onMouseEnter={() => setActiveSearchIndex(index)} onClick={() => selectSearchResult({ release, page })}><span>{page.pageNumber}</span><div><strong>{page.title}</strong><small>{release.courseTitle} · {release.moduleTitle}</small></div><Icon name="arrowRight" /></button>)}{results.length === 0 && <p className="empty-inline" role="status">没有找到匹配页面</p>}</div></div>}
       {panel === "sync" && <div className="utility-content"><div className={`sync-card sync-${sync?.state || "offline"}`}><span className="live-dot"/><div><strong>{sync?.state === "connected" ? "ReadWeave 已连接" : "ReadWeave 尚未连接"}</strong><span>{sync?.message || "尚未取得同步说明"}</span></div></div><dl className="utility-definitions"><div><dt>权威来源</dt><dd>ReadWeave</dd></div><div><dt>最近内容确认</dt><dd>{sync?.lastReadAt ? new Date(sync.lastReadAt).toLocaleString() : "尚未确认"}</dd></div><div><dt>待写入</dt><dd>{sync?.pendingWrites ?? 0}</dd></div><div><dt>冲突</dt><dd>{conflicts.length}</dd></div></dl>{conflicts.length > 0 && <div className="conflict-summary">{conflicts.map((conflict) => <p key={conflict.id}><Icon name="warning" />{conflict.objectType} · {conflict.objectId}</p>)}</div>}{syncFeedback && <p className={`sync-feedback ${syncFeedback.kind}`} role={syncFeedback.kind === "error" ? "alert" : "status"} aria-live="polite"><Icon name={syncFeedback.kind === "error" ? "warning" : syncFeedback.kind === "success" ? "check" : "sparkles"} />{syncFeedback.text}</p>}<button className="primary-button" data-action="refresh-sync-status" aria-describedby="refresh-sync-status-reason" disabled={refreshing} onClick={() => void refreshSync()}>{refreshing ? "正在重新检查" : "重新检查同步状态"}</button><span id="refresh-sync-status-reason" className="sr-only">{refreshing ? "正在读取 ReadWeave 连接和待同步操作" : "重新读取 ReadWeave 连接、待写入和冲突状态"}</span></div>}
       {panel === "settings" && <SettingsPanel theme={theme} onTheme={onTheme} sync={sync} onOpenTrash={onOpenTrash} />}
       {panel === "trash" && <TrashPanel onRefresh={onRefresh} />}
@@ -1708,7 +1739,7 @@ function ImportDialog({ courses, releases, parentNodeId, onClose, onSubmitted }:
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
-      <header><div><span className="section-kicker">NEW MATERIAL</span><h2 id="import-title">导入课程材料</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+      <header><div><span className="section-kicker">NEW MATERIAL</span><h2 id="import-title">导入课程材料</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <>
         <label className={`drop-zone ${file ? "has-file" : ""}`}>
           <input type="file" accept=".pptx,.pdf,.md,.txt" disabled={busy} onChange={(event) => { setPdfInspection(undefined); setInspectionError(""); setPdfLayout({ mode: "auto" }); setFile(event.target.files?.[0]); }} />
@@ -1948,7 +1979,7 @@ function CreateCourseDialog({ onClose, onCreated }: { onClose: () => void; onCre
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="create-course-title">
-      <header><div><span className="section-kicker">NEW COURSE</span><h2 id="create-course-title">建立课程项目</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+      <header><div><span className="section-kicker">NEW COURSE</span><h2 id="create-course-title">建立课程项目</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <div className="dialog-form"><label><span>课程名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如 数字系统设计" /></label><label><span>课程说明</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="课程目标、适用对象或材料范围" rows={4} /></label></div>
       <p className="dialog-hint"><Icon name="book" />创建后会同时在 ReadWeave 建立课程知识树</p>
       {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
@@ -1966,7 +1997,7 @@ function TreeTextDialog({ action, onClose, onSubmit }: { action: TreeTextAction;
   };
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog compact-dialog tree-text-dialog" role="dialog" aria-modal="true" aria-labelledby="tree-text-title">
-      <header><div><span className="section-kicker">COURSE TREE</span><h2 id="tree-text-title">{heading}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+      <header><div><span className="section-kicker">COURSE TREE</span><h2 id="tree-text-title">{heading}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <div className="dialog-form"><label><span>{action.kind === "rename" ? "新名称" : "模块名称"}</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submit(); }} placeholder={action.kind === "rename" ? "输入新的名称" : "例如 第一章：基础概念"} /></label><p className="dialog-hint"><Icon name="edit" />发布版本保持不可变，修改只会写入新的树节点或草稿</p></div>
       <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!title.trim()} onClick={submit}>{action.kind === "rename" ? "保存名称" : "建立模块"}</button></footer>
     </section>
@@ -1980,7 +2011,7 @@ function MoveNodeDialog({ node, tree, onClose, onMove }: { node: CourseTreeNode;
   const targets = flattenTree(tree?.courses ?? []).filter(({ node: candidate }) => !descendants.has(candidate.id) && allowedKinds.includes(candidate.kind));
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog compact-dialog move-dialog" role="dialog" aria-modal="true" aria-labelledby="move-node-title">
-      <header><div><span className="section-kicker">MOVE ITEM</span><h2 id="move-node-title">移动“{node.title}”</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+      <header><div><span className="section-kicker">MOVE ITEM</span><h2 id="move-node-title">移动“{node.title}”</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <div className="dialog-form"><label><span>目标位置</span><select value={parentId} onChange={(event) => setParentId(event.target.value)}><option value="">课程根目录</option>{targets.map(({ node: target, depth }) => <option key={target.id} value={target.id}>{`${"　".repeat(depth)}${target.title}`}</option>)}</select></label><p className="dialog-hint"><Icon name="move" />移动只改变课程树位置，不会修改已发布内容</p></div>
       <footer><button className="quiet-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => onMove(parentId || null)}>确认移动</button></footer>
     </section>
@@ -2213,7 +2244,7 @@ function HistoryDialog({ node, releases, onClose, onSelectPage }: { node: Course
     .sort((left, right) => right.version - left.version);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="import-dialog history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
-      <header><div><span className="section-kicker">VERSION HISTORY</span><h2 id="history-title">{node.title} 的版本历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+      <header><div><span className="section-kicker">VERSION HISTORY</span><h2 id="history-title">{node.title} 的版本历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close" /></button></header>
       <div className="history-list">
         {versions.length === 0 && <p className="empty-inline">这个节点暂时没有可查看的历史版本</p>}
         {versions.map((release) => <article key={release.id}><div><strong>v{release.version} · {release.moduleTitle}</strong><span>{release.pages.length} 页 · {release.lifecycle === "published" ? "正式版本" : "草稿来源"}</span></div><button className="quiet-button button-icon-trailing" onClick={() => { const first = release.pages[0]; if (first) { onSelectPage(release.id, first.id); onClose(); } }}>打开第一页<Icon name="arrowRight" /></button></article>)}

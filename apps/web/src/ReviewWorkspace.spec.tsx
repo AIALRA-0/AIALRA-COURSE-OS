@@ -12,6 +12,8 @@ describe("ReviewWorkspace without a review map", () => {
 
     expect(markup).toContain("自我重述卡片");
     expect(markup).toContain("返回复习中心");
+    expect(markup).toContain('class="self-retelling-review workbench-page" aria-busy="true"');
+    expect(markup).toContain('role="status" aria-live="polite"');
     expect(markup).not.toContain("掌握地图暂时不可用");
   });
 });

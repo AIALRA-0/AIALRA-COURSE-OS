@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { CostRollup, CourseRelease, ExplanationBlock, GenerationCostEntry, GenerationHarnessCurrent, GenerationJob, LessonDraft, PageLesson, QualityValidationResult, QuestionBankItem, ReadWeaveSyncStatus, WritingPolicyCurrent } from "@course-os/contracts";
 import { api } from "./api.js";
 import { Icon } from "./Icon.js";
@@ -18,6 +18,9 @@ const BLOCK_LABELS: Record<ExplanationBlock["kind"], string> = {
   source_status: "来源状态"
 };
 
+const INSPECTOR_TABS = ["quality", "source", "model", "cost"] as const;
+type InspectorTab = typeof INSPECTOR_TABS[number];
+
 export function StudioWorkspace({ release, page, sync, imageResources, rightCollapsed, onToggleRight, onPublished, onChanged }: {
   release: CourseRelease;
   page: PageLesson;
@@ -34,6 +37,7 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
   const [validation, setValidation] = useState<QualityValidationResult>();
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [inspector, setInspector] = useState<"quality" | "source" | "model" | "cost">("quality");
+  const inspectorTabsRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState<"load" | "save" | "validate" | "publish" | "generate" | "refill" | "">("load");
   const [generationJob, setGenerationJob] = useState<GenerationJob>();
   const [notice, setNotice] = useState("");
@@ -163,23 +167,37 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
     total: workingPage.coverageRequirements.length
   }), [workingPage]);
 
+  const onInspectorTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const currentIndex = INSPECTOR_TABS.indexOf(inspector);
+    const nextIndex = event.key === "ArrowRight" ? (currentIndex + 1) % INSPECTOR_TABS.length
+      : event.key === "ArrowLeft" ? (currentIndex - 1 + INSPECTOR_TABS.length) % INSPECTOR_TABS.length
+        : event.key === "Home" ? 0
+          : event.key === "End" ? INSPECTOR_TABS.length - 1
+            : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextTab = INSPECTOR_TABS[nextIndex]!;
+    setInspector(nextTab);
+    inspectorTabsRef.current?.querySelector<HTMLButtonElement>(`[data-inspector-tab="${nextTab}"]`)?.focus();
+  };
+
   return (
     <div className="studio-workspace">
       <header className="workspace-header">
         <div className="workspace-title">
-          <div className="breadcrumbs"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span><Icon name="chevronRight" /><strong>第 {page.pageNumber} 页</strong></div>
+          <nav className="breadcrumbs" aria-label="当前位置"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span><Icon name="chevronRight" /><strong aria-current="page">第 {page.pageNumber} 页</strong></nav>
           <div className="title-line"><h1>{workingPage.title}</h1><span className={`draft-pill ${dirty ? "dirty" : ""}`}>{dirty ? "有未保存修改" : draft?.revision ? `草稿修订 ${draft.revision}` : "基于正式版本"}</span></div>
         </div>
-        <div className="workspace-actions">
-          <button className="quiet-button" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "只重新生成当前页面"} onClick={generate}><Icon name="sparkles" />{busy === "generate" ? "建立任务中" : "生成本页"}</button>
-          <button className="quiet-button" onClick={() => setEditorMode(editorMode === "edit" ? "preview" : "edit")}><Icon name={editorMode === "edit" ? "eye" : "edit"} />{editorMode === "edit" ? "预览" : "编辑"}</button>
-          <button className="quiet-button" disabled={!dirty || Boolean(busy)} title={!dirty ? "当前没有需要保存的修改" : busy ? "请等待当前操作结束" : "保存到 ReadWeave 草稿"} onClick={save}><Icon name="cloud" />{busy === "save" ? "同步中" : "保存草稿"}</button>
-          <button className="quiet-button" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "运行确定性发布检查"} onClick={validate}><Icon name="check" />质量检查</button>
-          <button className="primary-button" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "通过质量门后发布不可变版本"} onClick={publish}><Icon name="publish" />{busy === "publish" ? "发布中" : "发布版本"}</button>
+        <div className="workspace-actions" role="group" aria-label="页面制作操作" data-action-slot="studio-header-actions">
+          <button type="button" className="quiet-button" data-action="studio-generate-page" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "只重新生成当前页面"} onClick={generate}><Icon name="sparkles" />{busy === "generate" ? "建立任务中" : "生成本页"}</button>
+          <button type="button" className="quiet-button" data-action="studio-toggle-preview" aria-pressed={editorMode === "preview"} onClick={() => setEditorMode(editorMode === "edit" ? "preview" : "edit")}><Icon name={editorMode === "edit" ? "eye" : "edit"} />{editorMode === "edit" ? "预览" : "编辑"}</button>
+          <button type="button" className="quiet-button" data-action="studio-save-draft" disabled={!dirty || Boolean(busy)} title={!dirty ? "当前没有需要保存的修改" : busy ? "请等待当前操作结束" : "保存到 ReadWeave 草稿"} onClick={save}><Icon name="cloud" />{busy === "save" ? "同步中" : "保存草稿"}</button>
+          <button type="button" className="quiet-button" data-action="studio-validate" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "运行确定性发布检查"} onClick={validate}><Icon name="check" />质量检查</button>
+          <button type="button" className="primary-button" data-action="studio-publish" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "通过质量门后发布不可变版本"} onClick={publish}><Icon name="publish" />{busy === "publish" ? "发布中" : "发布版本"}</button>
         </div>
       </header>
 
-      {notice && <div className={`studio-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}><Icon name={notice.includes("失败") || notice.includes("阻止") ? "warning" : "check"} /><span>{notice}</span></div>}
+      {notice && <div className={`studio-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`} role={notice.includes("失败") || notice.includes("阻止") ? "alert" : "status"}><Icon name={notice.includes("失败") || notice.includes("阻止") ? "warning" : "check"} /><span>{notice}</span></div>}
 
       <div className={`studio-columns ${rightCollapsed ? "right-is-collapsed" : ""}`}>
         <main className="studio-canvas">
@@ -189,7 +207,7 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
           </section>
 
           <section className="lesson-editor">
-            <div className="section-heading"><div><span className="section-kicker">TEACHING DRAFT</span><h2>教授级讲解</h2></div><div className="segmented"><button className={editorMode === "edit" ? "active" : ""} onClick={() => setEditorMode("edit")}>编辑</button><button className={editorMode === "preview" ? "active" : ""} onClick={() => setEditorMode("preview")}>学习预览</button></div></div>
+            <div className="section-heading"><div><span className="section-kicker">TEACHING DRAFT</span><h2>教授级讲解</h2></div><div className="segmented" role="group" aria-label="讲解显示模式" data-action-slot="studio-editor-mode"><button type="button" className={editorMode === "edit" ? "active" : ""} aria-pressed={editorMode === "edit"} onClick={() => setEditorMode("edit")}>编辑</button><button type="button" className={editorMode === "preview" ? "active" : ""} aria-pressed={editorMode === "preview"} onClick={() => setEditorMode("preview")}>学习预览</button></div></div>
             <div className="editor-block-list">
               {visibleBlocks.map((block, index) => (
                 <article key={block.id} className={`editor-block ${changedBlocks.has(block.id) ? "changed" : ""}`}>
@@ -206,19 +224,21 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
         </main>
 
         {rightCollapsed
-          ? <aside className="studio-right-rail"><button onClick={onToggleRight} aria-label="展开检查栏" title="展开检查栏"><Icon name="chevronLeft" /><span>展开检查</span></button></aside>
-          : <aside className="studio-inspector">
-          <div className="column-collapse-row"><span>制作检查</span><button onClick={onToggleRight} aria-label="收起检查栏" title="收起检查栏"><Icon name="chevronRight" /></button></div>
-          <div className="inspector-tabs">
-            <button className={inspector === "quality" ? "active" : ""} onClick={() => setInspector("quality")}>质量</button>
-            <button className={inspector === "source" ? "active" : ""} onClick={() => setInspector("source")}>来源</button>
-            <button className={inspector === "model" ? "active" : ""} onClick={() => setInspector("model")}>模型</button>
-            <button className={inspector === "cost" ? "active" : ""} onClick={() => setInspector("cost")}>成本</button>
+          ? <aside className="studio-right-rail" aria-label="制作检查"><button type="button" onClick={onToggleRight} aria-expanded={false} aria-label="展开检查栏" title="展开检查栏"><Icon name="chevronLeft" /><span>展开检查</span></button></aside>
+          : <aside className="studio-inspector" aria-labelledby="studio-inspector-heading">
+          <div className="column-collapse-row"><h2 className="inspector-title" id="studio-inspector-heading">制作检查</h2><button type="button" onClick={onToggleRight} aria-expanded={true} aria-label="收起检查栏" title="收起检查栏"><Icon name="chevronRight" /></button></div>
+          <div ref={inspectorTabsRef} className="inspector-tabs" role="tablist" aria-label="制作检查内容">
+            <button type="button" id="studio-inspector-tab-quality" data-inspector-tab="quality" role="tab" aria-selected={inspector === "quality"} tabIndex={inspector === "quality" ? 0 : -1} aria-controls="studio-inspector-panel" className={inspector === "quality" ? "active" : ""} onClick={() => setInspector("quality")} onKeyDown={onInspectorTabKeyDown}>质量</button>
+            <button type="button" id="studio-inspector-tab-source" data-inspector-tab="source" role="tab" aria-selected={inspector === "source"} tabIndex={inspector === "source" ? 0 : -1} aria-controls="studio-inspector-panel" className={inspector === "source" ? "active" : ""} onClick={() => setInspector("source")} onKeyDown={onInspectorTabKeyDown}>来源</button>
+            <button type="button" id="studio-inspector-tab-model" data-inspector-tab="model" role="tab" aria-selected={inspector === "model"} tabIndex={inspector === "model" ? 0 : -1} aria-controls="studio-inspector-panel" className={inspector === "model" ? "active" : ""} onClick={() => setInspector("model")} onKeyDown={onInspectorTabKeyDown}>模型</button>
+            <button type="button" id="studio-inspector-tab-cost" data-inspector-tab="cost" role="tab" aria-selected={inspector === "cost"} tabIndex={inspector === "cost" ? 0 : -1} aria-controls="studio-inspector-panel" className={inspector === "cost" ? "active" : ""} onClick={() => setInspector("cost")} onKeyDown={onInspectorTabKeyDown}>成本</button>
           </div>
-          {inspector === "quality" && <QualityInspector page={workingPage} validation={validation} coverage={coverage} />}
-          {inspector === "source" && <SourceInspector page={workingPage} draft={draft} sync={sync} />}
-          {inspector === "model" && <ModelInspector release={release} page={workingPage} job={generationJob} />}
-          {inspector === "cost" && <CostInspector release={release} page={workingPage} job={generationJob} />}
+          <div id="studio-inspector-panel" className="studio-inspector-panel" role="tabpanel" tabIndex={0} aria-labelledby={`studio-inspector-tab-${inspector}`}>
+            {inspector === "quality" && <QualityInspector page={workingPage} validation={validation} coverage={coverage} />}
+            {inspector === "source" && <SourceInspector page={workingPage} draft={draft} sync={sync} />}
+            {inspector === "model" && <ModelInspector release={release} page={workingPage} job={generationJob} />}
+            {inspector === "cost" && <CostInspector release={release} page={workingPage} job={generationJob} />}
+          </div>
         </aside>}
       </div>
     </div>

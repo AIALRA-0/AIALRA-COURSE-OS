@@ -45,7 +45,19 @@ export interface CourseTreeSearchResult {
   detail: string;
 }
 
-type TreeMenuState = { node: CourseTreeNode; x: number; y: number };
+type TreeMenuState = { node: CourseTreeNode; x: number; y: number; restoreFocusTo?: HTMLElement };
+
+export type TreeMenuKeyAction = { kind: "focus"; index: number } | { kind: "close"; restoreFocus: boolean } | { kind: "none" };
+
+export function resolveTreeMenuKeyAction(key: string, activeIndex: number, itemCount: number): TreeMenuKeyAction {
+  if (key === "Escape") return { kind: "close", restoreFocus: true };
+  if (itemCount <= 0) return { kind: "none" };
+  if (key === "Home") return { kind: "focus", index: 0 };
+  if (key === "End") return { kind: "focus", index: itemCount - 1 };
+  if (key === "ArrowDown") return { kind: "focus", index: (activeIndex + 1 + itemCount) % itemCount };
+  if (key === "ArrowUp") return { kind: "focus", index: (activeIndex - 1 + itemCount) % itemCount };
+  return { kind: "none" };
+}
 
 const treeStatusPresentation = {
   published: { icon: "check", label: "已发布", visibleLabel: "已发布" },
@@ -130,10 +142,14 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   }, [selectedPageId, searchableNodes, rootNodes, searchMaterials, query]);
 
   useEffect(() => {
-    const close = () => setMenu(undefined);
-    window.addEventListener("click", close);
-    window.addEventListener("blur", close);
-    return () => { window.removeEventListener("click", close); window.removeEventListener("blur", close); };
+    const close = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest(".tree-context-menu")) return;
+      setMenu(undefined);
+    };
+    document.addEventListener("pointerdown", close);
+    const closeOnBlur = () => setMenu(undefined);
+    window.addEventListener("blur", closeOnBlur);
+    return () => { document.removeEventListener("pointerdown", close); window.removeEventListener("blur", closeOnBlur); };
   }, []);
 
   const toggle = (id: string) => setExpanded((current) => {
@@ -146,6 +162,11 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     setQuery("");
     setSearchOpen(false);
     setActiveSearchIndex(0);
+  };
+
+  const clearSearchAndFocus = () => {
+    closeSearch();
+    searchInput.current?.focus();
   };
 
   const activateSearchNode = (node: CourseTreeNode) => {
@@ -172,21 +193,36 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   const activateSearchResult = (result: CourseTreeSearchResult) => activateSearchNode(result.node);
 
   const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (searchResults.length === 0) return;
+    const isComposing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+    const action = resolveSearchInputKeyAction(event.key, activeSearchIndex, searchResults.length, {
+      isComposing,
+      hasQuery: query.length > 0,
+      searchOpen
+    });
+    if (action.kind === "none") {
+      if (isComposing && ["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)) event.stopPropagation();
+      return;
+    }
+    if (action.kind === "move") {
       event.preventDefault();
       setSearchOpen(true);
-      setActiveSearchIndex((index) => moveSearchIndex(index, event.key === "ArrowDown" ? 1 : -1, searchResults.length));
+      setActiveSearchIndex(action.index);
       return;
     }
-    if (event.key === "Enter" && searchOpen && searchResults.length > 0) {
+    if (action.kind === "activate") {
       event.preventDefault();
-      activateSearchResult(searchResults[activeSearchIndex] ?? searchResults[0]!);
+      activateSearchResult(searchResults[action.index]!);
       return;
     }
-    if (event.key === "Escape") {
+    if (action.kind === "close") {
       event.preventDefault();
-      closeSearch();
+      event.stopPropagation();
+      if (query.length > 0) clearSearchAndFocus();
+      else {
+        setSearchOpen(false);
+        setActiveSearchIndex(0);
+        searchInput.current?.focus();
+      }
     }
   };
 
@@ -196,8 +232,17 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 270;
     const height = 380;
+    const restoreFocusTo = event.currentTarget instanceof HTMLButtonElement
+      ? event.currentTarget
+      : event.currentTarget.querySelector<HTMLButtonElement>(".tree-main-button") ?? undefined;
     setFocusedNodeId(node.id);
-    setMenu({ node, x: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), y: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)) });
+    setMenu({ node, x: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), y: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)), restoreFocusTo });
+  };
+
+  const closeMenu = (restoreFocus = false) => {
+    const target = menu?.restoreFocusTo;
+    setMenu(undefined);
+    if (restoreFocus && target) window.requestAnimationFrame(() => target.focus());
   };
 
   const allNodes = useMemo(() => [...rootNodes, ...(tree?.trash ? [tree.trash] : [])], [rootNodes, tree]);
@@ -247,17 +292,17 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     <button className="sidebar-rail-button sidebar-rail-bottom" data-action="tree-open-settings" onClick={onSettings} aria-label="工作区设置" title="工作区设置"><Icon name="settings" /></button>
   </aside>;
 
-  return <aside className="course-sidebar" aria-label="课程项目树">
+  return <aside className="course-sidebar" aria-labelledby="course-tree-title">
     <div className="sidebar-heading">
-      <div><span className="sidebar-kicker">课程空间</span><strong>{tree?.title || "Course OS"}</strong></div>
-      <div className="sidebar-heading-actions">
+      <div><span className="sidebar-kicker">课程空间</span><h2 className="sidebar-title" id="course-tree-title">{tree?.title || "Course OS"}</h2></div>
+      <div className="sidebar-heading-actions" data-action-slot="tree-heading-actions">
         <button className="icon-button" data-action="tree-create-course" aria-label="新建课程" onClick={onCreateCourse} title="新建课程"><Icon name="plus" /></button>
         <button className="icon-button" data-action="tree-collapse" aria-label="收起课程项目树" onClick={onCollapse} title="收起课程项目树"><Icon name="chevronLeft" /></button>
       </div>
     </div>
 
-    <div ref={searchContainer} style={{ position: "relative", zIndex: 30 }}>
-      <label className="tree-search">
+    <div ref={searchContainer} className="tree-search-slot" data-action-slot="tree-search" style={{ position: "relative", zIndex: 30 }}>
+      <div className="tree-search">
         <Icon name="search" />
         <input
           ref={searchInput}
@@ -265,15 +310,17 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
           onChange={(event) => { setQuery(event.target.value); setActiveSearchIndex(0); setSearchOpen(true); }}
           onFocus={() => { if (query) setSearchOpen(true); }}
           onKeyDown={onSearchKeyDown}
+          aria-label="搜索课程、材料或页面"
           placeholder="搜索课程、材料或页面"
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={searchOpen && Boolean(query.trim())}
-          aria-controls="course-tree-search-results"
+          aria-controls={searchOpen && Boolean(query.trim()) ? "course-tree-search-results" : undefined}
           aria-activedescendant={searchOpen && searchResults[activeSearchIndex] ? `course-tree-search-result-${activeSearchIndex}` : undefined}
         />
+        {query.length > 0 && <button type="button" className="tree-search-clear" data-action="tree-search-clear" data-action-slot="tree-search-clear" aria-label="清除搜索内容" title="清除搜索内容" onClick={clearSearchAndFocus}><Icon name="close" /></button>}
         <kbd>⌘ K</kbd>
-      </label>
+      </div>
       {searchOpen && query.trim() && <div id="course-tree-search-results" role="listbox" aria-label="课程树搜索结果" style={{ position: "absolute", top: "calc(100% - 8px)", left: 12, right: 12, maxHeight: 280, overflowY: "auto", padding: 4, border: "1px solid var(--line)", borderRadius: 8, background: "var(--panel)", boxShadow: "0 10px 28px rgb(0 0 0 / 18%)" }}>
         {searchResults.length === 0 ? <div role="status" style={{ padding: "10px 12px", color: "var(--muted)", fontSize: 12 }}>没有匹配的课程、材料或页面</div> : searchResults.map((result, index) => <button
           key={result.id}
@@ -286,20 +333,20 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
           onMouseEnter={() => setActiveSearchIndex(index)}
           onClick={() => activateSearchResult(result)}
           style={{ display: "grid", width: "100%", gridTemplateColumns: "minmax(0, 1fr)", gap: 2, padding: "8px 10px", border: 0, borderRadius: 6, background: index === activeSearchIndex ? "var(--soft)" : "transparent", color: "var(--ink)", textAlign: "left", cursor: "pointer" }}
-        ><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{result.label}</strong><small style={{ color: "var(--muted)", fontSize: 10 }}>{result.detail}</small></button>)}
+        ><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "var(--font-tree)" }}>{result.label}</strong><small style={{ color: "var(--muted)", fontSize: "var(--font-small)" }}>{result.detail}</small></button>)}
       </div>}
     </div>
 
     <div className="tree-toolbar">
-      <span>正式课程</span>
+      <h3 className="tree-toolbar-heading">正式课程</h3>
       <button data-action="tree-import-material" onClick={onImport}><Icon name="upload" />导入材料</button>
     </div>
 
     <div className="tree-scroll">
       <nav aria-label="正式课程">
       {visibleNodes.length === 0 && <div className="tree-empty"><Icon name="search" /><span>{!tree ? "正在载入课程目录" : query ? "没有匹配的课程、材料或页面" : "还没有课程或材料"}</span></div>}
-      {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={Boolean(query.trim())} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query.trim())} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
-      {!query.trim() && tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={false} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={false} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
+      {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={Boolean(query.trim())} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} openMenuNodeId={menu?.node.id} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query.trim())} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
+      {!query.trim() && tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={false} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} openMenuNodeId={menu?.node.id} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={false} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
       </nav>
       <TaskRows tasks={backgroundTasks} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} onClearFailed={onClearFailed} clearFailedBusy={clearFailedBusy} />
     </div>
@@ -328,7 +375,7 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
       }}
     />}
     <div className="sr-only" aria-live="polite" id="tree-drag-status">{dragAnnouncement}</div>
-    {menu && actions && <TreeContextMenu menu={menu} actions={actions} onClose={() => setMenu(undefined)} />}
+    {menu && actions && <TreeContextMenu menu={menu} actions={actions} onClose={closeMenu} />}
   </aside>;
 }
 
@@ -345,7 +392,8 @@ function TaskRows({ tasks, query, selectedTaskId, onSelectTask, onClearFailed, c
   const history = needle ? [] : tasks.filter((task) => task.state === "completed" || task.state === "cancelled" || task.state === "failed").filter(matchesQuery);
   const failedIds = failedCourseTreeTaskIds(tasks);
   if (current.length + needsAttention.length + history.length === 0) return null;
-  return <section className="tree-task-section" aria-label="后台任务">
+  return <section className="tree-task-section" aria-labelledby="tree-task-section-heading">
+    <h3 className="sr-only" id="tree-task-section-heading">后台任务</h3>
     {current.length > 0 && <TaskGroup title="当前任务" tasks={current} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />}
     {(needsAttention.length > 0 || (failedIds.length > 0 && onClearFailed)) && <div className="tree-task-disclosure-row">
       {needsAttention.length > 0
@@ -376,7 +424,7 @@ function TaskGroup({ title, tasks, selectedTaskId, onSelectTask }: {
   title: string; tasks: CourseTreeTask[]; selectedTaskId?: string; onSelectTask?: (taskId: string) => void;
 }) {
   return <div className="tree-task-group" role="group" aria-label={title}>
-    <div className="tree-task-heading"><span>{title}</span><span className="tree-task-count">{tasks.length}</span></div>
+    <div className="tree-task-heading"><span role="heading" aria-level={4}>{title}</span><span className="tree-task-count">{tasks.length}</span></div>
     <TaskList tasks={tasks} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
   </div>;
 }
@@ -454,7 +502,7 @@ export function failedCourseTreeTaskIds(tasks: readonly CourseTreeTask[]): strin
   return [...new Set(tasks.filter((task) => task.state === "failed").map((task) => task.id))];
 }
 
-function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSearch, depth, expanded, selectedPageId, focusedNodeId, onFocus, onToggle, onSelectPage, onOpenMenu, forceOpen, actions, draggingNodeId, pointerDraggingNodeId, dropTargetId, onDragStart, onPointerDragStart, onDragOver, onDrop, onDragEnd }: {
+function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSearch, depth, expanded, selectedPageId, focusedNodeId, openMenuNodeId, onFocus, onToggle, onSelectPage, onOpenMenu, forceOpen, actions, draggingNodeId, pointerDraggingNodeId, dropTargetId, onDragStart, onPointerDragStart, onDragOver, onDrop, onDragEnd }: {
   node: CourseTreeNode;
   allNodes: CourseTreeNode[];
   searchMaterials: CourseTreeSearchMaterial[];
@@ -464,6 +512,7 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
   expanded: Set<string>;
   selectedPageId?: string;
   focusedNodeId?: string;
+  openMenuNodeId?: string;
   onFocus: (id: string) => void;
   onToggle: (id: string) => void;
   onSelectPage: (releaseId: string, pageId: string) => void;
@@ -513,17 +562,26 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
         {publication && <span className={`status-dot status-${publication.status}`} role="img" aria-label={`材料版本：${publication.label}`} title={publication.label}><Icon name={treeStatusPresentation[publication.status].icon} /><span>{publication.label}</span></span>}
         {runtime && <span className={`status-dot status-${runtime}`} role="img" aria-label={`材料状态：${treeStatusPresentation[runtime].label}`} title={treeStatusPresentation[runtime].label}><Icon name={treeStatusPresentation[runtime].icon} /><span>{treeStatusPresentation[runtime].visibleLabel}</span></span>}
       </button>
-      {actions && <button className="tree-row-actions" data-action="tree-open-actions" onClick={(event) => onOpenMenu(node, event)} onFocus={() => onFocus(node.id)} aria-label={`打开 ${node.title} 的操作菜单`} aria-haspopup="menu" title="更多操作"><span aria-hidden="true">…</span></button>}
+      {actions && <button className="tree-row-actions" data-action="tree-open-actions" data-action-slot="tree-row-actions" onClick={(event) => onOpenMenu(node, event)} onFocus={() => onFocus(node.id)} aria-label={`打开 ${node.title} 的操作菜单`} aria-haspopup="menu" aria-expanded={openMenuNodeId === node.id} aria-controls={openMenuNodeId === node.id ? "course-tree-context-menu" : undefined} title="更多操作"><span aria-hidden="true">…</span></button>}
     </div>
-    {hasChildren && open && <div>{node.children.map((child) => <TreeNode key={child.id} node={child} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={searchActive} onActivateSearch={onActivateSearch} depth={depth + 1} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} onFocus={onFocus} onToggle={onToggle} onSelectPage={onSelectPage} onOpenMenu={onOpenMenu} forceOpen={forceOpen} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={onDragStart} onPointerDragStart={onPointerDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} />)}</div>}
+    {hasChildren && open && <div>{node.children.map((child) => <TreeNode key={child.id} node={child} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={searchActive} onActivateSearch={onActivateSearch} depth={depth + 1} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} openMenuNodeId={openMenuNodeId} onFocus={onFocus} onToggle={onToggle} onSelectPage={onSelectPage} onOpenMenu={onOpenMenu} forceOpen={forceOpen} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={onDragStart} onPointerDragStart={onPointerDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} />)}</div>}
   </div>;
 }
 
-function TreeContextMenu({ menu, actions, onClose }: { menu: TreeMenuState; actions: CourseTreeActions; onClose: () => void }) {
-  const firstItem = useRef<HTMLButtonElement>(null);
+function TreeContextMenu({ menu, actions, onClose }: { menu: TreeMenuState; actions: CourseTreeActions; onClose: (restoreFocus?: boolean) => void }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [focusedItemIndex, setFocusedItemIndex] = useState(0);
   const node = menu.node;
   const can = (capability: TreeNodeCapability) => Boolean(node.capabilities?.includes(capability));
-  useEffect(() => { firstItem.current?.focus(); }, []);
+  useEffect(() => {
+    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+    const firstEnabled = items[0];
+    if (firstEnabled) {
+      const index = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])].indexOf(firstEnabled);
+      setFocusedItemIndex(index);
+      firstEnabled.focus();
+    }
+  }, []);
   const run = (action: () => void) => { onClose(); action(); };
   const menuItems: Array<{ label: string; icon: "plus" | "upload" | "edit" | "archive" | "settings" | "history" | "copy" | "move" | "trash" | "play"; action: () => void; danger?: boolean; disabled?: boolean; title?: string }> = [];
   if (can("create_module") && actions.createModule) menuItems.push({ icon: "plus", label: "新建模块", action: () => actions.createModule!(node) });
@@ -545,15 +603,31 @@ function TreeContextMenu({ menu, actions, onClose }: { menu: TreeMenuState; acti
   if (can("move")) menuItems.push({ icon: "move", label: "移动到其他位置", action: () => actions.move(node) });
   if (can("trash")) menuItems.push({ icon: "trash", label: "移入回收站", action: () => actions.trash(node), danger: true });
   if (menuItems.length === 0) return null;
-  return <div className="tree-context-menu" style={{ left: menu.x, top: menu.y }} role="menu" aria-label={`${node.title} 的操作`} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => {
-    if (event.key === "Escape") { event.preventDefault(); onClose(); }
+  return <div ref={menuRef} id="course-tree-context-menu" className="tree-context-menu" data-action-slot="tree-context-menu" style={{ left: menu.x, top: menu.y }} role="menu" aria-label={`${node.title} 的操作`} onClick={(event) => event.stopPropagation()} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onClose();
+  }} onKeyDown={(event) => {
+    const allItems = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+    const enabledItems = allItems.filter((item) => !item.disabled);
+    const activeIndex = enabledItems.indexOf(document.activeElement as HTMLButtonElement);
+    const action = resolveTreeMenuKeyAction(event.key, activeIndex < 0 ? 0 : activeIndex, enabledItems.length);
+    if (action.kind === "focus") {
+      event.preventDefault();
+      const next = enabledItems[action.index];
+      if (next) {
+        setFocusedItemIndex(allItems.indexOf(next));
+        next.focus();
+      }
+    } else if (action.kind === "close") {
+      event.preventDefault();
+      onClose(action.restoreFocus);
+    }
   }}>
-    {menuItems.map((item, index) => <MenuItem key={`${item.label}:${index}`} actionId={`tree-menu-${index + 1}`} buttonRef={index === 0 ? firstItem : undefined} icon={item.icon} label={item.label} danger={item.danger} disabled={item.disabled} title={item.title} onClick={() => run(item.action)} />)}
+    {menuItems.map((item, index) => <MenuItem key={`${item.label}:${index}`} actionId={`tree-menu-${index + 1}`} tabIndex={index === focusedItemIndex ? 0 : -1} icon={item.icon} label={item.label} danger={item.danger} disabled={item.disabled} title={item.title} onClick={() => run(item.action)} />)}
   </div>;
 }
 
-function MenuItem({ actionId, icon, label, onClick, danger = false, disabled = false, title, buttonRef }: { actionId: string; icon: "plus" | "upload" | "edit" | "archive" | "settings" | "history" | "copy" | "move" | "trash" | "play"; label: string; onClick: () => void; danger?: boolean; disabled?: boolean; title?: string; buttonRef?: React.RefObject<HTMLButtonElement | null> }) {
-  return <button ref={buttonRef} className={danger ? "tree-menu-item danger" : "tree-menu-item"} data-action={actionId} role="menuitem" disabled={disabled} title={title} onClick={onClick}><Icon name={icon} /><span>{label}</span></button>;
+function MenuItem({ actionId, icon, label, onClick, danger = false, disabled = false, title, tabIndex }: { actionId: string; icon: "plus" | "upload" | "edit" | "archive" | "settings" | "history" | "copy" | "move" | "trash" | "play"; label: string; onClick: () => void; danger?: boolean; disabled?: boolean; title?: string; tabIndex: number }) {
+  return <button type="button" className={danger ? "tree-menu-item danger" : "tree-menu-item"} data-action={actionId} role="menuitem" tabIndex={tabIndex} disabled={disabled} title={title} onClick={onClick}><Icon name={icon} /><span>{label}</span></button>;
 }
 
 function collectExpandable(node: CourseTreeNode): string[] { return node.children.flatMap((child) => [child.id, ...collectExpandable(child)]); }
@@ -631,16 +705,21 @@ export type SearchInputKeyAction =
   | { kind: "close" }
   | { kind: "none" };
 
-export function resolveSearchInputKeyAction(key: string, activeIndex: number, resultCount: number): SearchInputKeyAction {
+export function resolveSearchInputKeyAction(key: string, activeIndex: number, resultCount: number, options: { isComposing?: boolean; hasQuery?: boolean; searchOpen?: boolean } = {}): SearchInputKeyAction {
+  if (options.isComposing) return { kind: "none" };
   if (key === "ArrowDown" || key === "ArrowUp") {
     if (resultCount <= 0) return { kind: "none" };
     return { kind: "move", index: moveSearchIndex(activeIndex, key === "ArrowDown" ? 1 : -1, resultCount) };
   }
   if (key === "Enter") {
-    if (resultCount <= 0) return { kind: "none" };
+    if (resultCount <= 0 || options.searchOpen === false) return { kind: "none" };
     return { kind: "activate", index: activeIndex >= 0 && activeIndex < resultCount ? activeIndex : 0 };
   }
-  if (key === "Escape") return { kind: "close" };
+  if (key === "Escape") {
+    if (options.hasQuery) return { kind: "close" };
+    if (options.searchOpen === false) return { kind: "none" };
+    return { kind: "close" };
+  }
   return { kind: "none" };
 }
 

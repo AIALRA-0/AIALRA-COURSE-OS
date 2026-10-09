@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { CourseRelease, PageLesson, SelfRetelling } from "@course-os/contracts";
 import { api } from "./api.js";
 import { readingProgress } from "./self-retelling-model.js";
 import "./self-retelling.css";
 
 export function SelfRetellingPanel({ release, page }: { release: CourseRelease; page: PageLesson }) {
+  const titleId = useId();
+  const countId = useId();
   const [records, setRecords] = useState<SelfRetelling[]>([]);
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(true);
@@ -40,11 +42,11 @@ export function SelfRetellingPanel({ release, page }: { release: CourseRelease; 
     } finally { setSaving(false); }
   };
 
-  return <article className="self-retelling-panel" aria-labelledby="self-retelling-title">
-    <header className="self-retelling-heading"><div><span>ACTIVE RECALL</span><h3 id="self-retelling-title">看完讲解后，用自己的话重述</h3><p>不用照抄。说清本页要解决的问题、关键关系和结论。</p></div><strong className="self-retelling-progress">阅读进度 {progress.answered}/{progress.total} · {progress.percent}%</strong></header>
-    <label className="self-retelling-input"><span>我的重述（必填）</span><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} maxLength={12_000} rows={5} required aria-required="true" disabled={saving || loading} placeholder={loading ? "正在读取已保存的回答…" : "先合上讲解，用自己的话写出你记住的内容"} /></label>
-    <div className="self-retelling-footer"><span>{answer.trim().length} / 12000</span><button className="primary-button" data-action="save-self-retelling" disabled={saving || loading || !answer.trim()} aria-busy={saving} onClick={() => void save()}>{saving ? "正在保存" : records.some((item) => item.pageId === page.id) ? "更新重述" : "提交重述"}</button></div>
-    {error && <p className="self-retelling-message is-error" role="alert">{error}</p>}
-    {notice && <p className="self-retelling-message" role="status">{notice}</p>}
+  return <article className="self-retelling-panel workbench-panel" aria-labelledby={titleId} aria-busy={loading || saving}>
+    <header className="self-retelling-heading workbench-panel-header"><div><span>ACTIVE RECALL</span><h3 id={titleId}>看完讲解后，用自己的话重述</h3><p>不用照抄。说清本页要解决的问题、关键关系和结论。</p></div><strong className="self-retelling-progress" role="status" aria-live="polite">阅读进度 {progress.answered}/{progress.total} · {progress.percent}%</strong></header>
+    <label className="self-retelling-input workbench-field"><span>我的重述（必填）</span><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} maxLength={12_000} rows={5} required aria-required="true" aria-describedby={countId} disabled={saving || loading} placeholder={loading ? "正在读取已保存的回答…" : "先合上讲解，用自己的话写出你记住的内容"} /></label>
+    <div className="self-retelling-footer workbench-action-row"><span id={countId}>{answer.trim().length} / 12000</span><button className="primary-button workbench-primary-action" data-action="save-self-retelling" disabled={saving || loading || !answer.trim()} aria-busy={saving} onClick={() => void save()}>{saving ? "正在保存" : records.some((item) => item.pageId === page.id) ? "更新重述" : "提交重述"}</button></div>
+    {error && <p className="self-retelling-message workbench-error is-error" role="alert">{error}</p>}
+    {notice && <p className="self-retelling-message workbench-feedback" role="status" aria-live="polite">{notice}</p>}
   </article>;
 }

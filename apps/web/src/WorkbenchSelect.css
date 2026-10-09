@@ -1,0 +1,23 @@
+.workbench-select-shell { position: relative; display: inline-flex; min-width: 0; }
+.workbench-select-shell .workbench-select {
+  box-sizing: border-box; width: 100%; min-width: 0; min-height: var(--control-height, 36px);
+  padding: 6px 32px 6px 10px; border: 1px solid var(--input-line); border-radius: var(--radius, 8px);
+  appearance: none; -webkit-appearance: none; background: var(--canvas); color: var(--ink);
+  font: inherit; font-size: var(--font-tree, 13px); line-height: 1.5; cursor: pointer;
+}
+.workbench-select-shell .workbench-select:hover:not(:disabled) { background-color: var(--surface); }
+.workbench-select-shell .workbench-select:disabled { color: var(--muted); cursor: not-allowed; }
+.workbench-select-chevron {
+  position: absolute; top: 50%; right: 10px; width: 16px; height: 16px; color: var(--ink-soft);
+  transform: translateY(-50%) rotate(90deg); pointer-events: none;
+}
+.question-batch-size .workbench-select-shell { flex: 0 0 auto; width: auto; }
+.question-batch-size .workbench-select-shell .workbench-select { width: auto; min-width: 96px; }
+.review-filters .workbench-select-shell { display: flex; width: 100%; }
+@media (pointer: coarse) {
+  .workbench-select-shell .workbench-select { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .workbench-select-shell .workbench-select { appearance: auto; -webkit-appearance: auto; border-color: ButtonText; }
+  .workbench-select-chevron { display: none; }
+}

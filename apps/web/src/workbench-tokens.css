@@ -1,0 +1,35 @@
+/* Native implementation mapping of the adopted tool-workbench-2.3.1 Profile.
+   Shared rule and Profile authorities remain in .agent-project-control/design. */
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  font-synthesis: none;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-ui: 14px; --font-small: 12px; --font-section: 16px; --font-title: 28px;
+  --font-body: 16px; --font-tree: 13px; --body-line: 1.75;
+  --app: #eeeeec; --surface: #f7f7f5; --canvas: #ffffff; --raised: #ffffff;
+  --hover: #e9e9e6; --selected: #dededb; --line: #d4d4d0; --input-line: #777774;
+  --ink: #232321; --ink-soft: #545451; --muted: #61615d; --faint: #61615d; --focus: #323230;
+  --green: #286c3c; --amber: #775908; --red: #a52225; --blue: #385f8a;
+  --panel: var(--surface); --panel-strong: var(--raised); --soft: var(--hover); --soft-2: var(--selected);
+  --line-strong: var(--input-line); --brand: var(--ink); --brand-ink: var(--ink);
+  --brand-soft: var(--selected); --accent: var(--muted); --viewer: var(--app);
+  --radius: 8px; --radius-sm: 8px; --radius-lg: 8px;
+  --topbar: 60px; --sidebar: 256px; --course-sidebar: var(--sidebar);
+  --activity-rail: 64px; --panel-gap: 16px; --workspace-footer-height: 40px;
+  --control-height: 36px; --compact-control: 32px; --control-gap: 12px;
+  --form-row-gap: 16px; --section-gap: 24px; --pane-header: 48px;
+  --shadow-sm: none; --shadow-md: 0 16px 48px rgb(0 0 0 / 16%);
+  color: var(--ink); background: var(--app);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --app: #141414; --surface: #1b1b1b; --canvas: #1e1e1e; --raised: #262626;
+  --hover: #303030; --selected: #383838; --line: #383838; --input-line: #747474;
+  --ink: #eeeeee; --ink-soft: #b8b8b8; --muted: #ababab; --faint: #ababab; --focus: #dedede;
+  --green: #a3d9b1; --amber: #e8cf94; --red: #ffb4ab; --blue: #91b6df;
+  --shadow-md: 0 16px 48px rgb(0 0 0 / 35%);
+}

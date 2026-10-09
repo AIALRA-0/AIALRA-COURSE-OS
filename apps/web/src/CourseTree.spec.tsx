@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseTreeNode } from "@course-os/contracts";
-import { buildCourseTreeSearchResults, CourseTree, failedCourseTreeTaskIds, moveSearchIndex, resolveCourseTreeSearchActivation, resolveSearchInputKeyAction, type CourseTreeSearchMaterial } from "./CourseTree.js";
+import { buildCourseTreeSearchResults, CourseTree, failedCourseTreeTaskIds, moveSearchIndex, resolveCourseTreeSearchActivation, resolveSearchInputKeyAction, resolveTreeMenuKeyAction, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 
 describe("CourseTree background task entries", () => {
@@ -16,9 +16,9 @@ describe("CourseTree background task entries", () => {
       backgroundTasks: [{ id: "task-running", courseId: "course-1", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running" }],
       onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
     }));
-    expect(markup).toContain('aria-label="后台任务"');
+    expect(markup).toContain('aria-labelledby="tree-task-section-heading"');
     expect(markup).toContain('class="tree-task-section"');
-    expect(markup.indexOf('</nav>')).toBeLessThan(markup.indexOf('aria-label="后台任务"'));
+    expect(markup.indexOf('</nav>')).toBeLessThan(markup.indexOf('aria-labelledby="tree-task-section-heading"'));
     expect(markup.indexOf("EE680")).toBeLessThan(markup.indexOf("Lecture.pptx"));
   });
   it("renders tasks with their real status class and opens the selected task entry", () => {
@@ -147,6 +147,40 @@ describe("CourseTree background task entries", () => {
   });
 });
 
+describe("CourseTree workbench semantics", () => {
+  it("exposes workspace headings, searchable input naming, current tree state, and stable row actions", () => {
+    const material = {
+      id: "material-current", kind: "material", title: "Linear Algebra", currentReleaseId: "release-current", releaseId: "release-current", children: [], capabilities: ["open_studio"]
+    } as unknown as CourseTreeNode;
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "EE680 Workspace", courses: [material], rootMaterials: [], updatedAt: "2026-10-09T10:00:00.000Z" },
+      selectedPageId: "page-current",
+      searchMaterials: [{ materialNodeId: material.id, releaseId: "release-current", version: 1, pages: [{ id: "page-current", pageNumber: 1, title: "Introduction" }] }],
+      actions: { rename: vi.fn(), duplicate: vi.fn(), move: vi.fn(), trash: vi.fn(), openStudio: vi.fn(), openReadWeave: vi.fn(), history: vi.fn() },
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+
+    expect(markup).toContain('<h2 class="sidebar-title" id="course-tree-title">EE680 Workspace</h2>');
+    expect(markup).toContain('<h3 class="tree-toolbar-heading">正式课程</h3>');
+    expect(markup).toContain('aria-label="搜索课程、材料或页面"');
+    expect(markup).toContain('aria-current="page"');
+    expect(markup).toContain('aria-haspopup="menu" aria-expanded="false"');
+    expect(markup).toContain('data-action-slot="tree-row-actions"');
+    expect(markup).toContain('data-action="tree-open-material"');
+    expect(markup).toContain('data-action="tree-open-actions"');
+  });
+
+  it("supports wrapped arrow movement, Home/End, and Escape for context menus", () => {
+    expect(resolveTreeMenuKeyAction("ArrowDown", 1, 3)).toEqual({ kind: "focus", index: 2 });
+    expect(resolveTreeMenuKeyAction("ArrowDown", 2, 3)).toEqual({ kind: "focus", index: 0 });
+    expect(resolveTreeMenuKeyAction("ArrowUp", 0, 3)).toEqual({ kind: "focus", index: 2 });
+    expect(resolveTreeMenuKeyAction("Home", 2, 3)).toEqual({ kind: "focus", index: 0 });
+    expect(resolveTreeMenuKeyAction("End", 0, 3)).toEqual({ kind: "focus", index: 2 });
+    expect(resolveTreeMenuKeyAction("Escape", 1, 3)).toEqual({ kind: "close", restoreFocus: true });
+    expect(resolveTreeMenuKeyAction("ArrowDown", -1, 0)).toEqual({ kind: "none" });
+  });
+});
+
 describe("CourseTree search navigation", () => {
   const currentMaterial = {
     id: "material-current", kind: "material", title: "Linear Algebra", currentReleaseId: "release-current", releaseId: "release-current",
@@ -222,6 +256,16 @@ describe("CourseTree search navigation", () => {
     expect(resolveSearchInputKeyAction("Escape", 0, results.length)).toEqual({ kind: "close" });
     expect(resolveSearchInputKeyAction("e", 0, results.length)).toEqual({ kind: "none" });
     expect(resolveSearchInputKeyAction("Enter", 0, 0)).toEqual({ kind: "none" });
+  });
+
+  it("leaves IME navigation keys to composition and clears a query before closing search", () => {
+    for (const key of ["ArrowDown", "ArrowUp", "Enter", "Escape"]) {
+      expect(resolveSearchInputKeyAction(key, 0, 2, { isComposing: true, hasQuery: true, searchOpen: true })).toEqual({ kind: "none" });
+    }
+    expect(resolveSearchInputKeyAction("Escape", 0, 2, { hasQuery: true, searchOpen: false })).toEqual({ kind: "close" });
+    expect(resolveSearchInputKeyAction("Escape", 0, 0, { hasQuery: false, searchOpen: true })).toEqual({ kind: "close" });
+    expect(resolveSearchInputKeyAction("Escape", 0, 0, { hasQuery: false, searchOpen: false })).toEqual({ kind: "none" });
+    expect(resolveSearchInputKeyAction("Enter", 0, 2, { searchOpen: false })).toEqual({ kind: "none" });
   });
 
   it("shows version publication labels on materials only and keeps review status separate", () => {

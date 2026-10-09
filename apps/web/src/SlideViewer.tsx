@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { ImageResourceCache } from "./reading-prefetch.js";
+import { Icon } from "./Icon.js";
 
 export interface ViewState {
   zoom: number;
@@ -76,6 +77,11 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
     onChange({ ...valueRef.current, panX: dragRef.current.panX + event.clientX - dragRef.current.x, panY: dragRef.current.panY + event.clientY - dragRef.current.y });
   };
   const pointerUp = () => { dragRef.current = undefined; setDragging(false); };
+  const pointerCancel = () => {
+    const original = dragRef.current;
+    if (original) onChange({ ...valueRef.current, panX: original.panX, panY: original.panY });
+    pointerUp();
+  };
   const toggleFullscreen = () => {
     setFullscreenError("");
     const operation = document.fullscreenElement ? document.exitFullscreen() : shellRef.current?.requestFullscreen();
@@ -91,12 +97,12 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
     <section ref={shellRef} className={`slide-shell ${fullscreen ? "is-fullscreen" : ""}`} aria-label="原始课件页面">
       <div className="viewer-toolbar">
         <div className="zoom-group" aria-label="缩放控制">
-          <button data-action="slide-zoom-out" onClick={() => onChange({ ...value, zoom: clamp(value.zoom - 0.25, 0.5, 5) })} aria-label="缩小">−</button>
+          <button className="icon-button" data-action="slide-zoom-out" onClick={() => onChange({ ...value, zoom: clamp(value.zoom - 0.25, 0.5, 5) })} aria-label="缩小" disabled={value.zoom <= 0.5}><Icon name="minus" /></button>
           <output>{Math.round(value.zoom * 100)}%</output>
-          <button data-action="slide-zoom-in" onClick={() => onChange({ ...value, zoom: clamp(value.zoom + 0.25, 0.5, 5) })} aria-label="放大">＋</button>
+          <button className="icon-button" data-action="slide-zoom-in" onClick={() => onChange({ ...value, zoom: clamp(value.zoom + 0.25, 0.5, 5) })} aria-label="放大" disabled={value.zoom >= 5}><Icon name="plus" /></button>
         </div>
         <button data-action="slide-reset" onClick={() => onChange({ zoom: 1, panX: 0, panY: 0 })}>复位</button>
-        <button data-action={fullscreen ? "slide-exit-fullscreen" : "slide-fullscreen"} onClick={toggleFullscreen}>{fullscreen ? "退出全屏" : "全屏"}</button>
+        <button data-action={fullscreen ? "slide-exit-fullscreen" : "slide-fullscreen"} aria-pressed={fullscreen} onClick={toggleFullscreen}><Icon name="expand" />{fullscreen ? "退出全屏" : "全屏"}</button>
       </div>
       <div
         ref={frameRef}
@@ -104,7 +110,7 @@ export function SlideViewer({ imageUrl, title, value, onChange, imageResources }
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
-        onPointerCancel={pointerUp}
+        onPointerCancel={pointerCancel}
         onDoubleClick={() => onChange({ zoom: 1, panX: 0, panY: 0 })}
       >
         {(!currentImageStatus || currentImageStatus.state === "loading") && <span className="slide-image-status" role="status">正在载入本页原图</span>}

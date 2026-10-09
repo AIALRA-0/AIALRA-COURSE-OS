@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { CourseRelease, LearningSession, LessonDraft, PageLesson, WorkspaceTree } from "@course-os/contracts";
+import type { CourseRelease, LearningSession, LessonDraft, PageLesson, PdfLayoutInspection, WorkspaceTree } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./api.js";
+import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
+import { StudioWorkspace } from "./StudioWorkspace.js";
 import type { ImportTaskSummary } from "./types.js";
 import { beginCandidatePreviewLoad, beginFormalPageLoad, beginImportCostRead, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
@@ -34,6 +36,54 @@ describe("workspace tree and incremental import UI inputs", () => {
 
     expect(handlers).toHaveLength(2);
     expect(handlers.every((handler) => handler.includes("rememberImport(record)") && handler.includes("trackImport(record.id)"))).toBe(true);
+  });
+});
+
+describe("studio and PDF workbench semantics", () => {
+  it("keeps Studio actions visible and exposes the selected inspector tab and panel relationship", () => {
+    const release = {
+      id: "release-1", courseId: "course-1", courseTitle: "EE680", moduleId: "module-1", moduleTitle: "Linear Systems"
+    } as CourseRelease;
+    const page = {
+      id: "page-1", pageNumber: 1, title: "State Space", imageUrl: "/source.png", anchors: [], atoms: [], blocks: [],
+      coverageRequirements: [], coverageClaims: [],
+      quality: { highRiskCoverage: 0, generalCoverage: 0, mathValid: true, publishable: false, issues: [] }
+    } as PageLesson;
+    const markup = renderToStaticMarkup(createElement(StudioWorkspace, {
+      release, page, imageResources: undefined as never, rightCollapsed: false,
+      onToggleRight: vi.fn(), onPublished: vi.fn(), onChanged: vi.fn()
+    }));
+
+    expect(markup).toContain('<h1>State Space</h1>');
+    expect(markup).toContain('aria-label="当前位置"');
+    expect(markup).toContain('data-action-slot="studio-header-actions"');
+    for (const action of ["studio-generate-page", "studio-toggle-preview", "studio-save-draft", "studio-validate", "studio-publish"]) {
+      expect(markup).toContain(`data-action="${action}"`);
+    }
+    expect(markup).toContain('role="tablist" aria-label="制作检查内容"');
+    expect(markup).toContain('id="studio-inspector-tab-quality" data-inspector-tab="quality" role="tab" aria-selected="true" tabindex="0" aria-controls="studio-inspector-panel"');
+    expect(markup).toContain('id="studio-inspector-panel" class="studio-inspector-panel" role="tabpanel" tabindex="0" aria-labelledby="studio-inspector-tab-quality"');
+    expect(markup).toContain('aria-pressed="true"');
+  });
+
+  it("labels PDF layout controls while keeping per-page adjustment and progress/error feedback", () => {
+    const inspection = {
+      version: "1", sourceSha256: "hash", physicalPageCount: 1, logicalPageCount: 1, fingerprint: "fingerprint",
+      pages: [{ physicalPage: 1, width: 100, height: 140, rotation: 0, mode: "original", regions: [] }],
+      previews: [{ physicalPage: 1, imageDataUrl: "data:image/png;base64,AA==" }]
+    } as PdfLayoutInspection;
+    const markup = renderToStaticMarkup(createElement(PdfLayoutPreview, {
+      inspection, selection: { mode: "auto" }, busy: true, error: "预览读取失败", onChange: vi.fn()
+    }));
+
+    expect(markup).toContain('<h3 id="pdf-layout-preview-heading">PDF 页面拆分预览</h3>');
+    expect(markup).toContain('data-action-slot="pdf-layout-mode"');
+    expect(markup).toContain('data-action="pdf-layout-mode"');
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain('data-action-slot="pdf-layout-previews"');
+    expect(markup).toContain('<details><summary>逐页调整');
+    expect(markup).toContain('第 1 张纸页拆分范围');
   });
 });
 
