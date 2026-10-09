@@ -1,0 +1,32 @@
+apps/web/src/course-navigator.css
+  s_e8850ef125fb32::t_892675b5ea2727 4,8,10-12
+  s_e8850ef125fb32::t_ac84cfd443ed11 9
+  s_e8850ef125fb32::t_304121ed86858c 13-14
+apps/web/src/LearningWorkspace.tsx
+  s_e8850ef125fb32::t_5a0b11359e8e5e 51,68,71,85-86,89,112,124,131,140
+apps/web/src/workbench-layout.css
+  s_e8850ef125fb32::t_1493eaaa54f369 157-158
+  s_e8850ef125fb32::t_9f26eea9f2920f 2,27,35,78,126,155-156,159-160,194,222-224
+apps/web/src/ReadingInspector.tsx
+  s_e8850ef125fb32::t_d6f3bee271775a 13,16
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_1493eaaa54f369 1084
+apps/web/src/CourseTree.tsx
+  s_e8850ef125fb32::t_ac84cfd443ed11 355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "356400b3bace59dab365bf5bd865c9383e0d4b73",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
