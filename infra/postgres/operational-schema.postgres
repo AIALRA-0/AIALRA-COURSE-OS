@@ -134,14 +134,18 @@ ON CONFLICT (id) DO UPDATE SET
 WHERE generation_jobs.job_data IS NULL;
 
 INSERT INTO generation_job_checkpoints (job_id, page_id, checkpoint)
-SELECT job.id, substr(checkpoint.key, length(job.id::text) + 2), checkpoint.value
+SELECT job.id, substr(checkpoint.key, strpos(checkpoint.key, ':') + 1), checkpoint.value
 FROM operational_state AS source
 CROSS JOIN LATERAL jsonb_each(
     CASE WHEN jsonb_typeof(source.state->'generationCheckpoints') = 'object'
          THEN source.state->'generationCheckpoints' ELSE '{}'::jsonb END
 ) AS checkpoint(key, value)
-JOIN generation_jobs AS job ON checkpoint.key LIKE job.id::text || ':%'
-WHERE length(checkpoint.key) > length(job.id::text) + 1
+JOIN generation_jobs AS job ON job.id = CASE
+    WHEN strpos(checkpoint.key, ':') > 0
+      AND split_part(checkpoint.key, ':', 1) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN split_part(checkpoint.key, ':', 1)::uuid
+END
+WHERE length(checkpoint.key) > strpos(checkpoint.key, ':')
 ON CONFLICT (job_id, page_id) DO NOTHING;
 
 INSERT INTO ordered_events (id, stream_id, event_type, payload, occurred_at)

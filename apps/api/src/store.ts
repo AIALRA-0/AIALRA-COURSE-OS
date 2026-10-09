@@ -747,12 +747,14 @@ export class PostgresOperationalStore extends OperationalStore {
         END $$`);
       await client.query(`WITH source AS MATERIALIZED (
           SELECT state || '{}'::jsonb AS state FROM operational_state WHERE id = 1
-        ), compacted AS (
+        ), compacted AS MATERIALIZED (
           SELECT state, COALESCE((SELECT jsonb_agg(event ORDER BY ordinal)
             FROM jsonb_array_elements(CASE WHEN jsonb_typeof(state->'events') = 'array'
               THEN state->'events' ELSE '[]'::jsonb END) WITH ORDINALITY AS legacy(event, ordinal)
             WHERE NOT EXISTS (SELECT 1 FROM ordered_events
-              WHERE id::text = event->>'id' AND stream_id = event->>'streamId'
+              WHERE id = CASE WHEN event->>'id' ~ '^[0-9]{1,19}$'
+                AND (length(event->>'id') < 19 OR event->>'id' <= '9223372036854775807')
+                THEN (event->>'id')::bigint END AND stream_id = event->>'streamId'
                 AND event_type = event->>'type' AND payload IS NOT DISTINCT FROM COALESCE(event->'payload', 'null'::jsonb)
                 AND occurred_at = (event->>'occurredAt')::timestamptz
                 AND event - ARRAY['id','streamId','type','payload','occurredAt'] = '{}'::jsonb)), '[]'::jsonb) AS events,
@@ -760,7 +762,11 @@ export class PostgresOperationalStore extends OperationalStore {
             FROM jsonb_each(CASE WHEN jsonb_typeof(state->'generationCheckpoints') = 'object'
               THEN state->'generationCheckpoints' ELSE '{}'::jsonb END) AS legacy(key, value)
             WHERE NOT EXISTS (SELECT 1 FROM generation_job_checkpoints
-              WHERE job_id::text || ':' || page_id = key AND checkpoint IS NOT DISTINCT FROM value)), '{}'::jsonb) AS checkpoints
+              WHERE job_id = CASE WHEN strpos(key, ':') > 0 AND length(key) > strpos(key, ':')
+                AND split_part(key, ':', 1) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                THEN split_part(key, ':', 1)::uuid END
+                AND page_id = substr(key, strpos(key, ':') + 1)
+                AND checkpoint IS NOT DISTINCT FROM value)), '{}'::jsonb) AS checkpoints
           FROM source
         ) UPDATE operational_state SET state = jsonb_set(jsonb_set(compacted.state, '{events}', compacted.events),
             '{generationCheckpoints}', compacted.checkpoints), updated_at = now()

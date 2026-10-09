@@ -333,6 +333,123 @@ interface PostgresFixture {
 }
 
 postgresDescribe("PostgreSQL operational job storage", () => {
+  it("backfills checkpoint colon keys with an indexed UUID join and retains invalid, orphan and conflicting legacy values", async () => {
+    const jobs = Array.from({ length: 300 }, () => makeJob(randomUUID()));
+    const fixture = await startFixture(jobs);
+    const client = await fixture.pool.connect();
+    try {
+      const checkpoints = Object.fromEntries(jobs.map((job, i) => [`${job.id}:page:${i}:part`, makeCheckpoint(`legacy-${i}`)]));
+      checkpoints[`${randomUUID()}:orphan:page`] = makeCheckpoint("orphan");
+      checkpoints["not-a-uuid:page:part"] = makeCheckpoint("invalid");
+      checkpoints[jobs[0]!.id] = makeCheckpoint("missing-colon");
+      checkpoints[`${jobs[0]!.id}:`] = makeCheckpoint("empty-page");
+      await client.query("UPDATE operational_state SET state=jsonb_set(state,'{generationCheckpoints}',$1::jsonb) WHERE id=1", [JSON.stringify(checkpoints)]);
+      await client.query("INSERT INTO generation_job_checkpoints(job_id,page_id,checkpoint) VALUES ($1,'page:0:part',$2::jsonb)", [jobs[0]!.id, JSON.stringify(makeCheckpoint("canonical"))]);
+      const schema = await readFile(schemaPath, "utf8");
+      const sql = schema.match(/INSERT INTO generation_job_checkpoints[\s\S]*?ON CONFLICT \(job_id, page_id\) DO NOTHING;/)?.[0];
+      expect(sql).toBeDefined();
+      const original = sql!.replace("substr(checkpoint.key, strpos(checkpoint.key, ':') + 1)", "substr(checkpoint.key, length(job.id::text) + 2)")
+        .replace(/JOIN generation_jobs AS job ON job.id = CASE[\s\S]*?END\nWHERE length\(checkpoint.key\) > strpos\(checkpoint.key, ':'\)/,
+          "JOIN generation_jobs AS job ON checkpoint.key LIKE job.id::text || ':%'\nWHERE length(checkpoint.key) > length(job.id::text) + 1");
+      expect(original).toContain("checkpoint.key LIKE");
+      await client.query("BEGIN");
+      await client.query("SET LOCAL statement_timeout='10000ms'");
+      await client.query("SAVEPOINT original_checkpoint_backfill");
+      const oldPlan = (await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${original}`)).rows[0]["QUERY PLAN"][0];
+      await client.query("ROLLBACK TO SAVEPOINT original_checkpoint_backfill");
+      const newPlan = (await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`)).rows[0]["QUERY PLAN"][0];
+      const collect = (node: Record<string, any>): Array<Record<string, any>> => [node, ...(node.Plans ?? []).flatMap(collect)];
+      const summarize = (plan: Record<string, any>) => collect(plan.Plan).map(node => ({ node: node["Node Type"], join: node["Join Type"],
+        relation: node["Relation Name"], indexCond: node["Index Cond"], joinFilter: node["Join Filter"], hashCond: node["Hash Cond"],
+        loops: node["Actual Loops"], rows: node["Actual Rows"], removedByJoin: node["Rows Removed by Join Filter"] }));
+      expect(collect(newPlan.Plan).some(node => (node["Join Filter"] ?? "").includes("~~"))).toBe(false);
+      expect(collect(newPlan.Plan).filter(node => node["Relation Name"] === "generation_jobs" && node["Actual Loops"] > 1)
+        .every(node => /\bid\s*=/.test(node["Index Cond"] ?? ""))).toBe(true);
+      const rows = (await client.query<{ job_id: string; page_id: string; checkpoint: PlannedCheckpoint }>("SELECT job_id,page_id,checkpoint FROM generation_job_checkpoints WHERE job_id=ANY($1::uuid[])", [jobs.map(job => job.id)])).rows;
+      expect(rows).toHaveLength(300);
+      expect(rows.find(row => row.job_id === jobs[0]!.id)).toMatchObject({ page_id: "page:0:part", checkpoint: makeCheckpoint("canonical") });
+      expect(rows.find(row => row.job_id === jobs[299]!.id)).toMatchObject({ page_id: "page:299:part", checkpoint: makeCheckpoint("legacy-299") });
+      expect((await client.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state.generationCheckpoints).toEqual(checkpoints);
+      console.info("schema checkpoint backfill probe", JSON.stringify({ jobs: 300, legacyKeys: 304,
+        originalMs: oldPlan["Execution Time"], guardedJoinMs: newPlan["Execution Time"],
+        originalPlan: summarize(oldPlan), guardedPlan: summarize(newPlan), preservedOrphansInvalidConflicts: true }));
+    } finally { await client.query("ROLLBACK"); client.release(); await stopFixture(fixture); }
+  }, 20000);
+
+  it("initializes overlapping 48060 events and explains the exact compaction with indexed IDs and colon page keys", async () => {
+    const job = makeJob(randomUUID());
+    const fixture = await startFixture([job]);
+    let reopened: PostgresOperationalStore | undefined;
+    try {
+      const base = Number((await fixture.pool.query("SELECT COALESCE(MAX(id),0) AS id FROM ordered_events")).rows[0].id);
+      await fixture.pool.query(`INSERT INTO ordered_events(id,stream_id,event_type,payload,occurred_at)
+        SELECT $1::bigint+n,$2,'synthetic.overlap',jsonb_build_object('n',n,'text',repeat('x',350)),$3::timestamptz
+        FROM generate_series(1,45480) AS series(n)`, [base, job.id, job.createdAt]);
+      const checkpoint = makeCheckpoint("colon-page");
+      await fixture.pool.query("INSERT INTO generation_job_checkpoints(job_id,page_id,checkpoint) VALUES ($1,'page:section:2',$2::jsonb)", [job.id, JSON.stringify(checkpoint)]);
+      await fixture.pool.query(`UPDATE operational_state SET state=jsonb_set(jsonb_set(state,'{events}',
+        (SELECT jsonb_agg(jsonb_build_object('id',$1::bigint+n,'streamId',$2::text,'type','synthetic.overlap',
+          'payload',CASE WHEN n=42 THEN jsonb_build_object('conflictingHistory',true)
+            ELSE jsonb_build_object('n',n,'text',repeat('x',350)) END,'occurredAt',$3::text) ORDER BY n)
+          FROM generate_series(1,48060) AS series(n)) || jsonb_build_array(jsonb_build_object(
+            'id','invalid-id','streamId','invalid-legacy','type','legacy.invalid','payload',null,'occurredAt',$3::text))),
+        '{generationCheckpoints}',jsonb_build_object($4::text,$5::jsonb,'invalid-uuid:page:2',$5::jsonb)) WHERE id=1`,
+        [base, job.id, job.createdAt, `${job.id}:page:section:2`, JSON.stringify(checkpoint)]);
+      const seeded = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      const beforeBytes = (await fixture.pool.query("SELECT octet_length(state::text) AS bytes FROM operational_state WHERE id=1")).rows[0].bytes;
+      const source = await readFile(new URL("./store.ts", import.meta.url), "utf8");
+      const sql = source.match(/await client\.query\(`(WITH source AS MATERIALIZED[\s\S]*?compacted AS[\s\S]*?)`\);/)?.[1];
+      expect(sql).toBeDefined();
+      const started = performance.now();
+      reopened = new PostgresOperationalStore({ connectionString: connectionString!, max: 2 });
+      await reopened.whenReady();
+      const startupMs = performance.now() - started;
+      const persisted = (await fixture.pool.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+      expect(persisted.events).toEqual([seeded.events[41], seeded.events.at(-1)]);
+      expect(persisted.generationCheckpoints).toEqual({ "invalid-uuid:page:2": checkpoint });
+      expect((await reopened.read()).generationCheckpoints[`${job.id}:page:section:2`]).toEqual(checkpoint);
+      expect(Number((await fixture.pool.query("SELECT count(*) AS count FROM ordered_events WHERE stream_id=$1", [job.id])).rows[0].count)).toBe(48060);
+      const client = await fixture.pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("UPDATE operational_state SET state=$1::jsonb WHERE id=1", [JSON.stringify(seeded)]);
+        // Overflow IDs and malformed checkpoint prefixes are retained by the
+        // compaction itself without a cast error, even when the index is used.
+        await client.query(`UPDATE operational_state SET state=jsonb_set(state,'{events}',state->'events'||
+          jsonb_build_array(jsonb_build_object('id','9223372036854775808','streamId','invalid-legacy',
+            'type','legacy.overflow','payload',null,'occurredAt',$1::text))) WHERE id=1`, [job.createdAt]);
+        await client.query("SET LOCAL statement_timeout='10000ms'");
+        const unindexed = sql!.replace("compacted AS MATERIALIZED (", "compacted AS (")
+          .replace(/WHERE id = CASE[\s\S]*?END AND stream_id/,
+          "WHERE id::text = event->>'id' AND stream_id")
+          .replace(/WHERE job_id = CASE[\s\S]*?AND page_id = substr\(key, strpos\(key, ':'\) \+ 1\)/,
+            "WHERE job_id::text || ':' || page_id = key");
+        await client.query("SAVEPOINT original_compaction");
+        const beforePlan = (await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${unindexed}`)).rows[0]["QUERY PLAN"][0];
+        await client.query("ROLLBACK TO SAVEPOINT original_compaction");
+        const explained = (await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`)).rows[0]["QUERY PLAN"][0];
+        const collect = (node: Record<string, any>): Array<Record<string, any>> => [node, ...(node.Plans ?? []).flatMap(collect)];
+        const summarize = (plan: Record<string, any>) => collect(plan.Plan).map(node => ({
+          node: node["Node Type"], relation: node["Relation Name"], index: node["Index Name"],
+          indexCond: node["Index Cond"], filter: node.Filter, loops: node["Actual Loops"],
+          rows: node["Actual Rows"], rowsRemoved: node["Rows Removed by Filter"], totalCost: node["Total Cost"]
+        }));
+        const scans = collect(explained.Plan).filter(node => node["Relation Name"] === "ordered_events");
+        expect(scans.some(node => node["Node Type"] === "Seq Scan" && node["Actual Loops"] > 1)).toBe(false);
+        expect(scans.filter(node => node["Actual Loops"] > 1).every(node => /\bid\s*=/.test(node["Index Cond"] ?? ""))).toBe(true);
+        const retained = (await client.query<{ state: OperationalState }>("SELECT state FROM operational_state WHERE id=1")).rows[0]!.state;
+        expect(retained.events).toHaveLength(3);
+        expect(retained.generationCheckpoints).toEqual({ "invalid-uuid:page:2": checkpoint });
+        console.info("startup compaction overlapping probe", JSON.stringify({
+          legacyEvents: 48060, initialRelationalEvents: 45480, beforeBytes, startupMs,
+          compactionMs: explained["Execution Time"], originalCompactionMs: beforePlan["Execution Time"],
+          originalCompactionPlanActual: summarize(beforePlan),
+          exactCompactionPlanActual: summarize(explained), preservedConflictAndInvalid: true
+        }));
+      } finally { await client.query("ROLLBACK"); client.release(); }
+    } finally { await reopened?.close(); await stopFixture(fixture); }
+  }, 30000);
+
   it("compacts only durable history, including text import streams, preserving canonical precedence and unmapped legacy data", async () => {
     const job = makeJob(randomUUID());
     const fixture = await startFixture([job], true);
