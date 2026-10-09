@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { CourseTreeNode, TreeNodeCapability, WorkspaceTree } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
+import "./course-navigator.css";
 import { importTaskStateLabel, type ImportTaskState } from "./import-progress.js";
 
 export interface CourseTreeTaskProgress {
@@ -285,23 +286,22 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     };
   }, [pointerDraggingNodeId, allNodes, actions]);
 
-  if (collapsed) return <aside className="course-sidebar course-sidebar-collapsed" aria-label="课程项目树已收起">
-    <button className="sidebar-expand-button" data-action="tree-expand" onClick={onCollapse} aria-label="展开课程项目树" title="展开课程项目树"><Icon name="chevronRight" /></button>
-    <button className="sidebar-rail-button" data-action="tree-create-course" onClick={onCreateCourse} aria-label="新建课程" title="新建课程"><Icon name="plus" /></button>
-    <button className="sidebar-rail-button" data-action="tree-import-material" onClick={onImport} aria-label="导入材料" title="导入材料"><Icon name="upload" /></button>
-    <button className="sidebar-rail-button sidebar-rail-bottom" data-action="tree-open-settings" onClick={onSettings} aria-label="工作区设置" title="工作区设置"><Icon name="settings" /></button>
+  if (collapsed) return <aside className="course-sidebar course-sidebar-collapsed course-navigator" aria-label="课程项目树已收起">
+    <button type="button" className="sidebar-expand-button" data-action="tree-expand" onClick={onCollapse} aria-label="展开课程项目树" title="展开课程项目树"><Icon name="chevronRight" /></button>
+    <button type="button" className="sidebar-rail-button" data-action="tree-create-course" onClick={onCreateCourse} aria-label="新建课程" title="新建课程"><Icon name="plus" /></button>
+    <button type="button" className="sidebar-rail-button" data-action="tree-import-material" onClick={onImport} aria-label="导入材料" title="导入材料"><Icon name="upload" /></button>
+    <button type="button" className="sidebar-rail-button sidebar-rail-bottom" data-action="tree-open-settings" onClick={onSettings} aria-label="工作区设置" title="工作区设置"><Icon name="settings" /></button>
   </aside>;
 
-  return <aside className="course-sidebar" aria-labelledby="course-tree-title">
-    <div className="sidebar-heading">
-      <div><span className="sidebar-kicker">课程空间</span><h2 className="sidebar-title" id="course-tree-title">{tree?.title || "Course OS"}</h2></div>
+  return <aside className="course-sidebar course-navigator" aria-labelledby="course-tree-title">
+    <header className="sidebar-heading">
+      <div className="course-navigator-title"><Icon name="book" /><h2 className="sidebar-title" id="course-tree-title">课程</h2></div>
       <div className="sidebar-heading-actions" data-action-slot="tree-heading-actions">
-        <button className="icon-button" data-action="tree-create-course" aria-label="新建课程" onClick={onCreateCourse} title="新建课程"><Icon name="plus" /></button>
-        <button className="icon-button" data-action="tree-collapse" aria-label="收起课程项目树" onClick={onCollapse} title="收起课程项目树"><Icon name="chevronLeft" /></button>
+        <button type="button" className="icon-button" data-action="tree-collapse" aria-label="收起课程项目树" onClick={onCollapse} title="收起课程项目树"><Icon name="chevronLeft" /></button>
       </div>
-    </div>
+    </header>
 
-    <div ref={searchContainer} className="tree-search-slot" data-action-slot="tree-search" style={{ position: "relative", zIndex: 30 }}>
+    <div ref={searchContainer} className="tree-search-slot" data-action-slot="tree-search" role="search" aria-label="筛选项目文件">
       <div className="tree-search">
         <Icon name="search" />
         <input
@@ -310,8 +310,8 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
           onChange={(event) => { setQuery(event.target.value); setActiveSearchIndex(0); setSearchOpen(true); }}
           onFocus={() => { if (query) setSearchOpen(true); }}
           onKeyDown={onSearchKeyDown}
-          aria-label="搜索课程、材料或页面"
-          placeholder="搜索课程、材料或页面"
+          aria-label="筛选课程、材料或页面"
+          placeholder="筛选课程、材料或页面"
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={searchOpen && Boolean(query.trim())}
@@ -319,31 +319,33 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
           aria-activedescendant={searchOpen && searchResults[activeSearchIndex] ? `course-tree-search-result-${activeSearchIndex}` : undefined}
         />
         {query.length > 0 && <button type="button" className="tree-search-clear" data-action="tree-search-clear" data-action-slot="tree-search-clear" aria-label="清除搜索内容" title="清除搜索内容" onClick={clearSearchAndFocus}><Icon name="close" /></button>}
-        <kbd>⌘ K</kbd>
       </div>
-      {searchOpen && query.trim() && <div id="course-tree-search-results" role="listbox" aria-label="课程树搜索结果" style={{ position: "absolute", top: "calc(100% - 8px)", left: 12, right: 12, maxHeight: 280, overflowY: "auto", padding: 4, border: "1px solid var(--line)", borderRadius: 8, background: "var(--panel)", boxShadow: "0 10px 28px rgb(0 0 0 / 18%)" }}>
-        {searchResults.length === 0 ? <div role="status" style={{ padding: "10px 12px", color: "var(--muted)", fontSize: 12 }}>没有匹配的课程、材料或页面</div> : searchResults.map((result, index) => <button
+      {searchOpen && query.trim() && <div id="course-tree-search-results" className="tree-search-results" role="listbox" aria-label="课程树搜索结果">
+        {searchResults.length === 0 ? <div className="tree-search-empty" role="status">没有匹配的课程、材料或页面</div> : searchResults.map((result, index) => <button
           key={result.id}
           id={`course-tree-search-result-${index}`}
           type="button"
+          className="tree-search-result"
           role="option"
           aria-selected={index === activeSearchIndex}
           data-action="tree-search-result"
           data-result-kind={result.node.kind}
           onMouseEnter={() => setActiveSearchIndex(index)}
           onClick={() => activateSearchResult(result)}
-          style={{ display: "grid", width: "100%", gridTemplateColumns: "minmax(0, 1fr)", gap: 2, padding: "8px 10px", border: 0, borderRadius: 6, background: index === activeSearchIndex ? "var(--soft)" : "transparent", color: "var(--ink)", textAlign: "left", cursor: "pointer" }}
-        ><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "var(--font-tree)" }}>{result.label}</strong><small style={{ color: "var(--muted)", fontSize: "var(--font-small)" }}>{result.detail}</small></button>)}
+        ><strong className="tree-search-result-title">{result.label}</strong><small className="tree-search-result-detail">{result.detail}</small></button>)}
       </div>}
     </div>
 
-    <div className="tree-toolbar">
-      <h3 className="tree-toolbar-heading">正式课程</h3>
-      <button data-action="tree-import-material" onClick={onImport}><Icon name="upload" />导入材料</button>
+    <div className="tree-toolbar" role="group" aria-label="项目文件工具">
+      <div className="tree-toolbar-title"><Icon name="folder" /><h3 className="tree-toolbar-heading">项目文件</h3></div>
+      <div className="tree-toolbar-actions" data-action-slot="tree-project-actions">
+        <button type="button" className="tree-toolbar-action" data-action="tree-create-course" onClick={onCreateCourse} aria-label="新建课程" title="新建课程"><Icon name="plus" /></button>
+        <button type="button" className="tree-toolbar-action" data-action="tree-import-material" onClick={onImport} aria-label="导入材料" title="导入材料"><Icon name="upload" /></button>
+      </div>
     </div>
 
     <div className="tree-scroll">
-      <nav aria-label="正式课程">
+      <nav aria-label="项目文件">
       {visibleNodes.length === 0 && <div className="tree-empty"><Icon name="search" /><span>{!tree ? "正在载入课程目录" : query ? "没有匹配的课程、材料或页面" : "还没有课程或材料"}</span></div>}
       {visibleNodes.map((node) => <TreeNode key={node.id} node={node} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={Boolean(query.trim())} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} openMenuNodeId={menu?.node.id} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={Boolean(query.trim())} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(item) => { setDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onPointerDragStart={(item) => { setPointerDraggingNodeId(item.id); setDragAnnouncement(`正在拖动 ${item.title}，请移动到课程或材料上`); }} onDragOver={(item) => setDropTargetId(item.id)} onDrop={handleDrop} onDragEnd={finishDrag} />)}
       {!query.trim() && tree?.trash && <TreeNode key={tree.trash.id} node={tree.trash} allNodes={allNodes} searchMaterials={searchMaterials} searchActive={false} onActivateSearch={activateSearchNode} depth={0} expanded={expanded} selectedPageId={selectedPageId} focusedNodeId={focusedNodeId} openMenuNodeId={menu?.node.id} onFocus={setFocusedNodeId} onToggle={toggle} onSelectPage={onSelectPage} onOpenMenu={openMenu} forceOpen={false} actions={actions} draggingNodeId={draggingNodeId} pointerDraggingNodeId={pointerDraggingNodeId} dropTargetId={dropTargetId} onDragStart={(node) => { setDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onPointerDragStart={(node) => { setPointerDraggingNodeId(node.id); setDragAnnouncement(`正在拖动 ${node.title}，请移动到课程或材料上`); }} onDragOver={(node) => setDropTargetId(node.id)} onDrop={handleDrop} onDragEnd={finishDrag} />}
@@ -352,9 +354,9 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     </div>
 
     <div className="sidebar-footer">
-      <div className="workspace-avatar">A</div>
-      <div><strong>个人工作区</strong><span>ReadWeave 权威存储</span></div>
-      <button className="icon-button" data-action="tree-open-settings" aria-label="工作区设置" onClick={onSettings} title="工作区设置"><Icon name="settings" /></button>
+      <div className="workspace-avatar" aria-hidden="true"><Icon name="user" /></div>
+      <div className="sidebar-footer-copy" title={tree?.title || "课程工作区"}><strong>{tree?.title || "课程工作区"}</strong><span>当前工作区</span></div>
+      <button type="button" className="icon-button" data-action="tree-open-settings" aria-label="工作区设置" onClick={onSettings} title="工作区设置"><Icon name="settings" /></button>
     </div>
     {onResizeStart && <div
       className="sidebar-resize-handle"
@@ -552,6 +554,15 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
   const draggable = isDraggableNode(node);
   const publication = node.kind === "material" ? materialPublication(node, materialInfo) : undefined;
   const runtime = node.kind === "material" ? materialRuntimeStatus(node.status) : undefined;
+  const statusKind = runtime ?? publication?.status;
+  const statusText = [
+    publication ? publication.status === "published" ? "已发布" : "草稿" : undefined,
+    runtime ? treeStatusPresentation[runtime].visibleLabel : undefined
+  ].filter(Boolean).join(" · ");
+  const statusDescription = [
+    publication ? `材料版本：${publication.label}` : undefined,
+    runtime ? `材料状态：${treeStatusPresentation[runtime].label}` : undefined
+  ].filter((label): label is string => Boolean(label)).join("；");
   return <div className="tree-node" data-node-id={node.id} data-dragging={draggingNodeId === node.id || pointerDraggingNodeId === node.id ? "true" : undefined} draggable={draggable} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", node.id); onDragStart(node); }} onDragEnd={onDragEnd}>
     <div className={`tree-row ${selected ? "selected" : ""} ${focusedNodeId === node.id ? "focused" : ""} ${dropTargetId === node.id ? "drop-target" : ""}`} data-depth={depth} data-node-kind={node.kind} style={{ "--tree-depth-px": `${depth * 20}px` } as CSSProperties} onContextMenu={(event) => onOpenMenu(node, event)} onDragOver={(event) => { if (!draggingNodeId || draggingNodeId === node.id) return; const source = flattenTree(allNodes).find(({ node: candidate }) => candidate.id === draggingNodeId)?.node; if (!source || !isValidDrop(source, node)) return; event.preventDefault(); event.dataTransfer.dropEffect = node.kind === "trash" ? "move" : "move"; onDragOver(node); }} onDrop={(event) => { event.preventDefault(); onDrop(node); }}>
       {draggable && <span className="tree-drag-handle" data-action="tree-drag" role="img" aria-label={`拖动 ${node.title}`} title="拖动到其他课程或调整顺序；键盘请使用 Alt+上/下箭头" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onFocus(node.id); setPointerCaptureSafe(event.currentTarget, event.pointerId); onPointerDragStart(node); }}><Icon name="grip" /></span>}
@@ -559,8 +570,7 @@ function TreeNode({ node, allNodes, searchMaterials, searchActive, onActivateSea
         <span className={`tree-chevron ${hasChildren ? "" : "empty"} ${open ? "is-open" : ""}`} aria-hidden="true"><Icon name="chevronRight" /></span>
         <span className={`tree-kind kind-${node.kind}`}><Icon name={node.kind === "course" ? "book" : node.kind === "trash" ? "trash" : node.kind === "material" ? "layers" : node.kind === "section" ? "folder" : node.kind === "module" ? "layers" : node.kind === "release" ? "publish" : "document"} /></span>
         <span className="tree-copy"><strong>{node.title}</strong></span>
-        {publication && <span className={`status-dot status-${publication.status}`} role="img" aria-label={`材料版本：${publication.label}`} title={publication.label}><Icon name={treeStatusPresentation[publication.status].icon} /><span>{publication.label}</span></span>}
-        {runtime && <span className={`status-dot status-${runtime}`} role="img" aria-label={`材料状态：${treeStatusPresentation[runtime].label}`} title={treeStatusPresentation[runtime].label}><Icon name={treeStatusPresentation[runtime].icon} /><span>{treeStatusPresentation[runtime].visibleLabel}</span></span>}
+        {statusKind && statusText && <span className={`status-dot status-${statusKind} tree-row-status`} data-publication-status={publication?.status} data-runtime-status={runtime} role="img" aria-label={statusDescription} title={statusDescription}><Icon name={treeStatusPresentation[statusKind].icon} /><span>{statusText}</span></span>}
       </button>
       {actions && <button className="tree-row-actions" data-action="tree-open-actions" data-action-slot="tree-row-actions" onClick={(event) => onOpenMenu(node, event)} onFocus={() => onFocus(node.id)} aria-label={`打开 ${node.title} 的操作菜单`} aria-haspopup="menu" aria-expanded={openMenuNodeId === node.id} aria-controls={openMenuNodeId === node.id ? "course-tree-context-menu" : undefined} title="更多操作"><span aria-hidden="true">…</span></button>}
     </div>

@@ -26,7 +26,7 @@ describe("quiz presentation does not change saved answers", () => {
   it("disables the whole exclusive-choice group while its answer is pending", () => {
     const html = renderToStaticMarkup(<QuestionChoiceList name="stable-question-key" options={["alpha", "beta"]} answer="alpha" disabled onChange={() => {}} />);
 
-    expect(html).toContain('<fieldset class="choice-list workbench-choice-list" disabled="">');
+    expect(html).toContain('<fieldset class="choice-list workbench-choice-list study-question-choice-list" disabled="">');
     expect(html.match(/type="radio"[^>]*disabled=""/g)).toHaveLength(2);
   });
   it("keeps actual and requested batch sizes separate", () => {
@@ -37,6 +37,7 @@ describe("quiz presentation does not change saved answers", () => {
     expect(html).toContain('disabled=""');
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain('role="status" aria-live="polite"');
+    expect(html).toContain('class="question-batch-controls workbench-control-row study-question-batch"');
   });
   it("associates the batch-size label and explanation with its select", () => {
     const html = renderToStaticMarkup(<QuestionBatchControls requestedCount={3} actualCount={2} pending={false} onChange={() => {}} />);

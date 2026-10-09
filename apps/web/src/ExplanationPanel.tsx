@@ -161,7 +161,7 @@ function LessonSectionView({ section, number, children }: { section?: LessonSect
       : section.kind === "learning_objectives" || section.kind === "main_content" || section.kind === "full_explanation" ? normalizeMalformedBoldLabelClosers(text) : text;
   const visibleMarkdown = (text: string) => section.kind === "misconceptions" ? displayMisconception(text)
     : section.kind === "learning_objectives" || section.kind === "main_content" || section.kind === "full_explanation" ? normalizeMalformedBoldLabelClosers(text) : text;
-  return <article className={`lesson-block section-${section.kind}`} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{visibleItem(item.text)}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{visibleMarkdown(section.markdown)}</Markdown> : null}{children}</article>;
+  return <article className={`lesson-block section-${section.kind}`} data-lesson-section={section.kind} aria-label={section.kind === "main_content" ? "本页要点" : undefined}><SectionTitle number={number} english={section.kind.replaceAll("_", " ")} title={section.title} />{section.items?.length ? <ul className="sentence-list">{section.items.map((item) => <li key={item.id}><Markdown>{visibleItem(item.text)}</Markdown></li>)}</ul> : null}{section.markdown ? <Markdown nestedHeadings>{visibleMarkdown(section.markdown)}</Markdown> : null}{children}</article>;
 }
 
 function PseudoCodeWalkthrough({ lines }: { lines: PseudoCodeLine[] }) {

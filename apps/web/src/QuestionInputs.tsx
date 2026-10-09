@@ -2,6 +2,7 @@ import { useId } from "react";
 import { Markdown } from "./Markdown.js";
 import { WorkbenchSelect } from "./WorkbenchSelect.js";
 import { questionOptionLabel, type QuestionBatchSize } from "./question-preview.js";
+import "./study-workbench.css";
 
 /** Changes only the requested next batch, never the currently saved selection. */
 export function QuestionBatchControls({ requestedCount, actualCount, pending, onChange }: {
@@ -9,8 +10,8 @@ export function QuestionBatchControls({ requestedCount, actualCount, pending, on
   onChange: (value: string) => void;
 }) {
   const id = useId();
-  return <div className="question-batch-controls workbench-control-row" aria-busy={pending}>
-    <div className="question-batch-field">
+  return <div className="question-batch-controls workbench-control-row study-question-batch" aria-busy={pending}>
+    <div className="question-batch-field study-question-batch-field">
       <label className="question-batch-size" htmlFor={id}>
         <span>下一组题数</span>
         <WorkbenchSelect id={id} value={String(requestedCount)} onChange={onChange}
@@ -20,7 +21,7 @@ export function QuestionBatchControls({ requestedCount, actualCount, pending, on
       </label>
       <small id={`${id}-help`}>点击“换一组题”后生效，不改变当前作答。</small>
     </div>
-    <span className="question-batch-actual workbench-status" role="status" aria-live="polite">本组 <strong>{actualCount}</strong> 题</span>
+    <span className="question-batch-actual workbench-status study-question-batch-actual" role="status" aria-live="polite">本组 <strong>{actualCount}</strong> 题</span>
   </div>;
 }
 
@@ -30,7 +31,7 @@ export function QuestionChoiceList({ name, options, answer, disabled, labelledBy
   labelledBy?: string;
   onChange: (value: string) => void;
 }) {
-  return <fieldset className="choice-list workbench-choice-list" disabled={disabled} aria-labelledby={labelledBy}>
+  return <fieldset className="choice-list workbench-choice-list study-question-choice-list" disabled={disabled} aria-labelledby={labelledBy}>
     <legend className="sr-only">请选择一个答案</legend>
     {options.map((option, index) => <label key={`${name}:${index}`}>
       <input type="radio" name={name} value={option} checked={answer === option}

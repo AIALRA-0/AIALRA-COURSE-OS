@@ -2,6 +2,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { CourseRelease, PageLesson } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
 import { displayPriorKnowledge, ExplanationPanel, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
+import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
+
+describe("self-retelling panel presentation", () => {
+  it("keeps its saved-answer field and dynamic page count inside the scoped workbench panel", () => {
+    const release = { id: "release-1", pageIds: ["page-1", "page-2", "page-3"] } as unknown as CourseRelease;
+    const page = { id: "page-1" } as unknown as PageLesson;
+    const markup = renderToStaticMarkup(<SelfRetellingPanel release={release} page={page} />);
+
+    expect(markup).toContain('class="self-retelling-panel workbench-panel study-self-retelling-panel"');
+    expect(markup).toContain("阅读进度 0/3 · 0%");
+    expect(markup).toContain('aria-required="true"');
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('data-action="save-self-retelling"');
+  });
+});
 
 describe("lesson summary", () => {
   it("removes a duplicate leading title while preserving the existing conclusions", () => {

@@ -160,14 +160,44 @@ describe("CourseTree workbench semantics", () => {
       onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
     }));
 
-    expect(markup).toContain('<h2 class="sidebar-title" id="course-tree-title">EE680 Workspace</h2>');
-    expect(markup).toContain('<h3 class="tree-toolbar-heading">正式课程</h3>');
-    expect(markup).toContain('aria-label="搜索课程、材料或页面"');
+    expect(markup).toContain('<h2 class="sidebar-title" id="course-tree-title">课程</h2>');
+    expect(markup).toContain('<h3 class="tree-toolbar-heading">项目文件</h3>');
+    expect(markup).toContain('<strong>EE680 Workspace</strong><span>当前工作区</span>');
+    expect(markup).toContain('aria-label="筛选课程、材料或页面"');
+    expect(markup).toContain('role="search" aria-label="筛选项目文件"');
+    expect(markup).toContain('aria-label="项目文件"');
+    expect(markup).toContain('data-action-slot="tree-project-actions"');
+    expect(markup).toContain('data-action="tree-create-course"');
+    expect(markup).toContain('data-action="tree-import-material"');
+    expect(markup).toContain('data-action="tree-open-settings"');
     expect(markup).toContain('aria-current="page"');
     expect(markup).toContain('aria-haspopup="menu" aria-expanded="false"');
     expect(markup).toContain('data-action-slot="tree-row-actions"');
     expect(markup).toContain('data-action="tree-open-material"');
     expect(markup).toContain('data-action="tree-open-actions"');
+  });
+
+  it("keeps current-version and runtime status in one compact row status beside an ellipsizable title", () => {
+    const title = "A long current course material title that should stay on one tree row";
+    const material = {
+      id: "material-current", kind: "material", title, currentReleaseId: "release-current", releaseId: "release-current",
+      revision: 5, status: "needs_review", children: [], capabilities: ["open_studio"]
+    } as unknown as CourseTreeNode;
+    const course = { id: "course-current", kind: "course", title: "EE680", children: [material], capabilities: [] } as unknown as CourseTreeNode;
+    const markup = renderToStaticMarkup(createElement(CourseTree, {
+      tree: { workspaceId: "workspace-1", title: "课程工作区", courses: [course], rootMaterials: [], updatedAt: "2026-10-09T10:00:00.000Z" },
+      searchMaterials: [{ materialNodeId: material.id, releaseId: "release-current", version: 5, lifecycle: "published", pages: [] }],
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+    }));
+    const rowButton = markup.slice(markup.lastIndexOf("<button", markup.indexOf('data-action="tree-open-material"')), markup.indexOf("</button>", markup.indexOf('data-action="tree-open-material"')) + "</button>".length);
+
+    expect(rowButton).toContain(`title="${title}"`);
+    expect(rowButton).toContain('data-publication-status="published"');
+    expect(rowButton).toContain('data-runtime-status="needs_review"');
+    expect(rowButton).toContain('aria-label="材料版本：已发布 v5；材料状态：需要审核"');
+    expect(rowButton).toContain('title="材料版本：已发布 v5；材料状态：需要审核"');
+    expect(rowButton).toContain("已发布 · 待审");
+    expect(rowButton.match(/class="status-dot/g)).toHaveLength(1);
   });
 
   it("supports wrapped arrow movement, Home/End, and Escape for context menus", () => {

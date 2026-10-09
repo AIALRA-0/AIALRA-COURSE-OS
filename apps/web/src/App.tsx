@@ -5,7 +5,7 @@ import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type C
 import { Icon } from "./Icon.js";
 import { WorkbenchRail } from "./WorkbenchRail.js";
 import { useWorkspaceOverlays } from "./overlay-focus.js";
-import { PaneResizeHandle } from "./PaneResizeHandle.js";
+import { LearningWorkspace } from "./LearningWorkspace.js";
 import { readViewPreference, saveViewPreference } from "./view-preferences.js";
 import { formatActivityAge, formatProgressCount, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
@@ -14,12 +14,8 @@ import { SlideViewer, type ViewState } from "./SlideViewer.js";
 import { BoundedPagePrefetchQueue, ImageResourceCache, settlePagePrefetch } from "./reading-prefetch.js";
 import type { ImportTaskSummary, WebGenerationPlan, WebImportRecord } from "./types.js";
 
-type ExplanationPanelModule = typeof import("./ExplanationPanel.js");
-let explanationPanelLoad: Promise<ExplanationPanelModule> | undefined;
-export function preloadExplanationPanel(): Promise<ExplanationPanelModule> {
-  return explanationPanelLoad ??= import("./ExplanationPanel.js");
-}
-const ExplanationPanel = lazy(() => preloadExplanationPanel().then((module) => ({ default: module.ExplanationPanel })));
+import { preloadExplanationPanel } from "./reader-core.js";
+export { preloadExplanationPanel } from "./reader-core.js";
 const ReviewWorkspace = lazy(() => import("./ReviewWorkspace.js").then((module) => ({ default: module.ReviewWorkspace })));
 const StudioWorkspace = lazy(() => import("./StudioWorkspace.js").then((module) => ({ default: module.StudioWorkspace })));
 
@@ -1065,10 +1061,18 @@ export function App() {
     openTrash: () => setUtilityPanel("trash")
   };
 
+  const modeTabs = (
+        <nav className="mode-switcher" aria-label="工作模式">
+          <ModeButton actionId="mode-learn" active={mode === "learn"} icon="play" label="学习" onClick={() => setMode("learn")} />
+          <ModeButton actionId="mode-studio" active={mode === "studio"} icon="edit" label="制作" onClick={() => setMode("studio")} />
+          <ModeButton actionId="mode-review" active={mode === "review"} icon="review" label="复习" onClick={() => setMode("review")} />
+        </nav>
+  );
+
   if (error) return <main className="empty-state"><span className="empty-logo">CO</span><h1>Course OS 暂时无法启动</h1><p>{error}</p><button className="primary-button" data-action="release-retry" onClick={() => { setError(""); setExplicitReleaseReload((value) => value + 1); }}>重试</button></main>;
   if (loading) return <main className="empty-state"><div className="loader" /><h1>正在建立课程工作区</h1><p>正在读取 ReadWeave、课程树和固定发布版本</p></main>;
   if (!release || !page) return <div className="product-shell" style={shellStyle}>
-    <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>课程学习工作台</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
+    <header className="product-topbar"><div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>学习工作台</small></div></div><div className="product-actions"><button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button><button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已连接" : "等待 ReadWeave"}</span></button><button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button></div></header>
        <StartupReadNotices releaseIndexError={releaseIndexError} releaseIndexLoading={releaseIndexLoading} onRetryReleaseIndex={() => setReleaseIndexReload((value) => value + 1)} treeError={treeError} treeLoading={treeLoading} onRetryTree={() => { setTreeError(""); void refreshMetadata().catch(() => undefined); }} />
        <div className={`product-body ${leftCollapsed ? "left-collapsed" : ""}`}>
         <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} /><CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} onSelectPage={() => undefined} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} /><section className={`product-content empty-course-workspace ${activeImportId ? "task-page-open" : ""}`}>{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} taskTitle={backgroundTasks.find((task) => task.id === activeImportId)?.title} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : releaseId ? <WorkspaceLoader /> : releaseIndexError || releaseIndexLoading ? null : <><span className="empty-logo">CO</span><h1>{tree?.courses.length ? "导入第一份课程材料" : "建立第一门课程"}</h1><p>{tree?.courses.length ? "选择现有课程并导入课件，系统会建立对应页面" : "先建立课程项目，再导入 PPTX、PDF 或 syllabus，系统会在 ReadWeave 中建立对应知识树"}</p><div><button className="primary-button" data-action="empty-create-course" onClick={() => setCreateCourseOpen(true)}><Icon name="plus" />新建课程</button><button className="quiet-button" data-action="empty-import-material" onClick={() => setImportOpen(true)}><Icon name="upload" />导入材料</button></div></>}</section></div>
@@ -1085,18 +1089,15 @@ export function App() {
   return (
     <div className="product-shell" style={shellStyle}>
       <header className="product-topbar">
-        <div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>课程学习工作台</small></div></div>
+        <div className="product-brand"><span className="brand-symbol"><span>C</span><span>O</span></span><div><strong>Course OS</strong><small>学习工作台</small></div></div>
 
-        <nav className="mode-switcher" aria-label="工作模式">
-          <ModeButton actionId="mode-learn" active={mode === "learn"} icon="play" label="学习" onClick={() => setMode("learn")} />
-          <ModeButton actionId="mode-studio" active={mode === "studio"} icon="edit" label="制作" onClick={() => setMode("studio")} />
-          <ModeButton actionId="mode-review" active={mode === "review"} icon="review" label="复习" onClick={() => setMode("review")} />
-        </nav>
 
+
+          <button className="command-button" data-action="open-global-search" onClick={() => setUtilityPanel("search")}><Icon name="search" /><span>搜索课程、页面与命令</span><kbd>{typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd></button>
          <div className="product-actions">
            <button className="mobile-tree-button icon-button" data-action="open-mobile-tree" onClick={() => setMobileTreeOpen(true)} aria-label="打开课程项目树" title="打开课程项目树"><Icon name="panel" /></button>
            <button className={`sync-indicator sync-${sync?.state || "offline"}`} data-action="open-sync-panel" onClick={() => setUtilityPanel("sync")}><span className="live-dot"/><span>{sync?.state === "connected" ? "ReadWeave 已同步" : "同步状态异常"}</span>{conflicts.length > 0 && <b>{conflicts.length}</b>}</button>
-          <button className="command-button" data-action="open-global-search" onClick={() => setUtilityPanel("search")}><Icon name="command" /><span>全局搜索</span><kbd>{typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd></button>
+
           <button className="icon-button" data-action="toggle-theme" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={theme === "light" ? "切换深色模式" : "切换浅色模式"}><Icon name={theme === "light" ? "moon" : "sun"} /></button>
           <button className="profile-button" data-action="open-account" onClick={() => setUtilityPanel("account")} aria-label="账户菜单">A</button>
         </div>
@@ -1107,10 +1108,11 @@ export function App() {
         <WorkbenchRail collapsed={leftCollapsed} drawerOpen={mobileTreeOpen} panel={utilityPanel} onCourses={() => window.innerWidth <= 900 ? setMobileTreeOpen((value) => !value) : setLeftCollapsed((value) => !value)} onSearch={() => setUtilityPanel("search")} onTrash={() => setUtilityPanel("trash")} onImport={() => setImportOpen(true)} onSettings={() => setUtilityPanel("settings")} onAccount={() => setUtilityPanel("account")} />
         <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={(ids) => void clearFailedTasks(ids)} clearFailedBusy={clearFailedBusy} selectedTaskId={activeImportId} onSelectTask={trackImport} collapsed={leftCollapsed} onCollapse={() => setLeftCollapsed((value) => !value)} sidebarWidth={sidebarWidth} onResizeStart={startSidebarResize} onResizeKeyboard={adjustSidebarWidth} actions={treeActions} selectedPageId={page.id} onSelectPage={selectPage} onImport={() => setImportOpen(true)} onCreateCourse={() => setCreateCourseOpen(true)} onSettings={() => setUtilityPanel("settings")} />
         <section className={`product-content ${mode === "learn" ? "learning-content-layout" : ""}`}>
+          {(mode !== "learn" || activeImportId) && modeTabs}
           {sessionWarning && <p className="empty-inline" role="status">{sessionWarning}</p>}
           {mode === "learn" && release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.page && candidatePreview.notice && candidatePreview.generatedReady !== false && <p className="empty-inline" role="status">{candidatePreview.notice}{candidatePreview.unavailable && <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={() => setMode("studio")}>进入制作模式</button>}</p>}
           {mode === "learn" ? <div className="learning-content-slot">{activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
-            {mode === "learn" && <LearningWorkspace release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} unpublishedDraftRevision={pageCache.get(pageSnapshotCacheKey(release.id, page.id))?.unpublishedDraftRevision} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
+            {mode === "learn" && <LearningWorkspace modeTabs={modeTabs} release={previewRelease ?? release} pageIndex={pageIndex} setPageIndex={setPageIndex} onPrefetchPage={(targetIndex, priority = 10) => prefetchPage(targetIndex, priority)} imageResources={imageResources} session={session?.courseReleaseId === release.id ? session : undefined} view={view} updateView={updateView} mobileMode={mobileMode} setMobileMode={setMobileMode} pageDockOpen={pageDockOpen} setPageDockOpen={setPageDockOpen} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onEnterStudio={() => setMode("studio")} unpublishedDraftRevision={pageCache.get(pageSnapshotCacheKey(release.id, page.id))?.unpublishedDraftRevision} generatedReady={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === true} contentReady={release.lifecycle === "draft_source" ? Boolean(candidatePreview?.pageId === page.id && candidatePreview.page) : pageDetailReady} contentError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id ? candidatePreview.error : undefined : currentFormalPageError?.message} contentNotice={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id ? candidatePreview.notice : undefined} contentReviewRequired={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && candidatePreview.generatedReady === false && Boolean(candidatePreview.page && candidatePreview.notice)} contentUnavailable={release.lifecycle === "draft_source" && candidatePreview?.pageId === page.id && Boolean(candidatePreview.unavailable)} contentTerminalError={release.lifecycle === "draft_source" ? candidatePreview?.pageId === page.id && candidatePreview.terminal === true : currentFormalPageError?.terminal === true} onRetryContent={() => release.lifecycle === "draft_source" ? setCandidatePreviewReload((value) => value + 1) : setFormalPageReload((value) => value + 1)} />}
           </Suspense>}</div> : activeImportId ? <ImportActivityDock key={activeImportId} importId={activeImportId} onReady={handleImported} onOpen={(record, nextMode) => void openImported(record, nextMode)} onProgress={() => setCandidatePreviewReload((value) => value + 1)} onClose={() => trackImport(undefined)} /> : <Suspense fallback={<WorkspaceLoader />}>
             {mode === "studio" && !pageDetailReady && release.lifecycle !== "draft_source" && <div className="workspace-loader compact" role="status">{currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type="button" className="quiet-button compact" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></> : <><div className="loader" /><span>正在载入页面详情</span></>}</div>}
             {pageDetailReady && mode === "studio" && <StudioWorkspace key={`${release.id}:${page.id}`} release={release} page={page} sync={sync} imageResources={imageResources} rightCollapsed={rightCollapsed} onToggleRight={() => setRightCollapsed((value) => !value)} onPublished={handlePublished} onChanged={() => refreshMetadata().catch(() => undefined)} />}
@@ -1157,101 +1159,6 @@ function MobileTreeDrawer({ tree, searchMaterials, selectedPageId, selectedTaskI
     <div className="mobile-tree-drawer" role="dialog" aria-modal="true" aria-label="课程项目树" onMouseDown={(event) => event.stopPropagation()}>
       <CourseTree tree={tree} searchMaterials={searchMaterials} backgroundTasks={backgroundTasks} onClearFailed={onClearFailed} clearFailedBusy={clearFailedBusy} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} selectedPageId={selectedPageId} collapsed={false} onCollapse={onClose} onSelectPage={onSelectPage} onImport={onImport} onCreateCourse={onCreateCourse} onSettings={onSettings} actions={actions} />
     </div>
-  </div>;
-}
-
-function LearningWorkspace({ release, pageIndex, setPageIndex, onPrefetchPage, imageResources, session, view, updateView, mobileMode, setMobileMode, pageDockOpen, setPageDockOpen, rightCollapsed, onToggleRight, onEnterStudio, unpublishedDraftRevision, generatedReady, contentReady = true, contentError, contentNotice, contentReviewRequired = false, contentUnavailable = false, contentTerminalError = false, onRetryContent }: {
-  release: CourseRelease;
-  pageIndex: number;
-  setPageIndex: Dispatch<SetStateAction<number>>;
-  onPrefetchPage: (index: number, priority?: number) => void;
-  imageResources: ImageResourceCache;
-  session?: LearningSession;
-  view: ViewState;
-  updateView: (next: ViewState) => void;
-  mobileMode: MobileMode;
-  setMobileMode: (mode: MobileMode) => void;
-  pageDockOpen: boolean;
-  setPageDockOpen: Dispatch<SetStateAction<boolean>>;
-  rightCollapsed: boolean;
-  onToggleRight: () => void;
-  onEnterStudio: () => void;
-  unpublishedDraftRevision?: number;
-  generatedReady?: boolean;
-  contentReady?: boolean;
-  contentError?: string;
-  contentNotice?: string;
-  contentReviewRequired?: boolean;
-  contentUnavailable?: boolean;
-  contentTerminalError?: boolean;
-  onRetryContent?: () => void;
-}) {
-  const page = release.pages[pageIndex]!;
-  const canShowContent = contentReady && !contentTerminalError;
-  const lessonColumnRef = useRef<HTMLDivElement>(null);
-  const lessonStripRef = useRef<HTMLElement>(null);
-  const [sourceHidden, setSourceHidden] = useState(false);
-  const [panesSwapped, setPanesSwapped] = useState(() => readViewPreference("course-os-panes-swapped") === "true");
-  const [sourceWidth, setSourceWidth] = useState(() => {
-    const saved = Number(readViewPreference("course-os-source-width"));
-    return Number.isFinite(saved) && saved >= 25 && saved <= 65 ? saved : 42;
-  });
-  const [layoutNotice, setLayoutNotice] = useState("");
-  useEffect(() => {
-    if (!saveViewPreference("course-os-source-width", String(sourceWidth)) || !saveViewPreference("course-os-panes-swapped", String(panesSwapped))) {
-      setLayoutNotice("布局偏好无法保存在此浏览器，本次调整仍可使用");
-    } else setLayoutNotice("");
-  }, [sourceWidth, panesSwapped]);
-  const toggleLessonPane = () => { if (!rightCollapsed && sourceHidden) setSourceHidden(false); onToggleRight(); };
-
-
-  useEffect(() => {
-    lessonColumnRef.current?.scrollTo({ top: 0, behavior: "auto" });
-    if (!pageDockOpen) return;
-    const strip = lessonStripRef.current;
-    const active = strip?.querySelector<HTMLElement>('[aria-current="page"]');
-    if (!strip || !active) return;
-    strip.scrollTo({
-      left: active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2,
-      behavior: "auto",
-    });
-  }, [page.id, pageDockOpen, release.id]);
-
-  return <div className="learning-workspace">
-    <header className="learning-header">
-      <div><div className="breadcrumbs"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span></div><h1>{page.title}</h1></div>
-      <div className="learning-header-actions"><div className="reading-layout-tools" role="group" aria-label="阅读面板布局">
-        <button className="icon-button" data-action="toggle-source-pane" aria-label={sourceHidden ? "展开原始课件" : "收起原始课件"} title={sourceHidden ? "展开原始课件" : "收起原始课件"} aria-pressed={!sourceHidden} onClick={() => { if (!sourceHidden && rightCollapsed) onToggleRight(); setSourceHidden(value => !value); }}><Icon name="eye" /></button>
-        <button className="icon-button" data-action="swap-reading-panes" aria-label="交换原图与讲解位置" title="交换原图与讲解位置" aria-pressed={panesSwapped} onClick={() => setPanesSwapped(value => !value)}><Icon name="swap" /></button>
-      </div><button className="quiet-button" data-action="learn-open-studio" onClick={onEnterStudio}><Icon name="edit" />制作本页</button><div className="learning-progress"><span>学习进度</span><strong>{pageIndex + 1} / {release.pages.length}</strong><div><i style={{ width: `${(pageIndex + 1) / release.pages.length * 100}%` }} /></div></div></div>
-      {layoutNotice && <span className="layout-preference-notice" role="status">{layoutNotice}</span>}
-    </header>
-
-    <nav className="mobile-tabs" aria-label="手机学习模式">
-      <button className={mobileMode === "visual" ? "active" : ""} data-action="mobile-visual" onClick={() => setMobileMode("visual")}>原始课件</button>
-      <button className={mobileMode === "lesson" ? "active" : ""} data-action="mobile-lesson" onClick={() => { if (rightCollapsed) onToggleRight(); setMobileMode("lesson"); }}>老师讲解</button>
-      <button className={mobileMode === "practice" ? "active" : ""} data-action="mobile-practice" onClick={() => { if (rightCollapsed) onToggleRight(); setMobileMode("practice"); }}>提问与测验</button>
-    </nav>
-
-    <main className={`learning-grid mode-${mobileMode} ${rightCollapsed ? "right-is-collapsed" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${panesSwapped ? "panes-swapped" : ""}`} style={{ "--source-width": `${sourceWidth}%` } as CSSProperties}>
-      {sourceHidden && <aside className="source-collapsed-rail"><button className="icon-button" data-action="expand-source-pane" aria-label="展开原始课件" title="展开原始课件" onClick={() => setSourceHidden(false)}><Icon name="eye" /></button></aside>}
-      <div className="visual-column">{contentTerminalError
-        ? <div className="empty-inline" role="alert">{contentError || "当前页面已无权访问或已删除"}</div>
-        : <SlideViewer imageUrl={page.imageUrl} title={page.title} value={view} onChange={updateView} imageResources={imageResources} />}</div>
-      {!sourceHidden && !rightCollapsed && <PaneResizeHandle value={sourceWidth} onChange={setSourceWidth} reversed={panesSwapped} />}
-      {rightCollapsed
-          ? <aside className="right-collapsed-rail"><button data-action="right-expand-learn" onClick={toggleLessonPane} aria-label="展开教学栏" title="展开教学栏"><Icon name="chevronLeft" /><span>展开讲解</span></button></aside>
-        : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span>老师讲解</span><button data-action="right-collapse-learn" onClick={toggleLessonPane} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}
-    </main>
-
-    <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
-      <div className="page-dock-summary">
-        <button data-action="page-previous" disabled={pageIndex === 0} title={pageIndex === 0 ? "已经是第一页" : "打开上一页"} onMouseEnter={() => onPrefetchPage(pageIndex - 1)} onFocus={() => onPrefetchPage(pageIndex - 1)} onPointerDown={() => onPrefetchPage(pageIndex - 1, 20)} onClick={() => setPageIndex((index) => index - 1)}><Icon name="arrowLeft" />上一页</button>
-        <button className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起全部页面" : `展开全部 ${release.pages.length} 页`}</small><Icon name={pageDockOpen ? "chevronUp" : "chevronDown"} /></button>
-        <button className="button-icon-trailing" data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onMouseEnter={() => onPrefetchPage(pageIndex + 1)} onFocus={() => onPrefetchPage(pageIndex + 1)} onPointerDown={() => onPrefetchPage(pageIndex + 1, 20)} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
-      </div>
-      {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)} onPointerDown={() => onPrefetchPage(index, 20)} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>}
-    </footer>
   </div>;
 }
 

@@ -5,6 +5,7 @@ import { Icon } from "./Icon.js";
 import { Markdown } from "./Markdown.js";
 import type { ImageResourceCache } from "./reading-prefetch.js";
 import { SlideViewer } from "./SlideViewer.js";
+import "./studio-workbench.css";
 
 const BLOCK_LABELS: Record<ExplanationBlock["kind"], string> = {
   objective: "学习目标",
@@ -166,6 +167,14 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
     covered: workingPage.coverageClaims.filter((claim) => claim.status === "covered").length,
     total: workingPage.coverageRequirements.length
   }), [workingPage]);
+  const footerStatus = busy === "load" ? "正在读取草稿"
+    : busy === "save" ? "正在同步草稿"
+      : busy === "validate" ? "正在运行质量检查"
+        : busy === "publish" ? "正在发布版本"
+          : busy === "generate" ? "正在建立生成任务"
+            : busy === "refill" ? "正在补充题库"
+              : dirty ? "有未保存修改"
+                : draft ? `草稿修订 ${draft.revision}` : "草稿尚未建立";
 
   const onInspectorTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const currentIndex = INSPECTOR_TABS.indexOf(inspector);
@@ -182,18 +191,18 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
   };
 
   return (
-    <div className="studio-workspace">
-      <header className="workspace-header">
+    <div className="studio-workspace studio-workbench-v2">
+      <header className="workspace-header studio-workbench-header">
         <div className="workspace-title">
           <nav className="breadcrumbs" aria-label="当前位置"><span>{release.courseTitle}</span><Icon name="chevronRight" /><span>{release.moduleTitle}</span><Icon name="chevronRight" /><strong aria-current="page">第 {page.pageNumber} 页</strong></nav>
           <div className="title-line"><h1>{workingPage.title}</h1><span className={`draft-pill ${dirty ? "dirty" : ""}`}>{dirty ? "有未保存修改" : draft?.revision ? `草稿修订 ${draft.revision}` : "基于正式版本"}</span></div>
         </div>
         <div className="workspace-actions" role="group" aria-label="页面制作操作" data-action-slot="studio-header-actions">
-          <button type="button" className="quiet-button" data-action="studio-generate-page" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "只重新生成当前页面"} onClick={generate}><Icon name="sparkles" />{busy === "generate" ? "建立任务中" : "生成本页"}</button>
-          <button type="button" className="quiet-button" data-action="studio-toggle-preview" aria-pressed={editorMode === "preview"} onClick={() => setEditorMode(editorMode === "edit" ? "preview" : "edit")}><Icon name={editorMode === "edit" ? "eye" : "edit"} />{editorMode === "edit" ? "预览" : "编辑"}</button>
-          <button type="button" className="quiet-button" data-action="studio-save-draft" disabled={!dirty || Boolean(busy)} title={!dirty ? "当前没有需要保存的修改" : busy ? "请等待当前操作结束" : "保存到 ReadWeave 草稿"} onClick={save}><Icon name="cloud" />{busy === "save" ? "同步中" : "保存草稿"}</button>
-          <button type="button" className="quiet-button" data-action="studio-validate" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "运行确定性发布检查"} onClick={validate}><Icon name="check" />质量检查</button>
-          <button type="button" className="primary-button" data-action="studio-publish" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "通过质量门后发布不可变版本"} onClick={publish}><Icon name="publish" />{busy === "publish" ? "发布中" : "发布版本"}</button>
+          <button type="button" className="quiet-button" data-action="studio-generate-page" aria-label={busy === "generate" ? "正在建立生成任务" : "生成本页"} disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "只重新生成当前页面"} onClick={generate}><Icon name="sparkles" />{busy === "generate" ? "建立任务中" : "生成本页"}</button>
+          <button type="button" className="quiet-button" data-action="studio-toggle-preview" aria-label={editorMode === "edit" ? "学习预览" : "返回编辑"} aria-pressed={editorMode === "preview"} onClick={() => setEditorMode(editorMode === "edit" ? "preview" : "edit")}><Icon name={editorMode === "edit" ? "eye" : "edit"} />{editorMode === "edit" ? "预览" : "编辑"}</button>
+          <button type="button" className="quiet-button" data-action="studio-save-draft" aria-label={busy === "save" ? "正在同步草稿" : "保存草稿"} disabled={!dirty || Boolean(busy)} title={!dirty ? "当前没有需要保存的修改" : busy ? "请等待当前操作结束" : "保存到 ReadWeave 草稿"} onClick={save}><Icon name="cloud" />{busy === "save" ? "同步中" : "保存草稿"}</button>
+          <button type="button" className="quiet-button" data-action="studio-validate" aria-label="质量检查" disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "运行确定性发布检查"} onClick={validate}><Icon name="check" />质量检查</button>
+          <button type="button" className="primary-button" data-action="studio-publish" aria-label={busy === "publish" ? "正在发布版本" : "发布版本"} disabled={Boolean(busy)} title={busy ? "请等待当前操作结束" : "通过质量门后发布不可变版本"} onClick={publish}><Icon name="publish" />{busy === "publish" ? "发布中" : "发布版本"}</button>
         </div>
       </header>
 
@@ -208,18 +217,20 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
 
           <section className="lesson-editor">
             <div className="section-heading"><div><span className="section-kicker">TEACHING DRAFT</span><h2>教授级讲解</h2></div><div className="segmented" role="group" aria-label="讲解显示模式" data-action-slot="studio-editor-mode"><button type="button" className={editorMode === "edit" ? "active" : ""} aria-pressed={editorMode === "edit"} onClick={() => setEditorMode("edit")}>编辑</button><button type="button" className={editorMode === "preview" ? "active" : ""} aria-pressed={editorMode === "preview"} onClick={() => setEditorMode("preview")}>学习预览</button></div></div>
-            <div className="editor-block-list">
-              {visibleBlocks.map((block, index) => (
-                <article key={block.id} className={`editor-block ${changedBlocks.has(block.id) ? "changed" : ""}`}>
-                  <header><span className="block-index">{String(index + 1).padStart(2, "0")}</span><div><span>{BLOCK_LABELS[block.kind]}</span><input value={block.title} onChange={(event) => updateBlock(block.id, { title: event.target.value })} aria-label={`${BLOCK_LABELS[block.kind]}标题`} /></div><span className="block-state">{changedBlocks.has(block.id) ? "已修改" : "已同步"}</span></header>
-                  {editorMode === "edit"
-                    ? <textarea value={block.markdown} onChange={(event) => updateBlock(block.id, { markdown: event.target.value })} aria-label={`${block.title}内容`} />
-                    : <div className="block-preview"><Markdown>{block.markdown}</Markdown></div>}
-                  <footer><span><Icon name="target" />{block.atomIds.length} 个教学元素</span><span><Icon name="archive" />{block.sourceAnchorIds.length} 个来源锚点</span></footer>
-                </article>
-              ))}
+            <div className="studio-editor-content">
+              <div className="editor-block-list">
+                {visibleBlocks.map((block, index) => (
+                  <article key={block.id} className={`editor-block ${changedBlocks.has(block.id) ? "changed" : ""}`}>
+                    <header><span className="block-index">{String(index + 1).padStart(2, "0")}</span><div><span>{BLOCK_LABELS[block.kind]}</span><input value={block.title} onChange={(event) => updateBlock(block.id, { title: event.target.value })} aria-label={`${BLOCK_LABELS[block.kind]}标题`} /></div><span className="block-state">{changedBlocks.has(block.id) ? "已修改" : "已同步"}</span></header>
+                    {editorMode === "edit"
+                      ? <textarea value={block.markdown} onChange={(event) => updateBlock(block.id, { markdown: event.target.value })} aria-label={`${block.title}内容`} />
+                      : <div className="block-preview"><Markdown>{block.markdown}</Markdown></div>}
+                    <footer><span><Icon name="target" />{block.atomIds.length} 个教学元素</span><span><Icon name="archive" />{block.sourceAnchorIds.length} 个来源锚点</span></footer>
+                  </article>
+                ))}
+              </div>
+              <QuestionBankEditor page={workingPage} dirty={dirty} busy={busy === "refill"} onRefill={() => void refillQuestions()} onChange={updateQuestion} />
             </div>
-            <QuestionBankEditor page={workingPage} dirty={dirty} busy={busy === "refill"} onRefill={() => void refillQuestions()} onChange={updateQuestion} />
           </section>
         </main>
 
@@ -241,6 +252,11 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
           </div>
         </aside>}
       </div>
+      <footer className="studio-workbench-footer" aria-label="页面工作状态">
+        <span className={`studio-footer-state${dirty ? " is-dirty" : ""}`} role="status"><i aria-hidden="true" />{footerStatus}</span>
+        <span>{visibleBlocks.length} 个讲解区块</span>
+        <span>{workingPage.anchors.length} 个来源锚点</span>
+      </footer>
     </div>
   );
 }

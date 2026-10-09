@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 import "./workbench.css";
+import "./workbench-layout.css";
 import { App } from "./App.js";
 
 createRoot(document.getElementById("root")!).render(

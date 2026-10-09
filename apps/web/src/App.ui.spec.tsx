@@ -188,9 +188,11 @@ describe("global search and startup notices", () => {
 describe("saved lesson navigation", () => {
   it("starts the same lazy reading-module import on learn entry and shares it with Suspense rendering", async () => {
     const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-    expect(source).toContain("let explanationPanelLoad: Promise<ExplanationPanelModule> | undefined");
-    expect(source).toContain("return explanationPanelLoad ??= import(\"./ExplanationPanel.js\")");
-    expect(source).toContain("const ExplanationPanel = lazy(() => preloadExplanationPanel()");
+    const reader = await readFile(new URL("./reader-core.ts", import.meta.url), "utf8");
+    const workspace = await readFile(new URL("./LearningWorkspace.tsx", import.meta.url), "utf8");
+    expect(reader).toContain("let load: Promise<ExplanationPanelModule> | undefined");
+    expect(reader).toContain("return load ??= import(\"./ExplanationPanel.js\")");
+    expect(workspace).toContain("const ExplanationPanel = lazy(() => preloadExplanationPanel()");
     expect(source).toContain('if (mode === "learn") void preloadExplanationPanel().catch(() => undefined)');
     expect(source).toContain('const ReviewWorkspace = lazy(() => import("./ReviewWorkspace.js")');
     expect(source).toContain('const StudioWorkspace = lazy(() => import("./StudioWorkspace.js")');
@@ -208,7 +210,8 @@ describe("saved lesson navigation", () => {
     expect(source).toContain("new BoundedPagePrefetchQueue(2)");
     expect(source).toContain("prefetchPage(pageIndex + 1)");
     expect(source).toContain("prefetchPage(pageIndex - 1)");
-    expect(source).toContain("onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)}");
+    const workspace = await readFile(new URL("./LearningWorkspace.tsx", import.meta.url), "utf8");
+    expect(workspace).toContain("onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)}");
   });
 
   it("keeps the rendered image tied to its URL while using the learn-only decoded image cache", async () => {
@@ -226,13 +229,16 @@ describe("saved lesson navigation", () => {
   it("shows formal page read failures with same-page retry and shares the image cache with Studio", async () => {
     const appSource = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     const studioSource = await readFile(new URL("./StudioWorkspace.tsx", import.meta.url), "utf8");
+    const workspace = await readFile(new URL("./LearningWorkspace.tsx", import.meta.url), "utf8");
+    const inspector = await readFile(new URL("./ReadingInspector.tsx", import.meta.url), "utf8");
 
     expect(appSource).toContain("currentFormalPageError ? <><span>{currentFormalPageError.message}</span><button type=\"button\" className=\"quiet-button compact\" onClick={() => setFormalPageReload((value) => value + 1)}>重试</button></>");
     expect(appSource).toContain("imageResources={imageResources} rightCollapsed={rightCollapsed}");
-    expect(appSource).toMatch(/<div className="visual-column">\{contentTerminalError\s*\? <div className="empty-inline" role="alert">/);
-    expect(appSource).toContain(": <SlideViewer imageUrl={page.imageUrl}");
-    expect(appSource).toContain("const canShowContent = contentReady && !contentTerminalError;");
-    expect(appSource).toContain("{canShowContent ? <Suspense");
+    expect(workspace).toContain('terminalError={contentTerminalError ? contentError || "当前页面已无权访问或已删除" : undefined}');
+    expect(inspector).toContain('terminalError ? <p className="empty-inline" role="alert">');
+    expect(inspector).toContain(": <SlideViewer imageUrl={page.imageUrl}");
+    expect(workspace).toContain("const canShowContent = contentReady && !contentTerminalError;");
+    expect(workspace).toContain("{canShowContent ? <Suspense");
     expect(studioSource).toContain("imageResources: ImageResourceCache;");
     expect(studioSource).toContain("<SlideViewer imageUrl={workingPage.imageUrl} title={workingPage.title} value={view} onChange={setView} imageResources={imageResources} />");
   });
@@ -456,7 +462,8 @@ describe("saved lesson navigation", () => {
     expect(preview?.notice).toContain("题库当前有 2 道可用题");
     expect(preview?.notice).not.toContain("待补齐");
     expect(preview?.notice).toContain("无需重试读取，请进入制作模式");
-    expect(source).toContain("canShowContent && contentReviewRequired && contentNotice");
+    const workspace = await readFile(new URL("./LearningWorkspace.tsx", import.meta.url), "utf8");
+    expect(workspace).toContain("canShowContent && contentReviewRequired && contentNotice");
     expect(readCurrentDraft).not.toHaveBeenCalled();
   });
 
