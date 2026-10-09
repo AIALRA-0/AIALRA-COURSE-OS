@@ -1,0 +1,106 @@
+apps/api/src/reading-routes.spec.ts
+  s_e8850ef125fb32::t_70ec286a459e4f 76-109,111-116,118-155
+  s_e8850ef125fb32::t_c07f89ff5c19db 205-218
+  s_e8850ef125fb32::t_fcfa6bb90fe856 9,156-204
+  s_e8850ef125fb32::t_cd37e60e6ae9cf 110,117
+apps/api/src/writing-standards.spec.ts
+  s_e8850ef125fb32::t_a5f22072201e8f 49-50
+  s_e8850ef125fb32::t_4967102729c5ec 1-48,51-73
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_f2b486d78e0c86 5,8
+apps/web/src/workbench-layout.css
+  s_e8850ef125fb32::t_56664e5ca05605 27-30,193-195
+.gitattributes
+  s_e8850ef125fb32::t_e74c22676e5282 8
+  s_e8850ef125fb32::t_fc97474c51ce48 9
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_5ea31b44700b40 1091-1092,1347,1365,1381,1495,1518,1566
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_600781331fec59 5,11
+  s_e8850ef125fb32::t_fa926bb0de9817 15,21,23,25-26,34,37,39
+apps/api/src/reading-replica.ts
+  s_e8850ef125fb32::t_0ed81887b9cacd 165,167-168,170
+  s_e8850ef125fb32::t_a60131bcec2393 15,153-158,169,1134
+docs/generation-writing-standards.md
+  s_e8850ef125fb32::t_e74c22676e5282 1-29
+config/generation-harness/page-plan-prompt.md
+  s_e8850ef125fb32::t_ed1b6e35cb271c 8
+  s_e8850ef125fb32::t_6e5a15b8aa8c3c 3-4
+vitest.config.ts
+  s_e8850ef125fb32::t_fc97474c51ce48 7
+apps/web/src/StudioWorkspace.tsx
+  s_e8850ef125fb32::t_4ad1c17369730b 8,223,276-277,285
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_437dcd36c9da54 4,466
+  s_e8850ef125fb32::t_ed1b6e35cb271c 5,315
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_56664e5ca05605 16-17,52,1373-1374
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_9624426eddb650 1037
+  s_e8850ef125fb32::t_e3dba6b74043bb 57,62,64-65,262,326,464,563,1041-1042
+apps/api/src/writing-standards.ts
+  s_e8850ef125fb32::t_87aae3dcda33d1 1-74,76-83
+  s_e8850ef125fb32::t_a5f22072201e8f 75
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_f2b486d78e0c86 317,320
+scripts/sync-writing-standards.ts
+  s_e8850ef125fb32::t_b94e0868236136 1-44
+apps/api/src/reading-replica.spec.ts
+  s_e8850ef125fb32::t_0ce7ab8fe0c2fb 4,6,14,120-152
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_04c1fc5e7204f0 3,485,867,957-964,1004-1005
+apps/web/src/StudioWorkspace.spec.tsx
+  s_e8850ef125fb32::t_04f2116280ae35 1-50
+apps/web/src/CourseTree.spec.tsx
+  s_e8850ef125fb32::t_0a04c847c2a376 351,354
+apps/web/src/Icon.spec.tsx
+  s_e8850ef125fb32::t_04f2116280ae35 1-27
+scripts/verify-writing.ts
+  s_e8850ef125fb32::t_b1f89ee008623f 8,18,34,40-42,74-75
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_9624426eddb650 1,5771-5775,5797
+  s_e8850ef125fb32::t_d8202cc7470d63 3061-3062,3069-3098,3100-3111,3248-3252,3257,3259-3265
+  s_e8850ef125fb32::t_ffa69faa5791b6 999-1004,1011,1015,1018,1020,1023,3099
+  s_e8850ef125fb32::t_f2b486d78e0c86 4894
+  s_e8850ef125fb32::t_7b486985e2c68c 2401,2638,2640,2646,2705,2707
+  s_e8850ef125fb32::t_6d18e821c6bbba 59
+apps/api/src/generation-harness.ts
+  s_e8850ef125fb32::t_437dcd36c9da54 5,36,44
+apps/web/src/Icon.tsx
+  s_e8850ef125fb32::t_56664e5ca05605 28-29,31
+apps/web/src/WorkbenchSelect.css
+  s_e8850ef125fb32::t_56664e5ca05605 12
+config/generation-harness/writing-format-contract.md
+  s_e8850ef125fb32::t_ed1b6e35cb271c 3,11,21,52,71-80
+  s_e8850ef125fb32::t_600781331fec59 81-104
+apps/web/src/studio-workbench.css
+  s_e8850ef125fb32::t_0c75e24cff140e 477
+  s_e8850ef125fb32::t_1ccb92ce1a7c0b 476,533-537
+  s_e8850ef125fb32::t_abd52ffb9ea78f 4,10,22,24,26,32,53,68,103-105,108,112,117-118,122,134-135,155,186,190,192,201,378,451-475,478-510,512-513,515,517,519,521-532
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_1c82de086bad25 3,9-10
+config/generation-harness/style-standard-source.md
+  s_e8850ef125fb32::t_30a9fb94424651 1-1547
+config/generation-harness/writing-standard-source.md
+  s_e8850ef125fb32::t_614d27cbcd62d2 1-1906
+config/writing-policy-manifest.json
+  s_e8850ef125fb32::t_e5bfb59dfb89c1 3-4,6-7,10-12,15-17,20
+config/writing-policy-snapshots/e80ace58d560a2b0.json
+  s_e8850ef125fb32::t_58273753a92621 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "73e5bd8973b1d5a46ff9b698ec4d64157e673fff",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
