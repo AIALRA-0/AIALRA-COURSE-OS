@@ -68,7 +68,7 @@ const treeStatusPresentation = {
   conflict: { icon: "warning", label: "存在冲突", visibleLabel: "冲突" }
 } as const;
 
-export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, onClearFailed, clearFailedBusy = false, collapsed = false, onCollapse, sidebarWidth, sidebarMaxWidth = 640, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, onSettings, actions }: {
+export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTasks = [], searchMaterials = [], onSelectTask, onClearFailed, clearFailedBusy = false, collapsed = false, onCollapse, sidebarWidth, sidebarMaxWidth = 640, onResizeStart, onResizeKeyboard, onSelectPage, onImport, onCreateCourse, actions }: {
   tree?: WorkspaceTree;
   selectedPageId?: string;
   selectedTaskId?: string;
@@ -86,7 +86,6 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
   onSelectPage: (releaseId: string, pageId: string) => void;
   onImport: () => void;
   onCreateCourse: () => void;
-  onSettings: () => void;
   actions?: CourseTreeActions;
 }) {
   const [query, setQuery] = useState("");
@@ -291,7 +290,6 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
     <button type="button" className="sidebar-expand-button" data-action="tree-expand" onClick={onCollapse} aria-label="展开课程项目树" title="展开课程项目树"><Icon name="chevronRight" /></button>
     <button type="button" className="sidebar-rail-button" data-action="tree-create-course" onClick={onCreateCourse} aria-label="新建课程" title="新建课程"><Icon name="plus" /></button>
     <button type="button" className="sidebar-rail-button" data-action="tree-import-material" onClick={onImport} aria-label="导入材料" title="导入材料"><Icon name="upload" /></button>
-    <button type="button" className="sidebar-rail-button sidebar-rail-bottom" data-action="tree-open-settings" onClick={onSettings} aria-label="工作区设置" title="工作区设置"><Icon name="settings" /></button>
   </aside>;
 
   return <aside className="course-sidebar course-navigator" aria-labelledby="course-tree-title">
@@ -354,11 +352,6 @@ export function CourseTree({ tree, selectedPageId, selectedTaskId, backgroundTas
       <TaskRows tasks={backgroundTasks} query={query} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} onClearFailed={onClearFailed} clearFailedBusy={clearFailedBusy} />
     </div>
 
-    <div className="sidebar-footer">
-      <div className="workspace-avatar" aria-hidden="true"><Icon name="user" /></div>
-      <div className="sidebar-footer-copy" title={tree?.title || "课程工作区"}><strong>{tree?.title || "课程工作区"}</strong><span>当前工作区</span></div>
-      <button type="button" className="icon-button" data-action="tree-open-settings" aria-label="工作区设置" onClick={onSettings} title="工作区设置"><Icon name="settings" /></button>
-    </div>
     {onResizeStart && <div
       className="sidebar-resize-handle"
       role="separator"

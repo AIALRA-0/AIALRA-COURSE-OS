@@ -12,6 +12,7 @@ import { beginCandidatePreviewLoad, beginFormalPageLoad, beginImportCostRead, bu
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
     expect(normalizeSidebarWidth(null)).toBe(SIDEBAR_DEFAULT_WIDTH);
+    expect(normalizeSidebarWidth("256")).toBe(320);
     expect(normalizeSidebarWidth("80")).toBe(SIDEBAR_DEFAULT_WIDTH);
     expect(normalizeSidebarWidth("not-a-width")).toBe(SIDEBAR_DEFAULT_WIDTH);
     expect(normalizeSidebarWidth("220")).toBe(220);

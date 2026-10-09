@@ -33,7 +33,7 @@
 .workbench-panel-header h2 { min-width: 0; display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
 .workbench-panel-header > div { display: flex; gap: 4px; }
 .workbench-panel-header .icon-button { width: 32px; height: 32px; min-height: 32px; border: 0; background: transparent; }
-.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(220px, min(1040px, var(--source-width, 480px))) 16px minmax(0, 1fr); grid-template-rows: 48px auto minmax(0, 1fr) 40px; overflow: hidden; }
+.learning-workspace { width: 100%; min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(220px, min(1040px, var(--source-width, 480px))) 16px minmax(0, 1fr); grid-template-rows: 48px auto minmax(0, 1fr) 52px; overflow: hidden; }
 .learning-workspace.panes-swapped { grid-template-columns: minmax(0, 1fr) 16px minmax(220px, min(1040px, var(--source-width, 480px))); }
 .learning-workspace > .mode-switcher { grid-column: 3; grid-row: 1; border: 1px solid var(--line); border-radius: 8px 8px 0 0; }
 .learning-workspace.panes-swapped > .mode-switcher { grid-column: 1; }
@@ -87,9 +87,9 @@
 .reading-source-panel .slide-shell:not(:fullscreen):not(.is-fullscreen) > .viewer-toolbar,
 .reading-source-panel .slide-shell:not(:fullscreen):not(.is-fullscreen) > .viewer-help { flex: 0 0 auto; }
 .reading-source-panel .slide-shell:not(:fullscreen):not(.is-fullscreen) > .slide-frame { width: 100%; min-height: 0; aspect-ratio: 4 / 3; flex: 1 1 auto; }
-.reading-source-panel .viewer-toolbar { flex-wrap: wrap; justify-content: center; gap: 4px; padding: 6px; background: var(--canvas); }
-.reading-source-panel .viewer-toolbar button { min-height: 28px; height: 28px; padding: 0 6px; font-size: 12px; border: 0; background: var(--surface); }
-.reading-source-panel .viewer-toolbar .icon-button { width: 28px; }
+.reading-source-panel .viewer-toolbar { flex-wrap: wrap; justify-content: center; gap: 8px; padding: 8px; background: var(--canvas); }
+.reading-source-panel .viewer-toolbar button { min-width: 36px; min-height: 36px; height: 36px; padding: 0 8px; font-size: 14px; border: 0; background: var(--surface); }
+.reading-source-panel .viewer-toolbar .icon-button { width: 36px; }
 .reading-source-panel .zoom-group { border: 0; background: transparent; }
 .reading-source-panel .viewer-help { padding: 8px; font-size: 11px; color: var(--muted); background: var(--canvas); }
 .reading-source-panel .slide-frame { min-height: 0; background: var(--app); }
@@ -124,16 +124,35 @@
 .lesson-section-title small { display: none; }
 .lesson-section-title h3 { margin: 0; font-size: 18px; font-weight: 600; }
 .explanation-panel .lesson-block { padding-top: 24px !important; margin-top: 24px; border-top: 1px solid var(--line) !important; background: transparent; border-radius: 0; font-weight: 400; }
-.page-dock { grid-column: 3; grid-row: 4; position: relative; min-width: 0; height: 40px; min-height: 40px; z-index: 12; border: 1px solid var(--line); border-radius: 0 0 8px 8px; background: var(--surface); }
+.page-dock { grid-column: 3; grid-row: 4; position: relative; min-width: 0; height: 52px; min-height: 52px; z-index: 12; border: 1px solid var(--line); border-radius: 0 0 8px 8px; background: var(--surface); }
 .learning-workspace.panes-swapped > .page-dock, .learning-workspace.source-is-collapsed > .page-dock, .learning-workspace.right-is-collapsed > .page-dock { grid-column: 1; }
 .page-dock-summary { height: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 0 12px; }
-.page-dock-summary > button { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 4px 8px; border: 0; border-radius: 4px; background: transparent; font-size: 12px; }
+.page-dock-summary > button { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 36px; min-height: 36px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; font-size: 14px; }
+.page-dock-summary > button:not(.page-dock-toggle) { width: auto; min-width: 84px; flex-direction: row; align-items: center; white-space: nowrap; writing-mode: horizontal-tb; padding-inline: 12px; }
 .page-dock-summary > button:hover:not(:disabled) { background: var(--hover); }
 .page-dock-summary > button:disabled { color: var(--faint); }
+.page-dock-summary > button svg { width: 16px; height: 16px; flex: none; }
 .page-dock-summary .page-dock-toggle { min-width: 0; gap: 12px; }
-.page-dock-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.page-dock-toggle small { color: var(--muted); font-size: 11px; white-space: nowrap; }
-.page-dock-toggle svg { width: 14px; height: 14px; flex: none; }
+.page-dock-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.page-dock-toggle small { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.page-dock-toggle svg { width: 16px; height: 16px; flex: none; transition: transform 180ms ease; }
+.page-dock.expanded .page-dock-toggle svg { transform: rotate(180deg); }
+.page-dock-drawer { position: absolute; z-index: 13; inset-inline: 0; bottom: calc(100% + 8px); box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; max-height: min(55dvh, 440px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow-md); visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease; }
+.page-dock.expanded .page-dock-drawer { visibility: visible; opacity: 1; transform: translateY(0); pointer-events: auto; }
+.page-dock.collapsed .page-dock-drawer { visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; }
+.page-dock-drawer-header { min-width: 0; min-height: 52px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.page-dock-drawer-header > :first-child { min-width: 0; display: flex; align-items: center; gap: 12px; overflow: hidden; color: var(--ink); font-size: 15px; font-weight: 600; white-space: nowrap; }
+.page-dock-drawer-header > :first-child > strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.page-dock-drawer-header > :first-child > span { flex: 0 0 auto; color: var(--muted); font-size: 13px; font-weight: 400; white-space: nowrap; }
+.page-dock-drawer-header button { width: 36px; min-width: 36px; height: 36px; min-height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
+.page-dock-drawer-header button svg { width: 16px; height: 16px; }
+.page-dock-drawer-header button:hover, .page-dock-drawer-header button:focus-visible { background: var(--hover); color: var(--ink); }
+.page-dock-drawer-header button:focus-visible, .page-dock-drawer .lesson-strip > button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.page-dock-drawer .lesson-strip { position: static; inset-inline: auto; bottom: auto; z-index: auto; width: 100%; min-width: 0; min-height: 0; max-height: none; flex: 1 1 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); grid-auto-flow: row; align-content: start; gap: 8px; padding: 12px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; border: 0; border-radius: 0; background: var(--panel); box-shadow: none; scrollbar-width: thin; }
+.page-dock-drawer .lesson-strip > button { width: 100%; min-width: 0; max-width: none; min-height: 56px; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 8px 10px; border-radius: 8px; content-visibility: visible; contain-intrinsic-size: 0px 0px; }
+.page-dock-drawer .lesson-strip > button > span { width: 36px; height: 36px; border-radius: 7px; font-size: 14px; }
+.page-dock-drawer .lesson-strip strong { font-size: 15px; }
+.page-dock-drawer .lesson-strip small { font-size: 13px; }
 .settings-card { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 24px 0; background: transparent; box-shadow: none; }
 .settings-main-header { background: var(--canvas); padding: 24px; }
 .settings-main-header h3 { font-size: 24px; letter-spacing: 0; }
@@ -167,7 +186,7 @@
   .workbench-rail { width: 48px; }
   .mode-switcher { min-height: 44px; padding: 0 8px; }
   .mode-switcher button { flex: 1; min-width: 0; padding: 0 8px; }
-  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px auto auto minmax(0, 1fr) 40px; }
+  .learning-workspace, .learning-workspace.panes-swapped, .learning-workspace.source-is-collapsed, .learning-workspace.right-is-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px auto auto minmax(0, 1fr) 52px; }
   .learning-workspace > .mode-switcher, .learning-workspace.panes-swapped > .mode-switcher { grid-column: 1; grid-row: 1; }
   .learning-workspace > .learning-header, .learning-workspace.panes-swapped > .learning-header { grid-column: 1; grid-row: 2; padding: 8px 12px; }
   .learning-header .breadcrumbs { max-width: none; }
@@ -192,8 +211,13 @@
   .command-button { padding-inline: 12px; font-size: 12px; gap: 8px; }
   .product-actions { gap: 4px; }
   .product-actions .profile-button { display: none; }
-  .page-dock-summary { padding-inline: 4px; gap: 4px; }
+  .page-dock-summary { grid-template-columns: 36px minmax(0, 1fr) 36px; padding-inline: 4px; gap: 4px; }
   .page-dock-summary > button { padding: 4px; gap: 4px; }
+  .page-dock-summary > button:not(.page-dock-toggle) { width: 36px; min-width: 36px; padding: 4px; font-size: 0; }
+  .page-dock-drawer-header > :first-child { align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; white-space: normal; }
   .explanation-panel { padding-inline: 16px; }
   .lesson-header h2 { font-size: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-dock-drawer, .page-dock-toggle svg { transition: none; }
 }

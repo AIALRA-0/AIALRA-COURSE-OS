@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type Dispatch, type SetStateAction, type CSSProperties, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction, type CSSProperties, type ReactNode } from "react";
 import type { CourseRelease, LearningSession } from "@course-os/contracts";
 import { Icon } from "./Icon.js";
 import { PaneResizeHandle } from "./PaneResizeHandle.js";
@@ -45,6 +45,9 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
   const lessonStripRef = useRef<HTMLElement>(null);
+  const dockRef = useRef<HTMLElement>(null);
+  const dockToggleRef = useRef<HTMLButtonElement>(null);
+  const dockId = useId();
   const [sourceHidden, setSourceHidden] = useState(false);
   const [panesSwapped, setPanesSwapped] = useState(() => readViewPreference("course-os-source-side") !== "left");
   const [sourceWidth, setSourceWidth] = useState(() => normalizeSourceWidth(readViewPreference("course-os-inspector-width")));
@@ -70,15 +73,32 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
 
   useEffect(() => {
     lessonColumnRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [page.id, release.id]);
+
+  useEffect(() => {
     if (!pageDockOpen) return;
     const strip = lessonStripRef.current;
     const active = strip?.querySelector<HTMLElement>('[aria-current="page"]');
     if (!strip || !active) return;
     strip.scrollTo({
-      left: active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2,
+      top: strip.scrollTop + active.getBoundingClientRect().top - strip.getBoundingClientRect().top - (strip.clientHeight - active.offsetHeight) / 2,
       behavior: "auto",
     });
   }, [page.id, pageDockOpen, release.id]);
+
+  useEffect(() => {
+    if (!pageDockOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !dockRef.current?.contains(event.target)) setPageDockOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [pageDockOpen, setPageDockOpen]);
+
+  const closePageDock = () => {
+    setPageDockOpen(false);
+    dockToggleRef.current?.focus();
+  };
 
   return <div ref={workspaceRef} className={`learning-workspace ${panesSwapped ? "panes-swapped" : ""} ${sourceHidden ? "source-is-collapsed" : ""} ${rightCollapsed ? "right-is-collapsed" : ""}`} style={{ "--source-width": `${visibleSourceWidth}px` } as CSSProperties}>
     {modeTabs}
@@ -106,13 +126,18 @@ export function LearningWorkspace({ modeTabs, release, pageIndex, setPageIndex, 
         : <div className="lesson-column" ref={lessonColumnRef}><div className="column-collapse-row"><span><Icon name="book" />讲解</span><button data-action="right-collapse-learn" onClick={toggleLessonPane} aria-label="收起教学栏" title="收起教学栏"><Icon name="chevronRight" /></button></div>{canShowContent && contentReviewRequired && contentNotice && <p className="empty-inline" role="status">{contentNotice}<button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button></p>}{canShowContent ? <Suspense fallback={<WorkspaceLoader compact />}><ExplanationPanel key={page.id} release={release} page={page} sessionId={session?.id} onEnterStudio={onEnterStudio} loadRootRef={lessonColumnRef} generatedReady={generatedReady} unpublishedDraftRevision={unpublishedDraftRevision} /></Suspense> : <div className="workspace-loader compact" role={contentTerminalError ? "alert" : "status"}>{!contentError && !contentTerminalError && !contentUnavailable && <div className="loader" />}<span>{contentUnavailable ? contentNotice : contentError ? `目标页讲解载入失败：${contentError}` : release.lifecycle === "draft_source" ? "正在载入候选讲解" : "正在载入本页讲解"}</span>{contentUnavailable ? <button type="button" className="quiet-button" data-action="candidate-open-studio" onClick={onEnterStudio}>进入制作模式</button> : contentError && onRetryContent && <button type="button" className="quiet-button compact" onClick={onRetryContent}>重试</button>}</div>}</div>}
     </main>
 
-    <footer className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`}>
+    <footer ref={dockRef} className={`page-dock ${pageDockOpen ? "expanded" : "collapsed"}`} onKeyDown={event => {
+      if (event.key === "Escape" && pageDockOpen) { event.preventDefault(); event.stopPropagation(); closePageDock(); }
+    }}>
       <div className="page-dock-summary">
         <button data-action="page-previous" disabled={pageIndex === 0} title={pageIndex === 0 ? "已经是第一页" : "打开上一页"} onMouseEnter={() => onPrefetchPage(pageIndex - 1)} onFocus={() => onPrefetchPage(pageIndex - 1)} onPointerDown={() => onPrefetchPage(pageIndex - 1, 20)} onClick={() => setPageIndex((index) => index - 1)}><Icon name="arrowLeft" />上一页</button>
-        <button className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起全部页面" : `展开全部 ${release.pages.length} 页`}</small><Icon name={pageDockOpen ? "chevronUp" : "chevronDown"} /></button>
+        <button ref={dockToggleRef} className="page-dock-toggle" data-action="toggle-page-dock" onClick={() => setPageDockOpen((open) => !open)} aria-expanded={pageDockOpen} aria-controls={dockId} title={page.title}><span>第 {page.pageNumber} 页 · {page.title}</span><small>{pageDockOpen ? "收起页码" : `全部 ${release.pages.length} 页`}</small><Icon name="chevronUp" /></button>
         <button className="button-icon-trailing" data-action="page-next" disabled={pageIndex === release.pages.length - 1} title={pageIndex === release.pages.length - 1 ? "已经是最后一页" : "打开下一页"} onMouseEnter={() => onPrefetchPage(pageIndex + 1)} onFocus={() => onPrefetchPage(pageIndex + 1)} onPointerDown={() => onPrefetchPage(pageIndex + 1, 20)} onClick={() => setPageIndex((index) => index + 1)}>下一页<Icon name="arrowRight" /></button>
       </div>
-      {pageDockOpen && <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)} onPointerDown={() => onPrefetchPage(index, 20)} onClick={() => setPageIndex(index)}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>}
+      <div className="page-dock-drawer" id={dockId} aria-hidden={!pageDockOpen}>
+        <div className="page-dock-drawer-header"><div><strong>全部页面</strong><span>{release.pages.length} 页 · 当前第 {page.pageNumber} 页</span></div><button className="icon-button" data-action="close-page-dock" aria-label="收起页码" tabIndex={pageDockOpen ? 0 : -1} onClick={closePageDock}><Icon name="close" /></button></div>
+        <nav className="lesson-strip" ref={lessonStripRef} aria-label="课程全部页面">{release.pages.map((item, index) => <button key={item.id} data-action="page-select" className={index === pageIndex ? "active" : ""} aria-current={index === pageIndex ? "page" : undefined} tabIndex={pageDockOpen ? 0 : -1} title={`第 ${item.pageNumber} 页 · ${item.title}`} onMouseEnter={() => onPrefetchPage(index)} onFocus={() => onPrefetchPage(index)} onPointerDown={() => onPrefetchPage(index, 20)} onClick={() => { setPageIndex(index); closePageDock(); }}><span>{item.pageNumber}</span><div><strong>{item.title}</strong><small>{item.quality.publishable ? "讲解已生成" : "讲解草稿"}</small></div></button>)}</nav>
+      </div>
     </footer>
   </div>;
 }

@@ -14,7 +14,7 @@ describe("CourseTree background task entries", () => {
     const markup = renderToStaticMarkup(createElement(CourseTree, {
       tree: { workspaceId: "workspace-1", title: "课程空间", courses: [course], rootMaterials: [], updatedAt: "2026-09-22T10:00:00.000Z" },
       backgroundTasks: [{ id: "task-running", courseId: "course-1", title: "Lecture.pptx", detail: "正在处理 · 2/8 页", state: "running" }],
-      onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
     expect(markup).toContain('aria-labelledby="tree-task-section-heading"');
     expect(markup).toContain('class="tree-task-section"');
@@ -36,7 +36,6 @@ describe("CourseTree background task entries", () => {
       onSelectPage: vi.fn(),
       onImport: vi.fn(),
       onCreateCourse: vi.fn(),
-      onSettings: vi.fn()
     }));
 
     expect(markup).toContain('data-action="tree-open-task"');
@@ -64,7 +63,7 @@ describe("CourseTree background task entries", () => {
     const markup = renderToStaticMarkup(createElement(CourseTree, {
       tree: { workspaceId: "workspace-1", title: "课程空间", courses: [course], rootMaterials: [], updatedAt: "2026-09-22T10:00:00.000Z" },
       backgroundTasks: [{ id: "generation-job:job-1", courseId: "course-1", title: "第一章 · 生成任务 abc123", detail: "正在处理 · 1/4 页", state: "running" }],
-      onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectTask: vi.fn(), onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
     expect(markup).toContain('data-task-id="generation-job:job-1"');
     expect(markup).toContain('class="tree-task-section"');
@@ -82,7 +81,7 @@ describe("CourseTree background task entries", () => {
         { id: "task-done", title: "Lecture.pptx", detail: "已完成 · 8/8 页", state: "completed" },
         { id: "task-cancelled", title: "Old attempt.pptx", detail: "已取消", state: "cancelled" }
       ],
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
 
     expect(markup).toContain('aria-label="当前任务"');
@@ -125,7 +124,7 @@ describe("CourseTree background task entries", () => {
       ],
       onClearFailed: vi.fn(),
       clearFailedBusy: true,
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
     const taskButton = (taskId: string) => {
       const taskMarker = `data-task-id="${taskId}"`;
@@ -157,19 +156,19 @@ describe("CourseTree workbench semantics", () => {
       selectedPageId: "page-current",
       searchMaterials: [{ materialNodeId: material.id, releaseId: "release-current", version: 1, pages: [{ id: "page-current", pageNumber: 1, title: "Introduction" }] }],
       actions: { rename: vi.fn(), duplicate: vi.fn(), move: vi.fn(), trash: vi.fn(), openStudio: vi.fn(), openReadWeave: vi.fn(), history: vi.fn() },
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
 
     expect(markup).toContain('<h2 class="sidebar-title" id="course-tree-title">课程</h2>');
     expect(markup).toContain('<h3 class="tree-toolbar-heading">项目文件</h3>');
-    expect(markup).toContain('<strong>EE680 Workspace</strong><span>当前工作区</span>');
+    expect(markup).not.toContain('sidebar-footer');
     expect(markup).toContain('aria-label="筛选课程、材料或页面"');
     expect(markup).toContain('role="search" aria-label="筛选项目文件"');
     expect(markup).toContain('aria-label="项目文件"');
     expect(markup).toContain('data-action-slot="tree-project-actions"');
     expect(markup).toContain('data-action="tree-create-course"');
     expect(markup).toContain('data-action="tree-import-material"');
-    expect(markup).toContain('data-action="tree-open-settings"');
+    expect(markup).not.toContain('data-action="tree-open-settings"');
     expect(markup).toContain('aria-current="page"');
     expect(markup).toContain('aria-haspopup="menu" aria-expanded="false"');
     expect(markup).toContain('data-action-slot="tree-row-actions"');
@@ -187,7 +186,7 @@ describe("CourseTree workbench semantics", () => {
     const markup = renderToStaticMarkup(createElement(CourseTree, {
       tree: { workspaceId: "workspace-1", title: "课程工作区", courses: [course], rootMaterials: [], updatedAt: "2026-10-09T10:00:00.000Z" },
       searchMaterials: [{ materialNodeId: material.id, releaseId: "release-current", version: 5, lifecycle: "published", pages: [] }],
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
     const rowButton = markup.slice(markup.lastIndexOf("<button", markup.indexOf('data-action="tree-open-material"')), markup.indexOf("</button>", markup.indexOf('data-action="tree-open-material"')) + "</button>".length);
 
@@ -249,7 +248,7 @@ describe("CourseTree search navigation", () => {
       selectedPageId: "page-current",
       searchMaterials,
       actions: { openMaterial: vi.fn(), rename: vi.fn(), duplicate: vi.fn(), move: vi.fn(), trash: vi.fn(), openStudio: vi.fn(), openReadWeave: vi.fn(), history: vi.fn() },
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
 
     expect(markup).not.toContain('data-node-id="page-current"');
@@ -310,7 +309,7 @@ describe("CourseTree search navigation", () => {
         { materialNodeId: "material-published", releaseId: "release-published", version: 8, lifecycle: "published", pages: [] },
         { materialNodeId: "material-draft", releaseId: "release-draft", version: 4, lifecycle: "draft_source", pages: [] }
       ],
-      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn(), onSettings: vi.fn()
+      onSelectPage: vi.fn(), onImport: vi.fn(), onCreateCourse: vi.fn()
     }));
 
     expect(markup).toContain("已发布 v8");
