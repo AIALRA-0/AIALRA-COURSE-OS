@@ -1,0 +1,30 @@
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_3aef501fec6b49 6,12-32
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_08477a7292c173 1496,1500-1505,1522-1523
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_3aef501fec6b49 1848,1866,1875-1881
+apps/api/src/reading-routes.spec.ts
+  s_e8850ef125fb32::t_52e69f0512b960 12,77-110
+apps/api/src/reading-replica.ts
+  s_e8850ef125fb32::t_52e69f0512b960 559,1043-1049,1099
+apps/api/src/reading-replica.spec.ts
+  s_e8850ef125fb32::t_52e69f0512b960 261,274-321
+  s_e8850ef125fb32::t_66845a1ee79ea1 322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "73413a44d3c1850cb57e38ee25071564ef638e23",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
