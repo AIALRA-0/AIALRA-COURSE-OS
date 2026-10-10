@@ -1,0 +1,56 @@
+scripts/sync-writing-standards.ts
+  s_e8850ef125fb32::t_0ef3852557b545 32-39,45,51
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_3f3cabfaabb7cc 407,409
+apps/api/src/writing-standards.ts
+  s_e8850ef125fb32::t_af4140c013950a 96,100,102
+  s_e8850ef125fb32::t_3bd0c003f98710 19-20,57-58,60,70,76-77,81-84
+  s_e8850ef125fb32::t_184fc2666a7c80 85-86
+apps/api/src/writing-standards.spec.ts
+  s_e8850ef125fb32::t_5ee0c9ab5f7da4 110-127
+  s_e8850ef125fb32::t_7492b3552b7512 10,36,38-42,138-165,189
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_ceafe1b51ac972 58,63,65
+packages/quality/src/presentation.ts
+  s_e8850ef125fb32::t_3f3cabfaabb7cc 9,16,20-21,30,315-316
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_3f3cabfaabb7cc 5,34,38
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_5491a356962ad5 4931
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_5491a356962ad5 1174,1382,1576,1592,1710,1733,1781
+packages/quality/src/presentation.spec.ts
+  s_e8850ef125fb32::t_3f8a0421aa7c2c 45,53,62-64
+config/generation-harness/writing-format-contract.md
+  s_e8850ef125fb32::t_3f3cabfaabb7cc 21,62
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_fd5ed2f2ca2ba8 547
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_3288d6c79d41ed 3,10-12
+config/generation-harness/writing-activation-source.md
+  s_e8850ef125fb32::t_3eb9920d035f14 1-73
+config/generation-harness/writing-minimal-examples.md
+  s_e8850ef125fb32::t_6044959dda4090 1-38
+config/generation-harness/writing-standard-source.md
+  s_e8850ef125fb32::t_dfcd5073478e87 233
+config/writing-policy-manifest.json
+  s_e8850ef125fb32::t_cb001f1343adda 4,7-8,13,19-28,31
+config/writing-policy-snapshots/0f709dc81c74650d.json
+  s_e8850ef125fb32::t_e9a7c92a8a5576 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eec5759f9a76ec1fff5c8098f2ab6e61f07ccd73",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
