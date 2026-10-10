@@ -1,4 +1,5 @@
 import { normalizePresentationMarkdown, validateTeachingPresentation } from "./presentation.js";
+export { parsePriorKnowledgeDefinitions } from "./prior-knowledge.js";
 export {
   displayFormulaMarker,
   teachingCompositionContract,

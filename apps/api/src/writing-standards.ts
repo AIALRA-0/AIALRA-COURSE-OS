@@ -21,27 +21,28 @@ export interface WritingStandardsBundle {
 export const writingStandardsDirectory = fileURLToPath(new URL("../../../config/generation-harness/", import.meta.url));
 export const writingStandardsMarker = "[COURSE_OS_APCF_WRITING_STYLE_V1]";
 
-/** Keep every normative paragraph; teaching examples are not additional rules. */
+/** Validate rule coverage without changing any source text, including examples. */
 export function compileWritingStandard(source: string, expectedIds: string[]): string {
-  const rules: Array<{ id: string; lines: string[] }> = [];
-  let fenced = false;
-  let examples = false;
-  for (const line of source.replace(/\r\n?/gu, "\n").split("\n")) {
-    if (line.startsWith("```")) fenced = !fenced;
-    const heading = !fenced ? /^## (S?\d+)\. /u.exec(line) : null;
-    if (heading) {
-      rules.push({ id: heading[1]!, lines: [line] });
-      examples = false;
-    } else if (line === "**Bad**") {
-      examples = true;
-    } else if (rules.length && !examples) {
-      rules[rules.length - 1]!.lines.push(line);
+  const ids: string[] = [];
+  let fence: { marker: string; length: number } | undefined;
+  for (const line of source.split(/\r\n?|\n/u)) {
+    if (fence) {
+      const closing = /^ {0,3}(`{3,}|~{3,})[\t ]*$/u.exec(line)?.[1];
+      if (closing && closing[0] === fence.marker && closing.length >= fence.length) fence = undefined;
+      continue;
     }
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (opening && (opening[1]![0] !== "`" || !opening[2]!.includes("`"))) {
+      fence = { marker: opening[1]![0]!, length: opening[1]!.length };
+      continue;
+    }
+    const heading = /^## (S?\d+)\. /u.exec(line);
+    if (heading) ids.push(heading[1]!);
   }
-  if (JSON.stringify(rules.map(rule => rule.id)) !== JSON.stringify(expectedIds)) {
+  if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) {
     throw new Error("WRITING_STANDARD_RULE_COVERAGE_MISMATCH");
   }
-  return rules.map(rule => rule.lines.join("\n").trim()).join("\n\n");
+  return source;
 }
 
 export function loadWritingStandards(directory = writingStandardsDirectory): WritingStandardsBundle {
@@ -72,7 +73,7 @@ export function loadWritingStandards(directory = writingStandardsDirectory): Wri
 
 export function approvedWritingInstructions(language: string): string {
   const bundle = loadWritingStandards();
-  return `${writingStandardsMarker}\n当前规范：APCF Writing / Style ${bundle.version}；快照 ${bundle.policySnapshotId}\n以下包含全部 29 条 Writing 和 S00–S14 Style 的原则、触发、必须、例外及停止条件，逐字来自校验过的规范；Bad / Good 示范不作为额外规则重复输入\n\n${bundle.writing}\n\n${bundle.style}\n\n适用边界：以上规则约束你自行成文的讲解、目标、总结、易错点、题干、选项、答案、解释、承接及复习说明；不要把工程报告或 CHECKLIST 当成课件栏目。JSON 键、机器协议、原文引用、原始代码、公式符号和来源数据受保护，不能翻译、重排或改写。七段教学栏目、数组字段等固定载体按当前产品合同填写；已明确的逐式符号解释要求继续执行。规划与页面理解只输出所请求的内部结果，不添加交付报告或自评；不确定性只限制对应结论，不把识别缺口伪装成页面缺失。${language === "en" ? "本次成文语言是英文；使用自然英文，中文专属格式只适用于实际出现的中文段落，其他理解、因果、来源保护和信息密度规则仍然适用" : "英文输出保持正常英文句法，中文术语规则不改变逐字英文来源"}`;
+  return `${writingStandardsMarker}\n当前规范：APCF Writing / Style ${bundle.version}；快照 ${bundle.policySnapshotId}\n以下为校验过的 Writing 1–29 和 Style S00–S14 全文，原样包含文件前言、全部规则及 Bad / Good 示例；示例用于理解相应规则，不改变其适用边界\n\n${bundle.writing}\n\n${bundle.style}\n\n适用边界：以上规则约束你自行成文的讲解、目标、总结、易错点、题干、选项、答案、解释、承接及复习说明；不要把工程报告或 CHECKLIST 当成课件栏目。JSON 键、机器协议、原文引用、原始代码、公式符号和来源数据受保护，不能翻译、重排或改写。七段教学栏目、数组字段等固定载体按当前产品合同填写；已明确的逐式符号解释要求继续执行。规划与页面理解只输出所请求的内部结果，不添加交付报告或自评；不确定性只限制对应结论，不把识别缺口伪装成页面缺失。${language === "en" ? "本次成文语言是英文；使用自然英文，中文专属格式只适用于实际出现的中文段落，其他理解、因果、来源保护和信息密度规则仍然适用" : "英文输出保持正常英文句法，中文术语规则不改变逐字英文来源"}`;
 }
 
 /** All provider transports share this boundary; do not duplicate the policy. */

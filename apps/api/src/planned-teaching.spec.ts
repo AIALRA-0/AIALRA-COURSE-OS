@@ -58,6 +58,24 @@ function input(): ModelRouterInput {
 describe("planned teaching core writer", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("projects prerequisites by definition boundaries instead of splitting explanation lines", () => {
+    const prior = "词元（Token）：文本的处理单位\n它工作的方式是：先分词，再逐项处理\n- 词表（Vocabulary）：全部词元的集合\n## Softmax\n把分数转换为概率";
+    const result = projectPlannedOutputToSchema({ priorKnowledge: prior }, {
+      type: "object", properties: { priorKnowledge: { type: "array", items: { type: "string" } } }
+    }) as { priorKnowledge: string[] };
+    expect(result.priorKnowledge).toHaveLength(3);
+    expect(result.priorKnowledge[0]).toContain("它工作的方式是：先分词，再逐项处理");
+    expect(result.priorKnowledge[2]).toBe("Softmax： 把分数转换为概率");
+  });
+
+  it("keeps a long definition continuous and joins a detached pronoun explanation without losing words", () => {
+    const definition = "注意力（Attention）：" + "根据当前词与历史位置的关联程度汇总信息；".repeat(12);
+    const result = normalizePlannedOpening({ priorKnowledge: [definition, "它工作的方式是：计算权重并加权求和"] });
+    expect(result.priorKnowledge).toHaveLength(1);
+    expect(result.priorKnowledge![0]).not.toContain("\n\n");
+    expect(result.priorKnowledge![0]).toContain("计算权重并加权求和");
+  });
+
   it.each([0, 1, 3, 5])("accepts a valid dynamic bank of %i questions without a count repair", async count => {
     const base = teachingPackage();
     const content = { ...base, questions: Array.from({ length: count }, (_, index) => base.questions[index % base.questions.length]!) };

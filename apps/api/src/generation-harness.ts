@@ -44,7 +44,9 @@ export function currentGenerationHarness(): GenerationHarnessSnapshot {
   for (const name of ["generation-harness.ts", "writing-standards.ts", "model-router.ts", "model-usage-meter.ts", "pricing.ts", "planned-teaching.ts", "page-source.ts", "source-layout.ts", "upstream/openmaic-course-context.ts"]) {
     files.push({ path: `apps/api/src/${name}`, sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, name))) });
   }
-  files.push({ path: "packages/quality/src/presentation.ts", sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, "../../../packages/quality/src/presentation.ts"))) });
+  for (const name of ["presentation.ts", "prior-knowledge.ts"]) {
+    files.push({ path: `packages/quality/src/${name}`, sha256: generationHarnessFileSha256(readFileSync(resolve(apiSourceDir, `../../../packages/quality/src/${name}`))) });
+  }
   const aggregateSha256 = createHash("sha256").update(JSON.stringify({ version: harnessManifest.version, files })).digest("hex");
   return { id: harnessManifest.id, version: harnessManifest.version, taskContract: harnessManifest.taskContract, files, aggregateSha256 };
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, validateHumanReadableChinese, validateTeachingPresentation } from "@course-os/quality";
+import { formatMisconception, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse, parsePriorKnowledgeDefinitions, validateHumanReadableChinese, validateTeachingPresentation } from "@course-os/quality";
 import { teachingPackageSchema, writingPolicyInstructions } from "./generation-harness.js";
 import type { ModelRouterInput, ModelRouterUsage, TeachingPackage } from "./model-router.js";
 import type { TeachingPlan } from "./teaching-plan.js";
@@ -261,7 +261,11 @@ export function projectPlannedOutputToSchema(value: unknown, schema: any, _phase
     } : record;
     return Object.fromEntries(Object.entries(schema.properties ?? {})
       .filter(([key]) => key in normalized)
-      .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(normalized[key], childSchema)]));
+      .map(([key, childSchema]) => [key, projectPlannedOutputToSchema(normalized[key], childSchema, key)]));
+  }
+  if (_phase === "priorKnowledge" && schema?.type === "array"
+    && (typeof candidate === "string" || Array.isArray(candidate) && candidate.every(item => typeof item === "string"))) {
+    return parsePriorKnowledgeDefinitions(candidate as string | string[]);
   }
   if (schema?.type === "array" && typeof candidate === "string" && candidate.trim()) {
     const items = candidate.split(/\r?\n/u).map(line =>
@@ -314,7 +318,10 @@ export function normalizePlannedOpening<T extends Partial<TeachingPackage>>(cont
     ...content,
     chapterBridgeMarkdown: typeof content.chapterBridgeMarkdown === "string" ? normalize(content.chapterBridgeMarkdown) : content.chapterBridgeMarkdown,
     priorKnowledge: Array.isArray(content.priorKnowledge)
-      ? content.priorKnowledge.map(value => typeof value === "string" ? normalize(value) : value) as string[]
+      ? content.priorKnowledge.every(value => typeof value === "string")
+        ? parsePriorKnowledgeDefinitions(content.priorKnowledge).map(value =>
+          normalizeEnglishTermCase(normalizeHumanReadableChineseMarkdown(value)))
+        : content.priorKnowledge
       : content.priorKnowledge,
     learningObjectives: Array.isArray(content.learningObjectives)
       ? content.learningObjectives.map(value => typeof value === "string" ? normalize(value) : value) as string[]

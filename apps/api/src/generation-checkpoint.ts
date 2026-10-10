@@ -1,4 +1,4 @@
-import type { GenerationCostEntry } from "@course-os/contracts";
+import type { GenerationCostEntry, LessonDraft } from "@course-os/contracts";
 import type { ModelRouterClient, TeachingGenerationResult } from "./model-router.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
 
@@ -10,6 +10,26 @@ export interface SavedPageGeneration {
   understandingCost?: GenerationCostEntry;
   teaching?: TeachingGenerationResult;
   teachingCost?: GenerationCostEntry;
+  bridge?: SavedBridgeGeneration;
+}
+
+export interface SavedBridgeGeneration {
+  response: Awaited<ReturnType<NonNullable<ModelRouterClient["generateBridge"]>>>;
+  cost: GenerationCostEntry;
+  sourceFingerprint: string;
+  previousSourceFingerprint: string;
+  previousCoreFingerprint: string;
+  coreRevision: number;
+  coreContentHash: string;
+  bridgedContentHash: string;
+  writeIdempotencyKey: string;
+  updatedAt: string;
+}
+
+export function savedBridgeDraftState(bridge: SavedBridgeGeneration, draft: LessonDraft): "core" | "bridge" | undefined {
+  if (draft.revision === bridge.coreRevision && draft.contentHash === bridge.coreContentHash) return "core";
+  if (draft.revision === bridge.coreRevision + 1 && draft.contentHash === bridge.bridgedContentHash) return "bridge";
+  return undefined;
 }
 
 export type JobCheckpoint = PlannedCheckpoint | SavedPageGeneration;

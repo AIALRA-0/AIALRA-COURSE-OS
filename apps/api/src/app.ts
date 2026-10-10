@@ -1,5 +1,5 @@
 import { loadWritingStandards } from "./writing-standards.js";
-import { savedPageGeneration, type SavedPageGeneration } from "./generation-checkpoint.js";
+import { savedBridgeDraftState, savedPageGeneration, type SavedPageGeneration } from "./generation-checkpoint.js";
 export { applySemanticAuditFindings } from "./teaching-patches.js";
 import { meterModelRouter } from "./model-usage-meter.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -4054,7 +4054,9 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       accountedCostIds: context.events.filter(event => event.type === "generation.cost.recorded")
         .map(event => (event.payload as { costEntryId?: string }).costEntryId)
     }));
-    let recovery: SavedPageGeneration = savedPageGeneration(recoveryRead?.result.checkpoint, recoveryFingerprint);
+    const priorRecovery = recoveryRead?.result.checkpoint;
+    const priorBridge = priorRecovery && "kind" in priorRecovery ? priorRecovery.bridge : undefined;
+    let recovery: SavedPageGeneration = savedPageGeneration(priorRecovery, recoveryFingerprint);
     const saveRecovery = async () => {
       await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
         if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken) || job.cancelRequested) throw new Error("LEASE_LOST");
@@ -4067,8 +4069,10 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
     while (true) {
     try {
+      if (priorRecovery && "kind" in priorRecovery && priorRecovery.bridge
+        && priorRecovery.fingerprint !== recoveryFingerprint) throw new Error("GENERATION_BRIDGE_CHECKPOINT_SOURCE_CHANGED");
       if (await settleCoreSavedPage(jobId, page.id, release, fenceToken, dependencies, timings, pageStartedAt, pageModelRouter,
-        initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined, () => meter.markSettled())) continue pages;
+        initial.pageIds.length === 1 ? releaseCoreSlot : () => undefined, () => meter.markSettled(), recovery, saveRecovery)) continue pages;
       if (currentJob.spentUsd >= currentJob.budgetUsd && !recovery.teaching) {
         await failGenerationJob(jobId, "JOB_BUDGET_EXHAUSTED", dependencies, fenceToken);
         return;
@@ -4280,32 +4284,16 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: currentJob.workspaceId,
             planId: currentJob.planId, release, pageNumber: page.pageNumber, dependencies });
           previousPageContext = previous.context;
-          const bridge = await pageModelRouter.generateBridge({ pageTitle: page.title, pageNumber: page.pageNumber,
+          const bridgeSaved = await saveRecoverableBridge(jobId, release, saved, currentJob, pageModelRouter, {
+            pageTitle: page.title, pageNumber: page.pageNumber,
             sourceText, previousPageContext, currentSummary: generation.content.mainContentMarkdown,
             writingPolicySnapshotId: currentJob.writingPolicySnapshotId || release.writingPolicySnapshotId,
             language: currentJob.language || "zh-CN", qualityMode: currentJob.qualityMode || generationQualityMode(currentJob.budgetUsd),
             idempotencyKey: `course-os:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge:v1`,
-            maxCostUsd: Math.max(0.001, pageCostLimitUsd - (generationUsageCostUsd(generation) ?? 0)), stage: "teach" });
-          await assertGenerationFence(jobId, fenceToken, dependencies);
-          const bridged = applyTeachingPackage(page, { ...generation.content, chapterBridgeMarkdown: bridge.markdown },
-            true, teachingPlan ? "multimodal" : "text_only", generation.teachingTrace);
-          bridged.quality = generatedPage.quality;
-          const bridgedHash = sha256Text(stableStringify(bridged));
-          const bridgeCost = makeGenerationCostEntry(jobId, currentJob, release, page.id, bridge.provider, bridge.model,
-            bridge.usage, "succeeded", true);
-          bridgeCost.id += ":bridge";
-          const bridgeDraft = { ...saved, generationJobId: jobId, page: bridged, revision: saved.revision,
-            contentHash: bridgedHash, updatedAt: new Date().toISOString() };
-          const bridgeWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:bridge`, currentJob.workspaceId);
-          const bundledBridgeCost = Boolean(dependencies.readweave.saveDraftWithCost);
-          saved = bundledBridgeCost
-            ? await dependencies.readweave.saveDraftWithCost!(bridgeDraft, saved.revision, bridgeWriteContext, bridgeCost)
-            : await dependencies.readweave.saveDraft(bridgeDraft, saved.revision, bridgeWriteContext);
-          const bridgeReadBack = await dependencies.readweave.getDraftByPage(page.id);
-          if (!bridgeReadBack || bridgeReadBack.contentHash !== saved.contentHash) throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
-          if (!bundledBridgeCost) {
-            await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
-          }
+            maxCostUsd: Math.max(0.001, pageCostLimitUsd - (generationUsageCostUsd(generation) ?? 0)), stage: "teach"
+          }, recovery, saveRecovery, dependencies, fenceToken);
+          const { response: bridge, cost: bridgeCost } = recovery.bridge!;
+          saved = bridgeSaved;
           await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
             if (!isGenerationLeaseCurrent(_job, leaseOwner, fenceToken)) throw new Error("LEASE_LOST");
             context.appendEvent("generation.page.core_saved", { pageId: page.id, draftRevision: saved.revision,
@@ -4369,6 +4357,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         failureRoute,
         ...(failureRoute.category === "storage" ? { backendFailureKind: safeReadWeaveFailureKind(error), persistenceStage } : {})
       }));
+      // A paid bridge receipt keeps its original identity even if draft IO or a later attempt fails.
+      const paidBridge = recovery.bridge ?? priorBridge;
+      if (paidBridge) {
+        const bridgeCost = paidBridge.cost;
+        await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
+        await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, bridgeCost, context));
+        meter.markSettled();
+      }
       const billedCalls = meter.groupedUsage();
       const unsettledCost = finalizedCostPersisted ? undefined : finalizedCost;
       if (billedCalls.length > 0 || (!finalizedCostPersisted && (finalizedCost || error instanceof ModelRouterGenerationError))) {
@@ -4427,6 +4423,71 @@ async function assertGenerationFence(jobId: string, fenceToken: number, dependen
   if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) throw new Error("LEASE_LOST");
 }
 
+async function saveRecoverableBridge(
+  jobId: string,
+  release: CourseRelease,
+  draft: LessonDraft,
+  job: GenerationJob,
+  router: ModelRouterClient,
+  input: Parameters<NonNullable<ModelRouterClient["generateBridge"]>>[0],
+  recovery: SavedPageGeneration,
+  saveRecovery: () => Promise<void>,
+  dependencies: AppDependencies,
+  fenceToken: number
+): Promise<LessonDraft> {
+  const previousSource = release.pages.find(page => page.pageNumber === draft.page.pageNumber - 1);
+  const previousSourceFingerprint = sha256Text(stableStringify(previousSource ?? { releaseId: release.id, firstPage: true }));
+  // Hash the actual core context, so a predecessor's later bridge does not invalidate the same paid input.
+  const previousCoreFingerprint = sha256Text(input.previousPageContext ?? "");
+  if (recovery.bridge && (recovery.bridge.sourceFingerprint !== recovery.fingerprint
+    || recovery.bridge.previousSourceFingerprint !== previousSourceFingerprint
+    || recovery.bridge.previousCoreFingerprint !== previousCoreFingerprint)) {
+    throw new Error("GENERATION_BRIDGE_CHECKPOINT_CONTEXT_CHANGED");
+  }
+  if (!recovery.bridge) {
+    const response = await router.generateBridge!(input);
+    await assertGenerationFence(jobId, fenceToken, dependencies);
+    const page = structuredClone(draft.page);
+    page.lessonSections = [{ id: `${draft.pageId}:section:bridge`, kind: "chapter_bridge", title: "承上启下",
+      markdown: response.markdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) },
+      ...(page.lessonSections ?? []).filter(section => section.kind !== "chapter_bridge")];
+    const cost = makeGenerationCostEntry(jobId, job, release, draft.pageId, response.provider, response.model, response.usage, "succeeded", true);
+    cost.id += ":bridge";
+    recovery.bridge = { response, cost, sourceFingerprint: recovery.fingerprint, previousSourceFingerprint, previousCoreFingerprint,
+      coreRevision: draft.revision, coreContentHash: draft.contentHash, bridgedContentHash: sha256Text(stableStringify(page)),
+      writeIdempotencyKey: `generation:${jobId}:attempt:${job.attempt}:${draft.pageId}:bridge`, updatedAt: new Date().toISOString() };
+  }
+  // Reconfirm persistence on retry too: the previous checkpoint commit may have failed.
+  await saveRecovery();
+  const receipt = recovery.bridge;
+  await assertGenerationFence(jobId, fenceToken, dependencies);
+  const authority = await dependencies.readweave.getDraftByPage(draft.pageId);
+  const state = authority && savedBridgeDraftState(receipt, authority);
+  if (!authority || authority.workspaceId !== job.workspaceId || authority.sourceReleaseId !== release.id || !state) {
+    throw new Error("READWEAVE_REVISION_CONFLICT:BRIDGE_RECOVERY_DRAFT_CHANGED");
+  }
+  let confirmed = authority;
+  if (state === "core") {
+    const page = structuredClone(authority.page);
+    page.lessonSections = [{ id: `${draft.pageId}:section:bridge`, kind: "chapter_bridge", title: "承上启下",
+      markdown: receipt.response.markdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) },
+      ...(page.lessonSections ?? []).filter(section => section.kind !== "chapter_bridge")];
+    const patch = { ...authority, page, generationJobId: jobId, contentHash: receipt.bridgedContentHash, updatedAt: receipt.updatedAt };
+    const write = systemWriteContext(receipt.writeIdempotencyKey, job.workspaceId);
+    await assertGenerationFence(jobId, fenceToken, dependencies);
+    confirmed = dependencies.readweave.saveDraftWithCost
+      ? await dependencies.readweave.saveDraftWithCost(patch, receipt.coreRevision, write, receipt.cost)
+      : await dependencies.readweave.saveDraft(patch, receipt.coreRevision, write);
+    const readback = await dependencies.readweave.getDraftByPage(draft.pageId);
+    if (!readback || savedBridgeDraftState(receipt, readback) !== "bridge") throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
+  }
+  // Reconfirm the original attempt's bill even when a previous save succeeded but its readback was lost.
+  if (state === "bridge" || !dependencies.readweave.saveDraftWithCost) {
+    await dependencies.readweave.appendCostEntry(receipt.cost, systemWriteContext(receipt.cost.id, job.workspaceId));
+  }
+  return confirmed;
+}
+
 async function settleCoreSavedPage(
   jobId: string,
   pageId: string,
@@ -4437,7 +4498,9 @@ async function settleCoreSavedPage(
   pageStartedAt: number,
   router: ModelRouterClient,
   releaseCoreSlot: () => void,
-  markUsageSettled: () => void
+  markUsageSettled: () => void,
+  recovery: SavedPageGeneration,
+  saveRecovery: () => Promise<void>
 ): Promise<boolean> {
   const events = await dependencies.operations.readGenerationJobEvents(jobId);
   const event = events.filter((item) => item.type === "generation.page.core_saved"
@@ -4457,6 +4520,8 @@ async function settleCoreSavedPage(
     bridgeCompleted?: boolean;
   };
   let draft = await dependencies.readweave.getDraftByPage(pageId);
+  if (recovery.bridge && (!draft || draft.workspaceId !== job?.workspaceId || draft.sourceReleaseId !== release.id
+    || !savedBridgeDraftState(recovery.bridge, draft))) throw new Error("READWEAVE_REVISION_CONFLICT:BRIDGE_RECOVERY_DRAFT_CHANGED");
   if (!draft || draft.sourceReleaseId !== release.id || (job && draft.workspaceId !== job.workspaceId)) return false;
   const eventMatchesDraft = Boolean(event && draft.revision === saved?.draftRevision && draft.contentHash === saved.contentHash);
   const metadataMatchesJob = draft.generationJobId === jobId;
@@ -4469,7 +4534,7 @@ async function settleCoreSavedPage(
     await repairSavedMainContent(jobId, pageId, release, draft, job, saved, router, dependencies,
       fenceToken, timings, markUsageSettled);
     return settleCoreSavedPage(jobId, pageId, release, fenceToken, dependencies, timings, pageStartedAt, router,
-      releaseCoreSlot, markUsageSettled);
+      releaseCoreSlot, markUsageSettled, recovery, saveRecovery);
   }
   if (draft.status !== "ready") return false;
 
@@ -4486,34 +4551,22 @@ async function settleCoreSavedPage(
 
   let confirmedDraft = draft;
   releaseCoreSlot();
-  if (!draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim())
+  if ((recovery.bridge || !draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim()))
     && router.generateBridge) {
     const job = (await dependencies.operations.readGenerationJob(jobId))!;
     const previous = await waitForPreviousCoreContext({ jobId, fenceToken, workspaceId: job.workspaceId,
       planId: job.planId, release, pageNumber: draft.page.pageNumber, dependencies });
-    const result = await router.generateBridge({ pageTitle: draft.page.title, pageNumber: draft.page.pageNumber,
+    confirmedDraft = await saveRecoverableBridge(jobId, release, draft, job, router, {
+      pageTitle: draft.page.title, pageNumber: draft.page.pageNumber,
       sourceText: "", previousPageContext: previous.context,
       currentSummary: draft.page.lessonSections?.find(section => section.kind === "main_content")?.markdown || "",
       language: job.language || "zh-CN", qualityMode: job.qualityMode || generationQualityMode(job.budgetUsd),
       writingPolicySnapshotId: job.writingPolicySnapshotId || release.writingPolicySnapshotId,
       idempotencyKey: `course-os:${jobId}:attempt:${job.attempt}:${pageId}:bridge:v1`,
-      maxCostUsd: Math.max(0.001, job.budgetUsd - job.spentUsd), stage: "teach" });
-    const page = structuredClone(draft.page);
-    page.lessonSections = [{ id: `${pageId}:section:bridge`, kind: "chapter_bridge", title: "承上启下",
-      markdown: result.markdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) },
-      ...(page.lessonSections || []).filter(section => section.kind !== "chapter_bridge")];
-    const cost = makeGenerationCostEntry(jobId, job, release, pageId, result.provider, result.model, result.usage, "succeeded", true);
-    cost.id += ":bridge";
-    const write = systemWriteContext(`generation:${jobId}:attempt:${job.attempt}:${pageId}:bridge`, job.workspaceId);
-    const patch = { ...draft, page, contentHash: sha256Text(stableStringify(page)), updatedAt: new Date().toISOString() };
-    await assertGenerationFence(jobId, fenceToken, dependencies);
-    confirmedDraft = dependencies.readweave.saveDraftWithCost
-      ? await dependencies.readweave.saveDraftWithCost(patch, draft.revision, write, cost)
-      : await dependencies.readweave.saveDraft(patch, draft.revision, write);
-    const readback = await dependencies.readweave.getDraftByPage(pageId);
-    if (readback?.contentHash !== confirmedDraft.contentHash) throw new Error("READWEAVE_BRIDGE_READBACK_MISMATCH");
-    if (!dependencies.readweave.saveDraftWithCost) await dependencies.readweave.appendCostEntry(cost, systemWriteContext(cost.id, job.workspaceId));
-    costs.push(cost);
+      maxCostUsd: Math.max(0.001, job.budgetUsd - job.spentUsd), stage: "teach"
+    }, recovery, saveRecovery, dependencies, fenceToken);
+    costs.push(recovery.bridge!.cost);
+    markUsageSettled();
   }
   await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
     if (!isGenerationLeaseCurrent(job, `course-os-worker:${process.pid}`, fenceToken)) return;

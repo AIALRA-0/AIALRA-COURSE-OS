@@ -59,7 +59,7 @@ describe("generation harness", () => {
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "writing-standard-source.md", "style-standard-source.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/writing-standards.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "writing-standard-source.md", "style-standard-source.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/writing-standards.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts", "packages/quality/src/prior-knowledge.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.files.find((file) => file.path === "writing-standard-source.md")?.sha256).toBe("ba0f450a1f8f30a5f9328376739081e4ff9f501904f376bc36c55aca743ddc6f");
     expect(snapshot.files.find((file) => file.path === "style-standard-source.md")?.sha256).toBe("97f49d1a670616b8546ed5eb1f1dfca4f45ec48d49d791a9c8c41662c3e03d76");
@@ -543,7 +543,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
   });
 
   it.each([
-    { accounting: "reported primary usage", primaryUsage: { input_tokens: 140, output_tokens: 0, total_cost: 0.033736 }, expectedCost: 0.034736, expectReserve: false },
+    { accounting: "reported primary usage", primaryUsage: { input_tokens: 140, output_tokens: 0, total_cost: 0.08 }, expectedCost: 0.081, expectReserve: false },
     { accounting: "unreported primary usage", primaryUsage: undefined, expectedCost: 0.001, expectReserve: true }
   ])("uses the explicit second route once and aggregates $accounting within the remaining page budget", async scenario => {
     const requests: Array<{ url: string; maxOutputTokens?: number }> = [];
@@ -560,7 +560,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const metered = meterModelRouter(configuredKuafuFallbackClient());
-    const result = await metered.client.generateTeachingPackage({ ...providerInput(`opaque-relay-fallback-${scenario.expectReserve}`), maxCostUsd: 0.072 });
+    const result = await metered.client.generateTeachingPackage({ ...providerInput(`opaque-relay-fallback-${scenario.expectReserve}`), maxCostUsd: 0.13 });
 
     expect(result).toMatchObject({ provider: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910",
       usage: { inputTokens: scenario.primaryUsage ? 240 : 100, outputTokens: 200, apiEquivalentUsd: scenario.expectedCost } });

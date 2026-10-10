@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CourseRelease, PageLesson } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { displayPriorKnowledge, ExplanationPanel, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
+import { displayPriorKnowledge, ExplanationPanel, QuestionAnswerFeedback, QuestionBankStatus, summaryMarkdown } from "./ExplanationPanel.js";
 import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
 
 describe("self-retelling panel presentation", () => {
@@ -26,7 +26,84 @@ describe("lesson summary", () => {
   });
 });
 
+describe("question answer feedback", () => {
+  it.each([
+    ["correct", "✅", "回答正确：记录已保存"],
+    ["incorrect", "❌", "回答未完全正确：记录已保存，还需要复习"]
+  ] as const)("displays a hidden visual symbol plus readable authoritative %s text", (state, symbol, title) => {
+    const markup = renderToStaticMarkup(<QuestionAnswerFeedback state={state} feedback="完整解释 **要点**，含 $x=y$ 与 `原文`。" />);
+    expect(markup).toContain(`<span aria-hidden="true">${symbol}</span>`);
+    expect(markup).toContain(title);
+    expect(markup).toContain("完整解释 <strong>要点</strong>");
+    expect(markup).toContain("<code>原文</code>");
+    expect(markup).toContain("katex");
+  });
+
+  it.each(["incorrect", "unverified"] as const)("preserves partially correct feedback under the actual %s result without reinterpreting prose", (state) => {
+    const feedback = "部分正确：前半部分满足条件，后半部分需要补充。\n\n**依据：** 不变量仍成立，但尚未说明边界。";
+    const markup = renderToStaticMarkup(<QuestionAnswerFeedback state={state} feedback={feedback} />);
+    expect(markup).toContain("部分正确：前半部分满足条件，后半部分需要补充。");
+    expect(markup).toContain("<strong>依据：</strong> 不变量仍成立，但尚未说明边界。");
+    expect(markup).not.toContain("✅");
+    if (state === "unverified") {
+      expect(markup).not.toContain("❌");
+      expect(markup).toContain("尚未判定对错");
+    }
+  });
+
+  it("does not turn save failures into an incorrect answer or a saved record", () => {
+    const markup = renderToStaticMarkup(<QuestionAnswerFeedback state="error" feedback="保存暂不可用，重试。" />);
+    expect(markup).toContain("保存失败：答案仍保留在输入框");
+    expect(markup).toContain("请检查后重试");
+    expect(markup).not.toContain("✅");
+    expect(markup).not.toContain("❌");
+    expect(markup).not.toContain("记录已保存");
+  });
+
+  it("shows a verdict even when a successfully saved result has empty explanation", () => {
+    expect(renderToStaticMarkup(<QuestionAnswerFeedback state="correct" feedback="" />)).toContain("回答正确：记录已保存");
+  });
+});
+
 describe("prior knowledge definition display", () => {
+  it("renders mixed definitions as sibling list items with one paragraph per ordinary definition", () => {
+    const lesson = { id: "mixed", title: "合成定义", pageNumber: 1, blocks: [], anchors: [], atoms: [], lessonSections: [{ id: "prior", kind: "prior_knowledge", title: "先验知识", items: [{ id: "mixed", text: "节点（Node）：定义。\n- 边（Edge）：连接。\n## Kernel\n函数说明。\n- 路径（Path）：有序连接。", sourceAnchorIds: [] }, { id: "continuation", text: "它工作的方式是：逐个连接。", sourceAnchorIds: [] }], sourceAnchorIds: [], atomIds: [] }], quality: { issues: [] } } as unknown as PageLesson;
+    const markup = renderToStaticMarkup(<ExplanationPanel release={{ id: "synthetic" } as CourseRelease} page={lesson} />);
+    const prior = markup.match(/<article class="lesson-block section-prior_knowledge"[\s\S]*?<\/article>/u)![0];
+    expect(prior.match(/<li>/gu)).toHaveLength(4);
+    expect(prior.match(/<ul/gu)).toHaveLength(1);
+    expect(prior.match(/<p>/gu)).toHaveLength(4);
+    expect(prior).toContain("Kernel： 函数说明。");
+    expect(prior).toContain("路径（Path）：有序连接。 它工作的方式是：逐个连接。");
+  });
+
+  it("preserves rich definition objects and nested reference lists in the rendered tree", () => {
+    const lesson = { id: "rich", title: "合成定义", blocks: [], anchors: [], atoms: [], lessonSections: [{ id: "prior", kind: "prior_knowledge", title: "先验知识", markdown: "节点（Node）：保留 $x:y$ 和 `x:y`。\n\n> 引文原文。\n> - 条目（Quoted）：真实引用。\n\n- 参考资料：\n  - 子资料保持嵌套。\n\n```text\n## Raw\n- 假名（Fake）：不能成为定义。\n```\n\n$$\nx = y\n$$\n\n- 边（Edge）：另一条定义。", sourceAnchorIds: [], atomIds: [] }], quality: { issues: [] } } as unknown as PageLesson;
+    const markup = renderToStaticMarkup(<ExplanationPanel release={{ id: "synthetic" } as CourseRelease} page={lesson} />);
+    expect(markup).toContain("<blockquote>");
+    expect(markup).toContain("真实引用。");
+    expect(markup).toContain("子资料保持嵌套。");
+    expect(markup).toContain("<code>x:y</code>");
+    expect(markup).toContain('class="language-text"');
+    expect(markup).toContain("- 假名（Fake）：不能成为定义。");
+    expect(markup).toContain('class="katex"');
+    expect(markup).not.toContain("katex-error");
+  });
+
+  it("does not repair opaque quotation text while flattening definitions around it", () => {
+    const lesson = { id: "quote", title: "引文保护", blocks: [], anchors: [], atoms: [], lessonSections: [{ id: "prior", kind: "prior_knowledge", title: "先验知识", items: [{ id: "prior", text: "节点（Node）：定义。\n\n> **原文标签： ** 引文中的标点和格式保持原样。\n\n- 边（Edge）：另一项。", sourceAnchorIds: [] }], sourceAnchorIds: [], atomIds: [] }], quality: { issues: [] } } as unknown as PageLesson;
+    const markup = renderToStaticMarkup(<ExplanationPanel release={{ id: "synthetic" } as CourseRelease} page={lesson} />);
+    expect(markup).toContain("**原文标签： ** 引文中的标点和格式保持原样。");
+    expect(markup).not.toContain("<strong>原文标签：</strong>");
+  });
+
+  it("retains all legacy prior knowledge definitions without sentence splitting or an eight-item limit", () => {
+    const terms = Array.from({ length: 10 }, (_, i) => `节点${i}（Node${i}）：完整定义。还有一句；保留。`);
+    const lesson = { id: "legacy", title: "旧定义", blocks: [{ id: "prior", kind: "prerequisite", markdown: terms.join("\n- ") }], anchors: [], atoms: [], quality: { issues: [] } } as unknown as PageLesson;
+    const markup = renderToStaticMarkup(<ExplanationPanel release={{ id: "synthetic" } as CourseRelease} page={lesson} />);
+    for (const term of terms) expect(markup).toContain(term);
+  });
+
   it.each([
     ["**图（Graph）：** 图由顶点和边组成。", "图（Graph）： 图由顶点和边组成。"],
     ["**图（Graph）： ** 图由顶点和边组成。", "图（Graph）： 图由顶点和边组成。"]
@@ -101,7 +178,8 @@ describe("lesson generation readiness badge", () => {
 
     expect(markup).toContain("图（Graph）： 后文 <strong>保持粗体</strong>。");
     expect(markup).not.toContain("<strong>图（Graph）：");
-    expect(markup).toContain("**段落标签： ** Markdown 正文保持原样。");
+    expect(markup).toContain("段落标签： Markdown 正文保持原样。");
+    expect(markup).not.toContain("**段落标签： **");
   });
 
   it("normalizes legacy labels in objectives, full explanation, and summary while preserving code", () => {

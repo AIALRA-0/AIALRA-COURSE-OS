@@ -2572,6 +2572,153 @@ describe("Course OS API", () => {
     expect(completed?.revision).toBe((draft?.revision ?? 0) + 1);
   }, 60_000);
 
+  it.each(["save503", "readback503", "revisionConflict"] as const)("resumes the durable paid bridge after %s without calling or charging it again", async (failure) => {
+    const priorWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const core = vi.fn(async () => testTeachingResult(0.001));
+      const bridge = vi.fn(async () => ({ markdown: "已付费的承上启下内容", provider: "kuafu", model: "deepseek-v4.1-flash",
+        usage: testTeachingResult(0.002).usage }));
+      const { app, dependencies, operations, readweave, release } = await seededApp({ generateTeachingPackage: core, generateBridge: bridge });
+      const save = readweave.saveDraftWithCost.bind(readweave);
+      const read = readweave.getDraftByPage.bind(readweave);
+      let fail = true;
+      let bridgeSaved = false;
+      let originalWriteKey: string | undefined;
+      vi.spyOn(readweave, "saveDraftWithCost").mockImplementation(async (...args) => {
+        if (args[0].page.lessonSections?.some(section => section.kind === "chapter_bridge")) {
+          const state = await operations.read();
+          const receipt = state.generationCheckpoints[`${args[0].generationJobId}:page-1`];
+          expect(receipt && "kind" in receipt && receipt.bridge?.response.markdown).toBe("已付费的承上启下内容");
+          expect(receipt && "kind" in receipt && receipt.bridge?.cost.id).toBe(args[3].id);
+          originalWriteKey ??= args[2].idempotencyKey;
+          expect(args[2].idempotencyKey).toBe(originalWriteKey);
+          if (fail && failure !== "readback503") throw new Error(failure === "save503"
+            ? "READWEAVE_ETAPI_503: bridge save unavailable" : "READWEAVE_REVISION_CONFLICT: bridge save rejected");
+          const result = await save(...args);
+          bridgeSaved = true;
+          return result;
+        }
+        return save(...args);
+      });
+      vi.spyOn(readweave, "getDraftByPage").mockImplementation(async pageId => {
+        if (fail && failure === "readback503" && bridgeSaved) throw new Error("READWEAVE_ETAPI_503: bridge readback unavailable");
+        return read(pageId);
+      });
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", `paid-bridge-${failure}`)
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+      await executeGenerationJob(created.body.id, dependencies);
+      expect((await operations.readGenerationJob(created.body.id))?.state).toBe("failed");
+      const before = await read("page-1");
+      const checkpoint = (await operations.read()).generationCheckpoints[`${created.body.id}:page-1`];
+      expect(checkpoint && "kind" in checkpoint && checkpoint.bridge?.cost.id).toContain("attempt:1");
+      expect(bridge).toHaveBeenCalledTimes(1);
+      fail = false;
+      await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", `paid-bridge-retry-${failure}`).send({}).expect(202);
+      const restarted = createDefaultDependencies(dependencies.dataDir, readweave, { generateTeachingPackage: core, generateBridge: bridge });
+      await executeGenerationJob(created.body.id, restarted);
+      expect(await operations.readGenerationJob(created.body.id)).toMatchObject({ state: "completed", attempt: 2, spentUsd: 0.003 });
+      expect(core).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      const after = await read("page-1");
+      expect(after?.page.blocks).toEqual(before?.page.blocks);
+      expect(after?.page.questionBank).toEqual(before?.page.questionBank);
+      expect(after?.page.lessonSections?.find(section => section.kind === "chapter_bridge")?.markdown).toBe("已付费的承上启下内容");
+      const costs = await readweave.listCostEntries({ jobId: created.body.id });
+      expect(costs).toHaveLength(2);
+      expect(costs.filter(cost => cost.id.endsWith(":bridge"))).toHaveLength(1);
+      expect(costs.find(cost => cost.id.endsWith(":bridge"))?.id).toContain("attempt:1");
+      expect((await operations.readGenerationJobEvents(created.body.id)).filter(event => event.type === "generation.cost.recorded")).toHaveLength(2);
+    } finally {
+      if (priorWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = priorWorker;
+    }
+  }, 15_000);
+
+  it("rejects a paid bridge checkpoint over a newer authority edit without regenerating the body or bridge", async () => {
+    const priorWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const core = vi.fn(async () => testTeachingResult(0.001));
+      const bridge = vi.fn(async () => ({ markdown: "旧正文对应的桥接", provider: "kuafu", model: "deepseek-v4.1-flash",
+        usage: testTeachingResult(0.002).usage }));
+      const { app, dependencies, operations, readweave, release } = await seededApp({ generateTeachingPackage: core, generateBridge: bridge });
+      const save = readweave.saveDraftWithCost.bind(readweave);
+      let edited: LessonDraft | undefined;
+      vi.spyOn(readweave, "saveDraftWithCost").mockImplementation(async (...args) => {
+        if (!edited && args[0].page.lessonSections?.some(section => section.kind === "chapter_bridge")) {
+          const base = (await readweave.getDraftByPage("page-1"))!;
+          const page = structuredClone(base.page);
+          page.blocks[0]!.markdown = "User's newer authoritative edit";
+          edited = await readweave.saveDraft({ ...base, page, contentHash: "newer-authority-edit" }, base.revision,
+            { idempotencyKey: "user-edit-during-bridge", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "user-edit-during-bridge" });
+        }
+        return save(...args);
+      });
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "paid-bridge-newer-edit")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+      await executeGenerationJob(created.body.id, dependencies);
+      expect((await operations.readGenerationJob(created.body.id))?.state).toBe("failed");
+      await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "paid-bridge-newer-edit-retry").send({}).expect(202);
+      await executeGenerationJob(created.body.id, dependencies);
+      expect(await operations.readGenerationJob(created.body.id)).toMatchObject({ state: "failed", lastErrorCode: "READWEAVE_UNAVAILABLE" });
+      expect((await operations.readGenerationJobEvents(created.body.id)).some(event =>
+        (event.payload as { backendFailureKind?: string }).backendFailureKind === "revision_conflict")).toBe(true);
+      expect(await readweave.getDraftByPage("page-1")).toEqual(edited);
+      expect(core).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect((await readweave.listCostEntries({ jobId: created.body.id })).filter(cost => cost.id.endsWith(":bridge"))).toHaveLength(1);
+    } finally {
+      if (priorWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = priorWorker;
+    }
+  }, 15_000);
+
+  it.each(["previousContext", "sourceContract"] as const)("refuses to mix a paid bridge checkpoint with changed %s", async (change) => {
+    const priorWorker = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const core = vi.fn(async () => testTeachingResult(0.001));
+      const bridge = vi.fn(async () => ({ markdown: "已付费的原上下文桥接", provider: "kuafu", model: "deepseek-v4.1-flash",
+        usage: testTeachingResult(0.002).usage }));
+      const { app, dependencies, operations, readweave, release } = await seededApp(
+        { generateTeachingPackage: core, generateBridge: bridge }, testReleaseWithPages(2));
+      const save = readweave.saveDraftWithCost.bind(readweave);
+      vi.spyOn(readweave, "saveDraftWithCost").mockImplementation(async (...args) => {
+        if (args[0].page.lessonSections?.some(section => section.kind === "chapter_bridge")) {
+          throw new Error("READWEAVE_REVISION_CONFLICT: preserve bridge receipt before retry");
+        }
+        return save(...args);
+      });
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", `bridge-context-${change}`)
+        .send({ materialVersionId: release.id, pageIds: ["page-2"], budgetUsd: 1 }).expect(202);
+      await executeGenerationJob(created.body.id, dependencies);
+      expect((await operations.readGenerationJob(created.body.id))?.state).toBe("failed");
+      const current = await readweave.getDraftByPage("page-2");
+      if (change === "previousContext") {
+        const page = structuredClone(release.pages[0]!);
+        page.lessonSections = [{ id: "edited-predecessor", kind: "full_explanation", title: "新前页讲解",
+          markdown: "The predecessor core now states a different premise", sourceAnchorIds: [], atomIds: [] }];
+        await readweave.saveDraft({ id: "draft:page-1", workspaceId: "personal", courseId: release.courseId,
+          moduleId: release.moduleId, sourceReleaseId: release.id, pageId: "page-1", revision: 0, status: "ready",
+          page, changedBlockIds: [], contentHash: "changed-predecessor-core", updatedAt: new Date().toISOString() }, 0,
+          { idempotencyKey: "changed-predecessor-core", actor: "test", workspaceId: "personal", schemaVersion: "2.4.0", requestId: "changed-predecessor-core" });
+      } else {
+        await operations.mutateGenerationJob(created.body.id, job => { job.language = "en"; });
+      }
+      await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", `bridge-context-retry-${change}`).send({}).expect(202);
+      await executeGenerationJob(created.body.id, dependencies);
+      expect((await operations.readGenerationJob(created.body.id))?.state).toBe("failed");
+      expect(await readweave.getDraftByPage("page-2")).toEqual(current);
+      expect(core).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect((await readweave.listCostEntries({ jobId: created.body.id })).filter(cost => cost.id.endsWith(":bridge"))).toHaveLength(1);
+    } finally {
+      if (priorWorker === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = priorWorker;
+    }
+  }, 15_000);
+
   it("saves a completed bridge and its cost in one ReadWeave mutation", async () => {
     const modelRouter: ModelRouterClient = {
       generateTeachingPackage: async () => testTeachingResult(0.001),
