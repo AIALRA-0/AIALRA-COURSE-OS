@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generationHarnessFileSha256 } from "./generation-harness.js";
+import { loadWritingStandards } from "./writing-standards.js";
 import { meterModelRouter } from "./model-usage-meter.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, parseWrappedProviderJson, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingPackageSchema, withCurrentDeepSeekModels } from "./model-router.js";
 
@@ -163,7 +164,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.response_format).toBeUndefined();
       expect(body.max_tokens).toBeGreaterThan(0);
       expect(body.max_tokens).toBeLessThanOrEqual(15_000);
-      expect(body).toMatchObject({ thinking: { type: "disabled" } });
+      expect(body).toMatchObject({ thinking: { type: "enabled" }, reasoning_effort: "low" });
       expect(body.messages[0]?.content).toContain("questions");
       expect(body.messages[1]?.content).toContain("来源内容");
       return Response.json({ model: "deepseek-v4-flash-vision-exp", choices: [{ message: { content: JSON.stringify(providerTeachingContent()) } }], usage: { prompt_tokens: 90, completion_tokens: 210, cached_tokens: 10 } });
@@ -178,7 +179,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(url).toBe("https://api.deepseek.test/responses");
       const body = JSON.parse(String(init?.body)) as { input: Array<{ content: Array<{ type: string; image_url?: string }> }>; reasoning?: { effort?: string }; temperature?: number; text?: { format?: { type?: string; json_schema?: unknown } } };
       expect(body.text?.format?.type).toBe("json_schema");
-      expect(body.reasoning?.effort).toBe("none");
+      expect(body.reasoning?.effort).toBe("low");
       expect(body.temperature).toBeUndefined();
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
       expect(body.input[0]?.content[1]?.image_url).toMatch(/^data:image\/png;base64,/);
@@ -248,7 +249,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
       expect(body.instructions.endsWith("本次成文任务仅是承上启下：只用一个自然段、2–4句，从已确认的前页一点自然引出本页问题；若没有可确认的前页信息，就只依据本页摘要提出本页问题。复用已有术语，不重复定义、正文、代码或推导；输出仅限承接段。"))
         .toBe(true);
-      expect(body.max_output_tokens).toBe(700);
+      expect(body.max_output_tokens).toBe(15_000);
       expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",
         output_text: "课程举例说明：AI provider temporarily unavailable 是系统提示语，本页继续讨论处理规则。",
@@ -331,7 +332,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://api.kuafushe.test/v1/responses");
       const body = JSON.parse(String(init?.body)) as { model?: string; stream?: boolean; reasoning?: { effort?: string }; text?: { format?: { type?: string } } };
-      expect(body).toMatchObject({ model: "deepseek-v4.1-flash", stream: true, reasoning: { effort: "none" } });
+      expect(body).toMatchObject({ model: "deepseek-v4.1-flash", stream: true, reasoning: { effort: "low" } });
       expect(body.text?.format?.type).toBe("json_schema");
       return Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()), usage: { input_tokens: 180, output_tokens: 260, input_tokens_details: { cached_tokens: 40 }, total_cost: 0.002 } });
     });
@@ -345,7 +346,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(url).toBe("https://opencode.test/responses");
       expect(new Headers(init?.headers).get("x-opencode-session")).toBe("luna-responses-test");
       const body = JSON.parse(String(init?.body)) as { reasoning?: { effort?: string }; temperature?: number; text?: { format?: { type?: string } }; input: Array<{ content: Array<{ type: string }> }> };
-      expect(body.reasoning?.effort).toBe("none");
+      expect(body.reasoning?.effort).toBe("low");
       expect(body.temperature).toBeUndefined();
       expect(body.text?.format?.type).toBe("json_schema");
       expect(body.input[0]?.content.map((item) => item.type)).toEqual(["input_text", "input_image"]);
@@ -459,7 +460,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     const result = await client.generateBridge!({ ...providerInput("empty-bridge-output"),
       previousPageContext: "前页已确认讲解", currentSummary: "本页教学摘要" });
 
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ max_output_tokens: 700, stream: true });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ max_output_tokens: 15_000, stream: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.markdown).toBe("本页继续核对前述条件");
     expect(result.usage).toMatchObject({ inputTokens: 125, outputTokens: 34, apiEquivalentUsd: 0.002 });
@@ -1003,7 +1004,7 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       const headers = new Headers(init?.headers);
       expect(headers.get("x-opencode-session")).toBeTruthy();
       expect(headers.get("x-opencode-request")).toBeTruthy();
-      expect(body.thinking?.type).toBe("disabled");
+      expect(body.thinking?.type).toBe("enabled");
       expect(body.messages[1]?.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image_url" })]));
       return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });
     });
@@ -1012,6 +1013,43 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       model: "deepseek-v4-flash-vision-exp", protocol: "chat_completions", supportsVision: true, billingMode: "subscription_quota" }, true);
     expect(health).toMatchObject({ providerId: "opencode-go", state: "connected", message: expect.stringContaining("图片输入") });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("enabled low thinking across stages and retries", () => {
+  it.each(["responses", "messages", "chat_completions"] as const)("keeps low effort and complete rules in %s", async (protocol) => {
+    const bundle = loadWritingStandards();
+    const bodies: Array<Record<string, unknown>> = [];
+    const keys: Array<string | null> = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+      const instructions = protocol === "responses" ? String(body.instructions)
+        : protocol === "messages" ? String(body.system)
+          : String((body.messages as Array<{ content: string }>)[0]!.content);
+      expect(instructions).toContain(bundle.writing);
+      expect(instructions).toContain(bundle.style);
+      expect(body.temperature).toBeUndefined();
+      expect(body.max_output_tokens ?? body.max_tokens).toBe(15_000);
+      if (protocol === "responses") expect(body.reasoning).toEqual({ effort: "low" });
+      else {
+        expect(body.thinking).toEqual({ type: "enabled" });
+        if (protocol === "messages") expect(body.output_config).toEqual({ effort: "low" });
+        else expect(body.reasoning_effort).toBe("low");
+      }
+      return bodies.length % 2 === 1 ? Response.json({ error: { code: "upstream_error" } }, { status: 503 })
+        : Response.json({ output_text: "ok", usage: { input_tokens: 100, output_tokens: 100, total_cost: 0.001 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu-backup", model: "deepseek-v4.1-flash-expires-on-0910",
+      baseUrl: "https://synthetic.test", apiKey: "synthetic-example-key", protocol });
+    for (const phase of ["page_understanding", "planning", "teaching", "format_repair", "bridge"]) {
+      await runPlannedStageForTest(client, phase);
+      expect(bodies.at(-1)).toEqual(bodies.at(-2));
+      expect(keys.at(-1)).toBe(keys.at(-2));
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(10);
   });
 });
 

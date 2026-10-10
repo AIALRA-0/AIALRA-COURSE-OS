@@ -172,6 +172,26 @@ export interface ProviderConnection {
   billingMode?: "metered" | "subscription_quota" | "free" | "unknown";
 }
 
+// Explicit low effort avoids gateway defaults (including medium -> high on
+// DeepSeek). Retries and provider fallbacks use the same request builder.
+function usesLowThinking(connection: ProviderConnection): boolean {
+  return connection.model.startsWith("deepseek-")
+    || (connection.protocol === "responses"
+      && ["deepseek", "kuafu", "kuafu-backup", "opencode-go"].includes(connection.providerId));
+}
+
+function lowThinkingParameters(connection: ProviderConnection): Record<string, unknown> {
+  if (!usesLowThinking(connection)) return {};
+  if (connection.protocol === "responses") return { reasoning: { effort: "low" } };
+  if (connection.protocol === "messages") return { thinking: { type: "enabled" }, output_config: { effort: "low" } };
+  return { thinking: { type: "enabled" }, reasoning_effort: "low" };
+}
+
+// Full-rule low-effort experiments needed up to 12,870 total output tokens.
+// Small final answers still need room for reasoning; the monetary allowance
+// below remains the final cap and is never increased by this floor.
+const LOW_THINKING_OUTPUT_FLOOR = 15_000;
+
 function providerRequestHeaders(connection: ProviderConnection, input: ModelRouterInput, idempotencyKey = input.idempotencyKey || randomUUID()): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${connection.apiKey}`,
@@ -216,9 +236,8 @@ export async function probeProviderConnection(connection: ProviderConnection, fu
     if (!chat && connection.protocol !== "responses") return { providerId: connection.providerId, state: "connected", checkedAt, message: "连接正常，模型目录可用；当前协议使用本地结构校验" };
     const requestBody = chat ? {
       model: connection.model,
-      max_tokens: 32,
-      temperature: 0,
-      thinking: { type: "disabled" },
+      max_tokens: usesLowThinking(connection) ? 4_096 : 32,
+      ...(usesLowThinking(connection) ? lowThinkingParameters(connection) : { temperature: 0 }),
       messages: [
         { role: "system", content: "Return only the JSON object {\"ok\":true}." },
         { role: "user", content: connection.supportsVision
@@ -229,8 +248,8 @@ export async function probeProviderConnection(connection: ProviderConnection, fu
       model: connection.model,
       instructions: "Return only the requested structured object",
       input,
-      max_output_tokens: 32,
-      reasoning: { effort: "none" },
+      max_output_tokens: usesLowThinking(connection) ? 4_096 : 32,
+      ...lowThinkingParameters(connection),
       text: { format: { type: "json_schema", name: "course_os_provider_probe", schema: capabilitySchema, strict: true } }
     };
     const probeId = randomUUID();
@@ -328,10 +347,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     let requestError: string | undefined;
     let requestStartedAt = 0;
     try {
-      const rawBody = this.connection.providerId === "opencode-go" && /^deepseek-/.test(this.connection.model)
-        && this.connection.protocol === "chat_completions" && typeof init.body === "string"
-        ? JSON.stringify({ thinking: { type: "disabled" }, ...JSON.parse(init.body) })
-        : init.body;
+      const rawBody = init.body;
       const useResponsesStream = ["deepseek", "kuafu", "kuafu-backup", "opencode-go"].includes(this.connection.providerId) && this.connection.protocol === "responses"
         && typeof rawBody === "string";
       const requestBody = useResponsesStream
@@ -474,7 +490,9 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
     const reserve = estimatedInput * price.inputMicrousdPerMillion / 1e12;
     const attemptBudget = budget / 2;
     const allowance = Math.floor((attemptBudget - reserve) * 1e12 / price.outputMicrousdPerMillion);
-    const maxTokens = Math.min(request.maxOutputTokens, allowance);
+    const outputCeiling = usesLowThinking(this.connection)
+      ? Math.max(request.maxOutputTokens, LOW_THINKING_OUTPUT_FLOOR) : request.maxOutputTokens;
+    const maxTokens = Math.min(outputCeiling, allowance);
     if (maxTokens < Math.min(1_000, request.maxOutputTokens)) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
     const attemptCostCeiling = reserve + maxTokens * price.outputMicrousdPerMillion / 1e12;
     const base = this.connection.baseUrl.replace(/\/$/, "");
@@ -488,17 +506,17 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       model: this.connection.model, instructions: request.instructions,
       input: image ? [{ role: "user", content: [{ type: "input_text", text: request.prompt }, { type: "input_image", image_url: image, detail: "high" }] }] : request.prompt,
       max_output_tokens: maxTokens,
-      ...(["deepseek", "kuafu", "kuafu-backup", "opencode-go"].includes(this.connection.providerId) ? { reasoning: { effort: "none" } } : { temperature: 0.2 }),
+      ...(usesLowThinking(this.connection) ? lowThinkingParameters(this.connection) : { temperature: 0.2 }),
       text: request.schema
         ? { format: { type: "json_schema", name: `course_os_${request.phase}`, schema: request.schema, strict: true } }
         : { format: { type: "text" } }
     } : protocol === "messages" ? {
       model: this.connection.model, system: schemaInstruction, max_tokens: maxTokens,
+      ...lowThinkingParameters(this.connection),
       messages: [{ role: "user", content: image ? [{ type: "text", text: request.prompt }, anthropicImagePart(image)] : request.prompt }]
     } : {
       model: this.connection.model, max_tokens: maxTokens,
-      ...(["deepseek", "opencode-go"].includes(this.connection.providerId) && this.connection.model.startsWith("deepseek-")
-        ? { thinking: { type: "disabled" } } : { temperature: 0.2 }),
+      ...(usesLowThinking(this.connection) ? lowThinkingParameters(this.connection) : { temperature: 0.2 }),
       messages: [{ role: "system", content: schemaInstruction }, { role: "user", content: image
         ? [{ type: "text", text: request.prompt }, { type: "image_url", image_url: { url: image, detail: "high" } }] : request.prompt }]
     };
