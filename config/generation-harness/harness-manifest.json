@@ -1,13 +1,15 @@
 {
   "id": "course-os-teaching",
-  "version": "2.5.6",
+  "version": "2.5.7",
   "taskContract": "GENERATE + TEACHING",
   "promptFiles": [
     "page-plan-prompt.md",
     "planned-writing-prompt.md",
     "writing-format-contract.md",
     "writing-standard-source.md",
-    "style-standard-source.md"
+    "style-standard-source.md",
+    "writing-activation-source.md",
+    "writing-minimal-examples.md"
   ],
   "schemaFile": "teaching-package.schema.json",
   "writingPolicySnapshotRequired": true

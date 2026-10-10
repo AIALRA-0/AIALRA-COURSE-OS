@@ -6,18 +6,19 @@ export const teachingCompositionContract = {
   learningObjectives: "每项只承诺正文真正教会的一种判断、计算或操作，不提前堆放陌生术语",
   fullExplanationMarkdown: "先按对象与依赖建立段落，再成文；独立步骤用有序列表，比较项和表格列说明用列表；同一因果过程保持连续；公式、代码、表格保留原对象且逐项解释",
   mainContentMarkdown: "按本页目标与实际内容组织要点，不加标题、不引入新术语，每条继承成立条件，不按固定数量截断",
-  misconceptions: "一个元素一处误解，错误理解、错因、正确判断、核对方法各占一个段落；四个标签统一加粗，解释因果，不能只贴标签",
+  misconceptions: "一个元素一处误解，错误理解、错因、正确判断、核对方法分别写成 - **标题**：完整解释；冒号在粗体外，解释因果，不能只贴标签",
   questions: "题干、每个选项、标准答案和解析均使用中文与合法数学，不为复述原文重新插入英文；理解题标准答案的独立并列内容分行列项，不挤成分号串；解析按依据、运算步骤、结果与误选原因分段或列项，每个错误选项的理由单独列项，不能用分号串成一段；选择题标准答案必须逐字等于一个选项",
   preservation: "换行、列表层级、公式和代码在生成、保存、读取和渲染中保持一致；不通过删掉问题段落或截断总结来通过验证"
 } as const;
 
 /** Normalize explicit role labels without rewriting the explanation itself. */
 export function formatMisconception(value: string): string {
-  const parts = value.trim().split(/\n\s*\n|\r?\n\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])|[；;]\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])/u);
+  const parts = value.trim().split(/\n\s*\n|\r?\n\s*(?=(?:[-*+]\s+)?\*{0,2}(?:错因|正确判断|核对方法)(?:\*{0,2})[：:])|[；;]\s*(?=\*{0,2}(?:错因|正确判断|核对方法)[：:])/u);
   const roles = ["错误理解", "错因", "正确判断", "核对方法"] as const;
   if (parts.length !== roles.length) return value;
   const bodies = parts.map((part, index) => {
-    const unwrapped = part.trim().replace(/^\*{0,2}((?:错误理解|错因|正确判断|核对方法)[：:])\*{0,2}/u, "$1");
+    const unwrapped = part.trim().replace(/^[-*+]\s+/u, "")
+      .replace(/^\*{0,2}(错误理解|错因|正确判断|核对方法)(?:\*{0,2})([：:])\*{0,2}/u, "$1$2");
     const prefix = index === 0 ? /^(?:错误理解[：:]|误以为\s*)/u
       : index === 1 ? /^(?:错因[：:]|错因是\s*)/u
         : new RegExp(`^${roles[index]}[：:]`, "u");
@@ -26,7 +27,7 @@ export function formatMisconception(value: string): string {
     return (index === 0 && match[0].startsWith("误以为") ? unwrapped : unwrapped.slice(match[0].length)).trimStart();
   });
   if (bodies.some(body => !body)) return value;
-  return bodies.map((body, index) => `**${roles[index]}：** ${body}`).join("\n\n");
+  return bodies.map((body, index) => `- **${roles[index]}**：${body}`).join("\n\n");
 }
 
 /** Split a long generated sentence only at real Chinese sentence boundaries. */
@@ -311,8 +312,8 @@ export function validateTeachingPresentation(input: PresentationInput): string[]
     if (/^错误理解[：:]/u.test(value.trim()) && /[；;]\s*(?:错因|正确判断|核对方法)[：:]/u.test(value)) {
       issues.add("TEACHING_PRESENTATION:misconceptions:ROLES_PACKED");
     }
-    const roleLabels = [...value.matchAll(/(?:^|\n\s*\n)((?:\*\*)?(错误理解|错因|正确判断|核对方法)[：:](?:\*\*)?)/gu)];
-    if (roleLabels.length > 0 && roleLabels.some((match) => match[1] !== `**${match[2]}：**`)) {
+    const roleLabels = [...value.matchAll(/(?:^|\n)((?:[-*+]\s+)?(?:\*\*)?(错误理解|错因|正确判断|核对方法)(?:\*\*)?[：:](?:\*\*)?)/gu)];
+    if (roleLabels.length > 0 && roleLabels.some((match) => match[1] !== `- **${match[2]}**：`)) {
       issues.add("TEACHING_PRESENTATION:misconceptions:LABEL_NOT_BOLD");
     }
   }

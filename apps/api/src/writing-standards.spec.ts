@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpProviderTeachingClient, type ModelRouterInput } from "./model-router.js";
 import { currentGenerationHarness } from "./generation-harness.js";
 import { plannedInstructions, writingFormatContract } from "./planned-teaching.js";
-import { approvedWritingInstructions, compileWritingStandard, generatedHeadingInstructions, loadWritingStandards, withApprovedWritingInstructions, writingStandardsDirectory, writingStandardsMarker } from "./writing-standards.js";
+import { approvedWritingInstructions, compileWritingStandard, generatedHeadingInstructions, loadWritingStandards, withApprovedWritingInstructions, writingActivationInstructions, writingStandardsDirectory, writingStandardsMarker } from "./writing-standards.js";
 
 vi.mock("node:fs", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -33,11 +33,13 @@ describe("APCF runtime writing contract", () => {
     // The full source, including the preamble and every example, is unchanged.
     for (const file of bundle.files) {
       const original = readFileSync(join(writingStandardsDirectory, file.path), "utf8");
-      const compiled = file.path.startsWith("writing") ? bundle.writing : bundle.style;
+      const compiled = { "writing-standard-source.md": bundle.writing, "style-standard-source.md": bundle.style, "writing-activation-source.md": bundle.activation, "writing-minimal-examples.md": bundle.examples }[file.path];
       expect(compiled).toBe(original);
-      expect(compiled).toContain("**Bad**");
-      expect(compiled).toContain("**Good**");
-      expect(createHash("sha256").update(compiled).digest("hex")).toBe(file.sha256);
+      if (file.path === "writing-standard-source.md" || file.path === "style-standard-source.md") {
+        expect(compiled).toContain("**Bad**");
+        expect(compiled).toContain("**Good**");
+      }
+      expect(createHash("sha256").update(compiled!).digest("hex")).toBe(file.sha256);
     }
   });
 
@@ -105,6 +107,24 @@ describe("APCF runtime writing contract", () => {
     expect(() => loadWritingStandards(directory)).toThrow("WRITING_STANDARD_MANIFEST_HASH_MISMATCH");
   });
 
+  it("can still read a pinned legacy two-source bundle without inventing activation sources", () => {
+    const root = mkdtempSync(join(tmpdir(), "course-writing-"));
+    temporaryRoots.push(root);
+    const directory = join(root, "generation-harness");
+    mkdirSync(directory);
+    const manifest = JSON.parse(readFileSync(join(writingStandardsDirectory, "../writing-policy-manifest.json"), "utf8"));
+    manifest.files = manifest.files.slice(0, 2);
+    manifest.aggregateSha256 = createHash("sha256").update(JSON.stringify(manifest.files.map(({ path, sha256 }: { path: string; sha256: string }) => ({ path, sha256 })))).digest("hex");
+    manifest.policySnapshotId = `writing-policy:${manifest.aggregateSha256.slice(0, 16)}`;
+    writeFileSync(join(root, "writing-policy-manifest.json"), JSON.stringify(manifest));
+    for (const file of manifest.files) writeFileSync(join(directory, file.path), readFileSync(join(writingStandardsDirectory, file.path)));
+    const legacy = loadWritingStandards(directory);
+    expect(legacy.writing).toBe(loadWritingStandards().writing);
+    expect(legacy.style).toBe(loadWritingStandards().style);
+    expect(legacy.activation).toBe("");
+    expect(writingActivationInstructions(legacy)).toBe("");
+  });
+
   it("composes once, rejects marker-only shortcuts and leaves English protocol text intact", () => {
     const approved = approvedWritingInstructions("zh-CN");
     const once = withApprovedWritingInstructions("write the requested fields", "zh-CN");
@@ -113,6 +133,34 @@ describe("APCF runtime writing contract", () => {
     expect(withApprovedWritingInstructions("Return only JSON", "en")).toContain("本次成文语言是英文");
     expect(withApprovedWritingInstructions("Return only JSON", "en")).toContain("Return only JSON");
     expect(withApprovedWritingInstructions("Return only JSON", "en").endsWith(generatedHeadingInstructions)).toBe(true);
+  });
+
+  it("reapplies release reminders after the phase without replacing full rules or multiplying calls", () => {
+    const bundle = loadWritingStandards();
+    expect(bundle.files).toHaveLength(4);
+    const activation = writingActivationInstructions(bundle);
+    expect(activation).toContain(bundle.activation);
+    expect(activation).toContain(bundle.examples);
+    expect(activation).toContain("案例用于说明写法，不是本页知识来源");
+    expect(activation).toContain("正式报告的术语表例外仅适用于要求术语表的任务");
+    const phase = "只填写本次教学字段";
+    const composed = withApprovedWritingInstructions(phase, "zh-CN");
+    expect(composed).toContain(bundle.writing);
+    expect(composed).toContain(bundle.style);
+    expect(composed.indexOf(activation)).toBeGreaterThan(composed.indexOf(phase));
+    expect(composed.split(activation)).toHaveLength(2);
+    expect(composed.indexOf(generatedHeadingInstructions)).toBeGreaterThan(composed.indexOf(activation));
+    expect(withApprovedWritingInstructions(composed, "zh-CN")).toBe(composed);
+  });
+
+  it.each(["writing-activation-source.md", "writing-minimal-examples.md"])("rejects drift in %s before sending even a previously composed prompt", fileName => {
+    const once = withApprovedWritingInstructions("只填写教学字段", "zh-CN");
+    const originalRead = fs.readFileSync;
+    vi.mocked(readFileSync).mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+      if (String(args[0]).endsWith(fileName)) return Buffer.from("changed synthetic reminder");
+      return originalRead(...args);
+    }) as typeof fs.readFileSync);
+    expect(() => withApprovedWritingInstructions(once, "zh-CN")).toThrow("WRITING_STANDARD_HASH_MISMATCH");
   });
 
   it.each(["zh-CN", "en"])("scopes the bilingual heading override without changing %s prose or source rules", language => {
@@ -138,7 +186,7 @@ describe("APCF runtime writing contract", () => {
     expect(writingFormatContract).toContain("## 1. 注意力 Attention");
     expect(writingFormatContract).toContain("### 1.1. 自注意力 Self-Attention");
     expect(writingFormatContract).not.toContain("## 1. 本次实际问题");
-    expect(currentGenerationHarness().version).toBe("2.5.6");
+    expect(currentGenerationHarness().version).toBe("2.5.7");
   });
 
   it("puts the single heading override after conflicting phase language and term-format instructions", () => {

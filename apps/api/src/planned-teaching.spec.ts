@@ -544,7 +544,7 @@ describe("planned teaching core writer", () => {
     expect(result.content.mainContentMarkdown).not.toBe(body);
     expect(result.content.learningObjectives).toEqual(repairedPackage.learningObjectives);
     expect(result.content.priorKnowledge).toEqual(repairedPackage.priorKnowledge);
-    expect(result.content.misconceptions).toEqual(repairedPackage.misconceptions);
+    expect(result.content.misconceptions).toEqual(["- **错误理解**：输入变化后可以保留原结果\n\n- **错因**：忽略了结果依赖输入\n\n- **正确判断**：应当重新计算\n\n- **核对方法**：逐项检查输入条件"]);
     expect(result.content.questions).toEqual(repairedPackage.questions);
     expect(result.content.fullExplanationMarkdown).toContain("## APPLICATIONS");
     expect(result.content.fullExplanationMarkdown).toContain("`G = (V, E)`");

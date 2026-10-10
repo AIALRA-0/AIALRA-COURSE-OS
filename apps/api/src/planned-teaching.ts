@@ -404,9 +404,9 @@ export function plannedFormatIssues(content: Partial<TeachingPackage>): string[]
   }
   for (const value of (Array.isArray(content.misconceptions) ? content.misconceptions : []).filter((item): item is string => typeof item === "string")) {
     const roles = ["错误理解", "错因", "正确判断", "核对方法"];
-    const paragraphs = value.trim().split(/\n\s*\n/u);
+    const paragraphs = value.trim().split(/\n\s*\n|\r?\n(?=- \*\*)/u);
     if (paragraphs.length !== roles.length || paragraphs.some((paragraph, index) =>
-      !paragraph.startsWith("**" + roles[index] + "：** "))) {
+      !paragraph.startsWith("- **" + roles[index] + "**："))) {
       issues.push("TEACHING_PRESENTATION:misconceptions:ROLE_LABEL_MISSING");
     }
   }

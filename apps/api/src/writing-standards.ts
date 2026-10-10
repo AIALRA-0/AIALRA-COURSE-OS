@@ -16,6 +16,8 @@ export interface WritingStandardsBundle {
   policySnapshotId: string;
   writing: string;
   style: string;
+  activation: string;
+  examples: string;
 }
 
 export const writingStandardsDirectory = fileURLToPath(new URL("../../../config/generation-harness/", import.meta.url));
@@ -52,9 +54,10 @@ export function loadWritingStandards(directory = writingStandardsDirectory): Wri
   const manifest = JSON.parse(readFileSync(resolve(directory, "../writing-policy-manifest.json"), "utf8")) as {
     standardVersion: string; files: WritingStandardSource[]; aggregateSha256: string; policySnapshotId: string;
   };
-  if (manifest.standardVersion !== "v0.1" || manifest.files.length !== 2) throw new Error("WRITING_STANDARD_MANIFEST_INVALID");
+  const sourceNames = ["writing-standard-source.md", "style-standard-source.md", "writing-activation-source.md", "writing-minimal-examples.md"];
+  if (manifest.standardVersion !== "v0.1" || ![2, 4].includes(manifest.files.length)) throw new Error("WRITING_STANDARD_MANIFEST_INVALID");
   const sources = manifest.files.map(file => {
-    if (!/^(writing|style)-standard-source\.md$/u.test(file.path)) throw new Error("WRITING_STANDARD_PATH_INVALID");
+    if (!sourceNames.includes(file.path)) throw new Error("WRITING_STANDARD_PATH_INVALID");
     const bytes = readFileSync(resolve(directory, file.path));
     if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error(`WRITING_STANDARD_HASH_MISMATCH:${file.path}`);
     return bytes.toString("utf8");
@@ -64,14 +67,21 @@ export function loadWritingStandards(directory = writingStandardsDirectory): Wri
   if (aggregate !== manifest.aggregateSha256 || manifest.policySnapshotId !== `writing-policy:${aggregate.slice(0, 16)}`) {
     throw new Error("WRITING_STANDARD_MANIFEST_HASH_MISMATCH");
   }
-  if (manifest.files[0]!.path !== "writing-standard-source.md" || manifest.files[1]!.path !== "style-standard-source.md") {
+  if (manifest.files.some((file, index) => file.path !== sourceNames[index])) {
     throw new Error("WRITING_STANDARD_SOURCE_ORDER_INVALID");
   }
   return {
     version: manifest.standardVersion, files: manifest.files, aggregateSha256: aggregate, policySnapshotId: manifest.policySnapshotId,
     writing: compileWritingStandard(sources[0]!, Array.from({ length: 29 }, (_, i) => String(i + 1))),
-    style: compileWritingStandard(sources[1]!, Array.from({ length: 15 }, (_, i) => `S${String(i).padStart(2, "0")}`))
+    style: compileWritingStandard(sources[1]!, Array.from({ length: 15 }, (_, i) => `S${String(i).padStart(2, "0")}`)),
+    activation: sources[2] ?? "", examples: sources[3] ?? ""
   };
+}
+
+/** Reapply the release's reminders at the last shared writing boundary. */
+export function writingActivationInstructions(bundle = loadWritingStandards()): string {
+  if (!bundle.activation) return "";
+  return `[COURSE_OS_APCF_WRITING_ACTIVATION_V1]\n以下是当前 APCF 发行中的规则提醒和最小对照全文；它们不能替代前面的 Writing／Style 正文，只在本次输出确实适用的对象上执行，合法例外继续保留\n\n${bundle.activation}\n\n${bundle.examples}\n\n教学适用范围：这些案例用于说明写法，不是本页知识来源，禁止把案例中的工程术语、清单、验收或交付报告填入教学内容；正式报告的术语表例外仅适用于要求术语表的任务，priorKnowledge 继续按产品合同逐项定义必要概念。Design 提醒由既有显示组件负责，不要求模型新增界面或自称已完成渲染检查。按前面完整规范逐项复读本次实际成文的名称对应、必要定义与类比、因果与步骤、条件与来源、公式、总结和题解；判断数值必须回到本页来源，不能复用计划里的未经核算结论；缺失资料与识别失败分别处理。复读在同一次请求内完成，不输出过程或自评，不新增报告栏目`;
 }
 
 export function approvedWritingInstructions(language: string): string {
@@ -83,10 +93,11 @@ export function approvedWritingInstructions(language: string): string {
 export function withApprovedWritingInstructions(instructions: string, language: string): string {
   // Validate the bundle even when the upstream prompt already contains it.
   const approved = approvedWritingInstructions(language);
+  const activation = writingActivationInstructions();
   // Keep the heading override once, after all phase-specific instructions.
   // The complete source bundle stays intact and remains the deduplication key.
   const sourcePolicy = approved.slice(0, -generatedHeadingInstructions.length).trimEnd();
-  const phaseInstructions = instructions.replaceAll(generatedHeadingInstructions, "").trimEnd();
+  const phaseInstructions = instructions.replaceAll(generatedHeadingInstructions, "").replaceAll(activation || "\u0000", "").trimEnd();
   const composed = phaseInstructions.includes(sourcePolicy) ? phaseInstructions : `${sourcePolicy}\n\n${phaseInstructions}`;
-  return `${composed}\n\n${generatedHeadingInstructions}`;
+  return `${composed}${activation ? `\n\n${activation}` : ""}\n\n${generatedHeadingInstructions}`;
 }

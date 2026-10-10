@@ -55,14 +55,14 @@ describe("generation harness", () => {
   });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.6", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.7", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/planned-teaching.ts")).toBe(true);
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
     expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
-    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "writing-standard-source.md", "style-standard-source.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/writing-standards.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts", "packages/quality/src/prior-knowledge.ts"]);
+    expect(snapshot.files.map((file) => file.path)).toEqual(["page-plan-prompt.md", "planned-writing-prompt.md", "writing-format-contract.md", "writing-standard-source.md", "style-standard-source.md", "writing-activation-source.md", "writing-minimal-examples.md", "teaching-package.schema.json", "apps/api/src/generation-harness.ts", "apps/api/src/writing-standards.ts", "apps/api/src/model-router.ts", "apps/api/src/model-usage-meter.ts", "apps/api/src/pricing.ts", "apps/api/src/planned-teaching.ts", "apps/api/src/page-source.ts", "apps/api/src/source-layout.ts", "apps/api/src/upstream/openmaic-course-context.ts", "packages/quality/src/presentation.ts", "packages/quality/src/prior-knowledge.ts"]);
     expect(snapshot.aggregateSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(snapshot.files.find((file) => file.path === "writing-standard-source.md")?.sha256).toBe("ba0f450a1f8f30a5f9328376739081e4ff9f501904f376bc36c55aca743ddc6f");
+    expect(snapshot.files.find((file) => file.path === "writing-standard-source.md")?.sha256).toBe("f51fbef6a61f1df46b9d48ca959755665f24672754073b9f17f98828ade833d7");
     expect(snapshot.files.find((file) => file.path === "style-standard-source.md")?.sha256).toBe("97f49d1a670616b8546ed5eb1f1dfca4f45ec48d49d791a9c8c41662c3e03d76");
   });
 
