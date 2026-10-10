@@ -18,6 +18,7 @@ export function classifyGenerationFailure(error: unknown): GenerationFailureRout
   if (code === "PROVIDER_QUOTA_EXHAUSTED") return { category: "provider", action: "switch_provider", code };
   if (["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT"].includes(code)) return { category: "provider", action: "retry_stage", code };
   if (code === "READWEAVE_UNAVAILABLE" || code === "READWEAVE_HASH_MISMATCH") return { category: "storage", action: "retry_readback", code };
+  if (code.startsWith("READWEAVE_")) return { category: "storage", action: "pause", code };
   if (code === "LEASE_LOST") return { category: "internal", action: "retry_stage", code };
   if (code === "GENERATION_REPAIR_SCOPE_INVALID" || code === "FORMULA_INVALID" || code === "COVERAGE_GAP") return { category: "content", action: "pause", code };
   if (code === "MODEL_INVALID_OUTPUT" || code === "MODEL_OUTPUT_LIMIT") return { category: "output", action: "pause", code };
@@ -51,7 +52,11 @@ function normalizeCode(raw: string): string {
   const teachingPhase = /^(TEACHING_(?:PLAN|OPENING|EXPLANATION|CONSOLIDATION)_INVALID)(?::|$)/u.exec(raw)?.[1];
   if (teachingPhase) return teachingPhase;
   if (raw.includes("READWEAVE") && raw.includes("MISMATCH")) return "READWEAVE_HASH_MISMATCH";
-  if (raw.includes("READWEAVE")) return "READWEAVE_UNAVAILABLE";
+  if (raw.includes("READWEAVE")) {
+    if (/READWEAVE_(?:ETAPI_)?(?:NETWORK|TIMEOUT)|READWEAVE_ETAPI_(?:429|5\d\d)|READWEAVE_SOURCE_REGISTRATION_TIMEOUT/u.test(raw)) return "READWEAVE_UNAVAILABLE";
+    if (/READWEAVE_ETAPI_(?:401|403)/u.test(raw)) return "READWEAVE_ACCESS_DENIED";
+    return /^(READWEAVE_[A-Z0-9_]+)/u.exec(raw)?.[1] ?? "READWEAVE_FAILURE";
+  }
   if (/INSUFFICIENT_BALANCE|QUOTA[_\s-]+(?:EXHAUSTED|EXCEEDED)|OUT[_\s-]+OF[_\s-]+CREDITS|402/iu.test(raw)) return "PROVIDER_QUOTA_EXHAUSTED";
   if (raw.includes("401") || raw.includes("403") || raw.includes("AUTH")) return "PROVIDER_AUTH";
   if (raw.includes("429") || raw.includes("RATE_LIMIT") || raw.includes("gateway_concurrency_limit")) return "PROVIDER_RATE_LIMIT";
@@ -74,6 +79,8 @@ function safeMessage(code: string): string {
   if (code === "PROVIDER_TIMEOUT") return "模型服务响应超时，当前页面未完成生成";
   if (code === "PROVIDER_INVALID_REQUEST") return "模型服务拒绝了生成请求，请检查当前提示词和输出结构";
   if (code === "READWEAVE_UNAVAILABLE") return "ReadWeave 暂时不可访问，内容尚未保存";
+  if (code === "READWEAVE_ACCESS_DENIED") return "ReadWeave 拒绝了当前身份的访问，已保存的生成结果保留，请检查权限";
+  if (code.startsWith("READWEAVE_") && code.includes("CONFLICT")) return "保存遇到版本或内容冲突，已保留生成结果，未覆盖已有内容";
   if (code === "MODEL_OUTPUT_LIMIT") return "模型达到本阶段输出上限，内容不完整，已停止相同请求重试";
   return "当前页面生成失败，请根据请求编号重试";
 }

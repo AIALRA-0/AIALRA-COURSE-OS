@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 
 describe("generation error classification", () => {
+  it.each(["READWEAVE_REVISION_CONFLICT", "READWEAVE_IMPORT_SOURCE_CONFLICT", "READWEAVE_DRAFT_BLOCK_CONFLICT"])("pauses %s instead of misreporting a temporary outage", code => {
+    expect(describeGenerationError(new Error(code))).toMatchObject({ code, retryable: false });
+    expect(classifyGenerationFailure(new Error(code))).toMatchObject({ category: "storage", action: "pause" });
+  });
+  it.each([401, 403])("keeps ReadWeave HTTP %s permission failures non-retryable", status => {
+    expect(describeGenerationError(new Error(`READWEAVE_ETAPI_${status}:denied`)))
+      .toMatchObject({ code: "READWEAVE_ACCESS_DENIED", retryable: false });
+  });
   it("routes content, transport, quota and storage failures to distinct recovery actions", () => {
     expect(classifyGenerationFailure(new Error("TEACHING_EXPLANATION_INVALID:PLAN_EVIDENCE_QUOTE_MISSING:a"))).toMatchObject({ action: "pause" });
     expect(classifyGenerationFailure(new Error("MODEL_PROVIDER_FAILED:429"))).toMatchObject({ category: "provider", action: "retry_stage" });

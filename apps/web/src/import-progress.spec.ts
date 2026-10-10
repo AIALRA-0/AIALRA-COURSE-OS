@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { GenerationCostEntry, GenerationJob } from "@course-os/contracts";
 import { describe, expect, it } from "vitest";
-import { deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportTaskPollingMode, getImportTaskState, getImportTaskStatus, getImportTaskTiming, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { applyImportSourceEvent, deliveredPageProgress, formatActivityAge, formatProgressCount, getImportActivity, getImportStageProgress, getImportTaskPollingMode, getImportTaskState, getImportTaskStatus, getImportTaskTiming, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress, summarizeImportStageEvents } from "./import-progress.js";
 import type { WebGenerationPlan, WebImportRecord } from "./types.js";
-import { formatTaskConcurrency } from "./App.js";
+import { formatTaskConcurrency, ImportProgress } from "./App.js";
 
 function record(value: Record<string, unknown>): WebImportRecord {
   return value as unknown as WebImportRecord;
@@ -33,6 +35,180 @@ describe("task concurrency display", () => {
 function plan(value: Record<string, unknown>): WebGenerationPlan {
   return value as unknown as WebGenerationPlan;
 }
+
+describe("actual pipeline stages", () => {
+  const ids = ["p1", "p2", "p3", "p4"];
+  const source = () => record({ id: "import-stages", state: "ready", autoGenerate: true, generationState: "running", pageIds: ids, issues: [], generationCompletedPageIds: [], generationFailedPageIds: [] });
+  const current = (value: Record<string, unknown> = {}) => plan({ id: "plan-stages", state: "running", pageIds: ids, completedPageIds: [], failedPageIds: [], ...value });
+  const step = (rows: ReturnType<typeof getImportStageProgress>, id: string) => rows.find(row => row.id === id)!;
+
+  it("keeps conversion and source saving visible before any body exists", () => {
+    const rows = getImportStageProgress(record({ id: "import-stages", state: "processing", autoGenerate: true,
+      conversionProgress: { stage: "saving_pages", pageCount: 4, completedPages: 2 } }));
+    expect(rows.map(row => row.label)).toEqual(["上传", "转换", "资料保存", "材料登记", "识图", "生成", "正文保存", "承接"]);
+    expect(step(rows, "conversion")).toMatchObject({ state: "complete", count: { completed: 4, total: 4 } });
+    expect(step(rows, "source_save")).toMatchObject({ state: "active", count: { completed: 2, total: 4 } });
+    expect(step(rows, "core_save").count).toBeUndefined();
+  });
+
+  it("keeps unknown total and stage duration unknown instead of inventing a count", () => {
+    const rows = getImportStageProgress(record({ state: "processing", conversionProgress: { stage: "counting_pages", completedPages: 0 } }));
+    expect(step(rows, "conversion")).toMatchObject({ state: "active", detail: "识别总页数", timing: "阶段耗时未记录" });
+    expect(step(rows, "conversion").count).toBeUndefined();
+  });
+
+  it("shows prepared source, pending registration and live model work together while syncing", () => {
+    const syncing = { ...source(), state: "syncing" as const, preparedSourceSha256: "prepared-hash", sourceRegistration: { state: "pending" as const, updatedAt: "2026-10-01T00:00:00Z" } };
+    const jobs = [{ id: "job-1", state: "running", pageIds: ["p1"], latestStageActivity: { stage: "teach", status: "started", phase: "teaching", phaseStatus: "started", occurredAt: "2026-10-01T00:00:01Z" } }] as GenerationJob[];
+    const rows = getImportStageProgress(syncing, current(), jobs);
+    expect(step(rows, "source_save")).toMatchObject({ state: "complete", detail: "原图与文字资料已准备；课程来源另待材料登记确认" });
+    expect(step(rows, "registration")).toMatchObject({ state: "active", detail: "材料来源等待权威保存确认；已准备的来源可用于生成" });
+    expect(step(rows, "generation").state).toBe("active");
+    expect(step(rows, "core_save").count).toEqual({ completed: 0, total: 4 });
+    expect(getImportActivity(syncing, current(), jobs, []).stage).toBe("正文讲解");
+    const confirmed = getImportStageProgress({ ...syncing, sourceRegistration: { ...syncing.sourceRegistration, state: "confirmed" } }, current(), jobs);
+    expect(step(confirmed, "registration").state).toBe("complete");
+    const rejected = getImportStageProgress({ ...syncing, sourceRegistration: { ...syncing.sourceRegistration, state: "failed", issue: "来源写入失败" } }, current(), jobs);
+    expect(step(rejected, "registration").state).toBe("failed");
+    expect(step(rejected, "source_save").state).toBe("complete");
+  });
+
+  it("counts real events once and keeps generated, saved, failed and skipped outcomes distinct", () => {
+    const event = (id: number, type: string, payload: Record<string, unknown>) => ({ id, type, occurredAt: "2026-10-01T00:00:00Z", streamId: "job-1", payload });
+    const events = [
+      event(1, "generation.stage.started", { pageId: "p1", stage: "extract", activity: "visual_understanding" }),
+      event(2, "generation.stage.completed", { pageId: "p1", stage: "extract", activity: "visual_understanding" }),
+      event(3, "generation.stage.skipped", { pageId: "p2", stage: "extract", activity: "visual_understanding" }),
+      event(4, "generation.stage.completed", { pageId: "p1", stage: "teach" }),
+      event(5, "generation.page.storage_retry", { pageId: "p1", reusedTeaching: true, attempt: 1 }),
+      event(6, "generation.page.storage_retry", { pageId: "p1", reusedTeaching: true, attempt: 2 }),
+      event(7, "generation.page.failed", { pageId: "p3", issue: "PROVIDER_TIMEOUT" }),
+      event(8, "generation.stage.completed", { pageId: "foreign", stage: "teach" })
+    ];
+    const snapshot = summarizeImportStageEvents([...events, events[5]!], ids);
+    expect(snapshot.vision).toMatchObject({ completed: 1, skipped: 1, total: 4 });
+    expect(snapshot.generation).toMatchObject({ completed: 1, failed: 1, total: 4 });
+    expect(snapshot.core_save).toMatchObject({ completed: 0, total: 4, pendingSave: 1, storageRetrying: 1 });
+    const rows = getImportStageProgress(source(), current({ jobIds: ["job-1"], events }));
+    expect(step(rows, "core_save").detail).toBe("1 页内容已生成，等待正文保存确认 · 1 页正在自动重试保存");
+    const completed = summarizeImportStageEvents([...events, event(9, "generation.page.core_saved", { pageId: "p1" }), event(10, "generation.page.core_saved", { pageId: "p1", bridgeCompleted: true }), event(11, "generation.stage.completed", { pageId: "p1", phase: "bridge", stage: "teach" })], ids);
+    expect(completed.core_save).toMatchObject({ completed: 1, pendingSave: 0, storageRetrying: 0 });
+    expect(completed.bridge).toMatchObject({ completed: 1 });
+  });
+
+  it("keeps source retries automatic and ignores replayed or out-of-order import events", () => {
+    const started = applyImportSourceEvent({ lastEventId: 0 }, "import.pipeline.started", { planId: "plan-1" }, 3);
+    const retry = applyImportSourceEvent(started, "readweave.source.retry", { attempt: 2 }, 4);
+    expect(retry).toMatchObject({ pipelineStarted: true, retryAttempt: 2, confirmed: false });
+    const rows = getImportStageProgress({ ...source(), state: "syncing", sourceRegistration: { state: "pending", updatedAt: "2026-10-01T00:00:00Z" }, sourceRetryAttempt: retry.retryAttempt }, current());
+    expect(step(rows, "registration").detail).toBe("正在自动重试材料来源保存（第 2 次），等待权威确认；讲解可并行生成");
+    const confirmed = applyImportSourceEvent(retry, "readweave.source.confirmed", { pages: 4 }, 5);
+    expect(confirmed.retryAttempt).toBeUndefined();
+    expect(applyImportSourceEvent(confirmed, "readweave.source.retry", { attempt: 2 }, 4)).toBe(confirmed);
+    expect(applyImportSourceEvent(confirmed, "generation.pipeline.started", {}, 6)).toBe(confirmed);
+  });
+
+  it("prefers saved-page counters aggregated from server events over an older plan ID array", () => {
+    const result = summarizeImportProgress(source(), current({ coreCompletedPageIds: [], bridgeCompletedPageIds: [],
+      progress: { core: { completed: 2, total: 4 }, crossPage: { completed: 1, total: 4 } }
+    }), [], []);
+    expect(result.core).toEqual({ completed: 2, total: 4 });
+    expect(result.crossPage).toEqual({ completed: 1, total: 4 });
+  });
+
+  it("renders live teaching beside pending authoritative registration rather than a save-only status", () => {
+    const markup = renderToStaticMarkup(createElement(ImportProgress, {
+      record: { ...source(), state: "syncing", preparedSourceSha256: "prepared", sourceRegistration: { state: "pending", updatedAt: "2026-10-01T00:00:00Z" } },
+      plan: current(), activeJobs: [{ id: "job-1", state: "running", pageIds: ["p1"], latestStageActivity: { stage: "teach", status: "started", phase: "teaching", phaseStatus: "started" } } as GenerationJob],
+      costs: [], costReadUnavailable: false, retryingFailed: false,
+      onRetryFailed: () => {}, onClose: () => {}, onOpen: () => {}, onGenerate: () => {}
+    }));
+    expect(markup).toContain("材料保存与讲解生成正在并行进行");
+    expect(markup).toContain('data-stage="registration" data-milestone-state="active"');
+    expect(markup).toContain('data-stage="generation" data-milestone-state="active"');
+    expect(markup).toContain("当前阶段</dt><dd>材料登记、生成");
+    expect(markup).not.toContain("写入课程草稿");
+  });
+
+  it("shows vision, generation and carryover running at the same time from existing stage activity", () => {
+    const jobs = [
+      { phase: "page_understanding", stage: "extract" }, { phase: "teaching", stage: "teach" }, { phase: "bridge", stage: "teach" }
+    ].map((activity, index) => ({ id: `job-${index}`, state: "running", pageIds: [ids[index]!], latestStageActivity: { ...activity, status: "started", phaseStatus: "started" } })) as GenerationJob[];
+    const rows = getImportStageProgress(source(), current({ coreCompletedPageIds: ["p1"], bridgeCompletedPageIds: [] }), jobs);
+    expect(["vision", "generation", "bridge"].map(id => step(rows, id).state)).toEqual(["active", "active", "active"]);
+    expect(step(rows, "vision").count).toBeUndefined();
+    expect(step(rows, "core_save").count).toEqual({ completed: 1, total: 4 });
+  });
+
+  it("separates generated content awaiting automatic storage retries from model failure", () => {
+    const rows = getImportStageProgress(source(), current({ coreCompletedPageIds: ["p1"], bridgeCompletedPageIds: [], stageSummary: {
+      generation: { completed: 3, total: 4, running: 1, failed: 0 },
+      core_save: { completed: 1, total: 4, pendingSave: 2, storageRetrying: 1 }
+    } }));
+    expect(step(rows, "generation")).toMatchObject({ state: "active", count: { completed: 3, total: 4 } });
+    expect(step(rows, "core_save")).toMatchObject({ state: "active", count: { completed: 1, total: 4 }, detail: "2 页内容已生成，等待正文保存确认 · 1 页正在自动重试保存" });
+    expect(step(rows, "core_save").detail).not.toContain("按");
+  });
+
+  it("does not count failed or skipped vision pages as successful completion", () => {
+    const rows = getImportStageProgress(source(), current({ stageSummary: {
+      vision: { completed: 2, total: 4, failed: 1, skipped: 1 },
+      generation: { completed: 1, total: 4, failed: 1 }
+    } }));
+    expect(step(rows, "vision")).toMatchObject({ state: "failed", count: { completed: 2, total: 4 } });
+    expect(step(rows, "generation").state).toBe("failed");
+    expect(step(rows, "generation").detail).toContain("生成阶段失败");
+  });
+
+  it("recognizes a returned teaching result without presenting it as saved or assigning an unproved page total", () => {
+    for (const activity of [{ stage: "teach", status: "completed", phase: "teaching", phaseStatus: "completed" }, { stage: "review", status: "completed" }]) {
+      const job = { id: "job-1", state: "running", pageIds: ["p1"], latestStageActivity: activity } as GenerationJob;
+      const rows = getImportStageProgress(source(), current({ coreCompletedPageIds: [] }), [job]);
+      expect(step(rows, "core_save")).toMatchObject({ state: "active", count: { completed: 0, total: 4 }, detail: "已收到生成内容，等待正文保存确认" });
+      expect(step(rows, "generation").count).toBeUndefined();
+    }
+  });
+
+  it("retains saved core after bridge failure and filters duplicate or unrelated saved IDs", () => {
+    const rows = getImportStageProgress({ ...source(), generationState: "failed", generationFailedPageIds: ["p2"] }, current({ state: "failed", failedPageIds: ["p2"],
+      coreCompletedPageIds: ["p1", "p2", "p2", "foreign"], bridgeCompletedPageIds: ["p1", "p1", "foreign"], stageSummary: { bridge: { completed: 1, total: 4, failed: 1 } }
+    }));
+    expect(step(rows, "core_save").count).toEqual({ completed: 2, total: 4 });
+    expect(step(rows, "bridge")).toMatchObject({ state: "failed", count: { completed: 1, total: 4 } });
+  });
+
+  it("does not turn skipped generation into completed generation or show import steps for a standalone job", () => {
+    const skipped = getImportStageProgress({ ...source(), autoGenerate: false, generationState: "not_requested" });
+    expect(skipped.slice(4).every(row => row.state === "skipped" && row.count === undefined)).toBe(true);
+    const standalone = getImportStageProgress({ ...source(), id: "generation-job:job-1" });
+    expect(standalone.map(row => row.id)).toEqual(["vision", "generation", "core_save", "bridge"]);
+  });
+
+  it("uses real stage timestamps and freezes stage duration after completion", () => {
+    const stages = current({ stageSummary: {
+      vision: { state: "running", startedAt: "2026-10-01T00:00:00Z" },
+      generation: { state: "completed", startedAt: "2026-10-01T00:00:00Z", endedAt: "2026-10-01T00:01:00Z" }
+    } });
+    const rows = getImportStageProgress(source(), stages, [], Date.parse("2026-10-01T00:02:00Z"));
+    expect(step(rows, "vision").timing).toBe("阶段耗时 2 分");
+    expect(step(rows, "generation").timing).toBe("阶段耗时 1 分");
+  });
+
+  it("renders separate stage counts before generation with no unified process percentage", () => {
+    const markup = renderToStaticMarkup(createElement(ImportProgress, {
+      record: record({ id: "import-stages", state: "processing", originalName: "test.pdf", autoGenerate: true, issues: [],
+        conversionProgress: { stage: "saving_pages", pageCount: 4, completedPages: 2 } }),
+      activeJobs: [], costs: [], costReadUnavailable: false, retryingFailed: false,
+      onRetryFailed: () => {}, onClose: () => {}, onOpen: () => {}, onGenerate: () => {}
+    }));
+    expect(markup).toContain('aria-label="各阶段实际进度"');
+    expect(markup).toContain("4/4 页");
+    expect(markup).toContain("2/4 页");
+    expect(markup).toContain("讲解完整保存 0/4 页");
+    expect(markup).not.toContain('aria-valuetext="讲解完整保存 0%"');
+    expect(markup).not.toContain("总完成度");
+  });
+});
 
 function cost(stage: GenerationCostEntry["stage"], createdAt: string, values: Partial<GenerationCostEntry> = {}): GenerationCostEntry {
   return {

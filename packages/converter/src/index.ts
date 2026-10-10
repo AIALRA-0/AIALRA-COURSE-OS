@@ -319,19 +319,37 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
   await report("rendering_pages", { pageCount, completedPages: 0 });
   const imagePrefix = join(outputDir, "page");
   const textPath = join(outputDir, "document.txt");
-  await runProcess(binaries.pdftoppm, ["-png", "-r", "144", pdfPath, imagePrefix], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
-  const imageFiles = (await readdir(outputDir))
-    .filter((name) => /^page-\d+\.png$/i.test(name))
-    .sort((left, right) => pageNumberFromFile(left) - pageNumberFromFile(right));
-  if (imageFiles.length !== pageCount || imageFiles.some((name, index) => pageNumberFromFile(name) !== index + 1)) {
-    throw new Error("CONVERSION_RENDER_PAGE_MISMATCH");
-  }
-  for (const name of imageFiles) await assertPngArtifact(join(outputDir, name));
-  await report("extracting_text", { pageCount, completedPages: 0 });
-  await runProcess(binaries.pdftotext, ["-layout", pdfPath, textPath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
-  const textStat = await stat(textPath);
-  if (textStat.size > MAX_EXTRACTED_TEXT_BYTES) throw new Error("CONVERSION_EXTRACTED_TEXT_TOO_LARGE");
-  const pageTexts = (await readFile(textPath, "utf8")).split("\f");
+  let textSettled = false;
+  const rendering = (async () => {
+    await runProcess(binaries.pdftoppm, ["-png", "-r", "144", pdfPath, imagePrefix], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+    // Read artifacts only after the renderer has closed its output files.
+    const imageFiles = (await readdir(outputDir))
+      .filter((name) => /^page-\d+\.png$/i.test(name))
+      .sort((left, right) => pageNumberFromFile(left) - pageNumberFromFile(right));
+    if (imageFiles.length !== pageCount || imageFiles.some((name, index) => pageNumberFromFile(name) !== index + 1)) {
+      throw new Error("CONVERSION_RENDER_PAGE_MISMATCH");
+    }
+    for (const name of imageFiles) await assertPngArtifact(join(outputDir, name));
+    // Only this branch advances the stage, so text finishing first cannot regress it.
+    if (!textSettled) await report("extracting_text", { pageCount, completedPages: 0 });
+    return imageFiles;
+  })();
+  const extracting = (async () => {
+    try {
+      await runProcess(binaries.pdftotext, ["-layout", pdfPath, textPath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+      const textStat = await stat(textPath);
+      if (textStat.size > MAX_EXTRACTED_TEXT_BYTES) throw new Error("CONVERSION_EXTRACTED_TEXT_TOO_LARGE");
+      return (await readFile(textPath, "utf8")).split("\f");
+    } finally {
+      textSettled = true;
+    }
+  })();
+  // Observe both failures immediately and wait for both processes before releasing the job.
+  const [rendered, extracted] = await Promise.allSettled([rendering, extracting]);
+  if (rendered.status === "rejected") throw rendered.reason;
+  if (extracted.status === "rejected") throw extracted.reason;
+  const imageFiles = rendered.value;
+  const pageTexts = extracted.value;
   await report("finalizing", { pageCount, completedPages: pageCount });
   return imageFiles.map((name, index) => {
     const text = normalizeExtractedText(pageTexts[index] ?? "");

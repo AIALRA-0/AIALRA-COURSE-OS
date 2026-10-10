@@ -1,3 +1,5 @@
+import { summarizeImportStageEvents } from "@course-os/contracts";
+export { summarizeImportStageEvents } from "@course-os/contracts";
 import type { GenerationCostEntry, GenerationJob, GenerationStage, GenerationStageActivitySummary } from "@course-os/contracts";
 import type { ImportProgressSummary, ProgressCount, WebGenerationPlan, WebImportRecord } from "./types.js";
 
@@ -28,7 +30,7 @@ function countFrom(value: unknown, completedKeys: readonly string[], totalKeys: 
   if (!object) return undefined;
   const completed = readNumber(object, completedKeys);
   const total = readNumber(object, totalKeys);
-  return completed !== undefined && total !== undefined && total >= completed ? { completed, total } : undefined;
+  return completed !== undefined && total !== undefined && Number.isInteger(completed) && Number.isInteger(total) && total >= completed ? { completed, total } : undefined;
 }
 
 function countFromSources(
@@ -42,7 +44,7 @@ function countFromSources(
     if (direct) return direct;
     const directCompleted = readNumber(source, completedKeys);
     const directTotal = readNumber(source, totalKeys);
-    if (directCompleted !== undefined && directTotal !== undefined && directTotal >= directCompleted) {
+    if (directCompleted !== undefined && directTotal !== undefined && Number.isInteger(directCompleted) && Number.isInteger(directTotal) && directTotal >= directCompleted) {
       return { completed: directCompleted, total: directTotal };
     }
   }
@@ -146,8 +148,26 @@ export function summarizeImportProgress(
     ["total", "totalPages", "pageCount", "totalPageCount", "crossPageTotal", "crossPageTotalPages", "carryoverTotal", "carryoverTotalPages"]
   ) ?? countFromArrays(crossPageSources, ["crossPageCompletedPageIds", "carryoverCompletedPageIds", "bridgeCompletedPageIds", "generationBridgeCompletedPageIds"], ["pageIds"], ["crossPageTotal", "carryoverTotal"]);
   if (plan?.retryOfPlanId && record.pageIds?.length && record.generationCompletedPageIds) {
-    core = { completed: record.generationCompletedPageIds.length, total: record.pageIds.length };
+    core = { completed: new Set(record.generationCompletedPageIds.filter(id => record.pageIds!.includes(id))).size, total: new Set(record.pageIds).size };
     crossPage = undefined;
+  }
+  // Explicit core/bridge IDs acknowledge their own saves even if a later stage failed.
+  const pageIds = record.pageIds?.length ? record.pageIds : plan?.pageIds;
+  if (pageIds?.length) {
+    const allowed = new Set(pageIds);
+    const count = (ids: unknown): ProgressCount | undefined => Array.isArray(ids)
+      ? { completed: new Set(ids.filter((id): id is string => typeof id === "string" && allowed.has(id))).size, total: allowed.size } : undefined;
+    const coreIds = record.generationCoreCompletedPageIds ?? (!plan?.retryOfPlanId ? plan?.coreCompletedPageIds : undefined);
+    const bridgeIds = record.generationBridgeCompletedPageIds ?? (!plan?.retryOfPlanId ? plan?.bridgeCompletedPageIds : undefined);
+    const planProgress = asRecord(plan?.progress);
+    core = count(record.generationCoreCompletedPageIds)
+      ?? (!plan?.retryOfPlanId ? countFrom(planProgress?.core, ["completed"], ["total"]) ?? count(coreIds) : undefined) ?? core;
+    crossPage = count(record.generationBridgeCompletedPageIds)
+      ?? (!plan?.retryOfPlanId ? countFrom(planProgress?.crossPage, ["completed"], ["total"]) ?? count(bridgeIds) : undefined) ?? crossPage;
+    if (!coreIds && !(asRecord(asRecord(plan?.progress)?.core))) {
+      const failed = new Set([...(record.generationFailedPageIds ?? []), ...(plan?.failedPageIds ?? [])]);
+      core = count([...(record.generationCompletedPageIds ?? []), ...(plan?.completedPageIds ?? [])].filter(id => !failed.has(id))) ?? core;
+    }
   }
 
   const explicitRepairCount = firstNumber(sources, ["repairCount", "repairs", "repairAttempts", "completedRepairCount"])
@@ -195,6 +215,158 @@ export function summarizeImportProgress(
 
 export function formatProgressCount(value?: ProgressCount): string {
   return value ? `${value.completed}/${value.total}` : "—";
+}
+
+export type ImportStageProgress = {
+  id: string;
+  label: string;
+  state: "complete" | "active" | "waiting" | "failed" | "stopped" | "unknown" | "skipped";
+  count?: ProgressCount;
+  detail: string;
+  timing?: string;
+};
+
+export type ImportSourceEventEvidence = { lastEventId: number; retryAttempt?: number; confirmed?: boolean; pipelineStarted?: boolean };
+
+export function applyImportSourceEvent(previous: ImportSourceEventEvidence, type: string, value: unknown, id: number): ImportSourceEventEvidence {
+  const payload = asRecord(value);
+  if (!payload || !Number.isInteger(id) || id <= previous.lastEventId) return previous;
+  if (type === "readweave.source.retry") {
+    const attempt = readNumber(payload, ["attempt"]);
+    return attempt !== undefined && Number.isInteger(attempt) && attempt > 0 ? { ...previous, lastEventId: id, retryAttempt: attempt, confirmed: false } : previous;
+  }
+  if (type === "readweave.source.confirmed") return { ...previous, lastEventId: id, retryAttempt: undefined, confirmed: true };
+  if (type === "import.pipeline.started") return { ...previous, lastEventId: id, pipelineStarted: true };
+  return previous;
+}
+
+export function getImportStageProgress(record: WebImportRecord, plan?: WebGenerationPlan, jobs: readonly GenerationJob[] = [], now = Date.now()): ImportStageProgress[] {
+  const summary = summarizeImportProgress(record, plan, jobs, []);
+  const standalone = Boolean(standaloneGenerationJobId(record.id ?? ""));
+  const taskState = getImportTaskState(record, plan, jobs);
+  const stopped = ["failed", "cancelled", "paused", "awaiting_review", "completed"].includes(taskState);
+  const generationRequested = record.autoGenerate !== false && record.generationState !== "not_requested";
+  const rows: ImportStageProgress[] = [];
+  const totalIds = record.pageIds?.length ? record.pageIds : plan?.pageIds;
+  const total = totalIds?.length;
+  const validIds = totalIds ? new Set(totalIds) : undefined;
+  const countIds = (ids: unknown): ProgressCount | undefined => Array.isArray(ids) && total !== undefined
+    ? { completed: new Set(ids.filter((id): id is string => typeof id === "string" && (!validIds || validIds.has(id)))).size, total }
+    : undefined;
+  const coreIds = readValue(record, ["generationCoreCompletedPageIds"]) ?? (!plan?.retryOfPlanId ? plan?.coreCompletedPageIds : undefined);
+  const bridgeIds = readValue(record, ["generationBridgeCompletedPageIds"]) ?? (!plan?.retryOfPlanId ? plan?.bridgeCompletedPageIds : undefined);
+
+  const eventSources = [record, plan, ...jobs].map(asRecord).filter((source): source is UnknownRecord => Boolean(source));
+  const events = eventSources.flatMap(source => Array.isArray(source.events) ? source.events : []);
+  const allowedStreams = new Set([record.id, record.generationJobId, ...(record.generationJobIds ?? []), ...(plan?.jobIds ?? []), ...jobs.map(job => job.id)]);
+  const eventSummary = summarizeImportStageEvents(events.filter(value => { const event = asRecord(value); return event && (event.streamId === undefined || allowedStreams.has(String(event.streamId))); }), totalIds ?? []);
+  const stageSnapshot = (keys: string[]): UnknownRecord | undefined => {
+    for (const source of [...(plan ? [plan] : []), record]) {
+      const snapshot = asRecord(asRecord(source)?.stageSummary);
+      if (!snapshot) continue;
+      for (const key of keys) {
+        const stage = asRecord(snapshot[key]);
+        if (stage) return stage;
+      }
+    }
+    for (const key of keys) { const stage = asRecord(eventSummary[key]); if (stage) return stage; }
+    return undefined;
+  };
+  const add = (id: string, label: string, state: ImportStageProgress["state"], detail: string, count?: ProgressCount, keys: string[] = [id]) => {
+    const snapshot = stageSnapshot(keys);
+    const snapshotCount = countFrom(snapshot, ["completed"], ["total"]);
+    const running = snapshot && readNumber(snapshot, ["running"]);
+    const failed = snapshot && readNumber(snapshot, ["failed"]);
+    const skipped = snapshot && readNumber(snapshot, ["skipped"]);
+    const snapshotState = snapshot?.state ?? snapshot?.status;
+    if (snapshotCount) count = snapshotCount;
+    if (running !== undefined && running > 0) { state = stopped && !jobs.some(job => job.state === "running" || job.state === "pending_sync") ? "stopped" : "active"; detail = state === "stopped" ? `${running} 页阶段结果待确认` : `${running} 页处理中`; }
+    else if (failed !== undefined && failed > 0 || snapshotState === "failed") { state = "failed"; detail = `阶段失败${failed ? ` · ${failed} 页` : ""}`; }
+    else if (snapshotState === "completed" || snapshotState === "complete") { state = "complete"; detail = "已完成"; }
+    else if (snapshotState === "running" || snapshotState === "started") { state = stopped ? "stopped" : "active"; detail = stopped ? "已停止" : "处理中"; }
+    else if (snapshotState === "skipped") { state = "skipped"; detail = "已跳过"; }
+    else if (snapshotCount && snapshotCount.total > 0 && snapshotCount.completed === snapshotCount.total) { state = "complete"; detail = "已完成"; }
+    if (running && failed) detail += ` · ${failed} 页失败`;
+    if (skipped) detail += ` · ${skipped} 页跳过`;
+    const startedAt = timestampMillis(snapshot, "attemptStartedAt") ?? (typeof snapshot?.startedAt === "string" ? Date.parse(snapshot.startedAt) : undefined);
+    const endedAt = timestampMillis(snapshot, "endedAt");
+    const end = state === "active" ? now : endedAt;
+    const duration = startedAt !== undefined && end !== undefined && end >= startedAt ? formatTaskDuration((end - startedAt) / 1000) : undefined;
+    rows.push({ id, label, state, count, detail, ...(duration ? { timing: `阶段耗时 ${duration}` } : state === "active" ? { timing: "阶段耗时未记录" } : {}) });
+  };
+
+  if (!standalone) {
+    add("upload", "上传", "complete", "文件已收到；已建立后台任务");
+    const conversionStage = record.conversionProgress?.stage;
+    const converting = record.state === "processing" && conversionStage !== "saving_pages";
+    const converted = ["syncing", "ready"].includes(record.state) || ["saving_pages", "completed"].includes(conversionStage ?? "");
+    const conversionCount = conversionStage === "saving_pages" && record.conversionProgress?.pageCount !== undefined
+      ? { completed: record.conversionProgress.pageCount, total: record.conversionProgress.pageCount } : summary.conversion;
+    const verifiedConversion = converted && conversionCount && conversionCount.total > 0 && conversionCount.completed === conversionCount.total;
+    add("conversion", "转换", conversionStage === "failed" ? "failed" : verifiedConversion ? "complete" : converting ? "active" : converted || stopped ? "unknown" : "waiting",
+      conversionStage === "failed" ? "转换失败" : verifiedConversion ? "原图与文字转换完成" : converting ? conversionStageLabel(record) : converted ? "转换已结束，页数待核对" : stopped ? "转换结果待核对" : "等待转换", conversionCount);
+    const saving = conversionStage === "saving_pages";
+    const registration = record.sourceRegistration;
+    const sourceConfirmed = registration?.state === "confirmed" || !registration && record.state === "ready";
+    const assetsPrepared = Boolean(record.preparedSourceSha256) || saving && summary.conversion && summary.conversion.total > 0 && summary.conversion.completed === summary.conversion.total;
+    const assetsCount = (assetsPrepared || sourceConfirmed) && total ? { completed: total, total } : saving ? summary.conversion : undefined;
+    add("source_save", "资料保存", assetsPrepared || sourceConfirmed ? "complete" : saving || record.state === "syncing" ? "active" : stopped ? "unknown" : "waiting",
+      sourceConfirmed ? "原图与文字资料已保存" : assetsPrepared ? "原图与文字资料已准备；课程来源另待材料登记确认" : saving ? "正在保存原图与文字资料" : record.state === "syncing" ? "等待资料保存确认" : stopped ? "资料保存结果待核对" : "等待可保存的转换结果", assetsCount);
+    add("registration", "材料登记", registration?.state === "failed" ? "failed" : registration?.state === "confirmed" || record.state === "ready" ? "complete" : registration?.state === "pending" || record.state === "syncing" ? "active" : stopped ? "unknown" : "waiting",
+      registration?.state === "failed" ? `材料登记失败${registration.issue ? ` · ${registration.issue}` : ""}` : registration?.state === "confirmed" || record.state === "ready" ? "课程材料来源已确认登记" : registration?.state === "pending" ? "材料来源等待权威保存确认；已准备的来源可用于生成" : record.state === "syncing" ? "正在登记课程材料，等待确认" : stopped ? "材料登记结果待核对" : "等待材料登记");
+    const sourceRetry = readNumber(record, ["sourceRetryAttempt"]);
+    if (registration?.state === "pending" && sourceRetry && Number.isInteger(sourceRetry)) {
+      rows.find(row => row.id === "registration")!.detail = `正在自动重试材料来源保存（第 ${sourceRetry} 次），等待权威确认；讲解可并行生成`;
+    }
+  }
+
+  const activityRows = (keys: string[]) => jobs.filter(job => ["running", "pending_sync"].includes(job.state) && job.latestStageActivity
+    && keys.includes(job.latestStageActivity.phase ?? job.latestStageActivity.stage));
+  const vision = activityRows(["page_understanding", "visual_understanding", "extract"]);
+  const teaching = activityRows(["plan", "teaching", "format_repair", "teach", "repair", "review", "semantic_audit"]);
+  const bridging = activityRows(["bridge"]);
+  const active = (items: GenerationJob[]) => items.some(job => job.latestStageActivity?.phaseStatus === "started" || (!job.latestStageActivity?.phaseStatus && job.latestStageActivity?.status === "started"));
+  const idleState = !generationRequested ? "skipped" : stopped ? "unknown" : "waiting";
+  const idleDetail = !generationRequested ? "未启用生成" : stopped ? "阶段结果待核对" : "等待任务进展";
+  const savedCore = summary.core ?? countIds(coreIds);
+  const savedBridge = summary.crossPage ?? countIds(bridgeIds);
+  const coreComplete = savedCore && savedCore.total > 0 && savedCore.completed === savedCore.total;
+  add("vision", "识图", active(vision) ? "active" : idleState, active(vision) ? "正在理解页面图文" : idleDetail, undefined, ["vision", "visual_understanding", "page_understanding", "extract"]);
+  add("generation", "生成", active(teaching) ? "active" : coreComplete ? "complete" : idleState,
+    active(teaching) ? "正在生成、检查或修复正文" : coreComplete ? "正文已生成" : idleDetail, coreComplete ? savedCore : undefined, ["generation", "teaching", "teach"]);
+  const pendingSync = jobs.some(job => job.state === "pending_sync") || record.generationState === "pending_sync";
+  add("core_save", "正文保存", coreComplete ? "complete" : pendingSync ? "active" : idleState,
+    coreComplete ? "正文已保存，可阅读" : pendingSync ? "正在保存生成结果，等待确认" : savedCore?.completed ? "已有正文可阅读，其余等待保存确认" : idleDetail, generationRequested ? savedCore : undefined, ["core_save", "core_saved"]);
+  const bridgeComplete = savedBridge && savedBridge.total > 0 && savedBridge.completed === savedBridge.total;
+  add("bridge", "承接", active(bridging) ? "active" : bridgeComplete ? "complete" : idleState,
+    active(bridging) ? "正在生成跨页承接" : bridgeComplete ? "跨页承接已保存" : idleDetail, generationRequested ? savedBridge : undefined);
+  const generation = rows.find(row => row.id === "generation")!;
+  const saving = rows.find(row => row.id === "core_save")!;
+  const generated = generation.count;
+  const saved = saving.count;
+  const pending = stageSnapshot(["core_save", "core_saved"]);
+  const pendingCount = pending && readNumber(pending, ["pendingSave"]);
+  const retryCount = pending && readNumber(pending, ["storageRetrying"]);
+  const awaitingSave = pendingCount ?? (generated && saved && generated.total === saved.total ? Math.max(0, generated.completed - saved.completed) : undefined);
+  if (awaitingSave && generationRequested) {
+    saving.detail = `${awaitingSave} 页内容已生成，等待正文保存确认${retryCount ? ` · ${retryCount} 页正在自动重试保存` : ""}`;
+    if (!stopped) saving.state = "active";
+  }
+  else if (retryCount && generationRequested) { saving.detail = `${retryCount} 页正在自动重试保存，等待确认`; if (!stopped) saving.state = "active"; }
+  const savedIds = new Set(Array.isArray(coreIds) ? coreIds : [...(record.generationCompletedPageIds ?? []), ...(plan?.completedPageIds ?? [])]);
+  const resultAwaitingSave = jobs.some(job => job.state === "running" && job.pageIds?.some(id => !savedIds.has(id))
+    && (job.latestStageActivity?.phase === "teaching" && job.latestStageActivity.phaseStatus === "completed"
+      || ["teach", "review"].includes(job.latestStageActivity?.stage ?? "") && !job.latestStageActivity?.phase && job.latestStageActivity?.status === "completed"));
+  if (!awaitingSave && resultAwaitingSave && generationRequested) {
+    saving.state = "active";
+    saving.detail = "已收到生成内容，等待正文保存确认";
+  }
+  if (generation.state === "failed") generation.detail = `生成阶段失败${generation.count ? ` · 已生成 ${formatProgressCount(generation.count)} 页` : ""}`;
+  return rows;
+}
+
+export function importStageStateLabel(state: ImportStageProgress["state"]): string {
+  return ({ complete: "已完成", active: "运行中", waiting: "等待中", failed: "失败", stopped: "已停止", unknown: "待核对", skipped: "已跳过" })[state];
 }
 
 /** Upload bytes are transport evidence only, never import acceptance. */
@@ -543,7 +715,7 @@ export function getImportActivity(
     question_refill: "题目补充",
     search: "外部检索"
   };
-  const stage = record.state === "ready" && generationActivity
+  const stage = (record.state === "ready" || record.state === "syncing") && generationActivity
     ? stageLabels[generationActivity.stage]
     : record.state === "quarantined" || record.state === "accepted"
     ? "等待转换"

@@ -1449,6 +1449,10 @@ svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: view-box; transf
 .import-task-page-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 0 16px; border-bottom: 1px solid var(--line); }
 .import-task-page-header h2 { margin: 5px 0 0; font-size: 21px; line-height: 1.35; }
 .import-task-workspace .import-activity-file { margin: 18px 0 12px; font-size: 13px; }
+.import-task-workspace .import-stage-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px 20px; margin-bottom: 12px; }
+.import-task-workspace .import-stage-list li > div { gap: 3px; }
+.import-task-workspace .import-stage-list small { color: var(--muted); font-size: var(--font-small); }
+.import-task-workspace .import-stage-note { margin: 0 0 20px; color: var(--muted); font-size: var(--font-small); line-height: 1.6; }
 .import-milestones { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 16px; margin: 0 0 24px; padding: 0; list-style: none; }
 .import-milestones li { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .import-milestone-marker { flex: 0 0 24px; width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 14px; }

@@ -4,14 +4,13 @@ import { api, ApiRequestError, type ModelProviderCreate, type ReadWeaveEtapiSett
 import { CourseTree, resolveSearchInputKeyAction, type CourseTreeActions, type CourseTreeTask, type CourseTreeSearchMaterial } from "./CourseTree.js";
 import { Icon } from "./Icon.js";
 import { WorkbenchSelect } from "./WorkbenchSelect.js";
-import { ImportMilestones } from "./ImportMilestones.js";
 import { ImportTaskEvents } from "./ImportTaskEvents.js";
 import { WorkbenchRail } from "./WorkbenchRail.js";
 import { useWorkspaceOverlays } from "./overlay-focus.js";
 import { LearningWorkspace } from "./LearningWorkspace.js";
 import { SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, sidebarWidthLimit } from "./reading-layout.js";
 import { readViewPreference, saveViewPreference } from "./view-preferences.js";
-import { formatActivityAge, formatProgressCount, formatUploadStatus, getImportActivity, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
+import { applyImportSourceEvent, type ImportSourceEventEvidence, formatActivityAge, formatProgressCount, formatUploadStatus, getImportActivity, getImportStageProgress, importStageStateLabel, getImportTaskState, getImportTaskStatus, getImportTaskTiming, getImportTaskPollingMode, importProgressTitle, importTaskStateLabel, standaloneGenerationJobId, summarizeImportProgress } from "./import-progress.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
 import { addModelRoute, removeModelRoute } from "./settings-routes.js";
 import { SlideViewer, type ViewState } from "./SlideViewer.js";
@@ -1806,7 +1805,24 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
   return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} onOpen={() => onOpen(record)} onGenerate={() => onOpen(record, "studio")} />;
 }
 
-function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose, onOpen, onGenerate }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void; onOpen: () => void; onGenerate: () => void }) {
+export function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose, onOpen, onGenerate }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void; onOpen: () => void; onGenerate: () => void }) {
+  const [sourceEvents, setSourceEvents] = useState<ImportSourceEventEvidence & { importId: string }>({ importId: record.id, lastEventId: 0 });
+  useEffect(() => {
+    if (standaloneGenerationJobId(record.id) || typeof EventSource === "undefined") return;
+    let disposed = false;
+    const stream = new EventSource(`${import.meta.env.VITE_API_BASE_URL || ""}/api/v1/imports/${encodeURIComponent(record.id)}/events`);
+    for (const type of ["import.pipeline.started", "readweave.source.confirmed", "readweave.source.retry"]) {
+      stream.addEventListener(type, event => {
+        if (disposed) return;
+        const message = event as MessageEvent<string>;
+        try {
+          const payload: unknown = JSON.parse(message.data);
+          setSourceEvents(previous => ({ importId: record.id, ...applyImportSourceEvent(previous.importId === record.id ? previous : { lastEventId: 0 }, type, payload, Number(message.lastEventId)) }));
+        } catch { /* Polling remains authoritative when an event cannot be parsed. */ }
+      });
+    }
+    return () => { disposed = true; stream.close(); };
+  }, [record.id]);
   const importInfo = importStatus(record.state);
   const auto = record.autoGenerate !== false;
   const planState = plan?.state;
@@ -1818,12 +1834,16 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUn
   const taskStatus = getImportTaskStatus(record, plan, activeJobs, retryingFailed);
   const timing = getImportTaskTiming(record, plan, activeJobs);
   const activity = getImportActivity(record, plan, activeJobs, costs);
+  const stages = getImportStageProgress(sourceEvents.importId === record.id && !sourceEvents.confirmed ? { ...record, sourceRetryAttempt: sourceEvents.retryAttempt } : record, plan, activeJobs);
   const awaitingPlanDetails = auto && Boolean(record.generationPlanId) && !plan;
   const failed = plan?.failedPageIds.length ?? record.generationFailedPageIds?.length ?? 0;
   const progress = activity.progressPercent;
   const failedState = record.state === "failed" || record.state === "rejected" || planState === "failed" || taskState === "failed";
   const cancelledState = planState === "cancelled" || taskState === "cancelled";
-  const statusTitle = record.state !== "ready" ? importInfo.title : taskStatus.fact;
+  const statusTitle = record.state === "syncing" && (planState === "running" || activeJobs.some(job => job.state === "running"))
+    ? "材料保存与讲解生成正在并行进行"
+    : record.state === "processing" && record.conversionProgress?.stage === "saving_pages" ? "正在保存转换资料"
+      : record.state !== "ready" ? importInfo.title : taskStatus.fact;
   const currentPages = activeJobs.map((job) => {
     const sourceIndex = record.pageIds?.indexOf(job.pageIds[0] ?? "") ?? -1;
     return sourceIndex >= 0 ? sourceIndex + 1 : (job.batchIndex ?? 0) + 1;
@@ -1834,13 +1854,14 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUn
   const activeDetail = activeJobs.length
     ? plan ? ` · 并行处理 ${activeJobs.length} 页${currentPages.length ? `（第 ${currentPages.join("、")} 页）` : ""}` : " · 当前生成任务运行中"
     : "";
-  const currentStage = `${activity.stage}${activity.stageCode ? `（${activity.stageCode}）` : ""}${activity.phase ? ` · ${activity.phase}` : ""}`;
+  const runningStages = stages.filter(step => step.state === "active");
+  const currentStage = runningStages.length ? runningStages.map(step => step.label).join("、") : activity.stage;
   const recordedModelStage = activity.phaseStatus
     ? activity.phaseStatus === "started" ? "模型调用进行中" : "模型已响应"
     : activity.stageStatus === "started" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已开始"
       : activity.stageStatus === "completed" && ["teach", "repair", "semantic_audit"].includes(activity.stageCode || "") ? "模型阶段已完成"
         : "尚未调用模型";
-  const statusDetail = record.state !== "ready" ? `${currentStage}${stageCount}` : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : awaitingPlanDetails ? "正在读取生成进度" : `${currentStage}${stageCount}${activeDetail}`;
+  const statusDetail = record.state !== "ready" ? `${currentStage}${stageCount}${activeDetail}` : !auto ? "已按你的选择跳过自动生成" : retryingFailed ? "失败页面正在重新排队" : awaitingPlanDetails ? "正在读取生成进度" : `${currentStage}${stageCount}${activeDetail}`;
   const indeterminate = progress === undefined && (activity.busy || awaitingPlanDetails) && (!activity.stale || awaitingPlanDetails);
   const canRetryFailed = planState === "failed" && failed > 0 && !retryingFailed;
   const providerModel = summary.provider && summary.model ? `${summary.provider} / ${summary.model}` : summary.provider || summary.model
@@ -1848,20 +1869,27 @@ function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUn
   const concurrency = formatTaskConcurrency(summary.concurrency);
   const confirmedCost = summary.costUsd === undefined ? undefined : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
   const cost = costReadUnavailable ? confirmedCost ? `${confirmedCost}（成本暂不可读，显示上次确认值）` : "成本暂不可读" : confirmedCost ?? (awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用");
-  const completionScope = activity.overall ? auto ? "讲解完整完成" : "材料来源已保存" : activity.progressScope;
+  const completionScope = activity.overall ? auto ? "讲解完整保存" : "材料来源已保存" : activity.progressScope;
   const progressLabel = failedState ? record.state === "ready" ? "生成失败" : "导入失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"
-      : `${progressScopeLabel(completionScope)}${progress}%${activity.overall ? ` · ${activity.overall.completed}/${activity.overall.total}` : ""}`;
-  const progressDescription = progress === undefined
+      : activity.overall ? `${completionScope} ${activity.overall.completed}/${activity.overall.total} 页` : `${progressScopeLabel(completionScope)}${progress}%`;
+  const progressDescription = activity.overall ? `${completionScope} ${activity.overall.completed}/${activity.overall.total} 页`
+    : progress === undefined
     ? `${activity.stage}，${failedState ? `${failed} 页失败` : awaitingPlanDetails ? "正在读取任务进度" : activity.stale ? "状态长时间未更新" : "进度百分比暂不可核对"}`
     : `${completionScope || activity.stage} ${progress}%`;
   return <section className={`import-task-workspace import-state-${record.state} ${activity.stale && !awaitingPlanDetails ? "task-stale" : ""}`} aria-live="polite">
     <header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>{statusTitle}</h2></div><button className="quiet-button" data-action="close-import-task" onClick={onClose}>返回课程</button></header>
     <p className="import-activity-file">{taskTitle || record.originalName}</p>
-    <ImportMilestones record={record} plan={plan} jobs={activeJobs} />
-    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${completionScope || activity.stage}阶段进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
+    <ol className="import-milestones import-stage-list" aria-label="各阶段实际进度">
+      {stages.map((step, index) => <li key={step.id} data-stage={step.id} data-milestone-state={step.state}>
+        <span className="import-milestone-marker" aria-hidden="true">{step.state === "complete" ? <Icon name="check" /> : step.state === "failed" ? <Icon name="warning" /> : index + 1}</span>
+        <div><strong>{step.label}</strong><span>{importStageStateLabel(step.state)}{step.count ? ` · ${formatProgressCount(step.count)} 页` : ""}</span><span>{step.detail}</span>{step.timing && <small>{step.timing}</small>}</div>
+      </li>)}
+    </ol>
+    <p className="import-stage-note">各阶段可同时运行；只按已确认的页面计数，失败页面单独显示</p>
+    <div className={`import-progress ${indeterminate ? "is-indeterminate" : ""} ${activity.stale && !awaitingPlanDetails ? "is-stale" : ""} ${failedState ? "is-failed" : ""}`} role="progressbar" aria-label={`${completionScope || activity.stage}进度`} aria-valuemin={0} aria-valuemax={activity.overall?.total ?? 100} aria-valuenow={activity.overall?.completed ?? progress} aria-valuetext={progressDescription}><i style={progress === undefined ? undefined : { width: `${progress}%` }} /></div>
     <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "已超过 2 分钟没有可核对的工作进展；连接或心跳不代表工作完成" : `最近工作进展：${formatActivityAge(activity.ageSeconds)}`}</small><small>{timing.label}</small></span></div>
-    <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(summary.conversion)}</dd></div><div><dt>正文可读</dt><dd>{auto ? formatProgressCount(summary.core) : "尚未生成"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(summary.crossPage) : "尚未生成"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
+    <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(stages.find(step => step.id === "conversion")?.count)}</dd></div><div><dt>正文可读</dt><dd>{auto ? formatProgressCount(stages.find(step => step.id === "core_save")?.count) : "尚未生成"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(stages.find(step => step.id === "bridge")?.count) : "尚未生成"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
     <ImportTaskEvents record={record} plan={plan} jobs={activeJobs} costs={costs} />
     <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>活跃任务与正文并发上限</dt><dd>{concurrency}</dd></div><div><dt>最近记录线路（非整任务）</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
     {Array.isArray(plan?.failureReasons) && plan.failureReasons.length > 0 && <p className="dialog-error" role="alert"><Icon name="warning" />{plan.failureReasons.filter((reason): reason is string => typeof reason === "string").join(" · ")}</p>}

@@ -13,7 +13,7 @@ This repository contains Apache-2.0 source code and synthetic test material only
 ## 1. 2.4 boundaries
 
 - Immutable releases and `ReleaseManifest` objects pin source, page, explanation, assessment, writing-policy, model, quality, and cost versions.
-- The course tree follows each material's current-version pointer. A `draft_source` can be the current readable material only when every page has a confirmed, readable draft with a complete body; it remains labeled draft / under review and is not published automatically.
+- The course tree follows each material's current-version pointer. A confirmed `draft_source` can be the current draft entry, exposing saved bodies page by page and explicitly marking ungenerated pages; it is not published automatically.
 - Historical versions remain in version history. Pages without generated bodies remain not ready and do not become published when their material is selected as current.
 - Pages, questions, mastery, review plans, and randomized assessment remain scoped to the workspace and pinned release.
 - Mouse, touch, and keyboard course-tree interactions share one persistence model; page, zoom, pan, and release selection recover after reload.
@@ -91,3 +91,5 @@ Normal navigation lists courses and materials; opening a material restores its l
 Terminal task duration uses the recorded server end time. Historical records without a reliable end time say that duration was not recorded. Saved, unpublished explanations offer a reading action without automatic publication.
 
 Clearing failed tasks persistently dismisses terminal notifications without removing materials, costs, answers, or original request associations. Active or changed tasks are skipped. Emptying trash requires explicit confirmation and reference checks. Adapters without safe remote deletion report unsupported items instead of claiming that removing a local index deleted authority content.
+
+Import tasks report upload, conversion, source preparation, material registration, image understanding, generation, body saving, and bridging separately. Rendering and text extraction overlap after page counting. New automatic imports may generate from immutable local inputs while registration is pending, but authoritative body writes require confirmed sources. Visual-cost persistence overlaps teaching, and paid output is checkpointed before storage waits. Page concurrency is capped at 14. Transient saves retry boundedly using the original result; permission and revision conflicts pause instead of being reported as saved. Local checkpoints do not replace ReadWeave authority, and simulations do not certify public authenticated acceptance.

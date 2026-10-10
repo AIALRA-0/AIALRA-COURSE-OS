@@ -2,6 +2,7 @@ import { loadWritingStandards } from "./writing-standards.js";
 import { savedBridgeDraftState, savedPageGeneration, type SavedPageGeneration } from "./generation-checkpoint.js";
 export { applySemanticAuditFindings } from "./teaching-patches.js";
 import { meterModelRouter } from "./model-usage-meter.js";
+import { summarizeImportStageEvents } from "@course-os/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -1821,7 +1822,8 @@ export function createApp(dependencies: AppDependencies): Express {
       };
       const effectiveState = activeJobs.some(job => job.state === "running") ? "running" : plan.state;
       const failureReasons = [...new Set(planJobs.filter(job => job.state === "failed").map(job => job.lastErrorCode).filter((code): code is string => Boolean(code)))].map(code => describeGenerationError(code).safeMessage);
-      response.json({ plan: { ...plan, state: effectiveState, progress, failureReasons }, currentJob, activeJobs, progress });
+      const stageSummary = summarizeImportStageEvents(detail.events.filter(event => jobIds.has(event.streamId)), plan.pageIds);
+      response.json({ plan: { ...plan, state: effectiveState, progress, stageSummary, failureReasons }, currentJob, activeJobs, progress });
     } catch (error) { next(error); }
   });
 
@@ -3706,8 +3708,8 @@ interface GenerationPlanResult {
 }
 
 function generationPlanConcurrency(): number {
-  const configured = Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 20);
-  return Number.isFinite(configured) ? Math.max(1, Math.min(32, Math.trunc(configured))) : 20;
+  const configured = Number(process.env.COURSE_OS_GENERATION_CONCURRENCY || 14);
+  return Number.isFinite(configured) ? Math.max(1, Math.min(14, Math.trunc(configured))) : 14;
 }
 
 async function createGenerationPlan(input: CreateGenerationPlanInput, dependencies: AppDependencies): Promise<GenerationPlanResult> {
@@ -4002,11 +4004,36 @@ async function executeGenerationJobWithinSlot(jobId: string, dependencies: AppDe
   }
 }
 
+async function waitForImportSourceRegistration(job: GenerationJob, release: CourseRelease, dependencies: AppDependencies, fenceToken: number): Promise<void> {
+  if (!job.sourceImportId) return;
+  const startedAt = Date.now();
+  while (true) {
+    await assertGenerationFence(job.id, fenceToken, dependencies);
+    const record = await dependencies.operations.getImport(job.sourceImportId, job.workspaceId);
+    if (!record || !record.preparedSourceSha256) return; // Legacy jobs retain the existing authority path.
+    if (record.materialVersionId !== release.id || record.sha256 !== release.manifestHash) throw new Error("READWEAVE_IMPORT_SOURCE_CONFLICT");
+    if (record.sourceRegistration?.state === "confirmed") return;
+    if (record.sourceRegistration?.state === "failed") throw new Error(record.sourceRegistration.issue || "READWEAVE_IMPORT_SOURCE_REGISTRATION_FAILED");
+    if (Date.now() - startedAt > 180_000) throw new Error("READWEAVE_SOURCE_REGISTRATION_TIMEOUT");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
 async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceToken: number, releaseCoreSlot: () => void): Promise<void> {
   const leaseOwner = `course-os-worker:${process.pid}`;
   const initial = await dependencies.operations.readGenerationJob(jobId);
   if (!initial || initial.state !== "running" || initial.lease?.fenceToken !== fenceToken) return;
-  const release = await dependencies.readweave.getRelease(initial.materialVersionId);
+  const preparedImport = initial.sourceImportId
+    ? await dependencies.operations.getImport(initial.sourceImportId, initial.workspaceId) : undefined;
+  const preparedSource = preparedImport?.preparedSourceSha256 && preparedImport.materialVersionId === initial.materialVersionId
+    && preparedImport.sourceRegistration?.state === "pending"
+    ? JSON.parse((await dependencies.cas.get(preparedImport.preparedSourceSha256)).toString("utf8")) as CourseRelease : undefined;
+  const release = preparedSource ?? await dependencies.readweave.getRelease(initial.materialVersionId);
+  if (preparedSource && (preparedSource.id !== initial.materialVersionId || preparedSource.manifestHash !== preparedImport!.sha256
+    || preparedSource.lifecycle !== "draft_source" || initial.pageIds.some(id => !preparedSource.pageIds.includes(id)))) {
+    await failGenerationJob(jobId, "READWEAVE_IMPORT_SOURCE_CONFLICT", dependencies, fenceToken);
+    return;
+  }
   if (!release) {
     await failGenerationJob(jobId, "MATERIAL_VERSION_NOT_FOUND", dependencies, fenceToken);
     return;
@@ -4067,6 +4094,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
     let finalizedCost: GenerationCostEntry | undefined;
     let finalizedCostPersisted = false;
     let persistenceStage: "load_draft" | "save_draft" | "read_back" | "append_cost" | undefined;
+    let visionPersistence: Promise<{ error?: unknown }> | undefined;
+    let visionReceiptCount = 0;
     while (true) {
     try {
       if (priorRecovery && "kind" in priorRecovery && priorRecovery.bridge
@@ -4121,11 +4150,13 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           }
           finalizedCost = visionCost;
           persistenceStage = "append_cost";
-          await dependencies.readweave.appendCostEntry(visionCost, systemWriteContext(visionCost.id, currentJob.workspaceId));
-          await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, visionCost, context));
+          visionReceiptCount = meter.receiptCount();
+          visionPersistence = (async () => {
+            await waitForImportSourceRegistration(initial, release, dependencies, fenceToken);
+            await dependencies.readweave.appendCostEntry(visionCost, systemWriteContext(visionCost.id, currentJob.workspaceId));
+            await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, visionCost, context));
+          })().then(() => ({}), error => ({ error }));
           persistenceStage = undefined;
-          meter.markSettled();
-          finalizedCost = undefined;
           await appendGenerationStageEvent(jobId, page.id, "extract", "completed", dependencies, {
             activity: "visual_understanding", provider: understood.provider, model: understood.model,
             durationMs: understood.usage.durationMs, sourceCharacters: understood.sourceDescription.length });
@@ -4149,6 +4180,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         } });
       if (!recovery.teaching) {
         recovery.teaching = generation;
+        recovery.teachingCost = generationCostEntry(jobId, currentJob, release, page.id, generation, false);
         await saveRecovery();
       }
       timings.formatCheckMs = generation.teachingTrace?.formatCheckMs ?? 0;
@@ -4183,14 +4215,25 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         issues: runtimeModelRouter ? issues : [...issues, "MODEL_REVIEW_REQUIRED"]
       };
       const cost = recovery.teachingCost ?? generationCostEntry(jobId, currentJob, release, page.id, generation, generatedPage.quality.publishable);
-      if (!recovery.teachingCost) {
+      if (!recovery.teachingCost || cost.qualityPassed !== generatedPage.quality.publishable) {
+        cost.qualityPassed = generatedPage.quality.publishable;
         recovery.teachingCost = cost;
         await saveRecovery();
       }
-      finalizedCost = cost;
       timings.pageCompileAndReviewMs = Date.now() - reviewStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
         provider: cost.provider, model: cost.model, estimatedMicrousd: cost.estimatedMicrousd, actualMicrousd: cost.actualMicrousd, costBasis: cost.costBasis });
+      // Registration and visual accounting overlap all model/local work. The
+      // authoritative-write barrier begins only when the draft is ready.
+      if (visionPersistence) {
+        persistenceStage = "append_cost";
+        const result = await visionPersistence;
+        visionPersistence = undefined;
+        if (result.error) throw result.error;
+        meter.markSettled(visionReceiptCount);
+      }
+      await waitForImportSourceRegistration(initial, release, dependencies, fenceToken);
+      finalizedCost = cost;
       persistenceStage = "load_draft";
       const loadDraftStartedAt = Date.now();
       const existing = await dependencies.readweave.getDraftByPage(page.id);
@@ -4331,6 +4374,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         if (job.completedPageIds.length + job.failedPageIds.length >= job.pageIds.length) finalizeGenerationJob(job, context);
       });
     } catch (error) {
+      // Drain the overlapped write before retry/cancellation releases this page.
+      // Its rejection is already captured, so it cannot escape as an unhandled
+      // promise or write after a replacement attempt has begun.
+      if (visionPersistence) {
+        const result = await visionPersistence;
+        visionPersistence = undefined;
+        if (!result.error) meter.markSettled(visionReceiptCount);
+      }
       if (isTransientReadWeaveFailure(error) && storageRetries < 2) {
         storageRetries += 1;
         await assertGenerationFence(jobId, fenceToken, dependencies);
@@ -4357,16 +4408,32 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
         failureRoute,
         ...(failureRoute.category === "storage" ? { backendFailureKind: safeReadWeaveFailureKind(error), persistenceStage } : {})
       }));
+      const recordFailureCost = async (cost: GenerationCostEntry) => {
+        let pendingIssue: string | undefined;
+        try {
+          await waitForImportSourceRegistration(initial, release, dependencies, fenceToken);
+          await dependencies.readweave.appendCostEntry(cost, systemWriteContext(cost.id, currentJob.workspaceId));
+        } catch (costError) {
+          pendingIssue = safeGenerationIssue(costError);
+        }
+        await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
+          applyScopedCost(job, cost, context);
+          if (pendingIssue && !context.events.some(event => event.type === "generation.cost.pending"
+            && (event.payload as { cost?: GenerationCostEntry }).cost?.id === cost.id)) {
+            context.appendEvent("generation.cost.pending", { cost, issue: pendingIssue, authoritySaved: false });
+          }
+        });
+      };
       // A paid bridge receipt keeps its original identity even if draft IO or a later attempt fails.
       const paidBridge = recovery.bridge ?? priorBridge;
       if (paidBridge) {
         const bridgeCost = paidBridge.cost;
-        await dependencies.readweave.appendCostEntry(bridgeCost, systemWriteContext(bridgeCost.id, currentJob.workspaceId));
+        await recordFailureCost(bridgeCost);
         await dependencies.operations.mutateGenerationJob(jobId, (job, context) => applyScopedCost(job, bridgeCost, context));
         meter.markSettled();
       }
       const billedCalls = meter.groupedUsage();
-      const unsettledCost = finalizedCostPersisted ? undefined : finalizedCost;
+      const unsettledCost = finalizedCostPersisted ? undefined : finalizedCost ?? recovery.teachingCost;
       if (billedCalls.length > 0 || (!finalizedCostPersisted && (finalizedCost || error instanceof ModelRouterGenerationError))) {
         const receipts = billedCalls.length ? billedCalls : error instanceof ModelRouterGenerationError
           ? [{ provider: error.provider, model: error.model, usage: error.usage }] : [];
@@ -4379,7 +4446,7 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           if (existingCosts.some(entry => entry.id === failedCost.id)) continue;
         }
         if (!unsettledCost && receipts.length > 1) failedCost.id += `:provider:${receipt.provider}:model:${receipt.model}`;
-        await dependencies.readweave.appendCostEntry(failedCost, systemWriteContext(failedCost.id, currentJob.workspaceId));
+        await recordFailureCost(failedCost);
         await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
           // Billing records remain valid after cancellation; they must not revive
           // the task or permit a stale worker to write a lesson draft.
@@ -4393,6 +4460,17 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
           }
         });
         }
+      }
+      // Teaching can finish while the earlier visual receipt is awaiting IO.
+      // Preserve both receipts if that IO exhausts its recovery allowance.
+      if (recovery.teaching && finalizedCost?.stage === "extract") {
+        const teachingCost = recovery.teachingCost ?? generationCostEntry(jobId, currentJob, release, page.id, recovery.teaching, false);
+        await recordFailureCost(teachingCost);
+        await dependencies.operations.mutateGenerationJob(jobId, (job, context) => {
+          if (!isGenerationLeaseCurrent(job, leaseOwner, fenceToken)) return;
+          recovery.teachingCost = teachingCost;
+          context.setCheckpoint(page.id, recovery);
+        });
       }
       await markGenerationPageFailed(jobId, pageId, safeGenerationIssue(error), dependencies, {
         failureRoute,
@@ -5521,11 +5599,44 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     }) : undefined;
     if (prepared && prepared.insertedPageIds.length === 0) throw new Error("INCREMENTAL_NO_NEW_PAGES");
     if (prepared) sourceRelease = prepared.sourceRelease;
+    const generationPageIds = prepared?.generationPageIds ?? sourceRelease.pageIds;
+    const preparedSource = await dependencies.cas.put(Buffer.from(JSON.stringify(sourceRelease)));
     await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
-      if (item) item.state = "syncing";
+      if (item) {
+        item.state = "syncing";
+        item.courseId = course.id;
+        item.materialVersionId = materialVersionId;
+        item.pageIds = sourceRelease.pageIds;
+        item.preparedSourceSha256 = preparedSource.sha256;
+        item.sourceRegistration = { state: "pending", updatedAt: new Date().toISOString() };
+      }
       context.appendEvent(importId, "readweave.sync.started", { materialVersionId, pages: convertedPages.length });
     });
+    // A new import has no inherited drafts to reconcile. Its immutable local
+    // input may feed the model while authoritative registration is in flight.
+    // Persisted content/cost writes still wait for confirmed registration.
+    const planInput = {
+      idempotencyKey: `import:${importId}:generation-plan`, workspaceId: record.workspaceId,
+      materialVersionId, pageIds: generationPageIds, budgetUsd: generationBudget(record.qualityMode),
+      sourceImportId: importId, qualityMode: record.qualityMode || "balanced" as const,
+      language: record.language || "zh-CN", writingPolicySnapshotId: writingPolicy.policySnapshotId, holdForReview: false
+    };
+    let generationPlan = record.autoGenerate === true && !existingSource && !prepared
+      ? await createGenerationPlan(planInput, dependencies) : undefined;
+    if (generationPlan) {
+      await dependencies.operations.mutateImports((state, context) => {
+        const item = state.imports.find(candidate => candidate.id === importId);
+        if (!item) return;
+        item.generationPlanId = generationPlan!.plan.id;
+        item.generationJobIds = generationPlan!.plan.jobIds;
+        item.generationJobId = generationPlan!.job?.id;
+        item.generationState = generationPlan!.plan.state;
+        context.appendEvent(importId, "import.pipeline.started", { planId: generationPlan!.plan.id,
+          pages: generationPageIds.length, sourceRegistration: "pending" });
+      });
+      startCreatedGenerationPlanJobs(generationPlan, dependencies);
+    }
     if (existingSource) {
       const sameSource = existingSource.lifecycle === "draft_source"
         && existingSource.manifestHash === sourceRelease.manifestHash
@@ -5533,11 +5644,36 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         && existingSource.pageIds.every((pageId, index) => pageId === sourceRelease.pageIds[index]);
       if (!sameSource) throw new Error("READWEAVE_IMPORT_SOURCE_CONFLICT");
     } else {
-      await dependencies.readweave.registerDraftSource(sourceRelease, systemWriteContext(`import:${importId}:source`, record.workspaceId));
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await dependencies.readweave.registerDraftSource(sourceRelease, systemWriteContext(`import:${importId}:source`, record.workspaceId));
+          break;
+        } catch (error) {
+          if (!isTransientReadWeaveFailure(error) || attempt >= 2) throw error;
+          // A lost response may follow a successful write. Read back before
+          // replaying the same operation identity; never invent a new source.
+          const observed = await dependencies.readweave.getRelease(materialVersionId).catch(() => undefined);
+          if (observed) {
+            if (observed.manifestHash !== sourceRelease.manifestHash || observed.lifecycle !== "draft_source"
+              || stableStringify(observed.pageIds) !== stableStringify(sourceRelease.pageIds)) throw new Error("READWEAVE_IMPORT_SOURCE_CONFLICT");
+            break;
+          }
+          await dependencies.operations.mutateImports((_state, context) => {
+            context.appendEvent(importId, "readweave.source.retry", { attempt: attempt + 1, issue: safeImportIssue(error) });
+          });
+          await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+        }
+      }
     }
+    await dependencies.operations.mutateImports((state, context) => {
+      const item = state.imports.find(candidate => candidate.id === importId);
+      if (item) item.sourceRegistration = { state: "confirmed", updatedAt: new Date().toISOString() };
+      context.appendEvent(importId, "readweave.source.confirmed", { materialVersionId, pages: sourceRelease.pageIds.length });
+    });
     const savedDrafts: LessonDraft[] = [];
     for (const [index, converted] of convertedPages.entries()) {
       const page = sourceRelease.pages[index]!;
+      if (!existingSource && record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) continue;
       const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
       if (existingDraft) {
         if (existingDraft.sourceReleaseId !== materialVersionId || existingDraft.courseId !== course.id) throw new Error("READWEAVE_IMPORT_DRAFT_CONFLICT");
@@ -5577,8 +5713,7 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         context.appendEvent(importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
     }
-    const generationPageIds = prepared?.generationPageIds ?? sourceRelease.pageIds;
-    const generationPlan = record.autoGenerate === true && generationPageIds.length > 0 ? await createGenerationPlan({
+    generationPlan ??= record.autoGenerate === true && generationPageIds.length > 0 ? await createGenerationPlan({
       idempotencyKey: `import:${importId}:generation-plan`,
       workspaceId: record.workspaceId,
       materialVersionId,
@@ -5616,16 +5751,19 @@ async function processImport(importId: string, dependencies: AppDependencies): P
         regeneratedPageIds: generationPlan ? generationPageIds : [], preservedPageIds: prepared?.preservedPageIds,
         generationPlanId: item.generationPlanId, generationJobId: item.generationJobId, autoGenerate: item.autoGenerate });
     });
-    if (generationPlan) startCreatedGenerationPlanJobs(generationPlan, dependencies);
+    if (generationPlan && (existingSource || prepared)) startCreatedGenerationPlanJobs(generationPlan, dependencies);
   } catch (error) {
     const issue = safeImportIssue(error);
     await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find((candidate) => candidate.id === importId);
       if (!item || item.state === "ready") return;
       item.state = "failed";
+      if (item.sourceRegistration?.state === "pending") item.sourceRegistration = {
+        state: "failed", issue, updatedAt: new Date().toISOString()
+      };
       item.conversionProgress = {
         ...item.conversionProgress,
-        stage: "failed",
+        stage: item.preparedSourceSha256 ? "completed" : "failed",
         completedPages: item.conversionProgress?.completedPages ?? 0,
         issue,
         updatedAt: new Date().toISOString()
@@ -5920,7 +6058,7 @@ function fileTitle(name: string): string {
 
 function safeImportIssue(error: unknown): string {
   const message = error instanceof Error ? error.message : "IMPORT_UNKNOWN_FAILURE";
-  if (message.startsWith("READWEAVE_ETAPI_")) return "READWEAVE_DRAFT_SYNC_FAILED";
+  if (message.startsWith("READWEAVE_ETAPI_")) return describeGenerationError(error).code;
   return /^[A-Z0-9_:-]+$/.test(message) ? message.slice(0, 240) : "IMPORT_INTERNAL_FAILURE";
 }
 

@@ -1360,6 +1360,7 @@ describe("Course OS API", () => {
       const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
       const dependencies = createDefaultDependencies(root, readweave);
       const emptySave = vi.spyOn(readweave, "saveDraft").mockRejectedValue(new Error("EMPTY_DRAFT_MUST_NOT_DELAY_GENERATION"));
+      const draftLookup = vi.spyOn(readweave, "getDraftByPage").mockRejectedValue(new Error("FRESH_SOURCE_HAS_NO_DRAFTS"));
       dependencies.conversion = { enqueueAndWait: async input => {
         await mkdir(input.outputDir, { recursive: true });
         const pages = await Promise.all(Array.from({ length: 56 }, async (_, index) => {
@@ -1378,10 +1379,98 @@ describe("Course OS API", () => {
       const source = await readweave.getRelease(ready.materialVersionId);
       expect(source?.pages.map(page => page.pageNumber)).toEqual(Array.from({ length: 56 }, (_, index) => index + 1));
       expect(emptySave).not.toHaveBeenCalled();
+      expect(draftLookup).not.toHaveBeenCalled();
       for (const page of source!.pages) {
         const image = await dependencies.cas.get(page.imageUrl.split("/").at(-1)!);
         expect(image.toString()).toContain(`Page ${page.pageNumber}`);
       }
+    } finally {
+      if (previous === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previous;
+    }
+  }, 15_000);
+
+  it("overlaps teaching with source registration without writing a draft before authority confirmation", async () => {
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
+    const { app, dependencies, readweave } = await seededApp(modelRouter);
+    let allowRegistration!: () => void;
+    const registrationGate = new Promise<void>(resolve => { allowRegistration = resolve; });
+    const register = readweave.registerDraftSource.bind(readweave);
+    const registration = vi.spyOn(readweave, "registerDraftSource").mockImplementation(async (...args) => {
+      await registrationGate;
+      return register(...args);
+    });
+    const save = vi.spyOn(readweave, "saveDraftWithCost");
+    try {
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "source-model-overlap")
+        .field("autoGenerate", "true").attach("file", Buffer.from("# Pipeline\n\nA source definition and a worked example."), { filename: "pipeline.md", contentType: "text/markdown" }).expect(201);
+      await vi.waitFor(() => expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+      expect(registration).toHaveBeenCalledTimes(1);
+      expect(save).not.toHaveBeenCalled();
+      const pending = await dependencies.operations.getImport(accepted.body.id, "personal");
+      expect(pending).toMatchObject({ state: "syncing", sourceRegistration: { state: "pending" } });
+      expect(pending?.generationPlanId).toBeTruthy();
+      await vi.waitFor(async () => {
+        const detail = await request(app).get(`/api/v1/generation-plans/${pending!.generationPlanId}`).expect(200);
+        expect(detail.body.plan.stageSummary.generation).toMatchObject({ completed: 1, total: 1 });
+        expect(detail.body.plan.stageSummary.core_save).toMatchObject({ completed: 0, total: 1, pendingSave: 1 });
+      }, { timeout: 5000 });
+      allowRegistration();
+      const ready = await waitForImport(app, accepted.body.id);
+      const job = await waitForJob(app, ready.generationJobId);
+      expect(job).toMatchObject({ state: "completed", failedPageIds: [], completedPageIds: ready.pageIds });
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+      expect(await readweave.getDraftByPage(ready.pageIds[0])).toBeDefined();
+      const done = await request(app).get(`/api/v1/generation-plans/${ready.generationPlanId}`).expect(200);
+      expect(done.body.plan.stageSummary.core_save).toMatchObject({ completed: 1, total: 1, pendingSave: 0 });
+    } finally { allowRegistration(); }
+  }, 20_000);
+
+  it("keeps paid teaching recoverable when authority registration is rejected", async () => {
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.002)) };
+    const { app, dependencies, readweave } = await seededApp(modelRouter);
+    let rejectRegistration!: () => void;
+    const gate = new Promise<void>(resolve => { rejectRegistration = resolve; });
+    vi.spyOn(readweave, "registerDraftSource").mockImplementation(async () => {
+      await gate;
+      throw new Error("READWEAVE_ETAPI_403:denied");
+    });
+    const save = vi.spyOn(readweave, "saveDraftWithCost");
+    try {
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "source-rejected-after-model")
+        .field("autoGenerate", "true").attach("file", Buffer.from("# Denied registration\n\nA preserved definition."), { filename: "denied.md", contentType: "text/markdown" }).expect(201);
+      await vi.waitFor(() => expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+      rejectRegistration();
+      const failedImport = await waitForImport(app, accepted.body.id);
+      expect(failedImport).toMatchObject({ state: "failed", sourceRegistration: { state: "failed" },
+        conversionProgress: { stage: "completed", completedPages: 1, pageCount: 1 } });
+      const job = await waitForJob(app, failedImport.generationJobId);
+      expect(job).toMatchObject({ state: "failed", spentUsd: 0.002 });
+      expect(save).not.toHaveBeenCalled();
+      const state = await dependencies.operations.read();
+      expect(state.generationCheckpoints[`${job.id}:${job.pageIds[0]}`])
+        .toMatchObject({ teaching: { content: testTeachingResult(0.002).content }, teachingCost: { actualMicrousd: 2000 } });
+      expect(state.events.filter(event => event.streamId === job.id && event.type === "generation.cost.pending"))
+        .toHaveLength(1);
+    } finally { rejectRegistration(); }
+  }, 20_000);
+
+  it("confirms a source committed before its response was lost without duplicating the source", async () => {
+    const previous = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const { app, readweave } = await seededApp();
+      const register = readweave.registerDraftSource.bind(readweave);
+      const spy = vi.spyOn(readweave, "registerDraftSource").mockImplementation(async (...args) => {
+        await register(...args);
+        throw new Error("READWEAVE_ETAPI_NETWORK:response lost after commit");
+      });
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "source-commit-lost-response")
+        .field("autoGenerate", "true").attach("file", Buffer.from("# Response loss\n\nPreserve this source."), { filename: "lost.md", contentType: "text/markdown" }).expect(201);
+      const ready = await waitForImport(app, accepted.body.id);
+      expect(ready).toMatchObject({ state: "ready", sourceRegistration: { state: "confirmed" } });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect((await readweave.listReleases()).filter(source => source.id === ready.materialVersionId)).toHaveLength(1);
     } finally {
       if (previous === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
       else process.env.COURSE_OS_EXTERNAL_WORKER = previous;
@@ -1438,13 +1527,13 @@ describe("Course OS API", () => {
     expect(created.body.draftIds).toHaveLength(3);
     expect(await readweave.listDrafts()).toHaveLength(0);
     const running = await request(app).get(`/api/v1/generation-plans/${created.body.generationPlan.id}`).expect(200);
-    expect(running.body.plan).toMatchObject({ maxConcurrency: 20 });
+    expect(running.body.plan).toMatchObject({ maxConcurrency: 14 });
     expect(running.body.plan.jobIds).toHaveLength(3);
     expect(running.body.activeJobs).toHaveLength(3);
     expect(running.body.progress).toMatchObject({
       core: { completed: 0, total: 3 },
       crossPage: { completed: 0, total: 3 },
-      concurrency: { running: 0, limit: 20 },
+      concurrency: { running: 0, limit: 14 },
       costUsd: 0
     });
     releaseGeneration();
@@ -2226,6 +2315,35 @@ describe("Course OS API", () => {
     expect(await readweave.getDraftByPage("page-1")).toBeDefined();
   }, 15_000);
 
+  it("starts teaching while the visual cost write is still pending", async () => {
+    const modelRouter: ModelRouterClient = {
+      understandPage: vi.fn(async () => ({ sourceDescription: "A diagram shows source data", teachingPlan: "Explain the diagram", provider: "synthetic", model: "vision", usage: testTeachingResult(0.001).usage })),
+      generateTeachingPackage: vi.fn(async () => testTeachingResult(0.001))
+    };
+    const source = testRelease();
+    const image = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><text>source</text></svg>');
+    source.pages[0]!.imageUrl = `/api/v1/media/${sha256Text(image.toString())}`;
+    const { app, dependencies, readweave, release } = await seededApp(modelRouter, source);
+    await dependencies.cas.put(image);
+    let unblock!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const append = readweave.appendCostEntry.bind(readweave);
+    vi.spyOn(readweave, "appendCostEntry").mockImplementation(async (cost, context) => {
+      if (cost.stage === "extract") await gate;
+      return append(cost, context);
+    });
+    try {
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "parallel-vision-cost")
+        .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+      await vi.waitFor(() => expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+      expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
+      unblock();
+      expect(await waitForJob(app, created.body.id)).toMatchObject({ completedPageIds: ["page-1"], failedPageIds: [] });
+      expect(await readweave.listCostEntries({ jobId: created.body.id })).toHaveLength(2);
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+    } finally { unblock(); }
+  }, 20_000);
+
   it("retains a completed visual observation while transient cost persistence recovers", async () => {
     const usage = testTeachingResult(0.001).usage;
     const modelRouter: ModelRouterClient = {
@@ -2661,7 +2779,7 @@ describe("Course OS API", () => {
       expect((await operations.readGenerationJob(created.body.id))?.state).toBe("failed");
       await request(app).post(`/api/v1/generation-jobs/${created.body.id}:retry`).set("Idempotency-Key", "paid-bridge-newer-edit-retry").send({}).expect(202);
       await executeGenerationJob(created.body.id, dependencies);
-      expect(await operations.readGenerationJob(created.body.id)).toMatchObject({ state: "failed", lastErrorCode: "READWEAVE_UNAVAILABLE" });
+      expect(await operations.readGenerationJob(created.body.id)).toMatchObject({ state: "failed", lastErrorCode: "READWEAVE_REVISION_CONFLICT" });
       expect((await operations.readGenerationJobEvents(created.body.id)).some(event =>
         (event.payload as { backendFailureKind?: string }).backendFailureKind === "revision_conflict")).toBe(true);
       expect(await readweave.getDraftByPage("page-1")).toEqual(edited);

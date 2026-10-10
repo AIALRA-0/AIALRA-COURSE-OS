@@ -1,3 +1,4 @@
+export { summarizeImportStageEvents } from "./generation-progress.js";
 export const COURSE_API_VERSION = "2.4.0" as const;
 export const PREVIOUS_COURSE_API_VERSION = "2.3.0" as const;
 export const LEGACY_COURSE_API_VERSION = "2.2.0" as const;
@@ -498,6 +499,9 @@ export interface ImportRecord {
   generationCompletedPageIds?: Identifier[];
   generationFailedPageIds?: Identifier[];
   generationState?: JobState | GenerationPlanState | "not_requested";
+  /** Immutable prepared input in CAS; it is not an authoritative saved course. */
+  preparedSourceSha256?: string;
+  sourceRegistration?: { state: "pending" | "confirmed" | "failed"; updatedAt: ISODateTime; issue?: string };
   conversionProgress?: {
     stage: "queued" | "preparing" | "counting_pages" | "rendering_pages" | "extracting_text" | "finalizing" | "saving_pages" | "completed" | "failed";
     pageCount?: number;

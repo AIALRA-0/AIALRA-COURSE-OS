@@ -3,7 +3,7 @@ import { ModelRouterGenerationError, type ModelRouterClient, type ModelRouterUsa
 type UsageReceipt = { provider: string; model: string; usage: ModelRouterUsage };
 
 /** Receipts outlive content validation and cancellation; no draft writes happen here. */
-export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRouterClient; markSettled(): void; groupedUsage(): UsageReceipt[] } {
+export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRouterClient; receiptCount(): number; markSettled(through?: number): void; groupedUsage(): UsageReceipt[] } {
   const receipts: UsageReceipt[] = [];
   let settledCount = 0;
   const observe = async <T extends UsageReceipt>(call: () => Promise<T>): Promise<T> => {
@@ -27,7 +27,7 @@ export function meterModelRouter(upstream: ModelRouterClient): { client: ModelRo
     ...(upstream.repairTeachingFields ? { repairTeachingFields: ((input, fields) => observe(() => upstream.repairTeachingFields!(input, fields))) as NonNullable<ModelRouterClient["repairTeachingFields"]> } : {}),
     ...(upstream.auditTeachingPackage ? { auditTeachingPackage: (input => observe(() => upstream.auditTeachingPackage!(input))) as NonNullable<ModelRouterClient["auditTeachingPackage"]> } : {})
   };
-  return { client, markSettled() { settledCount = receipts.length; }, groupedUsage() {
+  return { client, receiptCount: () => receipts.length, markSettled(through = receipts.length) { settledCount = Math.max(settledCount, Math.min(through, receipts.length)); }, groupedUsage() {
     const groups = new Map<string, UsageReceipt>();
     for (const receipt of receipts.slice(settledCount)) {
       const key = JSON.stringify([receipt.provider, receipt.model]);
