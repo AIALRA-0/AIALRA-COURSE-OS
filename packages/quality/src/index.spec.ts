@@ -939,7 +939,7 @@ describe("learner-facing teaching narrative", () => {
   it("formats only misconception role labels and preserves the teaching evidence", () => {
     const source = "误以为 $K=4$ 就是四次训练\n\n错因是把芯片数当成训练次数\n\n正确判断：按原图“4 Designs”核对 $K$\n\n核对方法：查看 `Count(G)` 的定义";
     const result = formatMisconception(source);
-    expect(result).toBe("**错误理解：** 误以为 $K=4$ 就是四次训练\n\n**错因：** 把芯片数当成训练次数\n\n**正确判断：** 按原图“4 Designs”核对 $K$\n\n**核对方法：** 查看 `Count(G)` 的定义");
+    expect(result).toBe("- **错误理解**：误以为 $K=4$ 就是四次训练\n\n- **错因**：把芯片数当成训练次数\n\n- **正确判断**：按原图“4 Designs”核对 $K$\n\n- **核对方法**：查看 `Count(G)` 的定义");
     expect(formatMisconception(result)).toBe(result);
     expect(formatMisconception("普通定义：不属于易错点")).toBe("普通定义：不属于易错点");
   });

@@ -40,8 +40,8 @@ $$`]
   it("renders old misconception prose as four consistently labelled paragraphs", () => {
     const old = "误以为 Ours 每列都最小\n\n错因是跳过反例\n\n正确判断：逐列比较\n\n核对方法：检查每列";
     const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(old) }));
-    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
-      expect(html).toContain(`<strong>${role}</strong>`);
+    for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) {
+      expect(html).toContain(`<strong>${role}</strong>：`);
     }
     expect(html.match(/<p>/g)).toHaveLength(4);
   });
@@ -53,8 +53,8 @@ $$`]
     const visible = displayMisconception(source);
     expect(displayMisconception(visible)).toBe(visible);
     const html = renderToStaticMarkup(createElement(Markdown, { children: visible }));
-    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
-      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>：`, "g"))).toHaveLength(1);
     }
     expect(html).toContain("katex");
     expect(html).toContain("Reward");
@@ -82,8 +82,8 @@ $$`]
     const visible = displayMisconception(source);
     const html = renderToStaticMarkup(createElement(Markdown, { children: visible }));
 
-    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
-      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>：`, "g"))).toHaveLength(1);
     }
     expect(visible).not.toContain("： **");
     expect(html).toContain("把最大值当成平均值");
@@ -94,8 +94,8 @@ $$`]
     const source = "**错误理解： **把总和当成平均值；**错因： **忽略项数；**正确判断： **按项数求平均；**核对方法： **检查分母";
     const html = renderToStaticMarkup(createElement(Markdown, { children: displayMisconception(source) }));
 
-    for (const role of ["错误理解：", "错因：", "正确判断：", "核对方法："]) {
-      expect(html.match(new RegExp(`<strong>${role}</strong>`, "g"))).toHaveLength(1);
+    for (const role of ["错误理解", "错因", "正确判断", "核对方法"]) {
+      expect(html.match(new RegExp(`<strong>${role}</strong>：`, "g"))).toHaveLength(1);
     }
     expect(html).toContain("把总和当成平均值");
     expect(html).toContain("检查分母");
