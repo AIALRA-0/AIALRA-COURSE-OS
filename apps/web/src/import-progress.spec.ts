@@ -42,6 +42,41 @@ describe("actual pipeline stages", () => {
   const current = (value: Record<string, unknown> = {}) => plan({ id: "plan-stages", state: "running", pageIds: ids, completedPageIds: [], failedPageIds: [], ...value });
   const step = (rows: ReturnType<typeof getImportStageProgress>, id: string) => rows.find(row => row.id === id)!;
 
+  it("freezes body and save timings before later bridge completion and repeated receipts", () => {
+    const event = (id: number, type: string, second: number, payload: Record<string, unknown>) => ({
+      id, type, streamId: "timing-job", occurredAt: `2026-10-01T00:00:${String(second).padStart(2, "0")}Z`, payload: { pageId: "p1", ...payload }
+    });
+    const events = [event(1, "generation.stage.started", 0, { stage: "teach" }),
+      event(2, "generation.stage.completed", 2, { stage: "teach" }),
+      event(3, "generation.stage.completed", 3, { stage: "review" }),
+      event(4, "generation.page.storage_retry", 8, { reusedTeaching: true }),
+      event(5, "generation.page.core_saved", 10, {}),
+      event(6, "generation.stage.started", 11, { stage: "teach", phase: "bridge" }),
+      event(7, "generation.stage.completed", 20, { stage: "teach", phase: "bridge" })];
+    const pending = summarizeImportStageEvents(events, ["p1"]);
+    expect(pending.generation).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:03Z" });
+    expect(pending.core_save).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:10Z" });
+    expect(pending.bridge).toMatchObject({ completed: 0, running: 1 });
+    const done = summarizeImportStageEvents([...events,
+      event(8, "generation.page.completed", 25, { bridgeCompleted: true }),
+      event(9, "generation.page.core_saved", 30, { bridgeCompleted: true })], ["p1"]);
+    expect(done.generation).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:03Z" });
+    expect(done.core_save).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:10Z" });
+    expect(done.bridge).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:25Z" });
+  });
+
+  it("keeps legacy completion fallback while allowing an explicit new phase attempt to finish later", () => {
+    const event = (id: number, type: string, second: number, payload: Record<string, unknown>) => ({
+      id, type, occurredAt: `2026-10-01T00:00:${String(second).padStart(2, "0")}Z`, payload: { pageId: "p1", ...payload }
+    });
+    const legacy = [event(1, "generation.page.completed", 10, { bridgeCompleted: true })];
+    expect(summarizeImportStageEvents(legacy, ["p1"]).generation).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:10Z" });
+    const retried = summarizeImportStageEvents([...legacy,
+      event(2, "generation.stage.started", 20, { stage: "teach" }),
+      event(3, "generation.stage.completed", 25, { stage: "teach" })], ["p1"]);
+    expect(retried.generation).toMatchObject({ completed: 1, endedAt: "2026-10-01T00:00:25Z" });
+  });
+
   it("keeps conversion and source saving visible before any body exists", () => {
     const rows = getImportStageProgress(record({ id: "import-stages", state: "processing", autoGenerate: true,
       conversionProgress: { stage: "saving_pages", pageCount: 4, completedPages: 2 } }));

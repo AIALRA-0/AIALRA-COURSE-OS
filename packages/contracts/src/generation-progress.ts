@@ -21,6 +21,12 @@ export function summarizeImportStageEvents(events: readonly unknown[], pageIds: 
     pages.set(pageId, { state, at });
     states.set(stage, pages);
   };
+  const confirm = (stage: string, pageId: string, at?: string) => {
+    // Later save/bridge receipts confirm earlier work, but do not change when
+    // that work actually finished. Old histories without a phase receipt still
+    // receive the earliest available confirmed completion as a fallback.
+    if (states.get(stage)?.get(pageId)?.state !== "completed") record(stage, pageId, "completed", at);
+  };
   const ordered = events.map(asRecord).filter((event): event is UnknownRecord => Boolean(event))
     .sort((left, right) => (readNumber(left, ["id"]) ?? 0) - (readNumber(right, ["id"]) ?? 0));
   for (const event of ordered) {
@@ -30,19 +36,19 @@ export function summarizeImportStageEvents(events: readonly unknown[], pageIds: 
     const at = typeof event.occurredAt === "string" && Number.isFinite(Date.parse(event.occurredAt)) ? event.occurredAt : undefined;
     const type = event.type;
     if (type === "generation.page.core_saved") {
-      record("core_save", pageId, "completed", at);
-      record("generation", pageId, "completed", at);
-      if (payload?.bridgeCompleted === true) record("bridge", pageId, "completed", at);
+      confirm("core_save", pageId, at);
+      confirm("generation", pageId, at);
+      if (payload?.bridgeCompleted === true) confirm("bridge", pageId, at);
       retries.delete(pageId);
     }
     else if (type === "generation.page.storage_retry") {
-      if (payload?.reusedTeaching === true) record("generation", pageId, "completed", at);
+      if (payload?.reusedTeaching === true) confirm("generation", pageId, at);
       // A later bridge/cost retry must not undo the earlier core-save receipt.
       if (states.get("core_save")?.get(pageId)?.state !== "completed") { record("core_save", pageId, "started", at); retries.add(pageId); }
     } else if (type === "generation.page.completed") {
-      record("generation", pageId, "completed", at);
-      record("core_save", pageId, "completed", at);
-      if (payload?.bridgeCompleted === true) record("bridge", pageId, "completed", at);
+      confirm("generation", pageId, at);
+      confirm("core_save", pageId, at);
+      if (payload?.bridgeCompleted === true) confirm("bridge", pageId, at);
       retries.delete(pageId);
     } else if (type === "generation.page.failed") {
       const issue = typeof payload?.issue === "string" ? payload.issue : "";
