@@ -405,7 +405,7 @@ svg[data-icon-name^="chevron"] { flex-shrink: 0; transform-box: view-box; transf
 .material-import-dialog .import-options .workbench-select { padding: 6px 32px 6px 10px; font-size: 14px; }
 .material-import-dialog .drop-zone, .material-import-dialog .drop-zone > * { min-width: 0; max-width: 100%; }
 .material-import-dialog .drop-zone strong { overflow-wrap: anywhere; }
-.material-import-dialog > footer { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); }
+.material-import-dialog > footer { position: sticky; bottom: 0; margin-top: 16px; background: var(--panel); border-top: 1px solid var(--line); }
 .import-upload-status { display: grid; gap: 6px; margin: 16px 18px 0; font-size: 14px; line-height: 1.6; }
 .import-upload-status span { color: var(--muted); }
 @container material-import (max-width: 420px) {
