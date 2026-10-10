@@ -1,0 +1,48 @@
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_8310334d01ca53 99-135
+apps/web/src/App.ui.spec.tsx
+  s_e8850ef125fb32::t_40f7f725859975 560,586,595-723
+  s_e8850ef125fb32::t_c263ae650fbdf3 1099-1101,1107,1109-1120
+apps/api/src/model-router.ts
+  s_e8850ef125fb32::t_dc9beb8cfe0f99 497,579-600
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_436a0ee415b2ae 7
+  s_e8850ef125fb32::t_29b824d2c50ab6 4,50
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_58abeecee777a7 381,724,1065-1069,1071-1073,2262-2263,2272-2274,2310,2319,2327-2328,2332-2334,2338,2340-2342,2345-2347,2377
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_f2bf9b5f554243 663-705
+apps/api/src/generation-checkpoint.ts
+  s_e8850ef125fb32::t_a6fe630045e125 4,33-38
+packages/readweave-adapter/src/state-encoder.spec.ts
+  s_e8850ef125fb32::t_436a0ee415b2ae 2-3,6-28,51-83,89-175
+  s_e8850ef125fb32::t_f49863c1e8d384 84-88
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_dc9beb8cfe0f99 67,84
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_f2bf9b5f554243 5-9
+apps/api/src/store-postgres.spec.ts
+  s_e8850ef125fb32::t_dc9beb8cfe0f99 938-940,952-954
+packages/readweave-adapter/src/state-encoder.ts
+  s_e8850ef125fb32::t_29b824d2c50ab6 1-86
+apps/api/src/store.ts
+  s_e8850ef125fb32::t_a6fe630045e125 62
+apps/api/src/generation-checkpoint.spec.ts
+  s_e8850ef125fb32::t_a6fe630045e125 4,7-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1a9685263afd8a0395c70e4e5927feb52bb2f117",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
