@@ -27,6 +27,13 @@ describe("lesson summary", () => {
 });
 
 describe("question answer feedback", () => {
+  it.each(["correct", "incorrect", "unverified"] as const)("shows immediate %s feedback without claiming persistence", state => {
+    const markup = renderToStaticMarkup(<QuestionAnswerFeedback state={state} feedback="题目快照中的解释" saving />);
+    expect(markup).toContain("记录正在保存");
+    expect(markup).toContain("题目快照中的解释");
+    expect(markup).not.toContain("记录已保存");
+    if (state !== "unverified") expect(markup).toContain(state === "correct" ? "✅" : "❌");
+  });
   it.each([
     ["correct", "✅", "回答正确：记录已保存"],
     ["incorrect", "❌", "回答未完全正确：记录已保存，还需要复习"]
@@ -63,6 +70,14 @@ describe("question answer feedback", () => {
   it("shows a verdict even when a successfully saved result has empty explanation", () => {
     expect(renderToStaticMarkup(<QuestionAnswerFeedback state="correct" feedback="" />)).toContain("回答正确：记录已保存");
   });
+});
+
+it("displays the generated teaching heading while retaining the original source title", () => {
+  const page = { id: "title-test", title: "Attention", teachingTitle: "注意力 Attention", pageNumber: 1,
+    anchors: [], atoms: [], blocks: [], quality: { issues: [] } } as unknown as PageLesson;
+  const markup = renderToStaticMarkup(<ExplanationPanel release={{ id: "title-release" } as CourseRelease} page={page} />);
+  expect(markup).toContain("<h2>注意力 Attention</h2>");
+  expect(page.title).toBe("Attention");
 });
 
 describe("prior knowledge definition display", () => {

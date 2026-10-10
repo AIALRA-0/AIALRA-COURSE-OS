@@ -4307,6 +4307,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async questionAttemptNoteParent(releaseId: string, pageId: string): Promise<string | undefined> {
+    const pageRecord = this.draftPageRecordCache.get(pageId)?.record;
+    const confirmedPageParent = this.activityRoutes?.assessmentNoteIds.get(pageId)
+      ?? pageRecord?.projection.sectionNoteIds.assessment;
+    if (confirmedPageParent && (pageRecord?.draft.sourceReleaseId === releaseId || this.activityRoutes?.releases.has(releaseId))) return confirmedPageParent;
     let routes = this.activityRoutes ?? (await this.ensureWorkspace(), this.activityRoutes);
     if (!routes?.releases.has(releaseId)) {
       const state = await this.readStateReference(true);
@@ -4326,7 +4330,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const pageNoteId = routes?.assessmentNoteIds.get(pageId);
     if (pageNoteId) return pageNoteId;
-    const state = await this.readStateReference();
+    const located = await this.findDraftPageRecord(pageId);
+    if (located?.record.projection.sectionNoteIds.assessment) return located.record.projection.sectionNoteIds.assessment;
+    const state = await this.readStateReference(false, false);
     const draft = state.drafts.find((item) => item.pageId === pageId);
     const assessmentNoteId = draft ? state.projections.drafts[draft.id]?.sectionNoteIds.assessment : undefined;
     if (assessmentNoteId) this.activityRoutes?.assessmentNoteIds.set(pageId, assessmentNoteId);
@@ -4356,7 +4362,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const kind = assessmentAttempt ? "question_attempt_transaction" : "question_attempt";
     await this.createNote(parentNoteId, `作答 · ${attempt.pageId}`, `<pre>${escapeHtml(JSON.stringify(body, null, 2))}</pre>`, "text", undefined, {
       courseOsType: kind, courseOsObjectId: attempt.id, courseOsPageId: attempt.pageId
-    });
+    }, true);
   }
 
   private async initializeActivityState(state: EtapiState): Promise<void> {
@@ -4745,18 +4751,27 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
   }
 
-  private async createNote(parentNoteId: string, title: string, content: string, type: "text" | "code" | "image", mime?: string, labels: Record<string, string> = {}): Promise<EtapiNote & { branch: EtapiBranch }> {
+  private async createNote(parentNoteId: string, title: string, content: string, type: "text" | "code" | "image", mime?: string, labels: Record<string, string> = {}, parallelLabels = false): Promise<EtapiNote & { branch: EtapiBranch }> {
     const created = await this.request<CreatedNoteResponse>("/create-note", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parentNoteId, title, type, mime, content, isExpanded: false })
     });
-    for (const [name, value] of Object.entries(labels)) {
+    const addLabel = async ([name, value]: [string, string]) => {
       await this.request("/attributes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ noteId: created.note.noteId, type: "label", name, value, position: 10, isInheritable: false })
       });
+    };
+    if (parallelLabels) {
+      // Only the three independent answer-note labels use this path. Settle
+      // every request before returning a failure so a retry cannot race them.
+      const results = await Promise.allSettled(Object.entries(labels).map(addLabel));
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+    } else {
+      for (const label of Object.entries(labels)) await addLabel(label);
     }
     return { ...created.note, branch: created.branch };
   }

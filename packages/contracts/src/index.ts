@@ -1,4 +1,5 @@
 export { summarizeImportStageEvents } from "./generation-progress.js";
+export { evaluateQuestionAnswer } from "./question-answer.js";
 export const COURSE_API_VERSION = "2.4.0" as const;
 export const PREVIOUS_COURSE_API_VERSION = "2.3.0" as const;
 export const LEGACY_COURSE_API_VERSION = "2.2.0" as const;
@@ -201,6 +202,8 @@ export interface QuestionBankItem {
 }
 
 export interface PageLesson {
+  /** Learner-facing heading from the generated lesson; the source title stays intact. */
+  teachingTitle?: string;
   id: Identifier;
   pageNumber: number;
   title: string;

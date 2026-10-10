@@ -1378,6 +1378,50 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(record.projection.blockHashes["block-1"]).toBe("new");
   });
 
+  it("confirms answers without a course-index read and writes independent note labels concurrently", async () => {
+    const remote = new FakeEtapi();
+    let armed = false;
+    let labelsStarted = 0;
+    let releaseLabels!: () => void;
+    let announceLabels!: () => void;
+    const gate = new Promise<void>(resolve => { releaseLabels = resolve; });
+    const started = new Promise<void>(resolve => { announceLabels = resolve; });
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root",
+      fetchImpl: async (input, init) => {
+        const path = new URL(String(input)).pathname.replace(/^\/etapi/u, "");
+        if (armed && path === `/notes/${remote.noteIdByTitle("00 Course OS 结构化索引")}/content`) throw new Error("UNRELATED_COURSE_READ");
+        if (armed && path === "/attributes" && init?.method === "POST") {
+          labelsStarted += 1;
+          if (labelsStarted === 3) announceLabels();
+          await gate;
+        }
+        return remote.fetch(input, init);
+      } });
+    const release = releaseWithPage();
+    await api.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    await api.saveDraft(draftFor(release), 0, { ...context, idempotencyKey: "fast-answer-draft" });
+    await api.saveQuestionSelection({ id: "fast-answer-selection", sessionId: "session", courseReleaseId: release.id,
+      pageId: "page-1", seed: "seed", questionIds: ["question"], createdAt: "2026-10-10T00:00:00Z" },
+      { ...context, idempotencyKey: "fast-answer-selection" });
+    Reflect.set(api, "stateCache", undefined);
+    Reflect.get(api, "activityRoutes").releases.clear();
+    const attempt = { id: "fast-answer", selectionId: "fast-answer-selection", sessionId: "session", courseReleaseId: release.id,
+      pageId: "page-1", questionId: "question", objectiveId: "objective", answer: "answer", correct: null,
+      usedHintLevel: 0, attemptedAt: "2026-10-10T00:00:01Z" };
+    armed = true;
+    let acknowledged = false;
+    const saving = api.saveQuestionAttempt(attempt, { ...context, idempotencyKey: "fast-answer" }).then(result => { acknowledged = true; return result; });
+    try {
+      await Promise.race([started, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Labels serialized or unrelated course read")), 1000))]);
+      expect(labelsStarted).toBe(3);
+      expect(acknowledged).toBe(false);
+    } finally { releaseLabels(); }
+    expect(await saving).toEqual(attempt);
+    const reopened = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    expect(await reopened.listQuestionAttempts("page-1")).toEqual([attempt]);
+    expect(remote.countActiveNotesByTitle("作答 · page-1")).toBe(1);
+  });
+
   it("partitions high-frequency learning activity and preserves it across restart and failed writes", async () => {
     const remote = new FakeEtapi();
     let failingActivityNoteId = "";

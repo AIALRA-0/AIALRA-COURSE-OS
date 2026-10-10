@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generationHarnessFileSha256 } from "./generation-harness.js";
-import { loadWritingStandards } from "./writing-standards.js";
+import { generatedHeadingInstructions, loadWritingStandards } from "./writing-standards.js";
 import { meterModelRouter } from "./model-usage-meter.js";
 import { HttpProviderTeachingClient, ModelRouterGenerationError, parseWrappedProviderJson, probeProviderConnection, RoutedProviderTeachingClient, SettingsProviderTeachingClient, currentGenerationHarness, teachingPackageSchema, withCurrentDeepSeekModels } from "./model-router.js";
 
@@ -55,7 +55,7 @@ describe("generation harness", () => {
   });
   it("loads editable prompt and schema files as one hashed snapshot", () => {
     const snapshot = currentGenerationHarness();
-    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.5", taskContract: "GENERATE + TEACHING" });
+    expect(snapshot).toMatchObject({ id: "course-os-teaching", version: "2.5.6", taskContract: "GENERATE + TEACHING" });
     expect(snapshot.files.some((file) => file.path === "apps/api/src/planned-teaching.ts")).toBe(true);
     expect(snapshot.files.some((file) => file.path === "apps/api/src/app.ts")).toBe(false);
     const schema = teachingPackageSchema as { properties: Record<string, unknown>; required: string[] };
@@ -247,8 +247,10 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
       expect(body.input).toContain("前页解释了输入");
       expect(body.input).toContain("本页讨论处理规则");
       expect(body.instructions).toContain("previousTeaching 只有明确包含已确认的真实前页讲解时");
-      expect(body.instructions.endsWith("本次成文任务仅是承上启下：只用一个自然段、2–4句，从已确认的前页一点自然引出本页问题；若没有可确认的前页信息，就只依据本页摘要提出本页问题。复用已有术语，不重复定义、正文、代码或推导；输出仅限承接段。"))
-        .toBe(true);
+      const phaseInstructions = "本次成文任务仅是承上启下：只用一个自然段、2–4句，从已确认的前页一点自然引出本页问题；若没有可确认的前页信息，就只依据本页摘要提出本页问题。复用已有术语，不重复定义、正文、代码或推导；输出仅限承接段。";
+      expect(body.instructions).toContain(phaseInstructions);
+      expect(body.instructions.endsWith(generatedHeadingInstructions)).toBe(true);
+      expect(body.instructions.indexOf(phaseInstructions)).toBeLessThan(body.instructions.indexOf(generatedHeadingInstructions));
       expect(body.max_output_tokens).toBe(15_000);
       expect(body.text?.format?.name).toBeUndefined();
       return Response.json({ model: "deepseek-flash",

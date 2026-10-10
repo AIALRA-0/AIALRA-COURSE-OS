@@ -1136,6 +1136,21 @@ describe("Course OS API", () => {
     await request(app).get(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`).set("X-Workspace-Id", "other-workspace").expect(404);
   });
 
+  it("uses the generated bilingual lesson title without changing the source title or body", () => {
+    const source = { ...testRelease().pages[0]!, title: "Attention" };
+    for (const heading of ["注意力 Attention", "注意力（Attention）", "1. 注意力 Attention"]) {
+      const content = { ...testTeachingResult(0).content, fullExplanationMarkdown: `## ${heading}\n\n讲解内容` };
+      const compiled = applyTeachingPackage(source, content, true);
+      expect(compiled.title).toBe("Attention");
+      expect(compiled.teachingTitle).toBe("注意力 Attention");
+      expect(compiled.anchors).toEqual(source.anchors);
+      expect(compiled.lessonSections?.find(section => section.kind === "full_explanation")?.markdown).toBe(content.fullExplanationMarkdown);
+    }
+    for (const body of ["## Attention\n\n正文", "```markdown\n## 注意力 Attention\n```", "## 核心思路\n\n正文"]) {
+      expect(applyTeachingPackage(source, { ...testTeachingResult(0).content, fullExplanationMarkdown: body }, true).teachingTitle).toBeUndefined();
+    }
+  });
+
   it("preserves the complete body even when its opening and long lines also appear in the summary", () => {
     const content = testTeachingResult(0).content;
     content.mainContentMarkdown = "这里定义当前移动的增益，并说明满足平衡约束后才可以执行这次移动";

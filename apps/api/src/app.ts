@@ -2,7 +2,8 @@ import { loadWritingStandards } from "./writing-standards.js";
 import { savedBridgeDraftState, savedPageGeneration, type SavedPageGeneration } from "./generation-checkpoint.js";
 export { applySemanticAuditFindings } from "./teaching-patches.js";
 import { meterModelRouter } from "./model-usage-meter.js";
-import { summarizeImportStageEvents } from "@course-os/contracts";
+import { evaluateQuestionAnswer, summarizeImportStageEvents } from "@course-os/contracts";
+export { evaluateQuestionAnswer } from "@course-os/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -4951,7 +4952,11 @@ export function applyTeachingPackage(page: CourseRelease["pages"][number], conte
     const status = coveredFields.length === 0 ? "missing" as const : requirement.requiredFields.every((field) => coveredFields.includes(field)) ? "covered" as const : "partial" as const;
     return { requirementId: requirement.id, explanationBlockId, coveredFields, status };
   });
-  return { ...page, blocks, lessonFlowVersion: 2, teachingCompositionVersion: modelBacked ? 1 : undefined, teachingTrace, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
+  const firstHeading = modelBacked ? fullExplanationMarkdown.match(/^\s*#{1,2}[ \t]+([^\r\n]+)(?:\r?\n|$)/u)?.[1]?.trim() : undefined;
+  const generatedTitle = firstHeading?.replace(/[ \t]+#+[ \t]*$/u, "").replace(/^\d+(?:\.\d+)*[.、．]?[ \t]+/u, "").replace(/([\p{Script=Han}]+)[ \t]*[（(][ \t]*([A-Za-z][^()（）\r\n]*)[）)]/gu, "$1 $2");
+  const usableTitle = generatedTitle && (!/[A-Za-z]/u.test(generatedTitle) || /\p{Script=Han}/u.test(generatedTitle))
+    && (!/[A-Za-z]/u.test(page.title) || /[A-Za-z]/u.test(generatedTitle));
+  return { ...page, ...(usableTitle ? { teachingTitle: generatedTitle } : {}), blocks, lessonFlowVersion: 2, teachingCompositionVersion: modelBacked ? 1 : undefined, teachingTrace, lessonSections, questionBank, coverageClaims, quality: { ...page.quality, issues: [], publishable: false } };
 }
 
 function isPlaceholderTeachingBlock(markdown: string): boolean {
@@ -6145,23 +6150,6 @@ function buildHint(check: string, level: number): string {
 
 function normalizeAnswer(value: string): string {
   return value.toLowerCase().replace(/[\s，。,.；;：:]/g, "");
-}
-
-export function evaluateQuestionAnswer(item: QuestionBankItem, answer: string): boolean | null {
-  if (normalizeAnswer(answer) === normalizeAnswer(item.expectedAnswer)) return true;
-  if (item.kind === "multiple_choice") {
-    const options = Array.isArray(item.options) ? item.options.filter((option): option is string => typeof option === "string") : [];
-    if (options.length < 2) return null;
-    return options.some((option) => normalizeAnswer(option) === normalizeAnswer(answer)) ? false : null;
-  }
-  const numeric = (value: string): number | undefined => {
-    const normalized = value.trim().replace(/^\$|\$$/g, "").replace(/,/g, "");
-    return /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized) ? Number(normalized) : undefined;
-  };
-  const expected = numeric(item.expectedAnswer);
-  const supplied = numeric(answer);
-  if (expected !== undefined && supplied !== undefined) return Math.abs(expected - supplied) <= Math.max(1e-9, Math.abs(expected) * 1e-9);
-  return null;
 }
 
 export function isPracticeReadyQuestion(item: QuestionBankItem): boolean {
