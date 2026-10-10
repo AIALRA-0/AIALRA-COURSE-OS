@@ -1,0 +1,21 @@
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_c83665f14e4059 45-79
+packages/contracts/src/generation-progress.ts
+  s_e8850ef125fb32::t_c83665f14e4059 24-29,39-41,45,49-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "37f1def11f7bfb3e572e7659ce8a8bb1c0a6e52f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
