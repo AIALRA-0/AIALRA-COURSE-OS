@@ -1,0 +1,67 @@
+config/generation-harness/planned-writing-prompt.md
+  s_e8850ef125fb32::t_b72bf228e89164 34
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_eb86951062fbbb 3,159,161-163,440
+  s_e8850ef125fb32::t_6b446001c66a26 439,441-447,449,475
+  s_e8850ef125fb32::t_7fae737bb0f414 160
+apps/api/src/generation-checkpoint.spec.ts
+  s_e8850ef125fb32::t_18072cae31c43c 2-3,14-32
+packages/quality/src/prior-knowledge.ts
+  s_e8850ef125fb32::t_57cd32bd906b5e 102-107
+  s_e8850ef125fb32::t_bbc9dfc1b5cff2 84
+  s_e8850ef125fb32::t_eb86951062fbbb 1-83,85-101,108-153
+apps/api/src/writing-standards.ts
+  s_e8850ef125fb32::t_1c18c2875844fa 24,26-32,34-40,42,45,76
+packages/quality/src/index.ts
+  s_e8850ef125fb32::t_eb86951062fbbb 2
+apps/api/src/planned-teaching.spec.ts
+  s_e8850ef125fb32::t_d362e16d44b00b 61-78
+config/generation-harness/writing-format-contract.md
+  s_e8850ef125fb32::t_b72bf228e89164 21,25
+apps/api/src/generation-checkpoint.ts
+  s_e8850ef125fb32::t_b8ee627117b633 1,13-32
+apps/api/src/planned-teaching.ts
+  s_e8850ef125fb32::t_78d3998c94d31b 3,264-268,321-324
+apps/api/src/writing-standards.spec.ts
+  s_e8850ef125fb32::t_b9dc3851fb8920 1-2,16-19,21-22,31,33,35-38,42-52,57-74,82,94-105,115-117,119-126,128-130,148,151-157
+  s_e8850ef125fb32::t_efb99896636fbb 3,10-14,20,26-28,118,127
+  s_e8850ef125fb32::t_d1175cd43046eb 53-56,134,137,161-162
+  s_e8850ef125fb32::t_507a70123b2d91 131
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_b5bfcb590d7b41 4,181-182
+  s_e8850ef125fb32::t_7fae737bb0f414 93-99
+  s_e8850ef125fb32::t_d7bbd84e3318bd 29-67
+  s_e8850ef125fb32::t_c2ce83207c5b10 69-92,100-106
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_1c1a8665d30898 62,546,563
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_18072cae31c43c 2575-2617,2620-2663,2667-2676
+  s_e8850ef125fb32::t_95552d4a967e72 2618-2619,2664-2666
+  s_e8850ef125fb32::t_cd775c59767f23 2677-2721
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_1c9694023580bb 4057-4059,4361-4363
+  s_e8850ef125fb32::t_a3f416b8b620cf 4485-4487
+  s_e8850ef125fb32::t_b8ee627117b633 2,4072-4073,4075,4287-4288,4293-4296,4360,4364-4367,4501-4503,4523-4524,4537,4554,4559-4560,4566-4569
+  s_e8850ef125fb32::t_fcfbee2b9ad56d 4426-4448,4450-4459,4462-4484,4488-4490
+  s_e8850ef125fb32::t_18072cae31c43c 4449,4460-4461
+apps/api/src/generation-harness.ts
+  s_e8850ef125fb32::t_78d3998c94d31b 47-49
+packages/quality/src/prior-knowledge.spec.ts
+  s_e8850ef125fb32::t_57cd32bd906b5e 1-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f4240d99de5ed3e87dc0fc6194d05204c88841cf",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
