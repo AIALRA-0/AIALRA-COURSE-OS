@@ -12,20 +12,20 @@ function record(value: Record<string, unknown>): WebImportRecord {
 }
 
 describe("task concurrency display", () => {
-  it("distinguishes all active tasks from the body concurrency cap without changing counters", () => {
+  it("reports occupied core slots separately from tasks waiting for storage", () => {
     const activeJobs = Array.from({ length: 16 }, (_, index) => ({ id: `job-${index}`, state: "running" })) as GenerationJob[];
     const source = record({ state: "ready", pageIds: [], issues: [] });
-    const currentPlan = plan({ state: "running", pageIds: [], completedPageIds: [], failedPageIds: [], maxConcurrency: 14 });
+    const currentPlan = plan({ state: "running", pageIds: [], completedPageIds: [], failedPageIds: [], maxConcurrency: 14, progress: { concurrency: { running: 2, limit: 14 } } });
     const summary = summarizeImportProgress(source, currentPlan, activeJobs, []);
-    expect(summary.concurrency).toEqual({ running: 16, limit: 14 });
-    expect(formatTaskConcurrency(summary.concurrency)).toBe("16 个活跃任务 · 正文并发上限14");
+    expect(summary.concurrency).toEqual({ running: 2, limit: 14 });
+    expect(formatTaskConcurrency(summary.concurrency)).toBe("2 页正在生成正文 · 正文并发上限14");
     expect(activeJobs).toHaveLength(16);
     expect(currentPlan.maxConcurrency).toBe(14);
   });
   it.each([
-    [{ running: 16 }, "16 个活跃任务 · 正文并发上限待确认"],
-    [{ limit: 14 }, "活跃任务数待确认 · 正文并发上限14"],
-    [{ running: 0, limit: 14 }, "0 个活跃任务 · 正文并发上限14"],
+    [{ running: 16 }, "16 页正在生成正文 · 正文并发上限待确认"],
+    [{ limit: 14 }, "正文生成并发待确认 · 正文并发上限14"],
+    [{ running: 0, limit: 14 }, "0 页正在生成正文 · 正文并发上限14"],
     [undefined, "—"]
   ])("keeps unavailable metrics unknown for %j", (value, expected) => {
     expect(formatTaskConcurrency(value)).toBe(expected);
@@ -365,7 +365,7 @@ describe("import progress summary", () => {
     expect(result.core).toEqual({ completed: 1, total: 2 });
     expect(result.crossPage).toBeUndefined();
     expect(result.repairCount).toBe(1);
-    expect(result.concurrency).toEqual({ running: 2, limit: 4 });
+    expect(result.concurrency).toEqual({ running: undefined, limit: 4 });
     expect(result.provider).toBe("provider-b");
     expect(result.model).toBe("model-b");
     expect(result.costUsd).toBe(0.0123);

@@ -10,7 +10,7 @@ import { FileReadWeaveCourseApi, type ReadWeaveCourseApi } from "@course-os/read
 import { sha256Text } from "@course-os/domain";
 import type { CourseProject, CourseRelease, GenerationCostEntry, GenerationJob, GenerationPlan, IdempotentWriteContext, ImportRecord, LessonDraft, QuestionBankItem, ReleaseManifest } from "@course-os/contracts";
 import { unpairedEnglishTeachingFields, validateTeachingNarrative } from "@course-os/quality";
-import { applyTeachingPackage, buildReadingTree, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
+import { applyTeachingPackage, buildReadingTree, createApp, createDefaultDependencies, evaluateQuestionAnswer, executeGenerationJob, normalizeGeneratedMathPunctuation, normalizeMultipartFilename, normalizeTeachingPackageMath, resumeIncompleteJobs, safeReadWeaveFailureKind } from "./app.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
 import { ModelRouterGenerationError, currentGenerationHarness, providerRouterFromSettings, type ModelRouterClient, type TeachingGenerationResult, type TeachingPackage } from "./model-router.js";
 import { ReadingRuntime } from "./reading-runtime.js";
@@ -73,6 +73,25 @@ async function seededReplicaDraftApp() {
 }
 
 describe("Course OS API", () => {
+  it.each(["slides.pptx", "先验知识_示例.pptx", "café.pdf", "😀.pptx"])("preserves decoded filenames and repairs browser UTF-8 multipart bytes for %s", name => {
+    expect(normalizeMultipartFilename(name)).toBe(name);
+    expect(normalizeMultipartFilename(Buffer.from(name, "utf8").toString("latin1"))).toBe(name);
+  });
+  it("keeps a browser Unicode upload name in the saved import record", async () => {
+    const { dependencies } = await seededApp();
+    const previous = process.env.COURSE_OS_EXTERNAL_WORKER;
+    process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      const app = createApp(dependencies);
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "unicode-browser-filename")
+        .field("autoGenerate", "false").attach("file", Buffer.from("# Filename source"), { filename: "中文课件.md", contentType: "text/markdown" }).expect(201);
+      expect(accepted.body.originalName).toBe("中文课件.md");
+      expect((await dependencies.operations.getImport(accepted.body.id, "personal"))?.originalName).toBe("中文课件.md");
+    } finally {
+      if (previous === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;
+      else process.env.COURSE_OS_EXTERNAL_WORKER = previous;
+    }
+  });
   it("blocks fenced media before CAS while retaining unindexed import previews and workspace isolation", async () => {
     const { app, dependencies, reading } = await seededReplicaDraftApp();
     const image = await dependencies.cas.put(Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
@@ -611,7 +630,7 @@ describe("Course OS API", () => {
       core: { completed: 1, total: 3 },
       crossPage: { completed: 1, total: 3 },
       repairCount: 1,
-      concurrency: { running: 2, limit: 2 },
+      concurrency: { running: 0, limit: 2 },
       provider: "test-provider",
       model: "test-model",
       costUsd: 0
@@ -1426,6 +1445,57 @@ describe("Course OS API", () => {
     } finally { allowRegistration(); }
   }, 20_000);
 
+  it("refills the core slot from durable paid output while source registration remains blocked", async () => {
+    const previous = process.env.COURSE_OS_GENERATION_CONCURRENCY;
+    process.env.COURSE_OS_GENERATION_CONCURRENCY = "1";
+    let allowRegistration!: () => void;
+    const registrationGate = new Promise<void>(resolve => { allowRegistration = resolve; });
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.002)) };
+    const { dependencies, readweave } = await seededApp(modelRouter);
+    dependencies.conversion = { enqueueAndWait: async input => {
+      await mkdir(input.outputDir, { recursive: true });
+      const pages = await Promise.all([1, 2].map(async pageNumber => {
+        const imagePath = join(input.outputDir, `page-${pageNumber}.svg`);
+        await writeFile(imagePath, `<svg xmlns="http://www.w3.org/2000/svg"><text>Page ${pageNumber}</text></svg>`);
+        return { pageNumber, title: `Page ${pageNumber}`, text: `Definition and worked example ${pageNumber}`, imagePath, imageMediaType: "image/svg+xml" as const };
+      }));
+      return { requestId: input.id, state: "completed" as const, pages, issues: [], startedAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+    } };
+    const app = createApp(dependencies);
+    const register = readweave.registerDraftSource.bind(readweave);
+    vi.spyOn(readweave, "registerDraftSource").mockImplementation(async (...args) => { await registrationGate; return register(...args); });
+    const save = vi.spyOn(readweave, "saveDraftWithCost");
+    try {
+      const accepted = await request(app).post("/api/v1/imports").set("Idempotency-Key", "core-slot-refill-before-save")
+        .field("autoGenerate", "true").attach("file", Buffer.from("# Two independent pages"), { filename: "refill.md", contentType: "text/markdown" }).expect(201);
+      await vi.waitFor(() => expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2), { timeout: 10_000 });
+      const pending = await dependencies.operations.getImport(accepted.body.id, "personal");
+      expect(pending?.sourceRegistration?.state).toBe("pending");
+      await vi.waitFor(async () => {
+        const detail = await request(app).get(`/api/v1/generation-plans/${pending!.generationPlanId}`).expect(200);
+        expect(detail.body.progress.concurrency).toEqual({ running: 0, limit: 1 });
+        expect(detail.body.activeJobs).toHaveLength(2);
+        expect(detail.body.plan.stageSummary.core_save).toMatchObject({ completed: 0, total: 2, pendingSave: 2 });
+        const state = await dependencies.operations.read();
+        for (const job of detail.body.activeJobs) {
+          expect(state.generationCheckpoints[`${job.id}:${job.pageIds[0]}`])
+            .toMatchObject({ teaching: { content: testTeachingResult(0.002).content }, teachingCost: { actualMicrousd: 2000 } });
+        }
+      }, { timeout: 5000 });
+      expect(save).not.toHaveBeenCalled();
+      allowRegistration();
+      const ready = await waitForImport(app, accepted.body.id);
+      const done = await waitForPlan(app, ready.generationPlanId);
+      expect(done).toMatchObject({ state: "completed", completedPageIds: ready.pageIds, failedPageIds: [] });
+      expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(2);
+      expect(save).toHaveBeenCalledTimes(2);
+    } finally {
+      allowRegistration();
+      if (previous === undefined) delete process.env.COURSE_OS_GENERATION_CONCURRENCY;
+      else process.env.COURSE_OS_GENERATION_CONCURRENCY = previous;
+    }
+  }, 20_000);
+
   it("keeps paid teaching recoverable when authority registration is rejected", async () => {
     const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0.002)) };
     const { app, dependencies, readweave } = await seededApp(modelRouter);
@@ -1533,7 +1603,7 @@ describe("Course OS API", () => {
     expect(running.body.progress).toMatchObject({
       core: { completed: 0, total: 3 },
       crossPage: { completed: 0, total: 3 },
-      concurrency: { running: 0, limit: 14 },
+      concurrency: { running: 3, limit: 14 },
       costUsd: 0
     });
     releaseGeneration();

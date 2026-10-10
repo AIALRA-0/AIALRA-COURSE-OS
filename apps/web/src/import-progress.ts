@@ -176,8 +176,9 @@ export function summarizeImportProgress(
   const repairCount = explicitRepairCount ?? (observedRepairCount > 0 ? observedRepairCount : undefined);
 
   const concurrencySource = [...progressSources(sources, ["concurrency", "runningConcurrency"]), ...sources];
-  const running = firstNumber(concurrencySource, ["running", "active", "current", "runningConcurrency", "activeConcurrency"])
-    ?? (activeJobs ? activeJobs.length : plan?.activeJobIds?.length);
+  // A running task may already be waiting on persistence or a predecessor.
+  // Only the scheduler's explicit count measures occupied core/model slots.
+  const running = firstNumber(concurrencySource, ["running", "active", "current", "runningConcurrency", "activeConcurrency"]);
   const limit = firstNumber(concurrencySource, ["limit", "max", "cap", "maxConcurrency"])
     ?? plan?.maxConcurrency;
   const concurrency = running !== undefined || limit !== undefined ? { running, limit } : undefined;

@@ -1900,7 +1900,7 @@ export function ImportProgress({ record, taskTitle, plan, activeJobs, costs, cos
     <div className="import-progress-label"><strong>{progressLabel}</strong><span>{statusDetail}<small>{awaitingPlanDetails ? "正在获取最新任务状态" : activity.stale ? "已超过 2 分钟没有可核对的工作进展；连接或心跳不代表工作完成" : `最近工作进展：${formatActivityAge(activity.ageSeconds)}`}</small><small>{timing.label}</small></span></div>
     <dl><div><dt>当前阶段</dt><dd>{currentStage}</dd></div><div><dt>最后工作进展</dt><dd>{formatActivityAge(activity.ageSeconds)}</dd></div><div><dt>转换页面</dt><dd>{formatProgressCount(stages.find(step => step.id === "conversion")?.count)}</dd></div><div><dt>正文可读</dt><dd>{auto ? formatProgressCount(stages.find(step => step.id === "core_save")?.count) : "尚未生成"}</dd></div><div><dt>跨页承接完成</dt><dd>{auto ? formatProgressCount(stages.find(step => step.id === "bridge")?.count) : "尚未生成"}</dd></div><div><dt>失败页面</dt><dd>{failed}</dd></div></dl>
     <ImportTaskEvents record={record} plan={plan} jobs={activeJobs} costs={costs} />
-    <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>活跃任务与正文并发上限</dt><dd>{concurrency}</dd></div><div><dt>最近记录线路（非整任务）</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
+    <details className="task-technical-details"><summary><Icon name="chevronDown" />运行详情</summary><dl><div><dt>修复数</dt><dd>{summary.repairCount ?? "—"}</dd></div><div><dt>正文生成并发</dt><dd>{concurrency}</dd></div><div><dt>最近记录线路（非整任务）</dt><dd>{providerModel}</dd></div><div><dt>累计成本</dt><dd>{cost}</dd></div></dl></details>
     {Array.isArray(plan?.failureReasons) && plan.failureReasons.length > 0 && <p className="dialog-error" role="alert"><Icon name="warning" />{plan.failureReasons.filter((reason): reason is string => typeof reason === "string").join(" · ")}</p>}
     {(error || record.issues.length > 0) && <p className="dialog-error"><Icon name="warning" />{error || record.issues.join(" · ")}</p>}
     <footer><span>{finished ? failedState ? "任务已结束，请核对失败详情" : cancelledState ? "任务已取消" : taskState === "paused" ? "任务已暂停" : taskStatus.fact : "离开此页不会停止任务，刷新后仍可从课程树恢复"}</span>{taskStatus.action === "open_draft" && <button className="primary-button" data-action="open-task-lesson" onClick={onOpen}>打开讲解</button>}{taskStatus.action === "generate" && <button className="primary-button" data-action="open-task-generation" onClick={onGenerate}>打开材料与生成工具</button>}{canRetryFailed && <button className="primary-button" data-action="retry-failed-pages" onClick={onRetryFailed}>重试失败页面</button>}{retryingFailed && <button className="primary-button" data-action="retry-failed-pages" disabled>正在重试失败页面</button>}</footer>
@@ -1911,7 +1911,7 @@ function progressScopeLabel(scope?: string): string { return scope && scope !== 
 
 export function formatTaskConcurrency(value?: { running?: number; limit?: number }): string {
   if (value?.running === undefined && value?.limit === undefined) return "—";
-  const active = value?.running === undefined ? "活跃任务数待确认" : `${value.running} 个活跃任务`;
+  const active = value?.running === undefined ? "正文生成并发待确认" : `${value.running} 页正在生成正文`;
   const limit = value?.limit === undefined ? "正文并发上限待确认" : `正文并发上限${value.limit}`;
   return `${active} · ${limit}`;
 }

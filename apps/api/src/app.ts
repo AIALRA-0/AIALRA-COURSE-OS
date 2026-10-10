@@ -1341,6 +1341,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.post(/^\/api\/v1\/imports:inspect$/, upload.single("file"), async (request, response, next) => {
     try {
       if (!request.file) return sendError(request, response, 400, "FILE_REQUIRED", "请选择 PDF 文件", false);
+      request.file.originalname = normalizeMultipartFilename(request.file.originalname);
       const inspection = inspectUpload(request.file.originalname, request.file.mimetype, request.file.buffer);
       if (!inspection.accepted || inspection.kind !== "pdf") return sendError(request, response, 422, "PDF_INSPECTION_REJECTED", "文件检查未通过，或不是 PDF", false);
       let pdfLayout;
@@ -1359,6 +1360,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.post("/api/v1/imports", upload.single("file"), async (request, response, next) => {
     try {
       if (!request.file) return sendError(request, response, 400, "FILE_REQUIRED", "请选择要导入的文件", false);
+      request.file.originalname = normalizeMultipartFilename(request.file.originalname);
       const idempotencyKey = requireIdempotencyKey(request);
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const existing = await dependencies.operations.readImportByOperation(idempotencyKey, workspaceId);
@@ -1815,7 +1817,7 @@ export function createApp(dependencies: AppDependencies): Express {
         core: { completed: [...coreSaved].filter(pageId => plan.pageIds.includes(pageId)).length, total: plan.pageIds.length },
         crossPage: { completed: [...bridgeSaved].filter(pageId => crossPageIds.has(pageId)).length, total: crossPageIds.size },
         repairCount,
-        concurrency: { running: activeJobs.filter(job => job.state === "running").length, limit: plan.maxConcurrency ?? generationPlanConcurrency() },
+        concurrency: { running: planJobs.filter(job => activeCoreGenerationJobIds.has(job.id)).length, limit: plan.maxConcurrency ?? generationPlanConcurrency() },
         provider: route?.provider,
         model: route?.model,
         costUsd: roundGenerationMoney(planJobs.reduce((sum, item) => sum + item.spentUsd, 0))
@@ -3798,7 +3800,12 @@ async function queueGenerationPlanJobs(planId: string, dependencies: AppDependen
     const currentFailed = new Set(state.jobs.filter((item) => item.planId === current.id).flatMap((item) => item.failedPageIds));
     const currentAssigned = new Set(state.jobs.filter((item) => item.planId === current.id).flatMap((item) => item.pageIds));
     const currentRemaining = current.pageIds.filter((pageId) => !currentCompleted.has(pageId) && !currentFailed.has(pageId) && !currentAssigned.has(pageId));
-    const slots = Math.max(0, (current.maxConcurrency ?? generationPlanConcurrency()) - currentActive.length);
+    // A live one-page job that released its core slot still remains active for
+    // saving/bridging. Queued jobs and unknown/restarted executions reserve
+    // capacity conservatively until they claim or recover their actual slot.
+    const coreReservations = currentActive.filter(job => job.state === "queued"
+      || !inProcessGenerationJobs.has(job.id) || activeCoreGenerationJobIds.has(job.id));
+    const slots = Math.max(0, (current.maxConcurrency ?? generationPlanConcurrency()) - coreReservations.length);
     const now = new Date().toISOString();
     const queued: Array<{ job: GenerationJob; created: boolean }> = [];
     for (const pageId of currentRemaining.slice(0, slots)) {
@@ -3939,7 +3946,15 @@ function startGenerationJob(jobId: string, dependencies: AppDependencies): void 
   if (process.env.COURSE_OS_EXTERNAL_WORKER !== "true") queueMicrotask(() => executeGenerationJob(jobId, dependencies).catch(() => undefined));
 }
 
+async function refillGenerationPlanAfterCore(jobId: string, dependencies: AppDependencies): Promise<void> {
+  const job = await dependencies.operations.readGenerationJob(jobId);
+  if (!job?.planId || job.pageIds.length !== 1) return;
+  const next = await queueGenerationPlanJobs(job.planId, dependencies);
+  for (const item of next) if (item.created) startGenerationJob(item.job.id, dependencies);
+}
+
 const inProcessGenerationJobs = new Map<string, Promise<void>>();
+const activeCoreGenerationJobIds = new Set<string>();
 let runningGenerationJobs = 0;
 const generationJobWaiters: Array<() => void> = [];
 
@@ -3959,10 +3974,12 @@ export function executeGenerationJob(jobId: string, dependencies: AppDependencie
   if (existing) return existing;
   const execution = (async () => {
     const releaseSlot = await acquireGenerationJobSlot();
+    activeCoreGenerationJobIds.add(jobId);
     let slotReleased = false;
     const releaseCoreSlot = () => {
       if (slotReleased) return;
       slotReleased = true;
+      activeCoreGenerationJobIds.delete(jobId);
       releaseSlot();
     };
     try { await executeGenerationJobWithinSlot(jobId, dependencies, releaseCoreSlot); }
@@ -4223,8 +4240,14 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       timings.pageCompileAndReviewMs = Date.now() - reviewStartedAt;
       await appendGenerationStageEvent(jobId, page.id, "review", "completed", dependencies, { issueCount: generatedPage.quality.issues.length, publishable: generatedPage.quality.publishable,
         provider: cost.provider, model: cost.model, estimatedMicrousd: cost.estimatedMicrousd, actualMicrousd: cost.actualMicrousd, costBasis: cost.costBasis });
-      // Registration and visual accounting overlap all model/local work. The
-      // authoritative-write barrier begins only when the draft is ready.
+      // Paid output and its cost receipt are durable before another page gets
+      // this core slot. Storage/registration and bridges have their own barriers
+      // and must not delay the next independent page's model work. Legacy jobs
+      // with more than one page keep their slot for the remaining model calls.
+      if (initial.pageIds.length === 1) {
+        releaseCoreSlot();
+        await refillGenerationPlanAfterCore(jobId, dependencies);
+      }
       if (visionPersistence) {
         persistenceStage = "append_cost";
         const result = await visionPersistence;
@@ -4629,6 +4652,7 @@ async function settleCoreSavedPage(
 
   let confirmedDraft = draft;
   releaseCoreSlot();
+  await refillGenerationPlanAfterCore(jobId, dependencies);
   if ((recovery.bridge || !draft.page.lessonSections?.some(section => section.kind === "chapter_bridge" && section.markdown?.trim()))
     && router.generateBridge) {
     const job = (await dependencies.operations.readGenerationJob(jobId))!;
@@ -5349,6 +5373,16 @@ function safeDiagnosticCode(value: string): string {
     .replace(/\b(?:sk|amr)[-_][A-Za-z0-9_-]{8,}\b/gu, "[secret]")
     .replace(/\b[A-Za-z0-9_-]{40,}\b/gu, "[opaque]")
     .slice(0, 240);
+}
+
+export function normalizeMultipartFilename(value: string): string {
+  // Busboy decodes unextended multipart filename parameters as Latin-1, while
+  // browsers send UTF-8 bytes. Already decoded Unicode and real Latin-1 names
+  // are kept intact; only a strictly valid UTF-8 byte sequence is decoded.
+  if ([...value].some(character => character.codePointAt(0)! > 255)) return value;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(value, "latin1"));
+  } catch { return value; }
 }
 
 export function safeReadWeaveFailureKind(error: unknown): string {
