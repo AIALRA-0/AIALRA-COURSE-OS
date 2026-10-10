@@ -2353,6 +2353,8 @@ describe("Course OS API", () => {
       state: "completed", completedPageIds: ["page-1"], failedPageIds: ["page-2"]
     });
     expect(saveFailures).toBe(0);
+    // A restart replaces the prior writer after its terminal cleanup finishes.
+    await executeGenerationJob(created.body.id, dependencies);
     const completedDraft = await readweave.getDraftByPage("page-1");
 
     expect((await dependencies.operations.read()).generationCheckpoints[`${created.body.id}:page-2`])

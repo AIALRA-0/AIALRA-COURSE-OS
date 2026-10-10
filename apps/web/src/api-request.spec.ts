@@ -15,7 +15,7 @@ describe("read request lifecycle", () => {
     vi.unstubAllGlobals();
   });
 
-  it("aborts a hung fetch at ten seconds and a manual retry starts a new request", async () => {
+  it("aborts a hung fetch at ten seconds before starting one automatic recovery request", async () => {
     vi.useFakeTimers();
     const calls: Array<{ signal?: AbortSignal; requestId: string | null }> = [];
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -30,20 +30,12 @@ describe("read request lifecycle", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const firstRequest = api.lesson("page-1");
-    const timedOut = expect(firstRequest).rejects.toMatchObject({
-      name: "ApiRequestError",
-      code: "REQUEST_TIMEOUT",
-      status: 408,
-      requestId: expect.any(String)
-    });
     await vi.advanceTimersByTimeAsync(10_000);
 
-    await timedOut;
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.signal?.aborted).toBe(true);
-
-    await expect(api.lesson("page-1")).resolves.toMatchObject({ releaseId: "release-1" });
+    await expect(firstRequest).resolves.toMatchObject({ releaseId: "release-1" });
     expect(calls).toHaveLength(2);
+    expect(calls[0]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
     expect(calls[1]?.requestId).toBeTruthy();
     expect(calls[1]?.requestId).not.toBe(calls[0]?.requestId);
   });
@@ -51,6 +43,7 @@ describe("read request lifecycle", () => {
   it("keeps the same deadline active while consuming a hanging JSON body", async () => {
     vi.useFakeTimers();
     let requestSignal: AbortSignal | undefined;
+    const signals: AbortSignal[] = [];
     const bodyText = vi.fn(() => new Promise<string>((_resolve, reject) => {
       if (!requestSignal) throw new Error("Expected the read request to pass an AbortSignal");
       requestSignal.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
@@ -63,16 +56,22 @@ describe("read request lifecycle", () => {
     } as unknown as Response;
     vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined;
+      if (requestSignal) signals.push(requestSignal);
       return Promise.resolve(response);
     }));
 
     const request = api.lesson("page-1");
     const timedOut = expect(request).rejects.toMatchObject({ code: "REQUEST_TIMEOUT", status: 408 });
     await vi.advanceTimersByTimeAsync(10_000);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
 
     await timedOut;
-    expect(bodyText).toHaveBeenCalledOnce();
-    expect(requestSignal?.aborted).toBe(true);
+    expect(bodyText).toHaveBeenCalledTimes(2);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("forwards external cancellation and removes its abort listener when settled", async () => {

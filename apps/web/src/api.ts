@@ -274,6 +274,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
+async function confirmedPageRead<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await request<T>(path, init);
+  } catch (error) {
+    // Only immutable learning reads recover once. Each request keeps the
+    // existing deadline and cancels its resources before the next attempt.
+    // Edits, authority confirmation, invalid content and permissions are not
+    // replayed. The second error remains visible with its own request ID.
+    const transient = error instanceof ApiRequestError && (error.code === "REQUEST_TIMEOUT"
+      || error.code === "NETWORK_ERROR" || [502, 503, 504].includes(error.status));
+    if (!transient || init?.signal?.aborted) throw error;
+    console.warn("course_os.confirmed_page_read_retry", { requestId: error.requestId, code: error.code, attempt: 2 });
+    return request<T>(path, init);
+  }
+}
+
 const pendingMetadataStorageKey = "course-os-pending-metadata:personal";
 const pendingMetadata = new Map<string, string>();
 const pendingMetadataBodies = new Map<string, string | undefined>();
@@ -441,7 +457,7 @@ export const api = {
   }),
   releases: (options?: ApiRequestOptions) => request<CourseRelease[]>("/api/v1/releases?view=index", { signal: options?.signal }),
   release: (id: string, options?: ApiRequestOptions) => request<CourseRelease>(`/api/v1/releases/${encodeURIComponent(id)}`, { signal: options?.signal }),
-  lesson: (pageId: string, options?: ApiRequestOptions) => request<{ releaseId: string; page: CourseRelease["pages"][number]; unpublishedDraftRevision?: number; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson${options?.releaseId ? `?releaseId=${encodeURIComponent(options.releaseId)}` : ""}`, { signal: options?.signal }),
+  lesson: (pageId: string, options?: ApiRequestOptions) => confirmedPageRead<{ releaseId: string; page: CourseRelease["pages"][number]; unpublishedDraftRevision?: number; qaRecords: PageQuestion[] }>(`/api/v1/pages/${encodeURIComponent(pageId)}/lesson${options?.releaseId ? `?releaseId=${encodeURIComponent(options.releaseId)}` : ""}`, { signal: options?.signal }),
   pageQuestions: (pageId: string, options?: ApiRequestOptions) => request<PageQuestion[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions`, { signal: options?.signal }),
   selfRetellings: (releaseId?: string, options?: ApiRequestOptions) => request<SelfRetelling[]>(`/api/v1/self-retellings${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`, { signal: options?.signal }),
   saveSelfRetelling: (releaseId: string, pageId: string, answer: string, idempotencyKey: string) => request<SelfRetelling>(`/api/v1/self-retellings/${encodeURIComponent(releaseId)}/${encodeURIComponent(pageId)}`, {
@@ -452,7 +468,7 @@ export const api = {
   }),
   readweaveQuestions: (pageId: string, options?: ApiRequestOptions) => request<import("@course-os/contracts").ReadWeavePageQuestions>(`/api/v1/pages/${encodeURIComponent(pageId)}/readweave-questions`, { signal: options?.signal }),
   draft: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft`, { signal: options?.signal }),
-  draftSnapshot: (pageId: string, options?: ApiRequestOptions) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot${options?.releaseId ? `&releaseId=${encodeURIComponent(options.releaseId)}` : ""}${options?.confirm ? "&confirm=1" : ""}`, { signal: options?.signal }),
+  draftSnapshot: (pageId: string, options?: ApiRequestOptions) => (options?.confirm ? request<LessonDraft> : confirmedPageRead<LessonDraft>)(`/api/v1/pages/${encodeURIComponent(pageId)}/draft?view=snapshot${options?.releaseId ? `&releaseId=${encodeURIComponent(options.releaseId)}` : ""}${options?.confirm ? "&confirm=1" : ""}`, { signal: options?.signal }),
   saveDraft: (draft: LessonDraft, page: LessonDraft["page"], changedBlockIds: string[]) => request<LessonDraft>(`/api/v1/pages/${encodeURIComponent(draft.pageId)}/draft`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },

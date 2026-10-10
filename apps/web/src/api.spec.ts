@@ -240,3 +240,62 @@ describe("question selection API", () => {
     expect(JSON.parse(calls[1]!.body)).toMatchObject({ seed: state.activeSeed, count: 2, excludeQuestionIds: ["q1", "q2"] });
   });
 });
+
+
+describe("confirmed learning read recovery", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
+  it("cancels a timed out snapshot and recovers it once with the same scoped URL", async () => {
+    vi.useFakeTimers();
+    const requests: Array<{ url: string; signal?: AbortSignal | null; id: string | null }> = [];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn((url: unknown, init?: RequestInit) => {
+      requests.push({ url: String(url), signal: init?.signal, id: new Headers(init?.headers).get("X-Request-Id") });
+      if (requests.length === 1) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+      return Promise.resolve(Response.json({ pageId: "page-a", sourceReleaseId: "release-a", status: "ready" }));
+    }));
+    const result = api.draftSnapshot("page-a", { releaseId: "release-a" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(result).resolves.toMatchObject({ pageId: "page-a", sourceReleaseId: "release-a" });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.signal?.aborted).toBe(true);
+    expect(requests[1]!.url).toBe(requests[0]!.url);
+    expect(requests[1]!.id).not.toBe(requests[0]!.id);
+    expect(warning).toHaveBeenCalledWith("course_os.confirmed_page_read_retry", expect.objectContaining({ requestId: requests[0]!.id, code: "REQUEST_TIMEOUT", attempt: 2 }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("recovers an upstream unavailable lesson but exposes a second failure without looping", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async () => new Response("unavailable", { status: 504 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.lesson("page-a", { releaseId: "release-a" })).rejects.toMatchObject({ status: 504 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it.each([401, 403, 404, 409, 422])("does not retry status %s", async status => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "READ_REJECTED" } }, { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.draftSnapshot("page-a", { releaseId: "release-a" })).rejects.toMatchObject({ status });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it("does not retry invalid content or explicit authority confirmation", async () => {
+    const fetchMock = vi.fn(async () => new Response("invalid", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.draftSnapshot("page-a")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockImplementation(async () => new Response("unavailable", { status: 503 }));
+    await expect(api.draftSnapshot("page-a", { confirm: true })).rejects.toMatchObject({ status: 503 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("does not recover a navigation cancellation", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = expect(api.draftSnapshot("page-a", { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    await result;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
