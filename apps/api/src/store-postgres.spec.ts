@@ -935,6 +935,9 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       await fixture.store.mutate((state) => { state.generationPlans.push(plan); });
       await fixture.store.mutateGenerationJob(selectedJob.id, (_job, context) => {
         context.appendEvent("generation.stage.started", { stage: "teach" });
+        context.appendEvent("generation.page.storage_retry", { stage: "core", attempt: 1 });
+        context.appendEvent("generation.stage.failed", { stage: "teach", issue: "MODEL_OUTPUT_LIMIT" });
+        context.appendEvent("generation.page.failed", { pageId: "page-1", issue: "MODEL_OUTPUT_LIMIT" });
       });
       await fixture.store.mutateGenerationJob(unrelatedJob.id, (_job, context) => {
         context.appendEvent("generation.stage.started", { stage: "teach", unrelated: true });
@@ -946,7 +949,9 @@ postgresDescribe("PostgreSQL operational job storage", () => {
       expect(query.mock.calls[0]![0]).toContain("WITH source AS MATERIALIZED");
       expect(detail.plan?.id).toBe(planId);
       expect(detail.jobs.map((job) => job.id)).toEqual([selectedJob.id]);
-      expect(detail.events).toHaveLength(1);
+      expect(detail.events.map((event) => event.type)).toEqual([
+        "generation.stage.started", "generation.page.storage_retry", "generation.stage.failed", "generation.page.failed"
+      ]);
       expect(detail.events[0]?.streamId).toBe(selectedJob.id);
       expect(await fixture.store.readGenerationPlanDetail(planId, "other-workspace")).toEqual({ jobs: [], events: [] });
       expect(await fixture.store.readGenerationPlanDetail(randomUUID(), selectedJob.workspaceId)).toEqual({ jobs: [], events: [] });

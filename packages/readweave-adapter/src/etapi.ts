@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
-import { promisify } from "node:util";
-import { brotliCompress, brotliCompressSync, constants as zlibConstants } from "node:zlib";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { assertReadBudgetActive, currentReadBudget, readBudgetAbortError, withIndependentReadBudget, type ReadBudget } from "./read-budget.js";
 import { decodeReadWeaveStateContent, decodeReadWeaveStateContentAsync } from "./state-decoder.js";
+import { encodeReadWeaveStateContentAsync } from "./state-encoder.js";
 import type {
   AssessmentAttempt,
   CredentialStatus,
@@ -38,7 +38,6 @@ import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeN
 import { assertTrashReferencesSafe, trashDeleteIdempotencyKey, trashDeleteReplay, trashDeleteScope, type TrashDeleteOptions, type TrashNativeErasePlan, type TrashDeleteScope } from "./trash-safety.js";
 
 const stateCodecPrefix = "COURSE_OS_BR_STATE_V1:";
-const brotliCompressAsync = promisify(brotliCompress);
 
 export function encodeReadWeaveStateContent(state: unknown): string {
   const plain = JSON.stringify(state);
@@ -48,14 +47,7 @@ export function encodeReadWeaveStateContent(state: unknown): string {
   return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
 }
 
-/** Preserve the snapshot format while moving online compression off the event loop. */
-export async function encodeReadWeaveStateContentAsync(state: unknown): Promise<string> {
-  const plain = JSON.stringify(state);
-  if (Buffer.byteLength(plain) < 1_000_000) return plain;
-  const hash = createHash("sha256").update(plain).digest("hex");
-  const compressed = await brotliCompressAsync(plain, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 2 } });
-  return `${stateCodecPrefix}${hash}:${compressed.toString("base64")}`;
-}
+export { encodeReadWeaveStateContentAsync } from "./state-encoder.js";
 
 export { decodeReadWeaveStateContent } from "./state-decoder.js";
 

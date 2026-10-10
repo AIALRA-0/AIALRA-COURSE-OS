@@ -64,7 +64,7 @@ function normalizeCode(raw: string): string {
   if (/MODEL_PROVIDER_STREAM_(?:FINAL_EVENT_MISSING|INTERRUPTED|DISCONNECTED|CONNECTION_LOST)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("NETWORK") || /MODEL_PROVIDER_FAILED:(?:upstream_error|upstream_reasoning_only|response_failed|5\d\d)/iu.test(raw)) return "PROVIDER_NETWORK_FAILURE";
   if (raw.includes("invalid_request_error") || raw.includes("MODEL_PROVIDER_FAILED:400")) return "PROVIDER_INVALID_REQUEST";
-  if (raw.includes("MODEL_PROVIDER_OUTPUT_LIMIT")) return "MODEL_OUTPUT_LIMIT";
+  if (raw.includes("MODEL_PROVIDER_OUTPUT_LIMIT") || raw.includes("MODEL_PROVIDER_FAILED:max_output_tokens")) return "MODEL_OUTPUT_LIMIT";
   if (raw.includes("JSON") || raw.includes("OUTPUT") || raw.includes("TEACHING_PACKAGE_INVALID") || raw.includes("MODEL_PROVIDER_INVALID_RESPONSE")) return "MODEL_INVALID_OUTPUT";
   if (raw.includes("MATH")) return "FORMULA_INVALID";
   if (raw.includes("COVERAGE")) return "COVERAGE_GAP";
@@ -81,6 +81,6 @@ function safeMessage(code: string): string {
   if (code === "READWEAVE_UNAVAILABLE") return "ReadWeave 暂时不可访问，内容尚未保存";
   if (code === "READWEAVE_ACCESS_DENIED") return "ReadWeave 拒绝了当前身份的访问，已保存的生成结果保留，请检查权限";
   if (code.startsWith("READWEAVE_") && code.includes("CONFLICT")) return "保存遇到版本或内容冲突，已保留生成结果，未覆盖已有内容";
-  if (code === "MODEL_OUTPUT_LIMIT") return "模型达到本阶段输出上限，内容不完整，已停止相同请求重试";
+  if (code === "MODEL_OUTPUT_LIMIT") return "模型达到本阶段输出上限，内容不完整，已停止自动重试并保留已有结果";
   return "当前页面生成失败，请根据请求编号重试";
 }

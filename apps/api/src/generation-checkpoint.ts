@@ -1,6 +1,7 @@
 import type { GenerationCostEntry, LessonDraft } from "@course-os/contracts";
 import type { ModelRouterClient, TeachingGenerationResult } from "./model-router.js";
 import type { PlannedCheckpoint } from "./planned-teaching.js";
+import { sha256Text, stableStringify } from "@course-os/domain";
 
 /** Recovery receipts are not published content. Authority remains ReadWeave. */
 export interface SavedPageGeneration {
@@ -29,6 +30,12 @@ export interface SavedBridgeGeneration {
 export function savedBridgeDraftState(bridge: SavedBridgeGeneration, draft: LessonDraft): "core" | "bridge" | undefined {
   if (draft.revision === bridge.coreRevision && draft.contentHash === bridge.coreContentHash) return "core";
   if (draft.revision === bridge.coreRevision + 1 && draft.contentHash === bridge.bridgedContentHash) return "bridge";
+  // ETAPI hashes its persisted JSON bytes; generation checkpoints hash sorted
+  // fields. Accept that serialization difference only when the actual page is
+  // the paid bridge's exact content and its stored byte hash is valid.
+  if (draft.revision === bridge.coreRevision + 1 && draft.page
+    && sha256Text(stableStringify(draft.page)) === bridge.bridgedContentHash
+    && sha256Text(JSON.stringify(draft.page)) === draft.contentHash) return "bridge";
   return undefined;
 }
 

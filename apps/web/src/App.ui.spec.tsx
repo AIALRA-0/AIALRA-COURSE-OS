@@ -557,7 +557,7 @@ describe("candidate preview reconciliation", () => {
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("ReadWeave text");
   });
 
-  it("reconciles the active page again on focus and uses the returned ready page", async () => {
+  it("reads the confirmed replica on ordinary window or dialog focus without remote confirmation", async () => {
     const snapshot = deferred<LessonDraft>();
     let preview: CandidatePreviewState | undefined;
     const setPreview = (next: CandidatePreviewState | undefined | ((current: CandidatePreviewState | undefined) => CandidatePreviewState | undefined)) => {
@@ -583,13 +583,142 @@ describe("candidate preview reconciliation", () => {
     reconcileOnFocus(new Event("focus"));
     await flushPromises();
     expect(readCurrentDraft).toHaveBeenCalledTimes(2);
-    expect(readCurrentDraft.mock.calls[1]?.[1]).toBe(true);
+    expect(readCurrentDraft.mock.calls[1]?.[1]).toBe(false);
     expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Edited in ReadWeave");
     expect(preview?.page?.quality.publishable).toBe(false);
 
     const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     expect(source).toContain('window.addEventListener("focus", reconcileCandidatePreview)');
     expect(source).toContain('window.removeEventListener("focus", reconcileCandidatePreview)');
+  });
+
+  const openEditor = (pending: Map<string, object>, releaseId = "release-a", pageId = "page-a") => openVerifiedReadWeaveDeepLink(
+    "note-a",
+    () => ({ opener: null, location: { replace: vi.fn() }, close: vi.fn() }) as unknown as Window,
+    async () => ({ url: "https://readweave.example/editor", verified: true }),
+    { pending, targets: [{ releaseId, pageId }] }
+  );
+
+  it("confirms an actual verified editor return once and coalesces repeated same-page focus", async () => {
+    const pending = new Map<string, object>();
+    const verification = deferred<{ url: string; verified: boolean }>();
+    const confirmation = deferred<LessonDraft>();
+    const replace = vi.fn();
+    let preview: CandidatePreviewState | undefined;
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Initial replica"))
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Replica while verifying"))
+      .mockReturnValueOnce(confirmation.promise)
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Confirmed edit"));
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a", pageId: "page-a",
+      readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-a", "Snapshot")),
+      readCurrentDraft, pendingAuthorityConfirmations: pending, isActive: () => true,
+      setPreview: next => { preview = typeof next === "function" ? next(preview) : next; }
+    });
+    await flushPromises();
+    const opening = openVerifiedReadWeaveDeepLink("note-a",
+      () => ({ opener: {}, location: { replace }, close: vi.fn() }) as unknown as Window,
+      () => verification.promise,
+      { pending, targets: [{ releaseId: "release-a", pageId: "page-a" }] });
+    expect(pending.size).toBe(0);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(readCurrentDraft.mock.calls[1]?.[1]).toBe(false);
+    verification.resolve({ url: "https://readweave.example/editor", verified: true });
+    await opening;
+    expect(replace).toHaveBeenCalledWith("https://readweave.example/editor");
+    expect(pending.has(pageSnapshotCacheKey("release-a", "page-a"))).toBe(true);
+    reconcile(new Event("focus"));
+    reconcile(new Event("focus"));
+    expect(readCurrentDraft).toHaveBeenCalledTimes(3);
+    expect(readCurrentDraft.mock.calls[2]?.[1]).toBe(true);
+    expect(readCurrentDraft.mock.calls[2]?.[0].aborted).toBe(false);
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Replica while verifying");
+    confirmation.resolve(candidateDraft("release-a", "page-a", "Confirmed edit"));
+    await flushPromises();
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Confirmed edit");
+    expect(pending.size).toBe(0);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(readCurrentDraft.mock.calls[3]?.[1]).toBe(false);
+    reconcile.cancel();
+  });
+
+  it("retains editor confirmation after timeout or identity mismatch and clears only a matching success", async () => {
+    const pending = new Map<string, object>();
+    let preview: CandidatePreviewState | undefined;
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Readable replica"))
+      .mockRejectedValueOnce(new ApiRequestError("authority timed out", "READ_DEADLINE_EXCEEDED", 504, true))
+      .mockResolvedValueOnce(candidateDraft("release-b", "page-a", "Wrong release"))
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Confirmed edit"));
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a", pageId: "page-a",
+      readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-a", "Snapshot")),
+      readCurrentDraft, pendingAuthorityConfirmations: pending, isActive: () => true,
+      setPreview: next => { preview = typeof next === "function" ? next(preview) : next; }
+    });
+    await flushPromises();
+    await openEditor(pending);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Readable replica");
+    expect(preview?.notice).toContain("authority timed out");
+    expect(pending.size).toBe(1);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(preview?.notice).toContain("身份错配");
+    expect(pending.size).toBe(1);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(readCurrentDraft.mock.calls.map(call => call[1])).toEqual([false, true, true, true]);
+    expect(preview?.page?.lessonSections?.[0]?.markdown).toBe("Confirmed edit");
+    expect(pending.size).toBe(0);
+    reconcile.cancel();
+  });
+
+  it("scopes editor confirmation to its exact page and release", async () => {
+    const pending = new Map<string, object>();
+    await openEditor(pending, "release-a", "page-b");
+    await openEditor(pending, "release-b", "page-a");
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+      .mockResolvedValue(candidateDraft("release-a", "page-a", "Replica"));
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a", pageId: "page-a", readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-a", "Snapshot")),
+      readCurrentDraft, pendingAuthorityConfirmations: pending, isActive: () => true, setPreview: () => undefined
+    });
+    await flushPromises();
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(readCurrentDraft.mock.calls.map(call => call[1])).toEqual([false, false]);
+    expect(pending.size).toBe(2);
+    reconcile.cancel();
+  });
+
+  it("keeps a newer editor session pending when an older authority confirmation completes", async () => {
+    const pending = new Map<string, object>();
+    const confirmation = deferred<LessonDraft>();
+    const readCurrentDraft = vi.fn<(signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>>()
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Initial replica"))
+      .mockReturnValueOnce(confirmation.promise)
+      .mockResolvedValueOnce(candidateDraft("release-a", "page-a", "Second edit"));
+    const reconcile = beginCandidatePreviewLoad({
+      releaseId: "release-a", pageId: "page-a", readSnapshot: () => Promise.resolve(candidateDraft("release-a", "page-a", "Snapshot")),
+      readCurrentDraft, pendingAuthorityConfirmations: pending, isActive: () => true, setPreview: () => undefined
+    });
+    await flushPromises();
+    await openEditor(pending);
+    reconcile(new Event("focus"));
+    await openEditor(pending);
+    confirmation.resolve(candidateDraft("release-a", "page-a", "First edit"));
+    await flushPromises();
+    expect(pending.size).toBe(1);
+    reconcile(new Event("focus"));
+    await flushPromises();
+    expect(readCurrentDraft.mock.calls.map(call => call[1])).toEqual([false, true, true]);
+    expect(pending.size).toBe(0);
+    reconcile.cancel();
   });
 
   it("ignores a late reconcile result after navigation moves to another page", async () => {
@@ -967,14 +1096,28 @@ describe("ReadWeave deep-link click flow", () => {
     const replace = vi.fn();
     const close = vi.fn();
     const popup = { opener: null, location: { replace }, close } as unknown as Window;
-    await expect(openVerifiedReadWeaveDeepLink("note-1", () => popup, async () => ({ url: "https://readweave.example/", verified: false })))
+    const pending = new Map<string, object>();
+    const confirmation = { pending, targets: [{ releaseId: "release-a", pageId: "page-a" }] };
+    await expect(openVerifiedReadWeaveDeepLink("note-1", () => popup, async () => ({ url: "https://readweave.example/", verified: false }), confirmation))
       .rejects.toThrow("尚未验证");
     expect(close).toHaveBeenCalledOnce();
     expect(replace).not.toHaveBeenCalled();
 
     const loadLink = vi.fn();
-    await expect(openVerifiedReadWeaveDeepLink("note-1", () => null, loadLink)).rejects.toThrow("阻止打开");
+    await expect(openVerifiedReadWeaveDeepLink("note-1", () => null, loadLink, confirmation)).rejects.toThrow("阻止打开");
     expect(loadLink).not.toHaveBeenCalled();
+    expect(pending.size).toBe(0);
+  });
+
+  it("does not mark an editor return when verified navigation fails", async () => {
+    const pending = new Map<string, object>();
+    const close = vi.fn();
+    const popup = { opener: null, location: { replace: () => { throw new Error("navigation failed"); } }, close } as unknown as Window;
+    await expect(openVerifiedReadWeaveDeepLink("note-a", () => popup,
+      async () => ({ url: "https://readweave.example/editor", verified: true }),
+      { pending, targets: [{ releaseId: "release-a", pageId: "page-a" }] })).rejects.toThrow("navigation failed");
+    expect(pending.size).toBe(0);
+    expect(close).toHaveBeenCalledOnce();
   });
 });
 

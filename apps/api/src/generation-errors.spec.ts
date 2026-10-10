@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 
 describe("generation error classification", () => {
+  it.each(["MODEL_PROVIDER_OUTPUT_LIMIT", "MODEL_PROVIDER_FAILED:max_output_tokens"])("reports %s as exhausted output, not an internal outage", code => {
+    expect(classifyGenerationFailure(new Error(code))).toMatchObject({ category: "output", action: "pause", code: "MODEL_OUTPUT_LIMIT" });
+    expect(describeGenerationError(new Error(code)).safeMessage).toContain("输出上限");
+    expect(shouldAutoRecoverGenerationFailure(new Error(code), 1, 0.01, 8)).toBe(false);
+  });
   it.each(["READWEAVE_REVISION_CONFLICT", "READWEAVE_IMPORT_SOURCE_CONFLICT", "READWEAVE_DRAFT_BLOCK_CONFLICT"])("pauses %s instead of misreporting a temporary outage", code => {
     expect(describeGenerationError(new Error(code))).toMatchObject({ code, retryable: false });
     expect(classifyGenerationFailure(new Error(code))).toMatchObject({ category: "storage", action: "pause" });

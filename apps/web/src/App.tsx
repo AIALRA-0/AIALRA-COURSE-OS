@@ -378,6 +378,7 @@ export function App() {
   const pagePrefetchQueue = useRef(new BoundedPagePrefetchQueue(2));
   const lessonRequests = useRef(new Map<string, SharedReadRequest<Awaited<ReturnType<typeof api.lesson>>>>());
   const candidateSnapshotRequests = useRef(new Map<string, SharedReadRequest<LessonDraft>>());
+  const pendingCandidateAuthorityConfirmations = useRef(new Map<string, object>());
   const [view, setView] = useState<ViewState>({ zoom: 1, panX: 0, panY: 0 });
   const [mobileMode, setMobileMode] = useState<MobileMode>("visual");
   const [pageDockOpen, setPageDockOpen] = useState(false);
@@ -720,6 +721,7 @@ export function App() {
         return snapshotRead.promise;
       },
       readCurrentDraft: (signal, confirm) => api.draftSnapshot(page.id, { signal, releaseId: release.id, confirm }),
+      pendingAuthorityConfirmations: pendingCandidateAuthorityConfirmations.current,
       isActive: () => active,
       setPreview: setCandidatePreview,
       onTerminalError: (reason) => {
@@ -1060,8 +1062,15 @@ export function App() {
       else openTreeNode(node, "studio");
     },
     openReadWeave: (node) => {
+      const targets = flattenTree([node]).flatMap(({ node: target }) => target.releaseId && target.pageId
+        ? [{ releaseId: target.releaseId, pageId: target.pageId }] : []);
+      if (!node.pageId && release && page && (node.releaseId ?? node.currentReleaseId) === release.id) {
+        targets.push({ releaseId: release.id, pageId: page.id });
+      }
       if (node.readweaveNoteId) void runTreeAction(
-        () => openVerifiedReadWeaveDeepLink(node.readweaveNoteId!),
+        () => openVerifiedReadWeaveDeepLink(node.readweaveNoteId!, undefined, undefined, {
+          pending: pendingCandidateAuthorityConfirmations.current, targets
+        }),
         "已打开 ReadWeave 精细笔记",
         "正在验证 ReadWeave 精细笔记…",
         false
@@ -2250,7 +2259,8 @@ function readActiveImportId(): string | undefined {
 export async function openVerifiedReadWeaveDeepLink(
   noteId: string,
   openWindow: () => Window | null = () => window.open("about:blank", "_blank"),
-  loadLink: (id: string) => Promise<{ url: string; verified: boolean }> = api.deepLink
+  loadLink: (id: string) => Promise<{ url: string; verified: boolean }> = api.deepLink,
+  authorityConfirmation?: { pending: Map<string, object>; targets: readonly { releaseId: string; pageId: string }[] }
 ): Promise<void> {
   const popup = openWindow();
   if (!popup) throw new Error("浏览器阻止打开 ReadWeave 新窗口");
@@ -2259,6 +2269,9 @@ export async function openVerifiedReadWeaveDeepLink(
     const link = await loadLink(noteId);
     if (!link.verified) throw new Error("这个 ReadWeave 目标尚未验证");
     popup.location.replace(link.url);
+    for (const target of authorityConfirmation?.targets ?? []) {
+      authorityConfirmation!.pending.set(pageSnapshotCacheKey(target.releaseId, target.pageId), {});
+    }
   } catch (reason) {
     popup.close();
     throw reason;
@@ -2294,6 +2307,7 @@ export function beginCandidatePreviewLoad({
   pageId,
   readSnapshot,
   readCurrentDraft,
+  pendingAuthorityConfirmations,
   isActive,
   setPreview,
   onTerminalError
@@ -2302,6 +2316,7 @@ export function beginCandidatePreviewLoad({
   pageId: string;
   readSnapshot: () => Promise<LessonDraft>;
   readCurrentDraft: (signal: AbortSignal, confirm: boolean) => Promise<LessonDraft>;
+  pendingAuthorityConfirmations?: Map<string, object>;
   isActive: () => boolean;
   setPreview: Dispatch<SetStateAction<CandidatePreviewState | undefined>>;
   onTerminalError?: (error: unknown) => void;
@@ -2309,18 +2324,27 @@ export function beginCandidatePreviewLoad({
   let snapshotReady = false;
   let latestRead = 0;
   let currentDraftController: AbortController | undefined;
+  let authorityReadInFlight = false;
+  const confirmationKey = pageSnapshotCacheKey(releaseId, pageId);
   let disposed = false;
   const reconcile = (event?: Event) => {
     if (disposed || !snapshotReady || !isActive()) return;
+    // Repeated focus must not cancel and restart an authority confirmation.
+    if (currentDraftController && authorityReadInFlight) return;
+    const confirmationMarker = event?.type === "focus" ? pendingAuthorityConfirmations?.get(confirmationKey) : undefined;
     currentDraftController?.abort();
     const controller = new AbortController();
     currentDraftController = controller;
+    authorityReadInFlight = Boolean(confirmationMarker);
     const readId = ++latestRead;
-    // Initial reads use confirmed copies; returning from ReadWeave explicitly
-    // requests an authority confirmation without hiding the readable page.
-    void readCurrentDraft(controller.signal, event?.type === "focus").then((draft) => {
+    // Ordinary focus reads the confirmed copy. Only a verified native-editor
+    // session requests remote authority, while keeping the readable page visible.
+    void readCurrentDraft(controller.signal, Boolean(confirmationMarker)).then((draft) => {
       if (!isActive() || readId !== latestRead) return;
       const identityMismatch = candidateSnapshotIdentityMismatch(draft, releaseId, pageId);
+      if (!identityMismatch && confirmationMarker && pendingAuthorityConfirmations?.get(confirmationKey) === confirmationMarker) {
+        pendingAuthorityConfirmations.delete(confirmationKey);
+      }
       if (identityMismatch) {
         setPreview((current) => current?.pageId === pageId && current.page
           ? { ...current, notice: `当前显示的是上次可读讲解；最新 ReadWeave 内容${identityMismatch}，暂未替换正文` }
@@ -2350,7 +2374,7 @@ export function beginCandidatePreviewLoad({
       if (isTerminalPageReadError(reason)) onTerminalError?.(reason);
       setPreview((current) => candidatePreviewAfterReadFailure(current, pageId, reason));
     }).finally(() => {
-      if (currentDraftController === controller) currentDraftController = undefined;
+      if (currentDraftController === controller) { currentDraftController = undefined; authorityReadInFlight = false; }
     });
   };
 

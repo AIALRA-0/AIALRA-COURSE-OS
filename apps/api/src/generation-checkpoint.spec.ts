@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type { LessonDraft } from "@course-os/contracts";
 import { savedBridgeDraftState, savedPageGeneration, type SavedBridgeGeneration } from "./generation-checkpoint.js";
+import { sha256Text, stableStringify } from "@course-os/domain";
 
 describe("page generation recovery identity", () => {
+  it("recognizes ETAPI byte hashes only for the exact paid bridge content and revision", () => {
+    const page = { title: "Synthetic source", id: "synthetic-page", lessonSections: [
+      { markdown: "Paid bridge", kind: "chapter_bridge" }, { markdown: "Saved body", kind: "full_explanation" }
+    ] } as unknown as LessonDraft["page"];
+    const receipt = { coreRevision: 4, coreContentHash: "core", bridgedContentHash: sha256Text(stableStringify(page)) } as SavedBridgeGeneration;
+    const draft = { revision: 5, contentHash: sha256Text(JSON.stringify(page)), page } as LessonDraft;
+    expect(draft.contentHash).not.toBe(receipt.bridgedContentHash);
+    expect(savedBridgeDraftState(receipt, draft)).toBe("bridge");
+    expect(savedBridgeDraftState(receipt, { ...draft, contentHash: "corrupt" })).toBeUndefined();
+    expect(savedBridgeDraftState(receipt, { ...draft, revision: 6 })).toBeUndefined();
+    const editedPage = { ...page, title: "User edit" };
+    expect(savedBridgeDraftState(receipt, { ...draft, page: editedPage, contentHash: sha256Text(JSON.stringify(editedPage)) })).toBeUndefined();
+    expect(page.title).toBe("Synthetic source");
+  });
   it("does not reuse paid text when its source or writing contract changes", () => {
     const saved = { kind: "page-generation-recovery-v1" as const, fingerprint: "old-source-contract",
       understanding: { sourceDescription: "Old page", teachingPlan: "Old plan", provider: "test", model: "test",

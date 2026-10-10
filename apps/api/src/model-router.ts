@@ -494,7 +494,7 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
       ? Math.max(request.maxOutputTokens, LOW_THINKING_OUTPUT_FLOOR) : request.maxOutputTokens;
     const maxTokens = Math.min(outputCeiling, allowance);
     if (maxTokens < Math.min(1_000, request.maxOutputTokens)) throw new Error("MODEL_PROVIDER_PAGE_BUDGET_EXCEEDED");
-    const attemptCostCeiling = reserve + maxTokens * price.outputMicrousdPerMillion / 1e12;
+    let attemptCostCeiling = reserve + maxTokens * price.outputMicrousdPerMillion / 1e12;
     const base = this.connection.baseUrl.replace(/\/$/, "");
     const image = request.image;
     const schemaInstruction = request.schema
@@ -576,6 +576,28 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         attemptUsage.apiEquivalentUsd = null;
       }
       addAttemptUsage(attemptUsage);
+      // Thinking and final content share the provider's output allowance. A
+      // truncated response has no usable paid teaching package to save. Allow
+      // one larger same-stage request, bounded by the remaining stage budget;
+      // transport retries continue to use the original body and identity.
+      const outputLimited = response.ok && (received.choices?.[0]?.finish_reason === "length"
+        || received.incomplete_details?.reason === "max_output_tokens" || bodyError?.code === "max_output_tokens");
+      if (outputLimited) {
+        budgetSpent += chargeAttempt(attemptUsage);
+        const remainingTokens = Math.floor((budget - budgetSpent - reserve) * 1e12 / price.outputMicrousdPerMillion);
+        const expandedTokens = Math.min(maxTokens * 2, remainingTokens);
+        if (attempt === 0 && usesLowThinking(this.connection) && expandedTokens > maxTokens) {
+          if ("max_output_tokens" in body) body.max_output_tokens = expandedTokens;
+          else body.max_tokens = expandedTokens;
+          init.body = JSON.stringify(body);
+          init.headers = providerRequestHeaders(this.connection, input, `${input.idempotencyKey}:${request.phase}:output-limit-retry`);
+          attemptCostCeiling = reserve + expandedTokens * price.outputMicrousdPerMillion / 1e12;
+          await waitForProviderRetry();
+          continue;
+        }
+        throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_LIMIT", model,
+          includeUnreportedReserve()!, this.connection.providerId, request.phase);
+      }
       if (providerFailed) {
         const code = providerFailureCode(response.status, bodyError);
         const retryable = retryableProviderResponse(response.status, bodyError);
@@ -592,9 +614,6 @@ export class HttpProviderTeachingClient implements ModelRouterClient {
         throw new ModelRouterGenerationError(code, model, includeUnreportedReserve()!, this.connection.providerId, request.phase);
       }
 
-      if (received.choices?.[0]?.finish_reason === "length" || received.incomplete_details?.reason === "max_output_tokens") {
-        throw new ModelRouterGenerationError("MODEL_PROVIDER_OUTPUT_LIMIT", model, includeUnreportedReserve()!, this.connection.providerId, request.phase);
-      }
       let attemptCost = this.usageCostUsd(attemptUsage);
       // Some compatible providers omit usage receipts on successful responses.
       // Keep the page moving while charging the already bounded stage ceiling;

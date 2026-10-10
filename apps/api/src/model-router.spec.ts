@@ -660,6 +660,49 @@ describe("OpenCode Go and DeepSeek provider clients", () => {
     expect(result.usage.unreportedCostReserveUsd).toBeGreaterThan(0);
   });
 
+  it("recovers a thinking output limit once without replaying vision or changing the prompt", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+        usage: { input_tokens: 100, output_tokens: 15_000, total_cost: 0.005 } }))
+      .mockResolvedValueOnce(Response.json({ model: "deepseek-v4.1-flash", output_text: JSON.stringify(providerTeachingContent()),
+        usage: { input_tokens: 100, output_tokens: 200, total_cost: 0.001 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses", billingMode: "metered" });
+    const result = await client.generateTeachingPackage({ ...providerInput("output-limit"), maxCostUsd: 8 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const second = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(first.max_output_tokens).toBe(15_000);
+    expect(second).toEqual({ ...first, max_output_tokens: 30_000 });
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("Idempotency-Key"))
+      .toBe("output-limit:teaching:output-limit-retry");
+    expect(result.usage).toMatchObject({ inputTokens: 200, outputTokens: 15_200, apiEquivalentUsd: 0.006 });
+    expect(result.content.fullExplanationMarkdown).toBeTruthy();
+  });
+
+  it("stops output-limit recovery after one attempt and preserves both paid receipts", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: { code: "max_output_tokens" }, status: "incomplete",
+      usage: { input_tokens: 100, output_tokens: 15_000, total_cost: 0.005 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses", billingMode: "metered" });
+    await expect(client.generateTeachingPackage({ ...providerInput("output-limit-stop"), maxCostUsd: 8 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_OUTPUT_LIMIT", usage: { apiEquivalentUsd: 0.01, outputTokens: 30_000 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not enlarge output when the remaining budget cannot fund a larger request", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+      usage: { input_tokens: 100, output_tokens: 15_000, total_cost: 1 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpProviderTeachingClient({ providerId: "kuafu", baseUrl: "https://relay.test",
+      apiKey: "synthetic-example-token", model: "deepseek-v4.1-flash", protocol: "responses", billingMode: "metered" });
+    await expect(client.generateTeachingPackage({ ...providerInput("output-limit-budget"), maxCostUsd: 1 }))
+      .rejects.toMatchObject({ code: "MODEL_PROVIDER_OUTPUT_LIMIT" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry quota exhaustion or turn a malformed result into a whole-page retry", async () => {
     const quotaFetch = vi.fn(async () => Response.json({ error: { code: "quota_exhausted" } }, { status: 429 }));
     vi.stubGlobal("fetch", quotaFetch);

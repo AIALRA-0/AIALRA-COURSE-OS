@@ -59,6 +59,7 @@ export interface GenerationPlanDetailRead {
 
 const generationPlanDetailEventTypes = new Set([
   "generation.stage.started", "generation.stage.completed", "generation.stage.skipped",
+  "generation.stage.failed", "generation.page.failed", "generation.page.storage_retry",
   "generation.page.core_saved", "generation.page.completed", "generation.cost.recorded"
 ]);
 

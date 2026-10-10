@@ -96,6 +96,43 @@ describe("actual pipeline stages", () => {
     expect(completed.bridge).toMatchObject({ completed: 1 });
   });
 
+  it("settles a terminal incomplete page only when its failure event is included", () => {
+    const event = (id: number, type: string, payload: Record<string, unknown>) => ({ id, type, streamId: "job-1", payload });
+    const events = [
+      event(1, "generation.stage.started", { pageId: "p1", stage: "teach" }),
+      event(2, "generation.page.failed", { pageId: "p1", issue: "GENERATION_CORE_FULL_EXPLANATION_REQUIRED" }),
+      event(3, "generation.page.core_saved", { pageId: "p2", bridgeCompleted: false }),
+      event(4, "generation.stage.started", { pageId: "p2", stage: "teach", phase: "bridge" }),
+      event(5, "generation.stage.skipped", { pageId: "p2", stage: "teach", phase: "bridge", incomplete: true, coreReadable: true }),
+      event(6, "generation.page.failed", { pageId: "p2", issue: "PROVIDER_TIMEOUT" })
+    ];
+    // A filtered history cannot establish that the previously started model stopped.
+    const withoutFailures = summarizeImportStageEvents(events.filter(event => event.type !== "generation.page.failed"), ["p1", "p2"]);
+    expect(withoutFailures.generation).toMatchObject({ running: 1, failed: 0 });
+    const completeHistory = summarizeImportStageEvents(events, ["p1", "p2"]);
+    expect(completeHistory.generation).toMatchObject({ completed: 1, running: 0, failed: 1 });
+    expect(completeHistory.core_save).toMatchObject({ completed: 1, pendingSave: 0 });
+    expect(completeHistory.bridge).toMatchObject({ completed: 0, running: 0, failed: 1 });
+  });
+
+  it("settles storage retry failure separately from returned teaching and later save confirmation", () => {
+    const event = (id: number, type: string, payload: Record<string, unknown>) => ({ id, type, streamId: "job-1", payload });
+    const events = [
+      event(1, "generation.stage.completed", { pageId: "p1", stage: "teach" }),
+      event(2, "generation.stage.completed", { pageId: "p1", stage: "review" }),
+      event(3, "generation.page.storage_retry", { pageId: "p1", reusedTeaching: true, attempt: 1 })
+    ];
+    const retrying = summarizeImportStageEvents(events, ["p1"]);
+    expect(retrying.generation).toMatchObject({ completed: 1, running: 0, failed: 0 });
+    expect(retrying.core_save).toMatchObject({ completed: 0, running: 1, pendingSave: 1, storageRetrying: 1 });
+    const failedEvents = [...events, event(4, "generation.page.failed", { pageId: "p1", issue: "READWEAVE_UNAVAILABLE", failureRoute: { category: "storage" } })];
+    const failed = summarizeImportStageEvents(failedEvents, ["p1"]);
+    expect(failed.generation).toMatchObject({ completed: 1, running: 0, failed: 0 });
+    expect(failed.core_save).toMatchObject({ completed: 0, running: 0, failed: 1, pendingSave: 1, storageRetrying: 0 });
+    const confirmed = summarizeImportStageEvents([...failedEvents, event(5, "generation.page.core_saved", { pageId: "p1" })], ["p1"]);
+    expect(confirmed.core_save).toMatchObject({ completed: 1, running: 0, failed: 0, pendingSave: 0, storageRetrying: 0 });
+  });
+
   it("keeps source retries automatic and ignores replayed or out-of-order import events", () => {
     const started = applyImportSourceEvent({ lastEventId: 0 }, "import.pipeline.started", { planId: "plan-1" }, 3);
     const retry = applyImportSourceEvent(started, "readweave.source.retry", { attempt: 2 }, 4);
