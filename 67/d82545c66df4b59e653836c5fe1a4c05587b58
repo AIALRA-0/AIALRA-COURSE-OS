@@ -1,0 +1,32 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_0c6277fda64e9f 1606
+  s_e8850ef125fb32::t_6c5b36439e9bd4 13,633,1497-1498
+  s_e8850ef125fb32::t_16bc8598ea3965 76-94,1448-1496
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_5767e4a7c80f18 3803-3808,3949-3955,4247-4250,4655
+  s_e8850ef125fb32::t_2587d60453bcb3 1820,3957,3977,3982,4243-4246
+  s_e8850ef125fb32::t_6c5b36439e9bd4 5378-5387
+  s_e8850ef125fb32::t_1eb7c30d597a8c 1344,1363
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_6c5b36439e9bd4 179-181
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_5767e4a7c80f18 15,18,20-21,26-28,368
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_2587d60453bcb3 1903,1914
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67d82545c66df4b59e653836c5fe1a4c05587b58",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
