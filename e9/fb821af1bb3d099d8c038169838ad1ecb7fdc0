@@ -1,0 +1,57 @@
+apps/api/src/writing-standards.ts
+  s_e8850ef125fb32::t_26e104a905ba66 86-91
+  s_e8850ef125fb32::t_b747cbbf42471f 24,26,79
+  s_e8850ef125fb32::t_20abcdaeb19578 25
+apps/api/src/writing-standards.spec.ts
+  s_e8850ef125fb32::t_20abcdaeb19578 126-128,140
+  s_e8850ef125fb32::t_f325ef6a3c462f 8-10,116,118-125,129-135,137-139,141-143,171-174,184,186,193,206-250,255-269
+  s_e8850ef125fb32::t_7c00257bf3d238 271-277
+  s_e8850ef125fb32::t_26e104a905ba66 112,114-115,136,144-151,192,194,251-254
+  s_e8850ef125fb32::t_852a7a9b559675 117,270
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_6f45d1c3c777e0 4311,4333-4335,4365,4754,4760,4766-4774
+  s_e8850ef125fb32::t_351f3c736266be 4310,4312-4313
+packages/contracts/src/question-answer.ts
+  s_e8850ef125fb32::t_6f45d1c3c777e0 1-20
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_a968f107675b63 1139-1140,1142-1153
+  s_e8850ef125fb32::t_3c155e1d4e8791 1141
+apps/web/src/ExplanationPanel.spec.tsx
+  s_e8850ef125fb32::t_a9d9e342fc9619 30-36
+  s_e8850ef125fb32::t_3c155e1d4e8791 75-82
+apps/api/src/model-router.spec.ts
+  s_e8850ef125fb32::t_20abcdaeb19578 58
+  s_e8850ef125fb32::t_04e40e554b6a27 3,250-253
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_6f45d1c3c777e0 2
+  s_e8850ef125fb32::t_a968f107675b63 205-206
+packages/readweave-adapter/src/index.spec.ts
+  s_e8850ef125fb32::t_7466a8ffb161fc 1381-1424
+config/generation-harness/harness-manifest.json
+  s_e8850ef125fb32::t_b747cbbf42471f 3
+config/generation-harness/writing-format-contract.md
+  s_e8850ef125fb32::t_b747cbbf42471f 18,79,85
+  s_e8850ef125fb32::t_20abcdaeb19578 90
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_0bdb624a269b75 5-6
+  s_e8850ef125fb32::t_a968f107675b63 4955,4957-4959
+  s_e8850ef125fb32::t_3c155e1d4e8791 4956
+apps/web/src/ExplanationPanel.tsx
+  s_e8850ef125fb32::t_0bdb624a269b75 3,45,416-418,442,444,446-449
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e9fb821af1bb3d099d8c038169838ad1ecb7fdc0",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
