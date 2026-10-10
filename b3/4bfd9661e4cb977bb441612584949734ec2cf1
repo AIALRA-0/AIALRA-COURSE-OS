@@ -1,0 +1,88 @@
+apps/api/src/model-usage-meter.ts
+  s_e8850ef125fb32::t_f64bf74dc78b4f 6,30
+apps/web/src/styles.css
+  s_e8850ef125fb32::t_d0b94b4c7e1e7a 1452-1455
+apps/web/src/import-progress.spec.ts
+  s_e8850ef125fb32::t_18427d529f57cc 6,58-108
+  s_e8850ef125fb32::t_53d6c839715a14 208
+  s_e8850ef125fb32::t_1797057e8a2d32 39-57,109-110,133-163,170-207,209-212
+  s_e8850ef125fb32::t_b7bc0703370435 111-132
+  s_e8850ef125fb32::t_68c90faa65c22e 2-3,8
+  s_e8850ef125fb32::t_8ef31b6f15b6a7 164-169
+apps/web/src/import-progress.ts
+  s_e8850ef125fb32::t_351794df7f49bc 359
+  s_e8850ef125fb32::t_bff05c87449baf 151,154-161,167-171,256-257,343-353,363-364,366-369
+  s_e8850ef125fb32::t_619df3a4bf515d 309,315-316,718
+  s_e8850ef125fb32::t_5f33714df094b2 355
+  s_e8850ef125fb32::t_f6686d8bca9e24 264,354,356-358,360-362
+  s_e8850ef125fb32::t_e751706d878b33 33,47,162-166,283,331-332
+  s_e8850ef125fb32::t_6d7b660e1a9e2e 311-314
+  s_e8850ef125fb32::t_9444e0ffc2c8d3 229-242,317-320
+  s_e8850ef125fb32::t_e34cdde045589e 259-262,272,310
+  s_e8850ef125fb32::t_d71fbd1f13fb34 220-228,243-255,258,263,265-271,273-282,284-308,321-330,333-342,365,370-371
+  s_e8850ef125fb32::t_bd0c6dc2d61627 1-2
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_baafa4e96dbfe9 13,1809-1825,1837,1892
+  s_e8850ef125fb32::t_876fdd93ba6029 1808,1872,1875,1883-1890
+  s_e8850ef125fb32::t_63dc56de573969 1864
+  s_e8850ef125fb32::t_18c7c84afa1f4d 1843-1846,1857-1858,1876-1877
+apps/worker/src/worker.ts
+  s_e8850ef125fb32::t_543f72c4b21eec 10
+README.md
+  s_e8850ef125fb32::t_a503e9822242ad 16,24,28,77,83,85,93,99
+  s_e8850ef125fb32::t_6005e443e7a453 95,97-98
+  s_e8850ef125fb32::t_2f49f975e2bb46 100,102-106
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_b5a503deda6d00 4007-4017,4019-4021,4377-4384
+  s_e8850ef125fb32::t_b0c95666ae5a9d 4018,5635
+  s_e8850ef125fb32::t_69e2ab41071d47 4411-4426,4431,4449,4464-4473
+  s_e8850ef125fb32::t_384d9037b5686f 5766
+  s_e8850ef125fb32::t_23881e3d75c77a 6061
+  s_e8850ef125fb32::t_f64bf74dc78b4f 4026-4036,4097-4098,4153-4158,4474
+  s_e8850ef125fb32::t_7709998c3f7a07 5602-5603,5606-5613,5616-5634,5636-5639,5647-5666,5668-5672,5676,5716,5761-5763
+  s_e8850ef125fb32::t_4595f592d29252 4226-4236,4436
+  s_e8850ef125fb32::t_543f72c4b21eec 3711-3712,5754
+  s_e8850ef125fb32::t_b71540fe254d9b 4183,4218-4219
+  s_e8850ef125fb32::t_7ec0b8af931457 5,1825-1826
+packages/converter/src/index.ts
+  s_e8850ef125fb32::t_b1045a8d5bd0ce 322-352
+packages/contracts/src/index.ts
+  s_e8850ef125fb32::t_f64bf74dc78b4f 502-504
+  s_e8850ef125fb32::t_635aa95a4b89cb 1
+packages/converter/src/index.spec.ts
+  s_e8850ef125fb32::t_81948c97cf969b 1,4,99-291,356-360
+  s_e8850ef125fb32::t_f483c4aca6fa45 361
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_543f72c4b21eec 1530
+  s_e8850ef125fb32::t_aab0b4858e89e6 1413-1417,1424-1425
+  s_e8850ef125fb32::t_384d9037b5686f 1445-1446
+  s_e8850ef125fb32::t_a1362b5cb2b767 1363,1382,1393-1412,1418-1423,1426-1428,1458-1479
+  s_e8850ef125fb32::t_5ba9177c88d2ff 2318-2346
+  s_e8850ef125fb32::t_8a8e9878c090dd 1536,2782
+  s_e8850ef125fb32::t_c348c570d97ae9 1429-1444,1447-1457
+apps/api/src/generation-errors.spec.ts
+  s_e8850ef125fb32::t_0269c8878dd4c9 5-12
+apps/api/src/generation-errors.ts
+  s_e8850ef125fb32::t_0269c8878dd4c9 21,55-59,82-83
+README.en.md
+  s_e8850ef125fb32::t_a503e9822242ad 16
+  s_e8850ef125fb32::t_890618eb2cab98 94-95
+packages/contracts/src/generation-progress.ts
+  s_e8850ef125fb32::t_69157b7489c9c9 1-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b34bfd9661e4cb977bb441612584949734ec2cf1",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
