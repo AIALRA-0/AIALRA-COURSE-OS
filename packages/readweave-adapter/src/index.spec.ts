@@ -1476,6 +1476,245 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(record.projection.blockHashes["block-1"]).toBe("new");
   });
 
+  it("batch draft-record merge exactly matches the sequential oracle across ordered duplicate owners", () => {
+    const api = new EtapiReadWeaveCourseApi({
+      baseUrl: "http://readweave", token: "secret", parentNoteId: "root"
+    });
+    const release = releaseWithPage();
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const ownSymbol = Symbol("batch-own");
+    type IdempotencyValue = { kind: "draft" | "cost_entry" | "attempt"; objectId: string };
+
+    const makeDraft = (owner: string, suffix: string) => {
+      const draft = draftFor(release);
+      draft.id = "draft:" + owner + ":" + suffix;
+      draft.pageId = owner;
+      draft.page.id = owner;
+      draft.updatedAt = timestamp;
+      draft.page.blocks[0]!.markdown = "body:" + owner + ":" + suffix;
+      return draft;
+    };
+    const makeCost = (id: string, owner: string, value: number): GenerationCostEntry => ({
+      ...costEntryFor(release, id), pageId: owner, actualMicrousd: value, createdAt: timestamp,
+      unitPriceSnapshot: {
+        ...costEntryFor(release, id).unitPriceSnapshot, capturedAt: timestamp
+      }
+    });
+    const makeConflict = (id: string, owner: string, value: string) => ({
+      id, objectId: owner, localContent: value, detail: { marker: value }
+    });
+    const makeBase = (variant: number) => {
+      const costs = [
+        makeCost("cross", "A", 1),
+        makeCost("b-only", "B", 2),
+        makeCost("cross", "B", 3),
+        makeCost("a-only", "A", 4),
+        makeCost("orphan", "UNRELATED", 5),
+        makeCost("cross", "A", 6)
+      ];
+      const conflicts = [
+        makeConflict("cross", "A", "a-first"),
+        makeConflict("b-only", "B", "b"),
+        makeConflict("cross", "B", "b-last"),
+        makeConflict("orphan", "UNRELATED", "orphan"),
+        makeConflict("a-only", "A", "a"),
+        makeConflict("cross", "A", "a-last")
+      ];
+      if (variant % 2) { costs.reverse(); conflicts.reverse(); }
+      const idempotency: Record<string, IdempotencyValue> = {
+        untouched: { kind: "attempt", objectId: "keep" },
+        shared: { kind: "draft", objectId: "old" }
+      };
+      return {
+        ...structuredClone(EMPTY_STATE),
+        drafts: [makeDraft("A", "first"), makeDraft("A", "duplicate"), makeDraft("B", "first")],
+        costEntries: costs, conflicts, idempotency,
+        projections: {
+          drafts: {
+            "draft:A:first": { pageNoteId: "old-A", blockHashes: { "block-1": "old-A" } },
+            "draft:B:first": { pageNoteId: "old-B", blockHashes: { "block-1": "old-B" } }
+          } as Record<string, { pageNoteId: string; blockHashes: Record<string, string> }>
+        }
+      };
+    };
+    const makeRecord = (owner: string, index: number, variant: number) => {
+      // Later occurrences use a different draft ID: the old projection key must survive.
+      const draft = makeDraft(owner, "incoming-" + index);
+      draft.revision = index + 1;
+      const idempotency = Object.fromEntries([
+        ["shared", { kind: "draft", objectId: draft.id }],
+        ["2", { kind: "attempt", objectId: "numeric-" + index }],
+        ["__proto__", { kind: "draft", objectId: draft.id }],
+        ["constructor", { kind: "cost_entry", objectId: "cross" }]
+      ]) as Record<string, IdempotencyValue>;
+      Object.defineProperty(idempotency, ownSymbol, {
+        value: { kind: "draft", objectId: draft.id }, enumerable: true
+      });
+      Object.defineProperty(idempotency, "hidden", {
+        value: { kind: "draft", objectId: "ignored" }, enumerable: false
+      });
+      Object.setPrototypeOf(idempotency, {
+        inherited: { kind: "draft", objectId: "ignored" }
+      });
+      const otherOwner = owner === "A" ? "B" : "A";
+      const emptyIncoming = variant === 2 || (variant === 3 && index % 2 === 0);
+      return {
+        pageId: owner, draft,
+        projection: { pageNoteId: "note-" + draft.id, blockHashes: { "block-1": "new-" + index } },
+        costEntries: emptyIncoming ? [] : [
+          makeCost("cross", otherOwner, 10 + index),
+          makeCost("new-" + owner, otherOwner, 20 + index),
+          makeCost("cross", owner, 30 + index),
+          makeCost("new-" + owner, owner, 40 + index)
+        ],
+        conflicts: emptyIncoming ? [] : [
+          makeConflict("cross", otherOwner, "incoming-other-" + index),
+          makeConflict("new-" + owner, otherOwner, "new-other-" + index),
+          makeConflict("cross", owner, "incoming-last-" + index),
+          makeConflict("new-" + owner, owner, "new-last-" + index)
+        ],
+        idempotency
+      };
+    };
+
+    type MergeState = ReturnType<typeof makeBase>;
+    type MergeRecord = ReturnType<typeof makeRecord>;
+    const helpers = api as unknown as {
+      mergeDraftPageRecord(state: MergeState, record: MergeRecord): void;
+      mergeDraftPageRecordBatch(state: MergeState, records: readonly MergeRecord[]): void;
+    };
+    const orders: readonly (readonly string[])[] = [
+      [], ["A"], ["A", "B", "A"], ["B", "A", "B"],
+      ["A", "A", "B", "A"], ["N", "A", "N"]
+    ];
+    for (let variant = 0; variant < 4; variant += 1) {
+      for (const order of orders) {
+        const base = makeBase(variant);
+        const baseBefore = structuredClone(base);
+        const expected = structuredClone(base);
+        const actual = structuredClone(base);
+        const oracleSetter = vi.fn();
+        const batchSetter = vi.fn();
+        const installAccessor = (state: MergeState, setter: typeof batchSetter) =>
+          Object.defineProperty(state.idempotency, "shared", {
+            get: () => ({ kind: "draft", objectId: "old" }),
+            set: setter, enumerable: true, configurable: true
+          });
+        installAccessor(expected, oracleSetter);
+        installAccessor(actual, batchSetter);
+
+        const records: readonly MergeRecord[] = Object.freeze(
+          order.map((owner, index) => makeRecord(owner, index, variant))
+        );
+        const recordsBefore = records.map(record => ({
+          draft: structuredClone(record.draft), projection: structuredClone(record.projection),
+          costs: structuredClone(record.costEntries), conflicts: structuredClone(record.conflicts),
+          keys: Reflect.ownKeys(record.idempotency),
+          descriptors: Object.getOwnPropertyDescriptors(record.idempotency),
+          prototype: Object.getPrototypeOf(record.idempotency)
+        }));
+        const dictionary = actual.idempotency;
+        const originalDrafts = [...actual.drafts];
+        const originalCosts = [...actual.costEntries];
+        const originalConflicts = [...actual.conflicts];
+        const originalCostArray = actual.costEntries;
+        const originalConflictArray = actual.conflicts;
+        const originalProjection = actual.projections.drafts;
+        const originalShared = Object.getOwnPropertyDescriptor(dictionary, "shared")!;
+        const orphanCost = actual.costEntries.find(entry => entry.id === "orphan")!;
+        const orphanConflict = actual.conflicts.find(entry => entry.id === "orphan")!;
+
+        for (const record of records) helpers.mergeDraftPageRecord(expected, record);
+        helpers.mergeDraftPageRecordBatch(actual, records);
+
+        // Strict arrays compare both values and order, including retained projection keys.
+        expect(actual).toStrictEqual(expected);
+        expect(actual.idempotency).toBe(dictionary);
+        expect(Reflect.ownKeys(actual.idempotency)).toEqual(Reflect.ownKeys(expected.idempotency));
+        expect(Object.getPrototypeOf(actual.idempotency)).toBe(Object.prototype);
+        expect(batchSetter).not.toHaveBeenCalled();
+        expect(oracleSetter).not.toHaveBeenCalled();
+        for (const key of Reflect.ownKeys(expected.idempotency)) {
+          const wanted = Object.getOwnPropertyDescriptor(expected.idempotency, key)!;
+          const received = Object.getOwnPropertyDescriptor(actual.idempotency, key)!;
+          expect(received.enumerable).toBe(wanted.enumerable);
+          expect(received.configurable).toBe(wanted.configurable);
+          expect("value" in received).toBe("value" in wanted);
+          if ("value" in wanted) {
+            expect(received.value).toStrictEqual(wanted.value);
+            expect(received.writable).toBe(wanted.writable);
+          }
+        }
+        expect(Object.hasOwn(actual.idempotency, "hidden")).toBe(false);
+        expect(Object.hasOwn(actual.idempotency, "inherited")).toBe(false);
+        expect(actual.costEntries.find(entry => entry.id === "orphan")).toBe(orphanCost);
+        expect(actual.conflicts.find(entry => entry.id === "orphan")).toBe(orphanConflict);
+        // Only the FIRST baseline draft with pageId A is ever replaced.
+        expect(actual.drafts[1]).toBe(originalDrafts[1]);
+
+        if (records.length === 0) {
+          expect(actual.costEntries).toBe(originalCostArray);
+          expect(actual.conflicts).toBe(originalConflictArray);
+          expect(actual.projections.drafts).toBe(originalProjection);
+          expect(Object.getOwnPropertyDescriptor(dictionary, "shared")).toEqual(originalShared);
+          actual.drafts.forEach((draft, index) => expect(draft).toBe(originalDrafts[index]));
+        } else {
+          const last = records[records.length - 1]!;
+          for (const key of Reflect.ownKeys(last.idempotency)) {
+            if (!Object.prototype.propertyIsEnumerable.call(last.idempotency, key)) continue;
+            // Existing sequential behavior copies the idempotency VALUE reference.
+            expect(Reflect.get(dictionary, key)).toBe(Reflect.get(last.idempotency, key));
+          }
+          expect(Object.getOwnPropertyDescriptor(dictionary, "__proto__")).toEqual({
+            value: last.idempotency.__proto__, writable: true, enumerable: true, configurable: true
+          });
+          expect(Reflect.get(dictionary, ownSymbol)).toBe(Reflect.get(last.idempotency, ownSymbol));
+        }
+
+        // Baseline survivors retain references; incoming bodies are separate clones.
+        for (const entry of actual.costEntries) {
+          const incoming = records.flatMap(record => record.costEntries).filter(value => value.id === entry.id);
+          if (incoming.length === 0) expect(originalCosts).toContain(entry);
+          incoming.forEach(value => {
+            expect(entry).not.toBe(value);
+            expect(entry.unitPriceSnapshot).not.toBe(value.unitPriceSnapshot);
+          });
+          entry.unitPriceSnapshot.source = "owned mutation";
+        }
+        for (const entry of actual.conflicts) {
+          const incoming = records.flatMap(record => record.conflicts).filter(value => value.id === entry.id);
+          if (incoming.length === 0) expect(originalConflicts).toContain(entry);
+          incoming.forEach(value => {
+            expect(entry).not.toBe(value);
+            expect(entry.detail).not.toBe(value.detail);
+          });
+          entry.detail.marker = "owned mutation";
+        }
+        for (const record of records) {
+          const mergedDraft = actual.drafts.find(draft => draft.pageId === record.pageId)!;
+          expect(mergedDraft).not.toBe(record.draft);
+          mergedDraft.page.blocks[0]!.markdown = "owned mutation";
+          const mergedProjection = actual.projections.drafts[record.draft.id]!;
+          expect(mergedProjection).not.toBe(record.projection);
+          expect(mergedProjection.blockHashes).not.toBe(record.projection.blockHashes);
+          mergedProjection.blockHashes["block-1"] = "owned mutation";
+        }
+        records.forEach((record, index) => {
+          const before = recordsBefore[index]!;
+          expect(record.draft).toStrictEqual(before.draft);
+          expect(record.projection).toStrictEqual(before.projection);
+          expect(record.costEntries).toStrictEqual(before.costs);
+          expect(record.conflicts).toStrictEqual(before.conflicts);
+          expect(Reflect.ownKeys(record.idempotency)).toEqual(before.keys);
+          expect(Object.getOwnPropertyDescriptors(record.idempotency)).toEqual(before.descriptors);
+          expect(Object.getPrototypeOf(record.idempotency)).toBe(before.prototype);
+        });
+        expect(base).toStrictEqual(baseBefore);
+      }
+    }
+  });
+
+
   it("confirms answers without a course-index read and writes independent note labels concurrently", async () => {
     const remote = new FakeEtapi();
     let armed = false;

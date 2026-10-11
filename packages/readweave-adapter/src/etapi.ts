@@ -1815,7 +1815,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     for (const pageId of knownScope.pageIds) {
       if (!freshPageIds.has(pageId)) this.draftPageRecordCache.delete(pageId);
     }
-    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+    this.mergeDraftPageRecordBatch(state, [...this.draftPageRecordCache.values()].map(located => located.record));
     return state;
   }
 
@@ -3740,13 +3740,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       state.projections.metadataIndexRevision = located.index.revision;
       this.cacheMetadataIndex(located);
     }
-    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+    this.mergeDraftPageRecordBatch(state, [...this.draftPageRecordCache.values()].map(located => located.record));
     return state;
   }
 
   private async mergeDraftPageRecords(state: EtapiState): Promise<void> {
     await this.hydrateDraftPageRecords();
-    for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+    this.mergeDraftPageRecordBatch(state, [...this.draftPageRecordCache.values()].map(located => located.record));
   }
 
   private async hydrateDraftPageRecords(): Promise<void> {
@@ -3939,6 +3939,69 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     this.draftPageRecordVersions.set(located.record.pageId, this.draftPageRecordVersion);
   }
 
+  private mergeDraftPageRecordBatch(state: EtapiState, records: readonly EtapiDraftPageRecord[]): void {
+    if (records.length === 0) return;
+    if (records.some(record => record.draft.pageId !== record.pageId)) {
+      for (const record of records) this.mergeDraftPageRecord(state, record);
+      return;
+    }
+    // Keep the sequential merge's first-draft match and ordered, last-value
+    // deduplication. These indexes exist only for this synchronous owned snapshot.
+    const draftIndexes = new Map<string, number>();
+    state.drafts.forEach((draft, index) => {
+      if (!draftIndexes.has(draft.pageId)) draftIndexes.set(draft.pageId, index);
+    });
+    const ordered = <T extends { id: string }>(input: T[], owner: (value: T) => string | undefined) => {
+      const values = new Map<string, T>();
+      const positions = new Map<string, number>();
+      const owners = new Map<string | undefined, Set<string>>();
+      let position = 0;
+      const put = (value: T) => {
+        const previous = values.get(value.id);
+        if (previous) owners.get(owner(previous))?.delete(value.id);
+        if (!values.has(value.id)) positions.set(value.id, position++);
+        values.set(value.id, value);
+        let group = owners.get(owner(value));
+        if (!group) { group = new Set(); owners.set(owner(value), group); }
+        group.add(value.id);
+      };
+      const firstPage = records[0]!.pageId;
+      for (const value of input) if (owner(value) !== firstPage) put(value);
+      for (const value of input) if (owner(value) === firstPage) put(value);
+      return {
+        movePage(pageId: string) {
+          const ids = [...(owners.get(pageId) ?? [])].sort((a, b) => positions.get(a)! - positions.get(b)!);
+          for (const id of ids) {
+            const value = values.get(id)!;
+            values.delete(id); values.set(id, value); positions.set(id, position++);
+          }
+        },
+        put,
+        finish: () => [...values.values()]
+      };
+    };
+    const costs = ordered(state.costEntries, value => value.pageId);
+    const conflicts = ordered(state.conflicts, value => value.objectId);
+    for (const [recordIndex, record] of records.entries()) {
+      let index = draftIndexes.get(record.pageId);
+      if (index === undefined) { index = state.drafts.length; draftIndexes.set(record.pageId, index); }
+      state.drafts[index] = structuredClone(record.draft);
+      state.projections.drafts[record.draft.id] = structuredClone(record.projection);
+      if (recordIndex > 0) costs.movePage(record.pageId);
+      for (const entry of record.costEntries) costs.put(structuredClone(entry));
+      for (const key of Reflect.ownKeys(record.idempotency)) {
+        if (!Object.prototype.propertyIsEnumerable.call(record.idempotency, key)) continue;
+        Object.defineProperty(state.idempotency, key, {
+          value: Reflect.get(record.idempotency, key), writable: true, enumerable: true, configurable: true
+        });
+      }
+      if (recordIndex > 0) conflicts.movePage(record.pageId);
+      for (const conflict of record.conflicts) conflicts.put(structuredClone(conflict));
+    }
+    state.costEntries = costs.finish();
+    state.conflicts = conflicts.finish();
+  }
+
   private mergeDraftPageRecord(state: EtapiState, record: EtapiDraftPageRecord): void {
     const draftIndex = state.drafts.findIndex((draft) => draft.pageId === record.pageId);
     if (draftIndex >= 0) state.drafts[draftIndex] = structuredClone(record.draft);
@@ -4122,7 +4185,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     let phase: "encode" | "put" | "complete" = "encode";
     let succeeded = false;
     try {
-      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      this.mergeDraftPageRecordBatch(state, [...this.draftPageRecordCache.values()].map(located => located.record));
       this.upsertStableMaterialNodes(state);
       markPhase("mergeBeforeEncodeMs");
       const split = await this.prepareMetadataAwareStateWrite(state);
@@ -4147,7 +4210,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         state.projections.metadataIndexRevision = metadata.index.revision;
       }
       this.lastWriteAt = new Date().toISOString();
-      for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      this.mergeDraftPageRecordBatch(state, [...this.draftPageRecordCache.values()].map(located => located.record));
       markPhase("mergeAfterWriteMs");
       const commitCoreSnapshot = async () => {
         const activityNoteId = state.projections.activityStateNoteId;
