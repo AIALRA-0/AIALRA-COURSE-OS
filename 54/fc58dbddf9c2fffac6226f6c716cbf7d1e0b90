@@ -1,0 +1,47 @@
+apps/worker/src/dispatch.spec.ts
+  s_e8850ef125fb32::t_30e41a880f5022 2,16-57
+apps/worker/src/dispatch.ts
+  s_e8850ef125fb32::t_dc502eb9bbcba2 7-34
+apps/worker/src/worker.ts
+  s_e8850ef125fb32::t_b8448be0034d68 4,55-59
+packages/converter/src/index.spec.ts
+  s_e8850ef125fb32::t_cb7d6908572cc3 24,116,371,389-404
+packages/converter/src/index.ts
+  s_e8850ef125fb32::t_7c687c109a9150 302-310
+packages/readweave-adapter/src/etapi.ts
+  s_e8850ef125fb32::t_7a5b9f55bb444b 920-932,3801-3802,3859-3862
+packages/readweave-adapter/src/index.spec.ts
+  s_0e8ff61e9358f0::t_864c92bcb4337d 1093-1181
+packages/storage/src/index.spec.ts
+  s_e8850ef125fb32::t_44d1329097a678 24-34
+packages/storage/src/index.ts
+  s_e8850ef125fb32::t_1d113c98110787 114-115
+scripts/inspect-pptx.py
+  s_e8850ef125fb32::t_548c32c03f7485 6-7,25-57,63-64,79,106-107,115,124-128,130-134,136,138,141
+scripts/inspect-pptx.spec.py
+  s_0e8ff61e9358f0::t_063ea2b033d3ac 1-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "54fc58dbddf9c2fffac6226f6c716cbf7d1e0b90",
+  "prompts": {},
+  "sessions": {
+    "s_0e8ff61e9358f0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10f02-00e5-7440-8971-e8ffd0d490e7",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    },
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
