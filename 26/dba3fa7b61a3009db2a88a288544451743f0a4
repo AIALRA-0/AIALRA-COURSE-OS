@@ -1,0 +1,21 @@
+apps/api/src/app.spec.ts
+  s_e8850ef125fb32::t_cdc9b6c3842021 1233-1299
+apps/api/src/app.ts
+  s_e8850ef125fb32::t_4dedd46b75e915 2078-2080,2516,3567,3569-3590,3595-3608
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "26dba3fa7b61a3009db2a88a288544451743f0a4",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
