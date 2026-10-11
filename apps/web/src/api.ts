@@ -278,7 +278,7 @@ async function confirmedPageRead<T>(path: string, init?: RequestInit): Promise<T
   try {
     return await request<T>(path, init);
   } catch (error) {
-    // Only immutable learning reads recover once. Each request keeps the
+    // Only nonmutating learning reads recover once. Each request keeps the
     // existing deadline and cancels its resources before the next attempt.
     // Edits, authority confirmation, invalid content and permissions are not
     // replayed. The second error remains visible with its own request ID.
@@ -578,7 +578,7 @@ export const api = {
     questionSelectionRequests.set(cacheKey, pending);
     return pending;
   },
-  questionAttempts: (pageId: string, sessionId: string, selectionId: string, options?: ApiRequestOptions) => request<QuestionAttempt[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/question-attempts?sessionId=${encodeURIComponent(sessionId)}&selectionId=${encodeURIComponent(selectionId)}`, { signal: options?.signal }),
+  questionAttempts: (pageId: string, sessionId: string, selectionId: string, options?: ApiRequestOptions) => confirmedPageRead<QuestionAttempt[]>(`/api/v1/pages/${encodeURIComponent(pageId)}/question-attempts?sessionId=${encodeURIComponent(sessionId)}&selectionId=${encodeURIComponent(selectionId)}`, { signal: options?.signal }),
   refillQuestions: (pageId: string, baseRevision: number) => request<QuestionRefillResponse>(`/api/v1/pages/${encodeURIComponent(pageId)}/questions:refill`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },

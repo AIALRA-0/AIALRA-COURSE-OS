@@ -153,4 +153,59 @@ describe("read request lifecycle", () => {
     finishRequest?.(Response.json({ releaseId: "release-1", pageId: "page-1", answer: "answer" }));
     await expect(write).resolves.toMatchObject({ answer: "answer" });
   });
+
+
+  it("recovers a transient saved-answer GET without changing page, session or selection", async () => {
+    const saved = [{ id: "attempt-one", pageId: "page:2", answer: "B", correct: true }];
+    const mock = vi.fn().mockResolvedValueOnce(Response.json({ error: { code: "READ_DEADLINE_EXCEEDED" } }, { status: 504 }))
+      .mockResolvedValueOnce(Response.json(saved));
+    vi.stubGlobal("fetch", mock);
+    await expect(api.questionAttempts("page:2", "session/one", "selection+1")).resolves.toEqual(saved);
+    expect(mock).toHaveBeenCalledTimes(2);
+    const path = "/api/v1/pages/page%3A2/question-attempts?sessionId=session%2Fone&selectionId=selection%2B1";
+    for (const [url, init] of mock.mock.calls) {
+      expect(url).toBe(path);
+      expect(init.method ?? "GET").toBe("GET");
+      expect(init.body).toBeUndefined();
+    }
+    expect(new Headers(mock.mock.calls[0]![1].headers).get("X-Request-Id"))
+      .not.toBe(new Headers(mock.mock.calls[1]![1].headers).get("X-Request-Id"));
+  });
+
+  it("stops saved-answer recovery after its second transient failure", async () => {
+    const mock = vi.fn(async () => Response.json({ error: { code: "UPSTREAM_UNAVAILABLE", requestId: "second-failure" } }, { status: 502 }));
+    vi.stubGlobal("fetch", mock);
+    await expect(api.questionAttempts("page-2", "session-one", "selection-one"))
+      .rejects.toMatchObject({ status: 502, requestId: "second-failure" });
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 403])("does not replay saved-answer reads denied with HTTP %s", async (status) => {
+    const mock = vi.fn(async () => Response.json({ error: {} }, { status }));
+    vi.stubGlobal("fetch", mock);
+    await expect(api.questionAttempts("page-2", "session-one", "selection-one")).rejects.toMatchObject({ status });
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start saved-answer recovery after caller cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("page changed", "AbortError");
+    const mock = vi.fn(async () => {
+      controller.abort(reason);
+      return Response.json({ error: {} }, { status: 504 });
+    });
+    vi.stubGlobal("fetch", mock);
+    await expect(api.questionAttempts("page-2", "session-one", "selection-one", { signal: controller.signal })).rejects.toBe(reason);
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps answer submission outside automatic GET recovery", async () => {
+    const mock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ error: { code: "UPSTREAM_UNAVAILABLE" } }, { status: 504 }));
+    vi.stubGlobal("fetch", mock);
+    await expect(api.questionAttempt({ selectionId: "selection-one", sessionId: "session-one", courseReleaseId: "release-one", pageId: "page-2", questionId: "question-one", questionVersion: 1, answer: "B", usedHintLevel: 0 }, "stable-attempt-key"))
+      .rejects.toMatchObject({ status: 504 });
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock.mock.calls[0]![1]?.method).toBe("POST");
+    expect(new Headers(mock.mock.calls[0]![1]?.headers).get("Idempotency-Key")).toBe("stable-attempt-key");
+  });
 });
