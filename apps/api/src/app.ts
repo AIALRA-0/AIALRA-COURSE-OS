@@ -2075,9 +2075,9 @@ export function createApp(dependencies: AppDependencies): Express {
   app.get("/api/v1/generation-jobs/:id/events", async (request, response, next) => {
     try {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const job = (await dependencies.operations.read()).jobs.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
-      if (!job) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
-      return streamEvents(dependencies.operations)(request, response);
+      const job = await dependencies.operations.readGenerationJob(request.params.id!);
+      if (!job || job.workspaceId !== workspaceId) return sendError(request, response, 404, "JOB_NOT_FOUND", "没有找到这个生成任务", false);
+      return streamEvents(dependencies.operations)(request, response, next);
     } catch (error) { next(error); }
   });
 
@@ -2513,7 +2513,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const workspaceId = request.header("X-Workspace-Id") || "personal";
       const plan = (await dependencies.operations.read()).reviewPlans.find((item) => item.id === request.params.id && item.workspaceId === workspaceId);
       if (!plan) return sendError(request, response, 404, "REVIEW_PLAN_NOT_FOUND", "没有找到这个复习计划", false);
-      return streamEvents(dependencies.operations)(request, response);
+      return streamEvents(dependencies.operations)(request, response, next);
     } catch (error) { next(error); }
   });
 
@@ -3564,19 +3564,48 @@ function createVirtualDraft(release: Pick<CourseRelease, "id" | "courseId" | "mo
 }
 
 function streamEvents(store: OperationalStore) {
-  return async (request: Request, response: Response) => {
+  return async (request: Request, response: Response, next: NextFunction) => {
     const streamId = String(request.params.id || "");
-    const after = Number(request.query.after || 0);
+    let lastSent = Number(request.query.after || 0);
+    let closed = false;
+    let replaying = true;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    type StreamEvent = { id: number; type: string; payload: unknown };
+    const buffered: StreamEvent[] = [];
+    const send = (event: StreamEvent) => {
+      if (closed || response.destroyed || response.writableEnded || event.id <= lastSent) return;
+      response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+      lastSent = event.id;
+    };
+    const listener = (event: StreamEvent) => { if (replaying) buffered.push(event); else send(event); };
+    const cleanup = () => {
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      store.bus.off(streamId, listener);
+      response.off("close", cleanup);
+      request.off("aborted", cleanup);
+    };
+    response.once("close", cleanup);
+    request.once("aborted", cleanup);
+    store.bus.on(streamId, listener);
     response.setHeader("Content-Type", "text/event-stream");
     response.setHeader("Cache-Control", "no-cache");
     response.setHeader("Connection", "keep-alive");
     response.flushHeaders();
-    const send = (event: { id: number; type: string; payload: unknown }) => response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`);
-    for (const event of (await store.read()).events.filter((item) => item.streamId === streamId && item.id > after)) send(event);
-    const listener = (event: { id: number; type: string; payload: unknown }) => send(event);
-    store.bus.on(streamId, listener);
-    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
-    request.on("close", () => { clearInterval(heartbeat); store.bus.off(streamId, listener); });
+    try {
+      // This existing query scopes by stream ID for imports and jobs alike.
+      // Subscribe first so events committed during replay are not lost.
+      const history = await store.readGenerationJobEvents(streamId);
+      if (closed || response.destroyed || response.writableEnded) return;
+      for (const event of [...history, ...buffered].sort((a, b) => a.id - b.id)) send(event);
+      buffered.length = 0;
+      replaying = false;
+      heartbeat = setInterval(() => { if (!closed) response.write(": heartbeat\n\n"); }, 15_000);
+    } catch (error) {
+      cleanup();
+      if (!response.destroyed) response.destroy();
+      next(error);
+    }
   };
 }
 

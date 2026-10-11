@@ -1230,6 +1230,73 @@ describe("Course OS API", () => {
     expect(normalized.fullExplanationMarkdown).toContain("代码 `softmax(x)` 保持原样");
   });
 
+
+
+  it.each(["replay", "disconnect", "read_failure", "job_replay", "wrong_workspace"] as const)("scopes SSE replay and releases its listener for %s", async (scenario) => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-scoped-sse-"));
+    const dependencies = createDefaultDependencies(root, new FileReadWeaveCourseApi(join(root, "readweave.json")));
+    const streamId = "isolated-import-stream";
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const event = (id: number) => ({ id, streamId, type: "readweave.page.synced", payload: { pageId: `p${id}` }, occurredAt: "2026-10-11T00:00:00Z" });
+    const scoped = vi.spyOn(dependencies.operations, "readGenerationJobEvents").mockImplementation(async id => {
+      expect(id).toBe(streamId); await readGate;
+      if (scenario === "read_failure") throw new Error("ISOLATED_EVENT_READ_FAILURE");
+      return [event(1), event(2), event(3)];
+    });
+    const full = vi.spyOn(dependencies.operations, "read").mockRejectedValue(new Error("FULL_STATE_REPLAY_FORBIDDEN"));
+    const jobRead = vi.spyOn(dependencies.operations, "readGenerationJob").mockResolvedValue({
+      id: streamId, workspaceId: scenario === "wrong_workspace" ? "other" : "personal",
+      materialVersionId: "release-1", state: "running", budgetUsd: 1, spentUsd: 0,
+      pageIds: ["page-1"], completedPageIds: [], failedPageIds: [], attempt: 1,
+      cancelRequested: false, createdAt: "2026-10-11T00:00:00Z", updatedAt: "2026-10-11T00:00:00Z"
+    });
+    const jobEndpoint = scenario === "job_replay" || scenario === "wrong_workspace";
+    const app = createApp(dependencies);
+    if (scenario === "wrong_workspace") {
+      await request(app).get(`/api/v1/generation-jobs/${streamId}/events`).expect(404);
+      expect(jobRead).toHaveBeenCalledWith(streamId); expect(scoped).not.toHaveBeenCalled();
+      expect(full).not.toHaveBeenCalled(); expect(dependencies.operations.bus.listenerCount(streamId)).toBe(0);
+      releaseRead(); return;
+    }
+    const server = app.listen(0);
+    await new Promise<void>(resolve => server.once("listening", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("HTTP_FIXTURE_ADDRESS_MISSING");
+    let resolveHeaders!: () => void;
+    const headers = new Promise<void>(resolve => { resolveHeaders = resolve; });
+    let body = "";
+    let response: import("node:http").IncomingMessage | undefined;
+    const client = httpRequest(`http://127.0.0.1:${address.port}/api/v1/${jobEndpoint ? "generation-jobs" : "imports"}/${streamId}/events?after=1`, { agent: false }, res => {
+      response = res; res.setEncoding("utf8"); res.on("data", chunk => { body += String(chunk); }); res.on("error", () => undefined); resolveHeaders();
+    });
+    client.on("error", () => undefined); client.end();
+    try {
+      await headers; expect(response?.statusCode).toBe(200);
+      await vi.waitFor(() => expect(scoped).toHaveBeenCalledOnce());
+      expect(full).not.toHaveBeenCalled(); expect(dependencies.operations.bus.listenerCount(streamId)).toBe(1);
+      if (scenario === "disconnect") {
+        response!.destroy(); client.destroy();
+        await vi.waitFor(() => expect(dependencies.operations.bus.listenerCount(streamId)).toBe(0));
+        releaseRead(); await new Promise(resolve => setTimeout(resolve, 25));
+        expect(body).toBe(""); expect(dependencies.operations.bus.listenerCount(streamId)).toBe(0);
+      } else if (scenario === "read_failure") {
+        releaseRead(); await vi.waitFor(() => expect(dependencies.operations.bus.listenerCount(streamId)).toBe(0));
+        await vi.waitFor(() => expect(response!.destroyed).toBe(true)); expect(body).toBe("");
+      } else {
+        dependencies.operations.bus.emit(streamId, event(3)); dependencies.operations.bus.emit(streamId, event(4));
+        releaseRead(); await vi.waitFor(() => expect(body).toContain("id: 4"));
+        expect(body.match(/^id: \d+/gm)).toEqual(["id: 2", "id: 3", "id: 4"]);
+        dependencies.operations.bus.emit(streamId, event(5)); await vi.waitFor(() => expect(body).toContain("id: 5"));
+        expect(body.match(/^id: \d+/gm)).toEqual(["id: 2", "id: 3", "id: 4", "id: 5"]);
+        response!.destroy(); client.destroy(); await vi.waitFor(() => expect(dependencies.operations.bus.listenerCount(streamId)).toBe(0));
+      }
+      expect(full).not.toHaveBeenCalled();
+    } finally {
+      releaseRead(); response?.destroy(); client.destroy();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  }, 15_000);
+
   it("reports liveness without waiting for ReadWeave", async () => {
     const { app, readweave } = await seededApp();
     const listReleases = vi.spyOn(readweave, "listReleases").mockRejectedValue(new Error("READWEAVE_OFFLINE"));
