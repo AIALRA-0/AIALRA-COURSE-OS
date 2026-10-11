@@ -499,10 +499,12 @@ it("serves a recent snapshot while a slow ReadWeave refresh is in flight", async
   const remote = new FakeEtapi();
   let delayContent = false;
   let releaseRefresh: (() => void) | undefined;
+  let announceRefresh!: () => void;
+  const refreshStarted = new Promise<void>(resolve => { announceRefresh = resolve; });
   const fetchImpl: typeof fetch = async (input, init) => {
     if (delayContent && (init?.method ?? "GET") === "GET" && new URL(String(input)).pathname.endsWith("/content")) {
       delayContent = false;
-      await new Promise<void>((resolve) => { releaseRefresh = resolve; });
+      await new Promise<void>((resolve) => { releaseRefresh = resolve; announceRefresh(); });
     }
     return remote.fetch(input, init);
   };
@@ -516,6 +518,13 @@ it("serves a recent snapshot while a slow ReadWeave refresh is in flight", async
     clock.mockReturnValue(base + 61_000);
     const result = await Promise.race([api.listCourses().then(() => "cached"), new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 100))]);
     expect(result).toBe("cached");
+    // A fresh metadata revalidation can precede the body; observe entry explicitly.
+    let startTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([refreshStarted, new Promise<never>((_, reject) => {
+        startTimeout = setTimeout(() => reject(new Error("refresh did not start")), 1_000);
+      })]);
+    } finally { if (startTimeout !== undefined) clearTimeout(startTimeout); }
     expect(releaseRefresh).toBeTypeOf("function");
     releaseRefresh?.();
     expect((await api.getSyncStatus()).state).toBe("connected");
@@ -5823,6 +5832,180 @@ it("TR8 shares one expired root read between fourteen page writers and a cancell
   expect(costs).toHaveLength(14);
 });
 
+describe("TR20 authoritative content-stamp revalidation", () => {
+  const rootTitle = "00 Course OS 结构化索引";
+  const configFor = (remote: FakeEtapi) => ({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  const fresh = async (api: EtapiReadWeaveCourseApi) => {
+    if ((api as any).stateCache) (api as any).stateCache.expiresAt = 0;
+    return (api as any).readStateReference(true, false);
+  };
+  const bodyReads = (remote: FakeEtapi, id: string, start: number) => remote.requests.slice(start).filter(row => row.method === "GET" && row.path === `/notes/${id}/content`);
+
+  it("revalidates an unchanged root without another full-body download", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote)); await fresh(api);
+    const id = remote.noteIdByTitle(rootTitle); const start = remote.requests.length;
+    await fresh(api); await fresh(api);
+    expect(bodyReads(remote, id, start)).toHaveLength(0);
+    expect(remote.requests.slice(start).filter(row => row.method === "GET" && row.path === `/notes/${id}`)).toHaveLength(2);
+    expect(remote.requests.slice(start).every(row => row.method === "GET")).toBe(true);
+  });
+
+  it("reads changed root content even without any timestamp change", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote)); await fresh(api);
+    const state = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    state.costEntries = [costEntryFor(releaseWithPage(), "external-root-cost")];
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(state));
+    const start = remote.requests.length;
+    expect((await fresh(api)).costEntries.map((row: GenerationCostEntry) => row.id)).toContain("external-root-cost");
+    expect(bodyReads(remote, remote.noteIdByTitle(rootTitle), start)).toHaveLength(1);
+  });
+
+  it("keeps the original body read when fresh metadata has no content stamp", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote)); await fresh(api);
+    remote.emitBlobIds = false; const start = remote.requests.length;
+    await fresh(api);
+    expect(bodyReads(remote, remote.noteIdByTitle(rootTitle), start)).toHaveLength(1);
+  });
+
+  it("propagates revoked root access instead of trusting an old snapshot", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses();
+    const id = remote.noteIdByTitle(rootTitle); let denied = false;
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (denied && new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname === `/etapi/notes/${id}`) return new Response("denied", { status: 403 });
+      return remote.fetch(input, init);
+    }});
+    await fresh(api); denied = true;
+    await expect(fresh(api)).rejects.toThrow();
+    denied = false; await expect(fresh(api)).resolves.toHaveProperty("costEntries");
+  });
+
+  it("still loads a changed metadata index when the root stamp is unchanged", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses(); await writer.ensureMetadataIndex();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote)); await fresh(api);
+    const title = "Course OS Metadata Index · personal";
+    const metadata = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+    metadata.courses = [{ id: "external-course", title: "外部新分类", moduleIds: [], createdAt: "2026-10-11T00:00:00Z" }];
+    remote.editByTitle(title, encodeReadWeaveStateContent(metadata));
+    const start = remote.requests.length;
+    expect((await fresh(api)).courses.map((row: CourseProject) => row.id)).toContain("external-course");
+    expect(bodyReads(remote, remote.noteIdByTitle(rootTitle), start)).toHaveLength(0);
+    expect(bodyReads(remote, remote.noteIdByTitle(title), start)).toHaveLength(1);
+  });
+
+  it("reuses page bodies but observes cost additions at the same draft revision", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote));
+    const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+    await writer.registerDraftSource(source, { ...context, idempotencyKey: "stamp-source" });
+    await writer.appendCostEntry(costEntryFor(source, "stamp-first"), { ...context, idempotencyKey: "stamp-first" });
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    expect((await api.listCostEntries({ materialVersionId: source.id })).map(row => row.id)).toEqual(["stamp-first"]);
+    const title = `Course OS draft record · ${source.pages[0]!.id}`;
+    const id = remote.noteIdByTitle(title); const start = remote.requests.length;
+    await api.listCostEntries({ materialVersionId: source.id });
+    expect(bodyReads(remote, id, start)).toHaveLength(0);
+    const beforeRecord = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+    await writer.appendCostEntry(costEntryFor(source, "stamp-second"), { ...context, idempotencyKey: "stamp-second" });
+    expect((decodeReadWeaveStateContent(remote.contentByTitle(title)) as any).draft.revision).toBe(beforeRecord.draft.revision);
+    const after = remote.requests.length;
+    expect((await api.listCostEntries({ materialVersionId: source.id })).map(row => row.id).sort()).toEqual(["stamp-first", "stamp-second"]);
+    expect(bodyReads(remote, id, after)).toHaveLength(1);
+  });
+
+  it("rejects a stamp hit that crosses the read deadline without installing it", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); await writer.listCourses();
+    const id = remote.noteIdByTitle(rootTitle); let crossDeadline = false;
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (crossDeadline && new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname === `/etapi/notes/${id}`) {
+        const later = Date.now() + 10_000; clock = vi.spyOn(Date, "now").mockReturnValue(later);
+      }
+      return response;
+    }});
+    await fresh(api); const confirmed = (api as any).rootReadSnapshot;
+    crossDeadline = true;
+    try {
+      await expect(withReadBudget({ timeoutMs: 1_000 }, () => (api as any).readRootSnapshot(id))).rejects.toThrow("READ_DEADLINE_EXCEEDED");
+      expect((api as any).rootReadSnapshot).toBe(confirmed);
+    } finally { clock?.mockRestore(); }
+  });
+
+  it.each(["stamped-record", "legacy-root"])("keeps %s content confirmed after conflict resolution fails before saving", async mode => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote)); const source = releaseWithPage();
+    await writer.publishRelease(source, { ...manifest, courseReleaseId: source.id }, context);
+    const saved = await writer.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "stamp-conflict-initial" });
+    const localPage = structuredClone(saved.page); localPage.blocks[0]!.markdown = "未提交的冲突候选";
+    await expect(writer.saveDraft({ ...saved, page: localPage }, 0, { ...context, idempotencyKey: "stamp-conflict-create" })).rejects.toThrow("READWEAVE_REVISION_CONFLICT");
+    const title = `Course OS draft record · ${saved.pageId}`;
+    const record = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+    const conflict = record.conflicts.find((item: CourseConflict) => item.status === "open");
+    expect(conflict).toBeDefined();
+    if (mode === "legacy-root") {
+      const root = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+      root.drafts = [record.draft]; root.conflicts = record.conflicts;
+      root.projections.drafts[record.draft.id] = record.projection;
+      remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+      remote.eraseNativeNotes([remote.noteIdByTitle(title)]);
+    }
+    const api = new EtapiReadWeaveCourseApi(configFor(remote)); await fresh(api);
+    if (mode === "stamped-record") await (api as any).readDraftPageRecords(saved.pageId);
+    const before = mode === "legacy-root" ? (api as any).rootReadSnapshot : (api as any).draftPageRecordCache.get(saved.pageId);
+    const frozen = structuredClone(before);
+    const refresh = vi.spyOn(api as any, "refreshDraftProjection").mockImplementation(async (...args: any[]) => {
+      args[1].blockHashes["block-1"] = "uncommitted-projection-hash";
+      throw new Error("TEST_PROJECTION_SAVE_FAILED");
+    });
+    try {
+      await expect(api.resolveConflict(conflict.id, "local", undefined, { ...context, idempotencyKey: "stamp-conflict-failed" })).rejects.toThrow("TEST_PROJECTION_SAVE_FAILED");
+    } finally { refresh.mockRestore(); }
+    if (mode === "legacy-root") {
+      expect((api as any).rootReadSnapshot).toEqual(frozen);
+      const reread = await fresh(api);
+      expect(reread.drafts.find((item: LessonDraft) => item.id === saved.id)).toMatchObject({ revision: saved.revision, page: saved.page });
+    } else {
+      expect((api as any).draftPageRecordCache.get(saved.pageId)).toEqual(frozen);
+      const reread = await (api as any).readDraftPageRecords(saved.pageId);
+      expect(reread[0].record.draft).toMatchObject({ revision: saved.revision, page: saved.page });
+      expect(reread[0].record.projection).toEqual(record.projection);
+    }
+  });
+
+  it("binds a page stamp to the fetched body across a search/body ABA change", async () => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote));
+    const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+    await writer.registerDraftSource(source, { ...context, idempotencyKey: "aba-source" });
+    await writer.appendCostEntry(costEntryFor(source, "aba-first"), { ...context, idempotencyKey: "aba-first" });
+    const title = `Course OS draft record · ${source.pages[0]!.id}`; const id = remote.noteIdByTitle(title);
+    const contentA = remote.contentByTitle(title); const recordB = decodeReadWeaveStateContent(contentA) as any;
+    recordB.costEntries.push(costEntryFor(source, "aba-second")); const contentB = encodeReadWeaveStateContent(recordB);
+    let change = true;
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url).pathname;
+      if (change && path === `/etapi/notes/${id}/content` && (init?.method ?? "GET") === "GET") {
+        change = false; remote.editByTitle(title, contentB);
+        const response = await remote.fetch(input, init); remote.editByTitle(title, contentA); return response;
+      }
+      return remote.fetch(input, init);
+    }});
+    expect((await api.listCostEntries({ materialVersionId: source.id })).map(row => row.id).sort()).toEqual(["aba-first", "aba-second"]);
+    const start = remote.requests.length;
+    expect((await api.listCostEntries({ materialVersionId: source.id })).map(row => row.id)).toEqual(["aba-first"]);
+    expect(bodyReads(remote, id, start)).toHaveLength(1);
+  });
+});
+
 function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; value: string }>; operator: "AND" | "OR" } | undefined {
   const clause = /#([^\s=]+)\s*=\s*(?:"((?:\\[\s\S]|[^"\\])*)"|([^\s]+))/y;
   const separator = /\s+(AND|OR)\s+/iy;
@@ -5848,6 +6031,10 @@ function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; va
 }
 
 class FakeEtapi {
+  emitBlobIds = false;
+  private contentStamp(content: string): Record<string, string> {
+    return this.emitBlobIds ? { blobId: createHash("sha512").update(content).digest("base64").replace(/\+/gu, "X").replace(/\//gu, "Y").slice(0, 20) } : {};
+  }
   private sequence = 0;
   failBranchDeleteCount = 0;
   readonly requests: Array<{ path: string; method: string; headers: Record<string, string>; body?: string }> = [];
@@ -5883,7 +6070,7 @@ class FakeEtapi {
           && (labels ? labels.labels[labels.operator === "OR" ? "some" : "every"](({ name, value }) =>
             Object.entries(note.labels).some(([key, actual]) => key.toLowerCase() === name && actual.toLowerCase() === value))
             : exactTitle ? note.title.includes(exactTitle) : false)
-          && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds }));
+          && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds, ...this.contentStamp(note.content) }));
       return Response.json({ results });
     }
     if (path === "/create-note" && init?.method === "POST") {
@@ -5904,7 +6091,7 @@ class FakeEtapi {
     if (noteMatch && (init?.method ?? "GET") === "GET") {
       const note = this.notes.get(noteMatch[1]!);
       if (!note || note.deleted) return new Response("not found", { status: 404 });
-      return Response.json({ noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds,
+      return Response.json({ ...this.contentStamp(note.content), noteId: noteMatch[1], title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds,
         childNoteIds: [...this.branches.values()].filter(branch => branch.parentNoteId === noteMatch[1]).map(branch => branch.noteId) });
     }
     if (noteMatch && init?.method === "PATCH") {

@@ -213,6 +213,8 @@ interface EtapiDraftPageRecord {
 }
 
 interface LocatedDraftPageRecord {
+  /** Content-addressed stamp computed from the actual confirmed body. */
+  blobId?: string;
   noteId: string;
   record: EtapiDraftPageRecord;
 }
@@ -421,6 +423,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private readonly pageWriteReadBudget = new AsyncLocalStorage<ReadBudget>();
   private stateCache?: { state: EtapiState; expiresAt: number };
+  private rootReadSnapshot?: { noteId: string; blobId: string; parsed: Partial<EtapiState> };
   private stateReadInFlight?: SharedRead<EtapiState>;
   private stateVersion = 0;
   private activityCache?: { state: EtapiActivityState; expiresAt: number };
@@ -1227,8 +1230,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       return this.withDraftPageLock(initial.objectId, context, async () => {
         const stateReference = await this.readStateReference(true, false);
         const located = await this.findDraftPageRecord(initial.objectId);
-        const draft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === initial!.objectId);
-        if (!draft) throw new Error("READWEAVE_DRAFT_NOT_FOUND");
+        const confirmedDraft = located?.record.draft ?? stateReference.drafts.find((item) => item.pageId === initial!.objectId);
+        if (!confirmedDraft) throw new Error("READWEAVE_DRAFT_NOT_FOUND");
+        const draft = structuredClone(confirmedDraft);
         const state = this.createDraftPageReadContext(stateReference, draft, located?.record);
         const replay = state.idempotency[context.idempotencyKey];
         if (replay) {
@@ -1255,8 +1259,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         draft.status = "editing";
         draft.contentHash = sha256(JSON.stringify(draft.page));
         draft.updatedAt = new Date().toISOString();
-        const projection = located?.record.projection ?? state.projections.drafts[draft.id]
-          ?? await this.ensureDraftProjection(stateReference, draft);
+        const projection = structuredClone(located?.record.projection ?? state.projections.drafts[draft.id]
+          ?? await this.ensureDraftProjection(stateReference, draft));
         state.projections.drafts[draft.id] = projection;
         conflict.status = "resolved";
         conflict.resolution = resolution;
@@ -3637,6 +3641,36 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return { coreState: stateWithoutMetadata(state, pointer, state.projections.metadataIndexRevision ?? located.index.revision) };
   }
 
+  private async readRootSnapshot(noteId: string): Promise<Partial<EtapiState>> {
+    const observedVersion = this.stateVersion;
+    const cached = this.rootReadSnapshot;
+    if (cached?.noteId === noteId && !this.writeContext.getStore()) {
+      const note = await this.getNote(noteId);
+      if (note.blobId && note.blobId === cached.blobId
+        && this.rootReadSnapshot === cached && this.stateVersion === observedVersion) {
+        const budget = currentReadBudget();
+        if (budget) assertReadBudgetActive(budget);
+        return rootReadView(cached.parsed);
+      }
+    }
+    const content = await this.getContent(noteId);
+    const parsed = await decodeReadWeaveStateContentAsync(content) as Partial<EtapiState>;
+    const blobId = readweaveContentBlobId(content);
+    const budget = currentReadBudget();
+    if (budget) assertReadBudgetActive(budget);
+    if (!this.writeContext.getStore() && this.stateVersion === observedVersion) {
+      this.rootReadSnapshot = { noteId, blobId, parsed };
+    }
+    return rootReadView(parsed);
+  }
+
+  private invalidateContentStamp(noteId: string): void {
+    if (this.rootReadSnapshot?.noteId === noteId) this.rootReadSnapshot = undefined;
+    for (const cached of this.draftPageRecordCache.values()) {
+      if (cached.noteId === noteId) delete cached.blobId;
+    }
+  }
+
   private async readState(requireFresh = false): Promise<EtapiState> {
     const state = structuredClone(await this.readStateReference(requireFresh));
     await this.mergeDraftPageRecords(state);
@@ -3688,7 +3722,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // same large index a second time during a cold API start.
     let parsed = bootstrap.stateSnapshot;
     if (parsed) bootstrap.stateSnapshot = undefined;
-    if (!parsed) parsed = await decodeReadWeaveStateContentAsync(await this.getContent(bootstrap.projection.stateNoteId)) as Partial<EtapiState>;
+    if (!parsed) parsed = await this.readRootSnapshot(bootstrap.projection.stateNoteId);
     const state = normalizeState(parsed, bootstrap.projection);
     const metadataNoteId = state.projections.metadataIndexNoteId;
     if (metadataNoteId) {
@@ -3756,11 +3790,22 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const concurrency = pageIds ? 4 : 8;
     const recordsBySearchOrder = new Array<LocatedDraftPageRecord | undefined>(notes.length);
     await forEachWithConcurrency(notes.map((note, index) => ({ note, index })), concurrency, async ({ note, index }) => {
-      const parsed = decodeReadWeaveStateContent(await this.getContent(note.noteId)) as Partial<EtapiDraftPageRecord>;
+      const cached = this.draftPageRecordCache.get(note.title.slice("Course OS draft record · ".length));
+      if (!this.writeContext.getStore() && note.blobId && cached?.noteId === note.noteId && cached.blobId === note.blobId) {
+        const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
+        if (budget) assertReadBudgetActive(budget);
+        if (!pageIds || pageIds.has(cached.record.pageId)) recordsBySearchOrder[index] = cached;
+        return;
+      }
+      const content = await this.getContent(note.noteId);
+      const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiDraftPageRecord>;
+      const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
+      if (budget) assertReadBudgetActive(budget);
       if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return;
       if (pageIds && !pageIds.has(parsed.pageId)) return;
       const located = {
         noteId: note.noteId,
+        blobId: readweaveContentBlobId(content),
         record: {
           schemaVersion: "1.0.0" as const,
           pageId: parsed.pageId,
@@ -3784,6 +3829,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         newest.set(candidate.record.pageId, candidate);
       }
     }
+    const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
+    if (budget) assertReadBudgetActive(budget);
     for (const candidate of newest.values()) {
       if ((this.draftPageRecordVersions.get(candidate.record.pageId) ?? 0)
         <= (observedVersions.get(candidate.record.pageId) ?? 0)) this.cacheDraftPageRecord(candidate);
@@ -4673,8 +4720,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (indexes.length > 1) throw new Error("READWEAVE_COURSE_INDEX_DUPLICATE");
     const existing = indexes[0];
     if (existing) {
-      const content = await this.getContent(existing.noteId);
-      const parsed = await decodeReadWeaveStateContentAsync(content) as Partial<EtapiState>;
+      const parsed = await this.readRootSnapshot(existing.noteId);
       if (!parsed.projections) throw new Error("READWEAVE_COURSE_INDEX_INVALID");
       const indexedWorkspaceRoot = parsed.projections.courseRootNoteId;
       if (workspaceRootNoteId) {
@@ -4826,16 +4872,19 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async putContent(noteId: string, content: string, onPutDuration?: (durationMs: number) => void): Promise<void> {
-    await this.raw(`/notes/${encodeURIComponent(noteId)}/revision`, { method: "POST" });
-    const putStartedAt = onPutDuration ? performance.now() : 0;
+    this.invalidateContentStamp(noteId);
+    let putStartedAt: number | undefined;
     try {
+      await this.raw(`/notes/${encodeURIComponent(noteId)}/revision`, { method: "POST" });
+      putStartedAt = onPutDuration ? performance.now() : undefined;
       await this.raw(`/notes/${encodeURIComponent(noteId)}/content`, {
         method: "PUT",
         headers: { "Content-Type": "text/plain; charset=utf-8" },
         body: Buffer.from(content)
       });
     } finally {
-      if (onPutDuration) onPutDuration(Math.round(performance.now() - putStartedAt));
+      this.invalidateContentStamp(noteId);
+      if (onPutDuration && putStartedAt !== undefined) onPutDuration(Math.round(performance.now() - putStartedAt));
     }
   }
 
@@ -4848,7 +4897,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async deleteNote(noteId: string): Promise<void> {
-    await this.raw(`/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
+    this.invalidateContentStamp(noteId);
+    try { await this.raw(`/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" }); }
+    finally { this.invalidateContentStamp(noteId); }
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -5183,6 +5234,19 @@ function stateNoteIdFromState(state: EtapiState): string {
   const noteId = state.projections.stateNoteId;
   if (!noteId) throw new Error("READWEAVE_METADATA_STATE_NOTE_MISSING");
   return noteId;
+}
+
+// Match the deployed ReadWeave content-addressed blob ID. Other formats
+// simply fail the fresh metadata comparison and retain the original body read.
+function readweaveContentBlobId(content: string): string {
+  return createHash("sha512").update(content).digest("base64").replace(/\+/gu, "X").replace(/\//gu, "Y").slice(0, 20);
+}
+
+// Readers may merge page and metadata overlays; keep the verified root immutable.
+function rootReadView(input: Partial<EtapiState>): Partial<EtapiState> {
+  return { ...input, drafts: [...(input.drafts ?? [])], costEntries: [...(input.costEntries ?? [])],
+    conflicts: [...(input.conflicts ?? [])], idempotency: { ...(input.idempotency ?? {}) },
+    ...(input.projections ? { projections: { ...input.projections, drafts: { ...input.projections.drafts } } } : {}) };
 }
 
 function normalizeState(input: Partial<EtapiState>, projection: ProjectionIndex): EtapiState {
