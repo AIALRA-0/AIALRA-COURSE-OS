@@ -1419,7 +1419,9 @@ export function createApp(dependencies: AppDependencies): Express {
         if (duplicate) {
           deduplicated = true;
           state.idempotency[idempotencyKey] = { kind: "import", objectId: duplicate.id };
-          if (duplicate.state === "failed" && inspection.accepted) {
+          if (["failed", "rejected"].includes(duplicate.state) && inspection.accepted) {
+            const previousState = duplicate.state;
+            const previousIssues = [...duplicate.issues];
             duplicate.state = "accepted";
             duplicate.issues = [];
             duplicate.attemptStartedAt = new Date().toISOString();
@@ -1428,7 +1430,7 @@ export function createApp(dependencies: AppDependencies): Express {
             duplicate.generationState = requestedAutoGenerate ? "queued" : "not_requested";
             duplicate.conversionProgress = { stage: "queued", completedPages: 0,
               ...(layoutPageCount ? { pageCount: layoutPageCount } : {}), updatedAt: duplicate.attemptStartedAt };
-            context.appendEvent(duplicate.id, "import.accepted", { retry: true, sha256: duplicate.sha256 });
+            context.appendEvent(duplicate.id, "import.accepted", { retry: true, sha256: duplicate.sha256, previousState, previousIssues });
             return structuredClone(duplicate);
           }
           context.appendEvent(duplicate.id, "import.deduplicated", { sha256: duplicate.sha256, source: duplicate.source });

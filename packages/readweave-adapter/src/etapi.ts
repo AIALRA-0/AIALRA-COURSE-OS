@@ -907,7 +907,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const costIndex = state.projections.costIndexNoteId
       ? await this.readCostIndex(state.projections.costIndexNoteId)
       : undefined;
-    let costs = state.costEntries;
+    // Merge the authoritative sources once per request. Rebuilding the entire
+    // ledger for each page needlessly multiplies work on long materials.
+    const costs = new Map(mergeCostEntries(costIndex?.costEntries, state.costEntries)
+      .map(entry => [entry.id, entry]));
     if (scoped) {
       const pageIds = filters.pageId ? [filters.pageId] : [...new Set([
         ...release!.pageIds, ...release!.pages.map(page => page.id),
@@ -937,10 +940,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const cached = this.draftPageRecordCache.get(pageId);
         if (located && cached && cached.record.draft.revision > located.record.draft.revision
           && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
-        costs = mergeCostEntries(costs, located?.record.costEntries);
+        for (const entry of located?.record.costEntries ?? []) costs.set(entry.id, entry);
       }
     }
-    return structuredClone(mergeCostEntries(costIndex?.costEntries, costs).filter((item) =>
+    return structuredClone([...costs.values()].filter((item) =>
       (!filters.courseId || item.courseId === filters.courseId) &&
       (!filters.materialVersionId || item.materialVersionId === filters.materialVersionId) &&
       (!filters.pageId || item.pageId === filters.pageId) &&

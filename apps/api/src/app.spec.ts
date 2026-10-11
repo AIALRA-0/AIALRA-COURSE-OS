@@ -1247,6 +1247,32 @@ describe("Course OS API", () => {
     expect(second.body.id).toBe(first.body.id);
   });
 
+  it("rechecks a previously rejected source on a new upload operation and preserves its failure history", async () => {
+    const { app, operations } = await seededApp();
+    const source = Buffer.from("# Recoverable source\nSame unchanged source bytes");
+    const first = await request(app).post("/api/v1/imports").set("Idempotency-Key", "rejected-mime")
+      .field("autoGenerate", "false").attach("file", source, { filename: "recover.md", contentType: "application/pdf" }).expect(422);
+    expect(first.body.issues).toContain("FILE_MIME_MISMATCH");
+    const rejectedAgain = await request(app).post("/api/v1/imports").set("Idempotency-Key", "still-rejected-mime")
+      .field("autoGenerate", "false").attach("file", source, { filename: "recover.md", contentType: "application/pdf" }).expect(200);
+    expect(rejectedAgain.body.state).toBe("rejected");
+    const retry = await request(app).post("/api/v1/imports").set("Idempotency-Key", "corrected-mime")
+      .field("autoGenerate", "false").attach("file", source, { filename: "recover.md", contentType: "text/markdown" }).expect(200);
+    expect(retry.body.id).toBe(first.body.id);
+    expect(retry.body.sha256).toBe(first.body.sha256);
+    expect(retry.body.state).toBe("accepted"); expect(retry.body.autoGenerate).toBe(false);
+    expect(retry.body.attemptStartedAt).toBeDefined(); expect(retry.body.endedAt).toBeUndefined();
+    const ready = await waitForImport(app, retry.body.id); expect(ready.state).toBe("ready");
+    const replay = await request(app).post("/api/v1/imports").set("Idempotency-Key", "corrected-mime")
+      .field("autoGenerate", "false").attach("file", source, { filename: "recover.md", contentType: "text/markdown" }).expect(200);
+    expect(replay.body.id).toBe(first.body.id); expect(replay.body.pageIds).toEqual(ready.pageIds);
+    const state = await operations.read();
+    expect(state.imports.filter(item => item.id === first.body.id)).toHaveLength(1);
+    expect(state.events.filter(item => item.streamId === first.body.id && item.type === "import.rejected")).toHaveLength(1);
+    expect(state.events.filter(item => item.streamId === first.body.id && item.type === "import.accepted" && (item.payload as { retry?: boolean }).retry))
+      .toEqual([expect.objectContaining({ payload: expect.objectContaining({ previousState: "rejected", previousIssues: ["FILE_MIME_MISMATCH"] }) })]);
+  });
+
   it("converts a syllabus into page images and ReadWeave drafts", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-api-import-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
