@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { workerDispatchHeaders } from "./dispatch.js";
+import { dispatchGenerationJob } from "./dispatch.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for the production worker");
@@ -52,13 +52,9 @@ while (!stopping) {
 await pool.end();
 
 async function dispatch(jobId: string, workspaceId: string): Promise<void> {
-  try {
-    const response = await fetch(`${apiBaseUrl}/api/internal/worker/jobs/${encodeURIComponent(jobId)}/run`, {
-      method: "POST",
-      headers: workerDispatchHeaders(workerToken, workspaceId)
-    });
-    if (!response.ok) process.stderr.write(`worker dispatch failed for ${jobId}: HTTP ${response.status}\n`);
-  } catch (error) {
-    process.stderr.write(`worker dispatch failed for ${jobId}: ${error instanceof Error ? error.message : String(error)}\n`);
-  }
+  const result = await dispatchGenerationJob(apiBaseUrl, workerToken, jobId, workspaceId);
+  if (!result.ok) process.stderr.write(JSON.stringify({
+    timestamp: new Date().toISOString(), event: "worker.dispatch.failed", jobId,
+    status: result.status, error: result.error, causeCode: result.causeCode
+  }) + "\n");
 }

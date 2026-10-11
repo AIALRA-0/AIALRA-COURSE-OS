@@ -299,12 +299,15 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
   let pptxTitles: string[] = [];
   if (kind === "pptx") {
     const inspection = await runProcess(binaries.python, [binaries.pptxInspector, sourcePath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
-    try {
-      const parsed: unknown = JSON.parse(inspection.stdout);
-      if (parsed && typeof parsed === "object" && "slideTitles" in parsed && Array.isArray(parsed.slideTitles)) {
-        pptxTitles = parsed.slideTitles.map((title: unknown) => typeof title === "string" ? title.trim().slice(0, 90) : "");
-      }
-    } catch { /* Older inspectors did not return slide titles; retain PDF text inference. */ }
+    let parsed: unknown;
+    try { parsed = JSON.parse(inspection.stdout); }
+    catch { throw new Error("CONVERSION_PPTX_INSPECTION_INVALID"); }
+    if (!parsed || typeof parsed !== "object" || !("accepted" in parsed) || parsed.accepted !== true) {
+      throw new Error("CONVERSION_PPTX_INSPECTION_REJECTED");
+    }
+    if ("slideTitles" in parsed && Array.isArray(parsed.slideTitles)) {
+      pptxTitles = parsed.slideTitles.map((title: unknown) => typeof title === "string" ? title.trim().slice(0, 90) : "");
+    }
     const localPptx = join(outputDir, "source.pptx");
     await writeFile(localPptx, await readFile(sourcePath), { flag: "wx" });
     const userInstallation = pathToFileURL(join(outputDir, "libreoffice-profile")).href;

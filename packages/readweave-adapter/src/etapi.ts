@@ -917,6 +917,19 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       ])];
       const observedVersions = new Map(this.draftPageRecordVersions);
       const records = new Map((await this.readDraftPageRecords(pageIds)).map(located => [located.record.pageId, located]));
+      const missing = pageIds.filter(pageId => !records.has(pageId));
+      for (let offset = 0; offset < missing.length; offset += 4) {
+        const batch = missing.slice(offset, offset + 4);
+        // Share the existing four-reader budget across recovery lookups. A
+        // not-yet-generated page must not serialize the entire material ledger.
+        const recovered = await Promise.allSettled(batch.map(pageId =>
+          this.recoverUnlabelledDraftPageRecord(pageId, Math.floor(4 / batch.length), observedVersions.get(pageId) ?? 0)));
+        const failure = recovered.find(item => item.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+        recovered.forEach((item, index) => {
+          if (item.status === "fulfilled" && item.value) records.set(batch[index]!, item.value);
+        });
+      }
       for (const pageId of pageIds) {
         let located = records.get(pageId);
         // Only a newer record committed/observed during this fresh read may
@@ -924,7 +937,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const cached = this.draftPageRecordCache.get(pageId);
         if (located && cached && cached.record.draft.revision > located.record.draft.revision
           && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
-        located ??= await this.recoverUnlabelledDraftPageRecord(pageId, 4);
         costs = mergeCostEntries(costs, located?.record.costEntries);
       }
     }
@@ -3786,7 +3798,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return this.recoverUnlabelledDraftPageRecord(pageId);
   }
 
-  private async recoverUnlabelledDraftPageRecord(pageId: string, contentConcurrency?: number): Promise<LocatedDraftPageRecord | undefined> {
+  private async recoverUnlabelledDraftPageRecord(pageId: string, contentConcurrency?: number,
+    observedVersion = this.draftPageRecordVersions.get(pageId) ?? 0): Promise<LocatedDraftPageRecord | undefined> {
     const projection = await this.ensureWorkspace();
     const title = `Course OS draft record · ${pageId}`;
     const query = new URLSearchParams({
@@ -3843,7 +3856,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     ]);
     if (!typeLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsType", "draft_record");
     if (!pageLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsDraftRecordPageId", pageId);
-    this.cacheDraftPageRecord(selected.located);
+    // A fresh read may finish after a concurrent commit. Preserve that commit
+    // for the caller's revision check; pre-existing warm cache is not evidence.
+    if ((this.draftPageRecordVersions.get(pageId) ?? 0) <= observedVersion)
+      this.cacheDraftPageRecord(selected.located);
     return selected.located;
   }
 

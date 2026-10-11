@@ -111,12 +111,8 @@ export function inspectUpload(name: string, declaredMediaType: string, buffer: B
     issues.push("FILE_MIME_MISMATCH");
   }
 
-  if (kind === "pptx") {
-    const cloudMetadataAddress = `http://${[169, 254, 169, 254].join(".")}`;
-    const suspiciousMarkers = ["<!ENTITY", "file://", cloudMetadataAddress, "../"];
-    const latin = buffer.toString("latin1");
-    if (suspiciousMarkers.some((marker) => latin.includes(marker))) issues.push("FILE_UNSAFE_MARKER");
-  }
+  // Compressed XML and binary image bytes are not paths or XML declarations.
+  // The converter's structured inspector must pass before LibreOffice opens PPTX.
 
   return { accepted: issues.length === 0, kind, detectedMediaType, issues };
 }

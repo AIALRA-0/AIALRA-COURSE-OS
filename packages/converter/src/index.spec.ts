@@ -21,7 +21,7 @@ describe("offline material converter", () => {
     const sourcePath = join(root, `lecture.${kind}`);
     await writeFile(sourcePath, kind === "pdf" ? "%PDF-1.7" : "PK synthetic pptx", "utf8");
     const runProcess: ProcessRunner = async (command, args, options) => {
-      if (command === "python" && kind === "pptx") return { stdout: JSON.stringify({ slideTitles: ["A complete title that wraps", "Second title"] }), stderr: "" };
+      if (command === "python" && kind === "pptx") return { stdout: JSON.stringify({ accepted: true, slideTitles: ["A complete title that wraps", "Second title"] }), stderr: "" };
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7", "utf8");
       if (command === "pdfinfo") return { stdout: "Pages:          2\n", stderr: "" };
       if (command === "pdftoppm") {
@@ -113,7 +113,7 @@ describe("offline material converter", () => {
     let settled = false;
     await writeFile(sourcePath, kind === "pdf" ? "%PDF-1.7" : "PK synthetic pptx");
     const runProcess: ProcessRunner = async (command, args, options) => {
-      if (command === "python") return { stdout: JSON.stringify({ slideTitles: Array.from({ length: 10 }, (_, i) => i === 0 ? "Slide title" : `Slide ${i + 1}`) }), stderr: "" };
+      if (command === "python") return { stdout: JSON.stringify({ accepted: true, slideTitles: Array.from({ length: 10 }, (_, i) => i === 0 ? "Slide title" : `Slide ${i + 1}`) }), stderr: "" };
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7");
       if (command === "pdfinfo") {
         events.push("counted");
@@ -368,7 +368,7 @@ describe("PPTX slide coverage", () => {
     let exportHidden = false;
     let rendered = false;
     const runProcess: ProcessRunner = async (command, args, options) => {
-      if (command === "python") return { stdout: JSON.stringify({ slideTitles: ["Visible", "Hidden", "Visible after hidden"] }), stderr: "" };
+      if (command === "python") return { stdout: JSON.stringify({ accepted: true, slideTitles: ["Visible", "Hidden", "Visible after hidden"] }), stderr: "" };
       if (command === "soffice") {
         const filter = args[args.indexOf("--convert-to") + 1]!;
         exportHidden = JSON.parse(filter.slice(filter.indexOf("{")).trim()).ExportHiddenSlides.value === "true";
@@ -385,4 +385,20 @@ describe("PPTX slide coverage", () => {
       expect(rendered).toBe(false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+});
+
+
+describe("PPTX inspection failure closure", () => {
+  it.each(["not-json", "{}", '{"accepted":false,"slideTitles":[]}', '{"accepted":"true"}'])
+    ("stops before LibreOffice when the inspector does not explicitly approve: %s", async (stdout) => {
+      const root = await mkdtemp(join(tmpdir(), "course-os-pptx-inspection-"));
+      const sourcePath = join(root, "lecture.pptx");
+      await writeFile(sourcePath, "PK fixture");
+      const calls: string[] = [];
+      const runProcess: ProcessRunner = async (command) => { calls.push(command); return { stdout, stderr: "" }; };
+      await expect(convertMaterial({ id: "inspection", kind: "pptx", originalName: "lecture.pptx", sourcePath,
+        outputDir: join(root, "out"), createdAt: new Date().toISOString() }, { runProcess, binaries: testBinaries() }))
+        .rejects.toThrow(/CONVERSION_PPTX_INSPECTION_/);
+      expect(calls).toEqual([testBinaries().python]);
+    });
 });

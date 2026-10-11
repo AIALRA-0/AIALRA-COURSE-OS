@@ -21,3 +21,14 @@ describe("upload inspection", () => {
     expect(inspectUpload("lecture.pdf", "application/pdf", Buffer.from("not-pdf"))).toMatchObject({ accepted: false });
   });
 });
+
+
+describe("PPTX coarse upload inspection", () => {
+  it("does not mistake binary data for paths or XML declarations", () => {
+    const bytes = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("image bytes ../ file:// <!ENTITY http://169.254.169.254")]);
+    expect(inspectUpload("lecture.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", bytes))
+      .toMatchObject({ accepted: true, kind: "pptx", issues: [] });
+    expect(inspectUpload("lecture.pdf", "application/pdf", bytes).accepted).toBe(false);
+    expect(inspectUpload("lecture.pptx", "application/pdf", bytes).issues).toContain("FILE_MIME_MISMATCH");
+  });
+});
