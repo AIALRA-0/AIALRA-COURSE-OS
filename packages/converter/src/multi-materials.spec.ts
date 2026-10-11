@@ -26,7 +26,13 @@ describe("multi-material conversion fixtures", () => {
       : fixture.kind === "pdf" ? "%PDF-1.7 synthetic fixture" : "PK synthetic pptx fixture";
     await writeFile(sourcePath, source, "utf8");
 
+    let inspectionCalls = 0;
     const runProcess: ProcessRunner = async (command, args, options) => {
+      if (command === "python") {
+        expect(args).toEqual(["inspect.py", sourcePath]);
+        inspectionCalls += 1;
+        return { stdout: JSON.stringify({ accepted: true, slideTitles: Array.from({ length: fixture.expectedPages }, (_, index) => `${fixture.titlePrefix} page ${index + 1}`) }), stderr: "" };
+      }
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7", "utf8");
       if (command === "pdfinfo") return { stdout: `Pages:          ${fixture.expectedPages}\n`, stderr: "" };
       if (command === "pdftoppm") {
@@ -41,6 +47,7 @@ describe("multi-material conversion fixtures", () => {
     const input = { id: fixture.id, sourcePath, originalName: fixture.originalName, kind: fixture.kind, createdAt: new Date().toISOString() };
     const first = await convertMaterial({ ...input, outputDir: outputOne }, { runProcess, binaries: testBinaries() });
     const second = await convertMaterial({ ...input, outputDir: outputTwo }, { runProcess, binaries: testBinaries() });
+    expect(inspectionCalls).toBe(fixture.kind === "pptx" ? 2 : 0);
     expect(first.state).toBe("completed");
     expect(first.pages).toHaveLength(fixture.expectedPages);
     expect(first.pages.map((page) => page.pageNumber)).toEqual(Array.from({ length: fixture.expectedPages }, (_, index) => index + 1));
