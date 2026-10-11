@@ -1,0 +1,27 @@
+apps/web/src/WorkspaceLoadBoundary.spec.tsx
+  s_e8850ef125fb32::t_c8278f9db09a7c 1-27
+packages/converter/src/multi-materials.spec.ts
+  s_e8850ef125fb32::t_c8278f9db09a7c 29,31-35,50
+apps/web/src/WorkspaceLoadBoundary.tsx
+  s_e8850ef125fb32::t_c8278f9db09a7c 1-16,18-22
+  s_e8850ef125fb32::t_92f1b4b357bfc3 17
+apps/web/src/App.tsx
+  s_e8850ef125fb32::t_c8278f9db09a7c 9
+  s_e8850ef125fb32::t_066f8ebaf84f8f 1159,1161,1165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1e104ea85dd81ef178523584f801f2a8e3b0799f",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
