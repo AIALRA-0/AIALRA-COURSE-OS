@@ -315,6 +315,13 @@ export function getImportStageProgress(record: WebImportRecord, plan?: WebGenera
       sourceConfirmed ? "原图与文字资料已保存" : assetsPrepared ? "原图与文字资料已准备；课程来源另待材料登记确认" : saving ? "正在保存原图与文字资料" : record.state === "syncing" ? "等待资料保存确认" : stopped ? "资料保存结果待核对" : "等待可保存的转换结果", assetsCount);
     add("registration", "材料登记", registration?.state === "failed" ? "failed" : registration?.state === "confirmed" || record.state === "ready" ? "complete" : registration?.state === "pending" || record.state === "syncing" ? "active" : stopped ? "unknown" : "waiting",
       registration?.state === "failed" ? `材料登记失败${registration.issue ? ` · ${registration.issue}` : ""}` : registration?.state === "confirmed" || record.state === "ready" ? "课程材料来源已确认登记" : registration?.state === "pending" ? "材料来源等待权威保存确认；已准备的来源可用于生成" : record.state === "syncing" ? "正在登记课程材料，等待确认" : stopped ? "材料登记结果待核对" : "等待材料登记");
+    if (!generationRequested) {
+      const confirmedDrafts = Array.isArray(record.draftIds) ? new Set(record.draftIds).size : undefined;
+      const count = confirmedDrafts !== undefined && total && confirmedDrafts <= total ? { completed: confirmedDrafts, total } : undefined;
+      const complete = record.state === "ready";
+      add("page_sync", "页面保存", complete ? "complete" : record.state === "failed" ? "failed" : sourceConfirmed ? "active" : "waiting",
+        complete ? "页面草稿已保存，讲解未生成" : record.state === "failed" ? "页面保存未完成，已确认草稿保留" : sourceConfirmed ? "正在保存页面草稿与原图引用" : "等待材料登记确认", count);
+    }
     const sourceRetry = readNumber(record, ["sourceRetryAttempt"]);
     if (registration?.state === "pending" && sourceRetry && Number.isInteger(sourceRetry)) {
       rows.find(row => row.id === "registration")!.detail = `正在自动重试材料来源保存（第 ${sourceRetry} 次），等待权威确认；讲解可并行生成`;

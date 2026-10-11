@@ -42,6 +42,21 @@ describe("actual pipeline stages", () => {
   const current = (value: Record<string, unknown> = {}) => plan({ id: "plan-stages", state: "running", pageIds: ids, completedPageIds: [], failedPageIds: [], ...value });
   const step = (rows: ReturnType<typeof getImportStageProgress>, id: string) => rows.find(row => row.id === id)!;
 
+
+  it("distinguishes confirmed source registration from partially saved page records without teaching generation", () => {
+    const partial = record({ id: "partial-save", state: "syncing", autoGenerate: false, generationState: "not_requested", pageIds: ids,
+      draftIds: ["draft:p1", "draft:p3", "draft:p1"], sourceRegistration: { state: "confirmed" }, issues: [] });
+    const rows = getImportStageProgress(partial);
+    expect(step(rows, "registration").state).toBe("complete");
+    expect(step(rows, "page_sync")).toMatchObject({ state: "active", count: { completed: 2, total: 4 } });
+    expect(step(getImportStageProgress({ ...partial, state: "failed" }), "page_sync"))
+      .toMatchObject({ state: "failed", count: { completed: 2, total: 4 }, detail: "页面保存未完成，已确认草稿保留" });
+    expect(step(getImportStageProgress({ ...partial, state: "ready", draftIds: ids.map(id => `draft:${id}`) }), "page_sync"))
+      .toMatchObject({ state: "complete", count: { completed: 4, total: 4 } });
+    expect(step(getImportStageProgress({ ...partial, draftIds: undefined }), "page_sync").count).toBeUndefined();
+    expect(getImportStageProgress({ ...partial, autoGenerate: true, generationState: "running" }).some(row => row.id === "page_sync")).toBe(false);
+  });
+
   it("freezes body and save timings before later bridge completion and repeated receipts", () => {
     const event = (id: number, type: string, second: number, payload: Record<string, unknown>) => ({
       id, type, streamId: "timing-job", occurredAt: `2026-10-01T00:00:${String(second).padStart(2, "0")}Z`, payload: { pageId: "p1", ...payload }
@@ -251,7 +266,10 @@ describe("actual pipeline stages", () => {
 
   it("does not turn skipped generation into completed generation or show import steps for a standalone job", () => {
     const skipped = getImportStageProgress({ ...source(), autoGenerate: false, generationState: "not_requested" });
-    expect(skipped.slice(4).every(row => row.state === "skipped" && row.count === undefined)).toBe(true);
+    const teachingRows = skipped.filter(row => ["vision", "generation", "core_save", "bridge"].includes(row.id));
+    expect(teachingRows).toHaveLength(4);
+    expect(teachingRows.every(row => row.state === "skipped" && row.count === undefined)).toBe(true);
+    expect(step(skipped, "page_sync").state).toBe("complete");
     const standalone = getImportStageProgress({ ...source(), id: "generation-job:job-1" });
     expect(standalone.map(row => row.id)).toEqual(["vision", "generation", "core_save", "bridge"]);
   });

@@ -1333,6 +1333,76 @@ describe("Course OS API", () => {
       .toMatchObject({ stage: "completed", pageCount: 2, completedPages: 2 });
   }, 45_000);
 
+
+
+  it.each([false, true])("bounds import page saves, preserves order and recovers confirmed partial drafts after failure=%s", async (failOnce) => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-import-save-workers-"));
+    const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));
+    const generate = vi.fn();
+    const dependencies = createDefaultDependencies(root, readweave, { generateTeachingPackage: generate });
+    dependencies.conversion = { enqueueAndWait: async (input) => {
+      await mkdir(input.outputDir, { recursive: true });
+      const pages = await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+        const imagePath = join(input.outputDir, `page-${index + 1}.svg`);
+        await writeFile(imagePath, `<svg xmlns="http://www.w3.org/2000/svg"><text>Page ${index + 1}</text></svg>`);
+        return { pageNumber: index + 1, title: `Page ${index + 1}`, text: `Source ${index + 1}`, imagePath, imageMediaType: "image/svg+xml" as const };
+      }));
+      return { requestId: input.id, state: "completed" as const, pages, issues: [], startedAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+    } };
+    let releaseSaves!: () => void;
+    let releaseFailure!: () => void;
+    const gate = new Promise<void>(resolve => { releaseSaves = resolve; });
+    const failureGate = new Promise<void>(resolve => { releaseFailure = resolve; });
+    const originalSave = readweave.saveDraft.bind(readweave);
+    const started: number[] = [];
+    let active = 0; let peak = 0; let injectFailure = failOnce; let failureRaised = false;
+    vi.spyOn(readweave, "saveDraft").mockImplementation(async (draft, expected, context, asset) => {
+      started.push(draft.page.pageNumber); active += 1; peak = Math.max(peak, active);
+      try {
+        if (injectFailure && draft.page.pageNumber === 2) {
+          await failureGate; injectFailure = false; failureRaised = true;
+          throw new Error("READWEAVE_ETAPI_400");
+        }
+        await gate;
+        return await originalSave(draft, expected, context, asset);
+      } finally { active -= 1; }
+    });
+    const app = createApp(dependencies);
+    const bytes = Buffer.from("# Six-page import worker fixture");
+    const upload = (key: string) => request(app).post("/api/v1/imports").set("Idempotency-Key", key)
+      .field("autoGenerate", "false").attach("file", bytes, { filename: "workers.md", contentType: "text/markdown" });
+    const accepted = await upload("workers-first").expect(201);
+    await vi.waitFor(() => expect(started).toHaveLength(4), { timeout: 10_000 });
+    expect(peak).toBe(4); expect(active).toBe(4);
+    const inFlight = (await request(app).get(`/api/v1/imports/${accepted.body.id}`).expect(200)).body;
+    expect(inFlight).toMatchObject({ state: "syncing", sourceRegistration: { state: "confirmed" } });
+    await request(app).get("/healthz").expect(200);
+    if (failOnce) {
+      releaseFailure(); await vi.waitFor(() => expect(failureRaised).toBe(true));
+      expect(started).toHaveLength(4);
+      expect((await request(app).get(`/api/v1/imports/${accepted.body.id}`).expect(200)).body.state).toBe("syncing");
+    }
+    releaseSaves(); releaseFailure();
+    const first = await waitForImport(app, accepted.body.id);
+    if (failOnce) {
+      expect(first.state).toBe("failed"); expect(first.issues).toContain("READWEAVE_ETAPI_400");
+      expect([...first.draftIds].sort()).toEqual([0, 2, 3].map(index => `draft:${first.pageIds[index]}`).sort());
+      expect(active).toBe(0); expect([...started].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+      for (const index of [0, 2, 3]) expect(await readweave.getDraftByPage(first.pageIds[index])).toMatchObject({ revision: 1 });
+      const resumed = await upload("workers-resume").expect(200);
+      expect(resumed.body.id).toBe(accepted.body.id);
+    }
+    const ready = await waitForImport(app, accepted.body.id);
+    expect(ready.state, JSON.stringify(ready.issues)).toBe("ready");
+    expect(ready.draftIds).toEqual(ready.pageIds.map((id: string) => `draft:${id}`));
+    expect(peak).toBeLessThanOrEqual(4); expect(active).toBe(0);
+    expect(generate).not.toHaveBeenCalled();
+    expect((await upload(failOnce ? "workers-resume" : "workers-first").expect(200)).body.draftIds).toEqual(ready.draftIds);
+    expect(started.filter(page => page === 1)).toHaveLength(1);
+    expect(started.filter(page => page === 2)).toHaveLength(failOnce ? 2 : 1);
+    expect((await dependencies.operations.read()).imports).toHaveLength(1);
+  }, 45_000);
+
   it("imports an inserted slide through the upload API without rewriting unrelated teaching drafts", async () => {
     const root = await mkdtemp(join(tmpdir(), "course-os-api-incremental-upload-"));
     const readweave = new FileReadWeaveCourseApi(join(root, "readweave.json"));

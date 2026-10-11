@@ -5707,22 +5707,29 @@ async function processImport(importId: string, dependencies: AppDependencies): P
     }
     await dependencies.operations.mutateImports((state, context) => {
       const item = state.imports.find(candidate => candidate.id === importId);
-      if (item) item.sourceRegistration = { state: "confirmed", updatedAt: new Date().toISOString() };
+      if (item) {
+        item.sourceRegistration = { state: "confirmed", updatedAt: new Date().toISOString() };
+        item.draftIds ??= [];
+      }
       context.appendEvent(importId, "readweave.source.confirmed", { materialVersionId, pages: sourceRelease.pageIds.length });
     });
-    const savedDrafts: LessonDraft[] = [];
-    for (const [index, converted] of convertedPages.entries()) {
+    const savedByIndex: Array<LessonDraft | undefined> = new Array(convertedPages.length);
+    let nextSaveIndex = 0;
+    let saveFailed = false;
+    let saveFailure: unknown;
+    const savePage = async (index: number): Promise<void> => {
+      const converted = convertedPages[index]!;
       const page = sourceRelease.pages[index]!;
-      if (!existingSource && record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) continue;
+      if (!existingSource && record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) return;
       const existingDraft = await dependencies.readweave.getDraftByPage(page.id);
       if (existingDraft) {
         if (existingDraft.sourceReleaseId !== materialVersionId || existingDraft.courseId !== course.id) throw new Error("READWEAVE_IMPORT_DRAFT_CONFLICT");
-        savedDrafts.push(existingDraft);
-        continue;
+        savedByIndex[index] = existingDraft;
+        return;
       }
       // Save a real generated lesson instead of synchronizing every empty
       // section first. Preserved incremental content must still be copied.
-      if (record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) continue;
+      if (record.autoGenerate === true && (!prepared || prepared.generationPageIds.includes(page.id))) return;
       const draft: LessonDraft = prepared?.drafts[index] ?? {
         id: `draft:${converted.page.id}`,
         workspaceId: record.workspaceId,
@@ -5748,11 +5755,28 @@ async function processImport(importId: string, dependencies: AppDependencies): P
           bytes: converted.bytes
         }
       );
-      savedDrafts.push(saved);
+      savedByIndex[index] = saved;
       await dependencies.operations.mutateImports((state, context) => {
+        const item = state.imports.find(candidate => candidate.id === importId);
+        if (item) {
+          const confirmed = new Set([...(item.draftIds ?? []), saved.id]);
+          item.draftIds = [...confirmed];
+        }
         context.appendEvent(importId, "readweave.page.synced", { pageId: saved.pageId, draftId: saved.id, revision: saved.revision });
       });
-    }
+    };
+    // Independent pages keep their existing locks and idempotency keys. A
+    // failed save stops new work, while started saves settle before failure.
+    const saveWorker = async (): Promise<void> => {
+      while (!saveFailed && nextSaveIndex < convertedPages.length) {
+        const index = nextSaveIndex++;
+        try { await savePage(index); }
+        catch (error) { if (!saveFailed) saveFailure = error; saveFailed = true; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, convertedPages.length) }, saveWorker));
+    if (saveFailed) throw saveFailure;
+    const savedDrafts = savedByIndex.filter((draft): draft is LessonDraft => draft !== undefined);
     generationPlan ??= record.autoGenerate === true && generationPageIds.length > 0 ? await createGenerationPlan({
       idempotencyKey: `import:${importId}:generation-plan`,
       workspaceId: record.workspaceId,
