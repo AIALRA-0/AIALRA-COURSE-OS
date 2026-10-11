@@ -3753,6 +3753,263 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.countActiveNotesByTitle("Course OS draft record · page-1")).toBe(1);
   });
 
+  it("initial saveDraft joins independent projection labels while preserving image and durable record fields", async () => {
+    const remote = new FakeEtapi();
+    const source = { ...releaseWithPage(), id: "parallel-label-source", lifecycle: "draft_source" as const };
+    const draft = draftFor(source);
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+    const asset = {
+      fileName: "parallel-label-page.png", mediaType: "image/png" as const, bytes,
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    };
+    const sections = [
+      ["source", "00 来源与原始截图"], ["prerequisites", "01 先验知识"],
+      ["objectives", "02 学习目标"], ["explanation", "03 完整讲解"],
+      ["main", "04 主要内容"], ["misconceptions", "05 易错点"],
+      ["assessment", "06 随机问题"], ["qa", "07 QA记录"], ["quality", "08 质量与成本"]
+    ] as const;
+    const pageTitle = "第 001 页 · " + draft.page.title;
+    const recordTitle = "Course OS draft record · " + draft.pageId;
+    type Group = {
+      title: string; wanted: Record<string, string>;
+      started: Set<string>; settled: Set<string>;
+      gate: Promise<void>; release: () => void;
+    };
+    const groups = new Map<string, Group>();
+    let armed = false;
+    const imageWrites: Buffer[] = [];
+    const childCreates: Array<{ id: string; parent: string; title: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const path = url.pathname.replace(/^\/etapi/u, "");
+      if (armed && path === "/create-note" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { parentNoteId: string; title: string };
+        const parent = groups.get(body.parentNoteId);
+        if (parent) expect([...parent.settled].sort()).toEqual(Object.keys(parent.wanted).sort());
+        let wanted: Record<string, string>;
+        const section = sections.find(([, title]) => title === body.title);
+        const block = draft.page.blocks.find(value => value.title === body.title);
+        if (body.title === pageTitle) wanted = { courseOsType: "page", courseOsObjectId: draft.pageId };
+        else if (section) wanted = { courseOsType: "page_" + section[0], courseOsPageId: draft.pageId };
+        else if (body.title === asset.fileName) wanted = {
+          courseOsType: "source_page_image", courseOsPageId: draft.pageId, courseOsSourceHash: asset.sha256
+        };
+        else if (block) wanted = {
+          courseOsType: "explanation_block", courseOsObjectId: block.id, courseOsPageId: draft.pageId
+        };
+        else if (body.title === recordTitle) wanted = {
+          courseOsType: "draft_record", courseOsDraftRecordPageId: draft.pageId
+        };
+        else throw new Error("Unexpected new note during initial draft save: " + body.title);
+        const response = await remote.fetch(input, init);
+        const created = await response.clone().json() as { note: { noteId: string } };
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        groups.set(created.note.noteId, {
+          title: body.title, wanted, started: new Set(), settled: new Set(), gate, release
+        });
+        childCreates.push({ id: created.note.noteId, parent: body.parentNoteId, title: body.title });
+        return response;
+      }
+      if (armed && path === "/attributes" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { noteId: string; name: string; value: string };
+        const group = groups.get(body.noteId);
+        if (group) {
+          expect(body.value).toBe(group.wanted[body.name]);
+          expect(group.started.has(body.name)).toBe(false);
+          group.started.add(body.name);
+          // No label can settle until ALL siblings have entered the fetch hook.
+          // A serialized implementation cannot pass this barrier.
+          if (group.started.size === Object.keys(group.wanted).length) group.release();
+          // Durable-record labels retain their existing recovery order.
+          if (group.title !== recordTitle) await group.gate;
+          const response = await remote.fetch(input, init);
+          group.settled.add(body.name);
+          return response;
+        }
+      }
+      if (armed && init?.method === "PUT" && new Headers(init.headers).get("X-Course-Asset-Type") === "image/png") {
+        const imageId = /^\/notes\/([^/]+)\/content$/u.exec(path)![1]!;
+        const group = groups.get(imageId)!;
+        expect([...group.settled].sort()).toEqual(Object.keys(group.wanted).sort());
+        imageWrites.push(Buffer.from(init.body as Uint8Array));
+      }
+      return remote.fetch(input, init);
+    };
+    const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl };
+    const api = new EtapiReadWeaveCourseApi(config);
+    await api.registerDraftSource(source, { ...context, idempotencyKey: "parallel-label-source" });
+    const write = { ...context, idempotencyKey: "parallel-label-initial-draft" };
+    armed = true;
+    let saved!: LessonDraft;
+    try {
+      saved = await api.saveDraft(draft, 0, write, asset);
+    } finally {
+      for (const group of groups.values()) group.release();
+      armed = false;
+    }
+    expect(groups.size).toBe(1 + sections.length + 1 + draft.page.blocks.length + 1);
+    for (const group of groups.values()) {
+      expect([...group.started].sort()).toEqual(Object.keys(group.wanted).sort());
+      expect([...group.settled].sort()).toEqual(Object.keys(group.wanted).sort());
+    }
+    expect(imageWrites).toHaveLength(1);
+    expect(imageWrites[0]).toEqual(bytes);
+    expect(remote.countNotesByLabel("courseOsSourceHash", asset.sha256)).toBe(1);
+    expect(saved).toMatchObject({
+      id: draft.id, pageId: draft.pageId, sourceReleaseId: source.id, revision: 1,
+      contentHash: sha256Text(JSON.stringify(draft.page))
+    });
+    expect(saved.page).toStrictEqual(draft.page);
+    const receipt = decodeReadWeaveStateContent(remote.contentByTitle(recordTitle)) as {
+      draft: LessonDraft; projection: {
+        pageNoteId: string; pageOverviewHash: string;
+        sourceNoteId: string; atomsNoteId: string;
+        sectionNoteIds: Record<string, string>;
+        blockNoteIds: Record<string, string>; blockHashes: Record<string, string>;
+        sourceImageNoteId: string; sourceImageFileName: string; sourceImageHash: string;
+      };
+      costEntries: GenerationCostEntry[]; conflicts: CourseConflict[];
+      idempotency: Record<string, { kind: string; objectId: string }>;
+    };
+    expect(receipt.draft).toStrictEqual(saved);
+    expect(receipt.costEntries).toEqual([]);
+    expect(receipt.conflicts).toEqual([]);
+    expect(receipt.idempotency[write.idempotencyKey]).toEqual({ kind: "draft", objectId: draft.id });
+    expect(Object.keys(receipt.projection.sectionNoteIds).sort()).toEqual(sections.map(([key]) => key).sort());
+    for (const [key, title] of sections) {
+      expect(receipt.projection.sectionNoteIds[key]).toBe(remote.noteIdByTitle(title));
+    }
+    expect(receipt.projection.sourceNoteId).toBe(receipt.projection.sectionNoteIds.source);
+    expect(receipt.projection.atomsNoteId).toBe(receipt.projection.sectionNoteIds.quality);
+    expect(receipt.projection.sourceImageHash).toBe(asset.sha256);
+    expect(receipt.projection.sourceImageFileName).toBe(asset.fileName);
+    expect(receipt.projection.sourceImageNoteId).toBe(remote.noteIdByTitle(asset.fileName));
+    expect(receipt.projection.pageNoteId).toBe(saved.readweaveNoteId);
+    expect(receipt.projection.pageOverviewHash).toBe(sha256Text(remote.contentByTitle(pageTitle)));
+    expect(remote.contentByTitle(pageTitle)).toContain('api/images/' + receipt.projection.sourceImageNoteId);
+    expect(remote.contentByTitle(sections[0][1])).toContain('api/images/' + receipt.projection.sourceImageNoteId);
+    for (const block of draft.page.blocks) {
+      expect(receipt.projection.blockNoteIds[block.id]).toBe(remote.noteIdByTitle(block.title));
+      expect(receipt.projection.blockHashes[block.id]).toBe(sha256Text(block.markdown));
+      expect(remote.contentByTitle(block.title)).toBe(block.markdown);
+    }
+    expect(childCreates.map(value => value.title)).toEqual([
+      pageTitle, ...sections.map(([, title]) => title), asset.fileName,
+      ...draft.page.blocks.map(block => block.title), recordTitle
+    ]);
+    const reopened = new EtapiReadWeaveCourseApi({ ...config, fetchImpl: remote.fetch });
+    expect(await reopened.getDraftByPage(draft.pageId)).toStrictEqual(saved);
+  });
+
+  it("an initial image-label failure waits for both slow labels and prevents dependent steps and durable record creation", async () => {
+    const remote = new FakeEtapi();
+    const source = { ...releaseWithPage(), id: "settled-label-source", lifecycle: "draft_source" as const };
+    const draft = draftFor(source);
+    const asset = {
+      fileName: "settled-label-page.png", mediaType: "image/png" as const,
+      bytes: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), sha256: "synthetic-image-hash"
+    };
+    const deferred = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>(done => { resolve = done; });
+      return { promise, resolve };
+    };
+    const allStarted = deferred();
+    const slowPage = deferred();
+    const slowHash = deferred();
+    const pageFinished = deferred();
+    const namesStarted = new Set<string>();
+    const namesFinished = new Set<string>();
+    const creates: string[] = [];
+    let imageId = "";
+    let armed = false;
+    let imagePuts = 0;
+    let saveSettled = false;
+    let settledBeforeSiblings = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const path = new URL(typeof input === "string" || input instanceof URL ? input : input.url)
+        .pathname.replace(/^\/etapi/u, "");
+      if (armed && path === "/create-note" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { title: string };
+        creates.push(body.title);
+        const response = await remote.fetch(input, init);
+        if (body.title === asset.fileName) {
+          imageId = ((await response.clone().json()) as { note: { noteId: string } }).note.noteId;
+        }
+        return response;
+      }
+      if (armed && path === "/attributes" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { noteId: string; name: string };
+        if (body.noteId === imageId) {
+          namesStarted.add(body.name);
+          if (namesStarted.size === 3) allStarted.resolve();
+          if (body.name === "courseOsType") return new Response("injected label failure", { status: 400 });
+          const gate = body.name === "courseOsPageId" ? slowPage : slowHash;
+          await gate.promise;
+          const response = await remote.fetch(input, init);
+          namesFinished.add(body.name);
+          if (body.name === "courseOsPageId") pageFinished.resolve();
+          return response;
+        }
+      }
+      if (armed && init?.method === "PUT" && path === "/notes/" + imageId + "/content") imagePuts += 1;
+      return remote.fetch(input, init);
+    };
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl });
+    await api.registerDraftSource(source, { ...context, idempotencyKey: "settled-label-source" });
+    armed = true;
+    // Attach both handlers immediately: never leave an early rejection unhandled.
+    const outcome = api.saveDraft(draft, 0, { ...context, idempotencyKey: "settled-label-draft" }, asset).then(
+      value => { saveSettled = true; return { ok: true as const, value }; },
+      error => {
+        saveSettled = true;
+        settledBeforeSiblings = namesFinished.size !== 2;
+        return { ok: false as const, error: error as unknown };
+      }
+    );
+    let result!: Awaited<typeof outcome>;
+    try {
+      await allStarted.promise;
+      // Event-loop-turn barrier drains promise rejection processing while the
+      // slow fetches remain blocked. No sleep or elapsed-time assertion.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect([...namesStarted].sort()).toEqual(["courseOsType", "courseOsPageId", "courseOsSourceHash"].sort());
+      expect(saveSettled).toBe(false);
+      expect(creates[creates.length - 1]).toBe(asset.fileName);
+      expect(imagePuts).toBe(0);
+      expect(remote.countActiveNotesByTitle("Course OS draft record · " + draft.pageId)).toBe(0);
+
+      slowPage.resolve();
+      await pageFinished.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect([...namesFinished]).toEqual(["courseOsPageId"]);
+      expect(saveSettled).toBe(false);
+      expect(creates[creates.length - 1]).toBe(asset.fileName);
+      expect(imagePuts).toBe(0);
+    } finally {
+      slowPage.resolve();
+      slowHash.resolve();
+      result = await outcome;
+      armed = false;
+    }
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected label failure, got a saved draft");
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toContain("READWEAVE_ETAPI_400");
+    expect(settledBeforeSiblings).toBe(false);
+    expect([...namesFinished].sort()).toEqual(["courseOsPageId", "courseOsSourceHash"].sort());
+    expect(imagePuts).toBe(0);
+    expect(creates).toEqual([
+      "第 001 页 · " + draft.page.title,
+      "00 来源与原始截图", "01 先验知识", "02 学习目标", "03 完整讲解", "04 主要内容",
+      "05 易错点", "06 随机问题", "07 QA记录", "08 质量与成本", asset.fileName
+    ]);
+    expect(creates).not.toContain("Course OS draft record · " + draft.pageId);
+    for (const block of draft.page.blocks) expect(creates).not.toContain(block.title);
+    expect(remote.countActiveNotesByTitle("Course OS draft record · " + draft.pageId)).toBe(0);
+  });
+
   it("creates newly added block notes in order and stops creating after a partial failure", async () => {
     const remote = new FakeEtapi();
     let trackBlockCreates = false;

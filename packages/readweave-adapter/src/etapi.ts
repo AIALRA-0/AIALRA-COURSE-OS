@@ -2868,10 +2868,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const pageNote = await this.createNote(moduleNoteId, `第 ${String(draft.page.pageNumber).padStart(3, "0")} 页 · ${draft.page.title}`, initialOverview, "text", undefined, {
       courseOsType: "page",
       courseOsObjectId: draft.pageId
-    });
+    }, true);
     const sectionNoteIds = {} as Record<SectionKey, string>;
     for (const [key, title] of SECTION_DEFINITIONS) {
-      sectionNoteIds[key] = (await this.createNote(pageNote.noteId, title, key === "source" ? "" : this.renderSectionOverview(draft, key), "text", undefined, { courseOsType: `page_${key}`, courseOsPageId: draft.pageId })).noteId;
+      sectionNoteIds[key] = (await this.createNote(pageNote.noteId, title, key === "source" ? "" : this.renderSectionOverview(draft, key), "text", undefined, { courseOsType: `page_${key}`, courseOsPageId: draft.pageId }, true)).noteId;
     }
     let sourceImageNoteId: string | undefined;
     if (sourceAsset) {
@@ -2879,7 +2879,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         courseOsType: "source_page_image",
         courseOsPageId: draft.pageId,
         courseOsSourceHash: sourceAsset.sha256
-      });
+      }, true);
       await this.putBinaryContent(sourceImage.noteId, sourceAsset.bytes, sourceAsset.mediaType);
       sourceImageNoteId = sourceImage.noteId;
     }
@@ -2893,7 +2893,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         courseOsType: "explanation_block",
         courseOsObjectId: block.id,
         courseOsPageId: draft.pageId
-      });
+      }, true);
       blockNoteIds[block.id] = note.noteId;
       blockHashes[block.id] = sha256(block.markdown);
     }
@@ -4934,8 +4934,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       });
     };
     if (parallelLabels) {
-      // Only the three independent answer-note labels use this path. Settle
-      // every request before returning a failure so a retry cannot race them.
+      // Explicit callers use this for a new note's two or three independent
+      // labels. Settle every request before failure so later steps or retries
+      // cannot race an outstanding label write.
       const results = await Promise.allSettled(Object.entries(labels).map(addLabel));
       const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failed) throw failed.reason;

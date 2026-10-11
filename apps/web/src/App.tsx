@@ -310,6 +310,14 @@ export function normalizeSidebarWidth(savedValue: string | null): number {
   return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH ? clampSidebarWidth(saved) : SIDEBAR_DEFAULT_WIDTH;
 }
 
+export function treeNodeReleaseId(node: CourseTreeNode, releases: CourseRelease[]): string | undefined {
+  // A tree pointer remains authoritative even when this tab's index is older.
+  if (node.currentReleaseId || node.releaseId) return node.currentReleaseId || node.releaseId;
+  if (node.kind !== "course") return undefined;
+  const candidates = releases.filter(item => item.courseId === node.id).sort(compareReleaseRecency);
+  return candidates.find(item => item.lifecycle !== "draft_source")?.id ?? candidates[0]?.id;
+}
+
 export function sourceReleasesForCourse(releases: CourseRelease[], courseId: string, courses?: CourseTreeNode[]): CourseRelease[] {
   if (!courseId) return [];
   const selected = courses?.find(course => course.id === courseId);
@@ -758,7 +766,10 @@ export function App() {
         setTaskRecords(records);
         const newlyReady = records.filter((record) => record.state === "ready" && !metadataReadyImports.current.has(record.id));
         newlyReady.forEach((record) => metadataReadyImports.current.add(record.id));
-        if (!initialPoll && newlyReady.length) void refreshMetadata().catch(() => undefined);
+        if (!initialPoll && newlyReady.length) {
+          setReleaseIndexReload(value => value + 1);
+          void refreshMetadata().catch(() => undefined);
+        }
         if (records.some((record) => ["queued", "running"].includes(getImportTaskState(record)))) nextPollMs = 4000;
       } catch {
         // Keep the last visible task list during a transient connection failure.
@@ -893,10 +904,14 @@ export function App() {
   };
 
   const handleImported = (record: ImportRecord) => {
-    Promise.all([api.releases(), refreshMetadata()]).then(([items]) => {
-      setReleases(items);
-      setTaskRecords((current) => current.map((item) => item.id === record.id ? record : item));
-    }).catch(() => undefined);
+    const indexRead = readOnce(releaseIndexRequests.current, "release-index", signal => api.releases({ signal }));
+    void indexRead.promise.then(items => {
+      setReleaseIndexError("");
+      setReleases(current => mergeReleaseIndex(current, items, detailedReleaseIds.current));
+      setTaskRecords(current => current.map(item => item.id === record.id ? record : item));
+    }).catch(reason => setReleaseIndexError(reason instanceof Error ? reason.message : "无法读取课程列表"))
+      .finally(indexRead.release);
+    void refreshMetadata().catch(() => undefined);
   };
 
   const openImported = async (record: ImportRecord, nextMode: "learn" | "studio" = "learn") => {
@@ -1012,23 +1027,30 @@ export function App() {
   }, [tree, releases]);
 
   const openTreeNode = (node: CourseTreeNode, nextMode: "learn" | "studio", restoreReadingPosition = false) => {
-    const candidateRelease = [node.currentReleaseId, node.releaseId]
-      .filter((id): id is string => Boolean(id))
-      .map((id) => releases.find((item) => item.id === id))
-      .find((item): item is CourseRelease => Boolean(item))
-      ?? (node.kind === "course"
-        ? [...releases].filter((item) => item.courseId === node.id && item.lifecycle !== "draft_source").sort(compareReleaseRecency)[0]
-          ?? [...releases].filter((item) => item.courseId === node.id).sort(compareReleaseRecency)[0]
-        : undefined);
+    const targetId = treeNodeReleaseId(node, releases);
+    const candidateRelease = releases.find(item => item.id === targetId);
     const savedPageId = candidateRelease && restoreReadingPosition
       ? localStorage.getItem(`course-os-last-page:${candidateRelease.id}`) : undefined;
     const candidatePage = candidateRelease?.pages.find(item => item.id === savedPageId) ?? candidateRelease?.pages[0];
-    if (!candidateRelease || !candidatePage) {
+    if (!targetId || (candidateRelease && !candidatePage)) {
       setToast("这个材料还没有可读取的页面");
       return;
     }
-    selectPage(candidateRelease.id, candidatePage.id);
+    // Select intent now; the existing per-ID read owns loading, errors and
+    // cancellation. A late read must never navigate over a newer selection.
+    trackImport(undefined);
+    const index = candidatePage ? candidateRelease!.pages.indexOf(candidatePage) : 0;
+    initialNavigation.current = { releaseId: targetId, pageIndex: index, hasExplicitPage: Boolean(candidatePage), mode: nextMode };
+    setError("");
+    setReleaseId(targetId);
+    setPageIndex(index);
     setMode(nextMode);
+    const navigation = new URLSearchParams(location.hash.slice(1));
+    navigation.set("release", targetId);
+    navigation.set("mode", nextMode);
+    if (candidatePage) navigation.set("page", String(index + 1));
+    else navigation.delete("page");
+    location.hash = navigation.toString();
   };
 
   const reorderTreeNode = async (node: CourseTreeNode, direction: "up" | "down") => {

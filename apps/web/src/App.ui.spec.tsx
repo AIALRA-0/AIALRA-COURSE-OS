@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { CourseRelease, LearningSession, LessonDraft, PageLesson, PdfLayoutInspection, WorkspaceTree } from "@course-os/contracts";
+import type { CourseRelease, CourseTreeNode, LearningSession, LessonDraft, PageLesson, PdfLayoutInspection, WorkspaceTree } from "@course-os/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "./api.js";
 import { PdfLayoutPreview } from "./PdfLayoutPreview.js";
 import { StudioWorkspace } from "./StudioWorkspace.js";
 import type { ImportTaskSummary } from "./types.js";
-import { beginCandidatePreviewLoad, beginFormalPageLoad, beginImportCostRead, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, type CandidatePreviewState, type SharedReadLease } from "./App.js";
+import { beginCandidatePreviewLoad, beginFormalPageLoad, beginImportCostRead, buildGlobalSearchResults, candidatePreviewAfterReadFailure, currentMaterialReleases, defaultRelease, flushNextSessionPatch, formalPageAfterReadFailure, isGlobalSearchShortcut, isReadyCandidateSnapshot, isTerminalPageReadError, isUnresolvedTaskFailure, mergeReleaseIndex, normalizeSidebarWidth, openVerifiedReadWeaveDeepLink, rememberPageSnapshot, pageCacheAfterPrefetch, pageCacheAfterReadFailure, pageSnapshotCacheKey, isCurrentPageSnapshot, pageSnapshotResponseState, readOnce, resolveActiveImportId, SIDEBAR_DEFAULT_WIDTH, sourceReleasesForCourse, StartupReadNotices, treeNodeReleaseId, type CandidatePreviewState, type SharedReadLease } from "./App.js";
 
 describe("workspace tree and incremental import UI inputs", () => {
   it("restores a readable default sidebar width for missing or invalid saved values", () => {
@@ -367,6 +367,34 @@ describe("saved lesson navigation", () => {
 
     const omittedIndex = mergeReleaseIndex(loaded, [other], new Set(["requested"]));
     expect(omittedIndex.find((item) => item.id === "requested")).toBe(detailed);
+  });
+
+  it("uses a new tree version even before this tab receives its release index", () => {
+    const old = { id: "old", courseId: "course-a", lifecycle: "published", version: 1 } as CourseRelease;
+    const node = { id: "material-a", kind: "material", currentReleaseId: "new", releaseId: "old" } as CourseTreeNode;
+    expect(treeNodeReleaseId(node, [old])).toBe("new");
+    expect(treeNodeReleaseId(node, [])).toBe("new");
+    expect(treeNodeReleaseId({ ...node, currentReleaseId: undefined }, [])).toBe("old");
+    expect(treeNodeReleaseId({ ...node, currentReleaseId: undefined, releaseId: undefined }, [old])).toBeUndefined();
+    const detailed = { ...old, pages: [{ id: "old:25" }] } as CourseRelease;
+    const incoming = { ...old, id: "new", pages: [{ id: "new:1" }, { id: "new:2" }] } as CourseRelease;
+    const merged = mergeReleaseIndex([detailed], [incoming], new Set(["old"]));
+    expect(merged.find(item => item.id === "old")).toBe(detailed);
+    expect(merged.find(item => item.id === treeNodeReleaseId(node, merged))?.pages[1]?.id).toBe("new:2");
+  });
+
+  it("keeps course fallback scoped and never treats a folder as an old material", () => {
+    const releases = [
+      { id: "source", courseId: "course-a", lifecycle: "draft_source", version: 9, publishedAt: "2026-03-01" },
+      { id: "published", courseId: "course-a", lifecycle: "published", version: 2, publishedAt: "2026-02-01" },
+      { id: "unrelated", courseId: "course-b", lifecycle: "published", version: 99, publishedAt: "2026-04-01" }
+    ] as CourseRelease[];
+    const node = { id: "course-a", kind: "course" } as CourseTreeNode;
+    expect(treeNodeReleaseId(node, releases)).toBe("published");
+    expect(treeNodeReleaseId(node, releases.filter(item => item.lifecycle === "draft_source"))).toBe("source");
+    expect(treeNodeReleaseId({ ...node, currentReleaseId: "new" }, releases)).toBe("new");
+    expect(treeNodeReleaseId({ ...node, kind: "module" }, releases)).toBeUndefined();
+    expect(treeNodeReleaseId({ ...node, id: "empty-course" }, releases)).toBeUndefined();
   });
 
   it("uses each material's exact current release pointer and does not filter readable drafts by lifecycle", () => {
