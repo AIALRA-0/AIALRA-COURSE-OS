@@ -62,7 +62,7 @@ import { applyAttempt, claimGenerationLease, hashManifest, isGenerationLeaseCurr
 import { formatMisconception, calculateCoverage, evaluateReleaseClosure, normalizeAdjacentTeachingHeadings, normalizeBareMathSymbols, normalizeEmbeddedDefinitionAbbreviation, normalizeEnglishTermCase, normalizeHumanReadableChineseMarkdown, normalizePackedTeachingProse as normalizeSharedPackedProse, normalizeLegacyMathDelimiters, normalizePriorDefinitionAbbreviation, normalizeSourceLabelCodeSpans, normalizeTeachingBridgeBlocks, quoteContextualSourceLabels, quoteRepeatedSourceLabels, validateMarkdownMath, validatePageForPublication, validatePageMath, validateTex } from "@course-os/quality";
 import { classifyGenerationFailure, describeGenerationError } from "./generation-errors.js";
 import type { CourseReleaseIndex, ReadWeaveCourseApi, TrashNativeErasePlan } from "@course-os/readweave-adapter";
-import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, filterDismissedTasks, type FailedTaskSelection } from "@course-os/storage";
+import { ContentAddressedStore, inspectUpload, selectFailedTasks, dismissFailedTasks, isTaskDismissed, readTaskCleanup, type FailedTaskSelection } from "@course-os/storage";
 import { buildModelImageDataUrl } from "./image-payload.js";
 import { OperationalStore, PostgresOperationalStore, type GenerationJobMutationContext, type GenerationTaskMutationState, type OperationalState } from "./store.js";
 import { modelRoutePolicyForRuntime } from "./provider-settings.js";
@@ -1551,8 +1551,7 @@ export function createApp(dependencies: AppDependencies): Express {
       const rawSnapshot = await dependencies.operations.readTaskIndex();
       if (response.headersSent || response.writableEnded || response.destroyed) return;
       const cleanupState = { ...rawSnapshot, idempotency: rawSnapshot.taskDismissals ?? {} };
-      const snapshot = filterDismissedTasks(cleanupState, workspaceId);
-      const cleanupGroups = selectFailedTasks(cleanupState, workspaceId);
+      const { snapshot, failedTasks: cleanupGroups } = readTaskCleanup(cleanupState, workspaceId);
       const imports = snapshot.imports
         .filter((item) => item.workspaceId === workspaceId)
         .map((item) => {

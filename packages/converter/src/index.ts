@@ -308,7 +308,7 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
     const localPptx = join(outputDir, "source.pptx");
     await writeFile(localPptx, await readFile(sourcePath), { flag: "wx" });
     const userInstallation = pathToFileURL(join(outputDir, "libreoffice-profile")).href;
-    await runProcess(binaries.soffice, [`-env:UserInstallation=${userInstallation}`, "--headless", "--nologo", "--nodefault", "--nolockcheck", "--convert-to", "pdf", "--outdir", outputDir, localPptx], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
+    await runProcess(binaries.soffice, [`-env:UserInstallation=${userInstallation}`, "--headless", "--nologo", "--nodefault", "--nolockcheck", "--convert-to", 'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"}}', "--outdir", outputDir, localPptx], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
     pdfPath = join(outputDir, "source.pdf");
     await assertFile(pdfPath, "CONVERSION_PPTX_PDF_MISSING");
   }
@@ -316,6 +316,7 @@ async function convertPagedDocument(kind: "pdf" | "pptx", sourcePath: string, ou
   const info = await runProcess(binaries.pdfinfo, [pdfPath], { cwd: outputDir, timeoutMs: PROCESS_TIMEOUT_MS });
   const pageCount = parsePageCount(info.stdout);
   if (pageCount < 1 || pageCount > MAX_PAGES) throw new Error("CONVERSION_PAGE_COUNT_INVALID");
+  if (pptxTitles.length && pageCount !== pptxTitles.length) throw new Error("CONVERSION_PPTX_SLIDE_COUNT_MISMATCH");
   await report("rendering_pages", { pageCount, completedPages: 0 });
   const imagePrefix = join(outputDir, "page");
   const textPath = join(outputDir, "document.txt");

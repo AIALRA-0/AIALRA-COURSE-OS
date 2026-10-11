@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { dismissFailedTasks, filterDismissedTasks, isTaskDismissed, pickTaskDismissals, selectFailedTasks, writeJsonAtomic,
+import { dismissFailedTasks, filterDismissedTasks, isTaskDismissed, readTaskCleanup, pickTaskDismissals, selectFailedTasks, writeJsonAtomic,
   type CleanupTaskRecord, type TaskCleanupState, type TaskDismissalContext } from "./index.js";
 
 const at = "2026-10-03T00:00:00.000Z";
@@ -121,5 +121,39 @@ describe("persistent failed-task dismissal", () => {
     await dismissFailedTasks(s, [selected[0]!], context);
     expect(selectFailedTasks(s, "personal")).toHaveLength(1);
     await expect(dismissFailedTasks(s, [selected[1]!], context)).rejects.toThrow("TASK_DISMISS_IDEMPOTENCY_CONFLICT");
+  });
+});
+
+describe("task-list cleanup read", () => {
+  it("retains the list, failure fingerprints and workspace fences across dismissal and a new attempt", async () => {
+    const s = state();
+    s.jobs.push(task("independent-active", { state: "pending_sync" }), task("other-workspace", { workspaceId: "other" }));
+    const verify = () => {
+      for (const workspace of ["personal", "other"]) {
+        const before = structuredClone(s);
+        expect(readTaskCleanup(s, workspace)).toEqual({ snapshot: filterDismissedTasks(s, workspace), failedTasks: selectFailedTasks(s, workspace) });
+        expect(s).toEqual(before);
+      }
+    };
+    verify();
+    await dismissFailedTasks(s, selectFailedTasks(s, "personal"), context);
+    verify();
+    expect(readTaskCleanup(s, "personal").snapshot.jobs.map(job => job.id)).toContain("independent-active");
+    s.jobs[0]!.attempt = 2;
+    verify();
+    expect(readTaskCleanup(s, "personal").failedTasks).toHaveLength(1);
+  });
+
+  it("does not read fingerprint payloads from thousands of completed tasks", () => {
+    const s = state();
+    for (let i = 0; i < 2043; i++) {
+      const job = task(`finished-${i}`, { state: "completed" });
+      Object.defineProperty(job, "pageIds", { get: () => { throw new Error("Completed task should not be fingerprinted"); } });
+      s.jobs.push(job);
+    }
+    const result = readTaskCleanup(s, "personal");
+    expect(result.failedTasks).toHaveLength(1);
+    expect(result.snapshot).toBe(s);
+    expect(result.snapshot.jobs).toHaveLength(2044);
   });
 });

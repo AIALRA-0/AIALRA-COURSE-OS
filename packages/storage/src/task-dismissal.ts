@@ -164,8 +164,11 @@ function describe(members: Entry[]): FailedTaskGroup {
 }
 
 function failed(members: Entry[]): boolean {
-  const root = describe(members);
-  const r = members.find(entry => key(entry.ref) === key(root))!.record;
+  const representative = members.find(entry => entry.ref.kind === "import")
+    ?? members.find(entry => entry.ref.kind === "plan" && !entry.record.retryOfPlanId)
+    ?? members.find(entry => entry.ref.kind === "plan") ?? members[0]!;
+  const root = representative.ref;
+  const r = representative.record;
   return r.state === "failed" || (root.kind === "import" && r.state === "rejected") || (root.kind === "import" && r.state === "ready" && r.generationState === "failed")
     || (root.kind === "import" && r.state === "ready" && members.some(entry => entry.ref.kind === "plan" && entry.record.state === "failed"));
 }
@@ -182,6 +185,25 @@ export function selectFailedTasks(state: TaskCleanupState, workspaceId: string):
   const saved = markers(state);
   return groups(state).filter(members => members.every(entry => entry.record.workspaceId === workspaceId) && failed(members))
     .map(describe).filter(task => saved[markerKey(workspaceId, task)]?.objectId !== task.fingerprint);
+}
+
+/** One relationship traversal per task-list request, with the existing dismissal fences. */
+export function readTaskCleanup<T extends TaskCleanupState>(state: T, workspaceId: string): { snapshot: T; failedTasks: FailedTaskGroup[] } {
+  const saved = markers(state);
+  const hidden = new Set<string>();
+  const failedTasks: FailedTaskGroup[] = [];
+  for (const members of groups(state)) {
+    if (!members.every(entry => entry.record.workspaceId === workspaceId) || !failed(members)) continue;
+    const task = describe(members);
+    if (saved[markerKey(workspaceId, task)]?.objectId !== task.fingerprint) failedTasks.push(task);
+    for (const ref of task.members) if (saved[markerKey(workspaceId, ref)]?.kind === "taskdismissal"
+      && saved[markerKey(workspaceId, ref)]?.objectId === task.fingerprint) hidden.add(key(ref));
+  }
+  const snapshot = hidden.size ? { ...state,
+    imports: state.imports.filter(record => !hidden.has(key({ kind: "import", id: record.id }))),
+    generationPlans: state.generationPlans.filter(record => !hidden.has(key({ kind: "plan", id: record.id }))),
+    jobs: state.jobs.filter(record => !hidden.has(key({ kind: "job", id: record.id }))) } as T : state;
+  return { snapshot, failedTasks };
 }
 
 /** Use for task list, history and search projections; retain direct entity/detail reads. */

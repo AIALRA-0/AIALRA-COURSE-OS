@@ -113,7 +113,7 @@ describe("offline material converter", () => {
     let settled = false;
     await writeFile(sourcePath, kind === "pdf" ? "%PDF-1.7" : "PK synthetic pptx");
     const runProcess: ProcessRunner = async (command, args, options) => {
-      if (command === "python") return { stdout: JSON.stringify({ slideTitles: ["Slide title"] }), stderr: "" };
+      if (command === "python") return { stdout: JSON.stringify({ slideTitles: Array.from({ length: 10 }, (_, i) => i === 0 ? "Slide title" : `Slide ${i + 1}`) }), stderr: "" };
       if (command === "soffice") await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7");
       if (command === "pdfinfo") {
         events.push("counted");
@@ -359,3 +359,30 @@ function deferred() {
   const promise = new Promise<void>((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
 }
+
+describe("PPTX slide coverage", () => {
+  it("rejects an export that silently skips source slides before any generation-ready pages", async () => {
+    const root = await mkdtemp(join(tmpdir(), "course-os-hidden-slide-"));
+    const sourcePath = join(root, "hidden.pptx");
+    await writeFile(sourcePath, "PK synthetic pptx");
+    let exportHidden = false;
+    let rendered = false;
+    const runProcess: ProcessRunner = async (command, args, options) => {
+      if (command === "python") return { stdout: JSON.stringify({ slideTitles: ["Visible", "Hidden", "Visible after hidden"] }), stderr: "" };
+      if (command === "soffice") {
+        const filter = args[args.indexOf("--convert-to") + 1]!;
+        exportHidden = JSON.parse(filter.slice(filter.indexOf("{")).trim()).ExportHiddenSlides.value === "true";
+        await writeFile(join(options.cwd, "source.pdf"), "%PDF-1.7");
+      }
+      if (command === "pdfinfo") return { stdout: "Pages: 2", stderr: "" };
+      if (command === "pdftoppm") rendered = true;
+      return { stdout: "", stderr: "" };
+    };
+    try {
+      await expect(convertMaterial({ id: "hidden", sourcePath, originalName: "hidden.pptx", kind: "pptx", outputDir: join(root, "out"), createdAt: new Date().toISOString() },
+        { runProcess, binaries: testBinaries() })).rejects.toThrow("CONVERSION_PPTX_SLIDE_COUNT_MISMATCH");
+      expect(exportHidden).toBe(true);
+      expect(rendered).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
