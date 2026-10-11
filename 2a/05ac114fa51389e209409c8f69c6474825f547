@@ -1,0 +1,21 @@
+packages/readweave-adapter/src/state-decoder.spec.ts
+  s_e8850ef125fb32::t_185914854c696e 1-2,46-72
+packages/readweave-adapter/src/state-decoder.ts
+  s_e8850ef125fb32::t_4f730554d53dd6 2-3,15-19,68-76,88,98-100,116-117,133,143-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2a05ac114fa51389e209409c8f69c6474825f547",
+  "prompts": {},
+  "sessions": {
+    "s_e8850ef125fb32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0457f-8774-7b32-a516-a974107d6ab1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "AIALRA-0 <71060413+AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
