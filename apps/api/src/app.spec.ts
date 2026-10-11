@@ -4350,3 +4350,39 @@ function testGenerationCost(jobId: string, release: CourseRelease, pageId: strin
     createdAt: "2026-09-24T00:00:00.000Z"
   };
 }
+
+describe("PA18 fee pipeline API scheduling hints", () => {
+  const record = (): ImportRecord => ({ id: "fee-import", workspaceId: "personal", originalName: "synthetic.pdf",
+    mediaType: "application/pdf", kind: "pdf", sizeBytes: 1, sha256: "synthetic", casPath: "/synthetic.pdf",
+    source: "user_upload", license: "private_course_material", sensitivity: "private", state: "ready", issues: [],
+    createdAt: "2026-10-11T00:00:00Z", materialVersionId: "material-version:fee-import", pageIds: ["saved-1", "saved-2"] });
+  it("uses only saved exact workspace/version import IDs and ignores HTTP hint injection", async () => {
+    const { app, dependencies } = await seededApp();
+    const lookup = vi.spyOn(dependencies.operations, "getImport").mockResolvedValue(record());
+    const list = vi.spyOn(dependencies.readweave, "listCostEntries").mockResolvedValue([]);
+    await request(app).get("/api/v1/costs?materialVersionId=material-version:fee-import&pageIdsHint=foreign&pageIdHint=evil").expect(200);
+    expect(lookup).toHaveBeenCalledWith("fee-import", "personal");
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ materialVersionId: "material-version:fee-import" }), ["saved-1", "saved-2"]);
+    await request(app).get("/api/v1/costs?pageIdsHint=foreign").expect(200);
+    expect(lookup).toHaveBeenCalledTimes(1); expect(list.mock.calls[1]![1]).toBeUndefined();
+  });
+  it.each(["missing", "foreign", "version", "id", "failure"])("optional import lookup %s falls back to the original read", async mode => {
+    const { app, dependencies } = await seededApp(); const saved = record();
+    if (mode === "foreign") saved.workspaceId = "foreign";
+    if (mode === "version") saved.materialVersionId = "material-version:other";
+    if (mode === "id") saved.id = "other";
+    const lookup = vi.spyOn(dependencies.operations, "getImport");
+    if (mode === "failure") lookup.mockRejectedValue(new Error("synthetic lookup failure"));
+    else lookup.mockResolvedValue(mode === "missing" ? undefined : saved);
+    const list = vi.spyOn(dependencies.readweave, "listCostEntries").mockResolvedValue([]);
+    await request(app).get("/api/v1/costs?materialVersionId=material-version:fee-import").expect(200);
+    expect(list).toHaveBeenCalledWith(expect.anything(), undefined);
+  });
+  it.each(["READ_CANCELLED", "READ_DEADLINE_EXCEEDED"])("does not swallow optional lookup %s", async message => {
+    const { app, dependencies } = await seededApp();
+    vi.spyOn(dependencies.operations, "getImport").mockRejectedValue(new Error(message));
+    const list = vi.spyOn(dependencies.readweave, "listCostEntries").mockResolvedValue([]);
+    await request(app).get("/api/v1/costs?materialVersionId=material-version:fee-import").expect(message === "READ_CANCELLED" ? 499 : 504);
+    expect(list).not.toHaveBeenCalled();
+  });
+});

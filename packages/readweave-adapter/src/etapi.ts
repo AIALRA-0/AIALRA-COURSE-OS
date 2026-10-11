@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
-import { assertReadBudgetActive, currentReadBudget, readBudgetAbortError, withIndependentReadBudget, type ReadBudget } from "./read-budget.js";
-import { decodeReadWeaveStateContent, decodeReadWeaveStateContentAsync } from "./state-decoder.js";
+import { assertReadBudgetActive, currentReadBudget, readBudgetAbortError, withReadBudget, withIndependentReadBudget, type ReadBudget } from "./read-budget.js";
+import { decodeReadWeaveStateContent, decodeReadWeaveStateContentAsync, decodeReadWeaveCostRootAsync, projectReadWeaveCostRoot, type CostRootReadDTO } from "./state-decoder.js";
 import { encodeReadWeaveStateContentAsync } from "./state-encoder.js";
 import type {
   AssessmentAttempt,
@@ -423,6 +423,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private readonly writeContext = new AsyncLocalStorage<IdempotentWriteContext>();
   private readonly pageWriteReadBudget = new AsyncLocalStorage<ReadBudget>();
   private stateCache?: { state: EtapiState; expiresAt: number };
+  private readonly costRootReads = new Map<string, SharedRead<CostRootReadDTO>>();
+  private costReferenceCache?: { root: CostRootReadDTO; version: number; expiresAt: number; dto: CostRootReadDTO };
+  private costRootReadSnapshot?: { noteId: string; blobId: string; version: number; dto: CostRootReadDTO };
   private rootReadSnapshot?: { noteId: string; blobId: string; parsed: Partial<EtapiState> };
   private stateReadInFlight?: SharedRead<EtapiState>;
   private stateVersion = 0;
@@ -900,57 +903,114 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     });
   }
 
-  async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}): Promise<GenerationCostEntry[]> {
-    const reference = filters.pageId || filters.materialVersionId
-      ? await this.readStateReference(false, false) : undefined;
-    const release = filters.materialVersionId
-      ? reference?.releases.find(item => item.id === filters.materialVersionId) : undefined;
-    const scoped = Boolean(reference && (filters.pageId || release) && (!filters.materialVersionId || release));
-    const state = scoped ? reference! : await this.readState();
-    const costIndex = state.projections.costIndexNoteId
-      ? await this.readCostIndex(state.projections.costIndexNoteId)
-      : undefined;
-    // Merge the authoritative sources once per request. Rebuilding the entire
-    // ledger for each page needlessly multiplies work on long materials.
-    const costs = new Map(mergeCostEntries(costIndex?.costEntries, state.costEntries)
-      .map(entry => [entry.id, entry]));
-    if (scoped) {
-      const pageIds = filters.pageId ? [filters.pageId] : [...new Set([
-        ...release!.pageIds, ...release!.pages.map(page => page.id),
-        ...state.drafts.filter(draft => draft.sourceReleaseId === release!.id).map(draft => draft.pageId),
-        ...mergeCostEntries(costIndex?.costEntries, state.costEntries)
-          .filter(cost => cost.materialVersionId === release!.id && cost.pageId).map(cost => cost.pageId!)
-      ])];
-      const observedVersions = new Map(this.draftPageRecordVersions);
-      const records = new Map((await this.readDraftPageRecords(pageIds)).map(located => [located.record.pageId, located]));
-      const missing = pageIds.filter(pageId => !records.has(pageId));
-      for (let offset = 0; offset < missing.length; offset += 4) {
-        const batch = missing.slice(offset, offset + 4);
-        // Share the existing four-reader budget across recovery lookups. A
-        // not-yet-generated page must not serialize the entire material ledger.
-        const recovered = await Promise.allSettled(batch.map(pageId =>
-          this.recoverUnlabelledDraftPageRecord(pageId, Math.floor(4 / batch.length), observedVersions.get(pageId) ?? 0)));
-        const failure = recovered.find(item => item.status === "rejected");
-        if (failure?.status === "rejected") throw failure.reason;
-        recovered.forEach((item, index) => {
-          if (item.status === "fulfilled" && item.value) records.set(batch[index]!, item.value);
-        });
+  async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}, pageIdsHint?: readonly string[]): Promise<GenerationCostEntry[]> {
+    // A hint schedules reads only. No fetched page is installed or consumed
+    // before the root, metadata binding and complete authoritative route pass.
+    const hintIds = filters.pageId ? [filters.pageId]
+      : filters.materialVersionId ? [...new Set(pageIdsHint ?? [])] : [];
+    const observedVersions = new Map(this.draftPageRecordVersions);
+    const scheduledVersion = this.stateVersion;
+    const controller = new AbortController();
+    let prefetchWork: Promise<LocatedDraftPageRecord[]> | undefined;
+    let prefetch: Promise<{ value: LocatedDraftPageRecord[] | undefined; error: unknown }> | undefined;
+    let prefetchStarted = false;
+    const startPrefetch = () => {
+      if (prefetchStarted || hintIds.length === 0) return;
+      prefetchStarted = true;
+      prefetch = withReadBudget({ signal: controller.signal }, () => {
+        prefetchWork = this.readDraftPageRecords(hintIds, { install: false });
+        return prefetchWork;
+      }).then(value => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+    };
+    try {
+      let reference: CostRootReadDTO | undefined;
+      let verifiedVersion: number;
+      do {
+        verifiedVersion = this.stateVersion;
+        reference = filters.pageId || filters.materialVersionId
+          ? await this.readCostReference(startPrefetch) : undefined;
+      } while (this.stateVersion !== verifiedVersion);
+      const release = filters.materialVersionId
+        ? reference?.releases.find(item => item.id === filters.materialVersionId) : undefined;
+      const scoped = Boolean(reference && (filters.pageId || release) && (!filters.materialVersionId || release));
+      if (!scoped && prefetch) {
+        controller.abort();
+        await prefetch;
+        await prefetchWork?.catch(() => undefined);
       }
-      for (const pageId of pageIds) {
-        let located = records.get(pageId);
-        // Only a newer record committed/observed during this fresh read may
-        // supersede its result. A missing remote record is not a cache hit.
-        const cached = this.draftPageRecordCache.get(pageId);
-        if (located && cached && cached.record.draft.revision > located.record.draft.revision
-          && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
-        for (const entry of located?.record.costEntries ?? []) costs.set(entry.id, entry);
+      const state = scoped ? reference! : await this.readState();
+      const costIndex = state.projections.costIndexNoteId
+        ? await this.readCostIndex(state.projections.costIndexNoteId)
+        : undefined;
+      // Merge the authoritative sources once per request. Rebuilding the entire
+      // ledger for each page needlessly multiplies work on long materials.
+      const costs = new Map(mergeCostEntries(costIndex?.costEntries, state.costEntries)
+        .map(entry => [entry.id, entry]));
+      if (scoped) {
+        const pageIds = filters.pageId ? [filters.pageId] : [...new Set([
+          ...release!.pageIds, ...release!.pages.map(page => page.id),
+          ...state.drafts.filter(draft => draft.sourceReleaseId === release!.id).map(draft => draft.pageId),
+          ...mergeCostEntries(costIndex?.costEntries, state.costEntries)
+            .filter(cost => cost.materialVersionId === release!.id && cost.pageId).map(cost => cost.pageId!)
+        ])];
+        const scheduled = await prefetch;
+        if (scheduled?.error && isCostReadCancellation(scheduled.error)) throw scheduled.error;
+        const usable = scheduled?.value && scheduledVersion === verifiedVersion;
+        const allowed = new Set(pageIds);
+        const records = new Map((usable ? scheduled.value! : [])
+          .filter(located => allowed.has(located.record.pageId)).map(located => [located.record.pageId, located]));
+        const covered = new Set(usable ? hintIds.filter(pageId => allowed.has(pageId)) : []);
+        const uncovered = pageIds.filter(pageId => !covered.has(pageId));
+        for (const located of await this.readDraftPageRecords(uncovered, { install: false })) {
+          records.set(located.record.pageId, located);
+        }
+        const missing = pageIds.filter(pageId => !records.has(pageId));
+        for (let offset = 0; offset < missing.length; offset += 4) {
+          const batch = missing.slice(offset, offset + 4);
+          // Share the existing four-reader budget across recovery lookups. A
+          // not-yet-generated page must not serialize the entire material ledger.
+          const recovered = await Promise.allSettled(batch.map(pageId =>
+            this.recoverUnlabelledDraftPageRecord(pageId, Math.floor(4 / batch.length), observedVersions.get(pageId) ?? 0, state.projections.stateNoteId, false)));
+          const failure = recovered.find(item => item.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+          recovered.forEach((item, index) => {
+            if (item.status === "fulfilled" && item.value) records.set(batch[index]!, item.value);
+          });
+        }
+        const installBudget = currentReadBudget();
+        if (installBudget) assertReadBudgetActive(installBudget);
+        // Generic deletion also advances the state version. Revalidate the root
+        // rather than letting a delayed body restore a deleted cache entry.
+        if (this.stateVersion !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
+        for (const pageId of pageIds) {
+          const located = records.get(pageId);
+          if (located && (this.draftPageRecordVersions.get(pageId) ?? 0) <= (observedVersions.get(pageId) ?? 0)) {
+            this.cacheDraftPageRecord(located);
+          }
+        }
+        for (const pageId of pageIds) {
+          let located = records.get(pageId);
+          // Only a newer record committed/observed during this fresh read may
+          // supersede its result. A missing remote record is not a cache hit.
+          const cached = this.draftPageRecordCache.get(pageId);
+          if (located && cached && cached.record.draft.revision > located.record.draft.revision
+            && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
+          for (const entry of located?.record.costEntries ?? []) costs.set(entry.id, entry);
+        }
       }
+      const result = structuredClone([...costs.values()].filter((item) =>
+        (!filters.courseId || item.courseId === filters.courseId) &&
+        (!filters.materialVersionId || item.materialVersionId === filters.materialVersionId) &&
+        (!filters.pageId || item.pageId === filters.pageId) &&
+        (!filters.jobId || item.jobId === filters.jobId)));
+      const budget = currentReadBudget();
+      if (budget) assertReadBudgetActive(budget);
+      return result;
+    } finally {
+      controller.abort();
+      await prefetch;
+      await prefetchWork?.catch(() => undefined);
     }
-    return structuredClone([...costs.values()].filter((item) =>
-      (!filters.courseId || item.courseId === filters.courseId) &&
-      (!filters.materialVersionId || item.materialVersionId === filters.materialVersionId) &&
-      (!filters.pageId || item.pageId === filters.pageId) &&
-      (!filters.jobId || item.jobId === filters.jobId)));
   }
 
   async saveAttempt(attempt: AssessmentAttempt, mastery: MasteryRecord, context: IdempotentWriteContext): Promise<AssessmentAttempt> {
@@ -3641,6 +3701,170 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return { coreState: stateWithoutMetadata(state, pointer, state.projections.metadataIndexRevision ?? located.index.revision) };
   }
 
+  private async locateCostReadIndex(): Promise<{ workspaceRootNoteId: string | undefined; indexes: EtapiNote[] }> {
+    const controller = new AbortController();
+    let work: Promise<EtapiNote[]> | undefined;
+    const prefetch = withReadBudget({ signal: controller.signal }, () => {
+      work = this.findCourseIndexNotes(this.config.parentNoteId, false);
+      return work;
+    }).then(value => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+    try {
+      const workspaceRootNoteId = await this.findWorkspaceRootNoteId();
+      const candidates = await prefetch;
+      if (candidates.error) {
+        if (isCostReadCancellation(candidates.error)) throw candidates.error;
+        return { workspaceRootNoteId, indexes: await this.findCourseIndexNotes(
+          workspaceRootNoteId ?? this.config.parentNoteId, workspaceRootNoteId !== undefined) };
+      }
+      // Broad parent discovery is speculative: uniqueness applies only after
+      // the same fresh, direct-child permission binding as the original query.
+      const directIds = workspaceRootNoteId
+        ? new Set((await this.getNote(workspaceRootNoteId)).childNoteIds ?? []) : undefined;
+      return { workspaceRootNoteId, indexes: candidates.value!.filter(note => !directIds || directIds.has(note.noteId)) };
+    } finally {
+      controller.abort();
+      await prefetch;
+      await work?.catch(() => undefined);
+    }
+  }
+
+  /** Locate with the existing authority checks, without bootstrap materialization. */
+  private async readCostReference(onRootScheduled?: () => void): Promise<CostRootReadDTO | undefined> {
+    for (;;) {
+      const version = this.stateVersion;
+      const known = this.bootstrapCache?.projection;
+      const located = known ? undefined : await this.locateCostReadIndex();
+      const workspaceRootNoteId = known ? known.courseRootNoteId : located!.workspaceRootNoteId;
+      const indexes = located?.indexes;
+      if (indexes && indexes.length > 1) throw new Error("READWEAVE_COURSE_INDEX_DUPLICATE");
+      const noteId = known?.stateNoteId ?? indexes?.[0]?.noteId;
+      if (!noteId) {
+        if (workspaceRootNoteId) throw new Error("READWEAVE_COURSE_INDEX_NOT_FOUND");
+        // Preserve the original empty-workspace/bootstrap behavior on full fallback.
+        return undefined;
+      }
+      const rootRead = this.readCostRootSnapshot(noteId);
+      // Shared work starts on a queued microtask, not synchronously. Attach a
+      // rejection handler before yielding so an early failure is always owned;
+      // dispatch root work before the optional, expensive page-record search.
+      void rootRead.catch(() => undefined);
+      await Promise.resolve();
+      const scheduled = onRootScheduled;
+      onRootScheduled = undefined;
+      scheduled?.();
+      const dto = await rootRead;
+      const declaredRoot = dto.projections.courseRootNoteId;
+      if (!known) {
+        if (workspaceRootNoteId) {
+          if (declaredRoot !== workspaceRootNoteId) throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+        } else {
+          const parent = await this.getNote(this.config.parentNoteId);
+          if (!declaredRoot || !(parent.childNoteIds ?? []).includes(declaredRoot)) {
+            throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+          }
+          const legacy = await this.findCourseIndexNotes(declaredRoot);
+          if (legacy.length !== 1 || legacy[0]!.noteId !== noteId) throw new Error("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+        }
+      }
+      const pointer = dto.projections.metadataIndexNoteId;
+      if (pointer) {
+        const located = await this.readMetadataIndex(pointer);
+        if (located.index.workspaceId !== this.workspaceId || located.index.stateNoteId !== dto.projections.stateNoteId) {
+          throw new Error("READWEAVE_METADATA_INDEX_SOURCE_MISMATCH");
+        }
+        const revision = dto.projections.metadataIndexRevision ?? 0;
+        const pending = located.index.status === "staged" && revision === located.index.revision + 1;
+        if (located.index.status === "rolled_back" || (located.index.revision < revision && !pending)) {
+          throw new Error("READWEAVE_METADATA_INDEX_REVISION_INVALID");
+        }
+        if (!dto.metadataRootFieldsAreEmpty || dto.metadataReceiptKinds.some(kind => metadataIdempotencyKinds.has(kind) && kind !== "permanent_delete")) throw new Error("READWEAVE_METADATA_ROOT_DUAL_AUTHORITY");
+        // This is the independent full metadata index, never the cost DTO.
+        if (this.stateVersion === version) this.cacheMetadataIndex(located);
+      }
+      const budget = currentReadBudget();
+      if (budget) assertReadBudgetActive(budget);
+      // A local write finishing while root/metadata were read invalidates this
+      // view. Retry under the same caller deadline; never install a late view.
+      if (this.stateVersion !== version) continue;
+      const cached = this.costReferenceCache;
+      if (cached?.root === dto && cached.version === version && cached.expiresAt > Date.now()) return cached.dto;
+      const drafts = dto.drafts.map(draft => ({ ...draft }));
+      const records = [...this.draftPageRecordCache.values()].map(located => located.record);
+      let costEntries = [...dto.costEntries];
+      if (records.length) {
+        const indexes = new Map<string, number>();
+        drafts.forEach((draft, index) => { if (!indexes.has(draft.pageId)) indexes.set(draft.pageId, index); });
+        const unusualRoutes = records.some(record => record.draft.pageId !== record.pageId);
+        const costs = orderedOwnerLedger(costEntries, entry => entry.pageId, records[0]!.pageId);
+        for (const [recordIndex, record] of records.entries()) {
+          // Match batch's fallback for malformed historical page associations.
+          let index = unusualRoutes ? drafts.findIndex(draft => draft.pageId === record.pageId) : indexes.get(record.pageId);
+          if (index === undefined || index < 0) { index = drafts.length; indexes.set(record.pageId, index); }
+          drafts[index] = { pageId: record.draft.pageId, sourceReleaseId: record.draft.sourceReleaseId };
+          if (recordIndex > 0) costs.movePage(record.pageId);
+          for (const entry of record.costEntries) costs.put(structuredClone(entry));
+        }
+        costEntries = costs.finish();
+      }
+      const reference: CostRootReadDTO = { ...dto, drafts, costEntries };
+      // Like readStateReference, capture overlays when the reference is built,
+      // not on every subsequent page read (which would resurrect removed costs).
+      if (!this.writeContext.getStore()) this.costReferenceCache = {
+        root: dto, version, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs, dto: reference
+      };
+      return reference;
+    }
+  }
+
+  private async readCostRootSnapshot(noteId: string): Promise<CostRootReadDTO> {
+    if (this.writeContext.getStore()) return this.loadCostRootSnapshot(noteId);
+    const budget = currentReadBudget();
+    if (budget) assertReadBudgetActive(budget);
+    const key = `${noteId}\u0000${this.stateVersion}`;
+    let read = this.costRootReads.get(key);
+    if (!read || read.controller.signal.aborted) {
+      read = createSharedRead(() => this.pageWriteReadBudget.exit(() =>
+        this.writeContext.exit(() => this.loadCostRootSnapshot(noteId))));
+      this.costRootReads.set(key, read);
+      const pending = read;
+      void pending.promise.finally(() => {
+        if (this.costRootReads.get(key) === pending) this.costRootReads.delete(key);
+      }).catch(() => undefined);
+    }
+    return joinSharedRead(read, budget);
+  }
+
+  private async loadCostRootSnapshot(noteId: string): Promise<CostRootReadDTO> {
+    const version = this.stateVersion;
+    const full = this.rootReadSnapshot;
+    const scoped = this.costRootReadSnapshot;
+    if (!this.writeContext.getStore() && (full?.noteId === noteId || (scoped?.noteId === noteId && scoped.version === version))) {
+      const note = await this.getNote(noteId);
+      const budget = currentReadBudget();
+      if (budget) assertReadBudgetActive(budget);
+      if (this.stateVersion === version && note.blobId) {
+        if (scoped?.noteId === noteId && scoped.version === version && this.costRootReadSnapshot === scoped && note.blobId === scoped.blobId) return scoped.dto;
+        if (full?.noteId === noteId && this.rootReadSnapshot === full && note.blobId === full.blobId) {
+          const dto = projectReadWeaveCostRoot(full.parsed);
+          if (budget) assertReadBudgetActive(budget);
+          this.costRootReadSnapshot = { noteId, blobId: full.blobId, version, dto };
+          return dto;
+        }
+      }
+    }
+    const content = await this.getContent(noteId, { identityEncoding: true });
+    const dto = await decodeReadWeaveCostRootAsync(content);
+    const blobId = readweaveContentBlobId(content);
+    const budget = currentReadBudget();
+    if (budget) assertReadBudgetActive(budget);
+    if (!this.writeContext.getStore() && this.stateVersion === version) {
+      // A separate disposable read projection. It cannot satisfy any generic
+      // state/bootstrap reader, writer, activity route or hydration operation.
+      this.costRootReadSnapshot = { noteId, blobId, version, dto };
+    }
+    return dto;
+  }
+
   private async readRootSnapshot(noteId: string): Promise<Partial<EtapiState>> {
     const observedVersion = this.stateVersion;
     const cached = this.rootReadSnapshot;
@@ -3665,6 +3889,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private invalidateContentStamp(noteId: string): void {
+    if (this.costRootReadSnapshot?.noteId === noteId) this.costRootReadSnapshot = undefined;
     if (this.rootReadSnapshot?.noteId === noteId) this.rootReadSnapshot = undefined;
     for (const cached of this.draftPageRecordCache.values()) {
       if (cached.noteId === noteId) delete cached.blobId;
@@ -3768,7 +3993,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
   }
 
-  private async readDraftPageRecords(pageId?: string | readonly string[]): Promise<LocatedDraftPageRecord[]> {
+  private async readDraftPageRecords(pageId?: string | readonly string[], options: { install?: boolean } = {}): Promise<LocatedDraftPageRecord[]> {
     const pageIds = pageId === undefined ? undefined : new Set(typeof pageId === "string" ? [pageId] : pageId);
     if (pageIds?.size === 0) return [];
     const observedVersions = new Map(this.draftPageRecordVersions);
@@ -3831,7 +4056,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
     const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
     if (budget) assertReadBudgetActive(budget);
-    for (const candidate of newest.values()) {
+    if (options.install !== false) for (const candidate of newest.values()) {
       if ((this.draftPageRecordVersions.get(candidate.record.pageId) ?? 0)
         <= (observedVersions.get(candidate.record.pageId) ?? 0)) this.cacheDraftPageRecord(candidate);
     }
@@ -3849,12 +4074,13 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async recoverUnlabelledDraftPageRecord(pageId: string, contentConcurrency?: number,
-    observedVersion = this.draftPageRecordVersions.get(pageId) ?? 0): Promise<LocatedDraftPageRecord | undefined> {
-    const projection = await this.ensureWorkspace();
+    observedVersion = this.draftPageRecordVersions.get(pageId) ?? 0,
+    verifiedStateNoteId?: string, install = true): Promise<LocatedDraftPageRecord | undefined> {
+    const stateNoteId = verifiedStateNoteId ?? (await this.ensureWorkspace()).stateNoteId;
     const title = `Course OS draft record · ${pageId}`;
     const query = new URLSearchParams({
       search: quoteSearchValue(title),
-      ancestorNoteId: projection.stateNoteId,
+      ancestorNoteId: stateNoteId,
       ancestorDepth: "lt5",
       fastSearch: "true"
     });
@@ -3901,14 +4127,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (duplicate.content === selected.content) await this.deleteNote(duplicate.located.noteId);
     }
     const [typeLabel, pageLabel] = await Promise.all([
-      this.searchDraftRecordLabel(projection.stateNoteId, "courseOsType", "draft_record"),
-      this.searchDraftRecordLabel(projection.stateNoteId, "courseOsDraftRecordPageId", pageId)
+      this.searchDraftRecordLabel(stateNoteId, "courseOsType", "draft_record"),
+      this.searchDraftRecordLabel(stateNoteId, "courseOsDraftRecordPageId", pageId)
     ]);
     if (!typeLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsType", "draft_record");
     if (!pageLabel.has(selected.located.noteId)) await this.addDraftRecordLabel(selected.located.noteId, "courseOsDraftRecordPageId", pageId);
     // A fresh read may finish after a concurrent commit. Preserve that commit
     // for the caller's revision check; pre-existing warm cache is not evidence.
-    if ((this.draftPageRecordVersions.get(pageId) ?? 0) <= observedVersion)
+    if (install && (this.draftPageRecordVersions.get(pageId) ?? 0) <= observedVersion)
       this.cacheDraftPageRecord(selected.located);
     return selected.located;
   }
@@ -3951,37 +4177,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     state.drafts.forEach((draft, index) => {
       if (!draftIndexes.has(draft.pageId)) draftIndexes.set(draft.pageId, index);
     });
-    const ordered = <T extends { id: string }>(input: T[], owner: (value: T) => string | undefined) => {
-      const values = new Map<string, T>();
-      const positions = new Map<string, number>();
-      const owners = new Map<string | undefined, Set<string>>();
-      let position = 0;
-      const put = (value: T) => {
-        const previous = values.get(value.id);
-        if (previous) owners.get(owner(previous))?.delete(value.id);
-        if (!values.has(value.id)) positions.set(value.id, position++);
-        values.set(value.id, value);
-        let group = owners.get(owner(value));
-        if (!group) { group = new Set(); owners.set(owner(value), group); }
-        group.add(value.id);
-      };
-      const firstPage = records[0]!.pageId;
-      for (const value of input) if (owner(value) !== firstPage) put(value);
-      for (const value of input) if (owner(value) === firstPage) put(value);
-      return {
-        movePage(pageId: string) {
-          const ids = [...(owners.get(pageId) ?? [])].sort((a, b) => positions.get(a)! - positions.get(b)!);
-          for (const id of ids) {
-            const value = values.get(id)!;
-            values.delete(id); values.set(id, value); positions.set(id, position++);
-          }
-        },
-        put,
-        finish: () => [...values.values()]
-      };
-    };
-    const costs = ordered(state.costEntries, value => value.pageId);
-    const conflicts = ordered(state.conflicts, value => value.objectId);
+    const costs = orderedOwnerLedger(state.costEntries, value => value.pageId, records[0]!.pageId);
+    const conflicts = orderedOwnerLedger(state.conflicts, value => value.objectId, records[0]!.pageId);
     for (const [recordIndex, record] of records.entries()) {
       let index = draftIndexes.get(record.pageId);
       if (index === undefined) { index = state.drafts.length; draftIndexes.set(record.pageId, index); }
@@ -4971,8 +5168,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     }
   }
 
-  private async getContent(noteId: string): Promise<string> {
-    const response = await this.raw(`/notes/${encodeURIComponent(noteId)}/content`);
+  private async getContent(noteId: string, options?: { identityEncoding?: boolean }): Promise<string> {
+    const response = await this.raw(`/notes/${encodeURIComponent(noteId)}/content`,
+      options?.identityEncoding ? { headers: { "Accept-Encoding": "identity" } } : undefined);
     return response.text();
   }
 
@@ -5384,7 +5582,36 @@ function quoteSearchValue(value: string): string {
   return `"${value.replace(/[\\"]/g, "\\$&")}"`;
 }
 
-function mergeCostEntries(...groups: Array<GenerationCostEntry[] | undefined>): GenerationCostEntry[] {
+function orderedOwnerLedger<T extends { id: string }>(input: readonly T[], owner: (value: T) => string | undefined, firstPage: string) {
+  const values = new Map<string, T>();
+  const positions = new Map<string, number>();
+  const owners = new Map<string | undefined, Set<string>>();
+  let position = 0;
+  const put = (value: T) => {
+    const previous = values.get(value.id);
+    if (previous) owners.get(owner(previous))?.delete(value.id);
+    if (!values.has(value.id)) positions.set(value.id, position++);
+    values.set(value.id, value);
+    let group = owners.get(owner(value));
+    if (!group) { group = new Set(); owners.set(owner(value), group); }
+    group.add(value.id);
+  };
+  for (const value of input) if (owner(value) !== firstPage) put(value);
+  for (const value of input) if (owner(value) === firstPage) put(value);
+  return {
+    movePage(pageId: string) {
+      const ids = [...(owners.get(pageId) ?? [])].sort((a, b) => positions.get(a)! - positions.get(b)!);
+      for (const id of ids) {
+        const value = values.get(id)!;
+        values.delete(id); values.set(id, value); positions.set(id, position++);
+      }
+    },
+    put,
+    finish: () => [...values.values()]
+  };
+}
+
+function mergeCostEntries(...groups: Array<readonly GenerationCostEntry[] | undefined>): GenerationCostEntry[] {
   const entries = new Map<string, GenerationCostEntry>();
   for (const group of groups) {
     for (const entry of group ?? []) entries.set(entry.id, entry);
@@ -5568,4 +5795,9 @@ function courseNodeFromProject(course: CourseProject): CourseTreeNode {
     readweaveNoteId: course.readweaveNoteId,
     children: []
   };
+}
+
+function isCostReadCancellation(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError"
+    || error.message === "READ_CANCELLED" || error.message === "READ_DEADLINE_EXCEEDED");
 }

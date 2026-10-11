@@ -108,7 +108,7 @@ export interface ReadWeaveCourseApi {
   saveReviewPlan(plan: ReviewPlan, context: IdempotentWriteContext): Promise<ReviewPlan>;
   updateReviewPlan(plan: ReviewPlan, expectedRevision: number, context: IdempotentWriteContext): Promise<ReviewPlan>;
   appendCostEntry(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry>;
-  listCostEntries(filters?: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string }): Promise<GenerationCostEntry[]>;
+  listCostEntries(filters?: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string }, pageIdsHint?: readonly string[]): Promise<GenerationCostEntry[]>;
   saveAttempt(attempt: AssessmentAttempt, mastery: MasteryRecord, context: IdempotentWriteContext): Promise<AssessmentAttempt>;
   listAssessmentAttempts(objectiveId?: string): Promise<AssessmentAttempt[]>;
   listMastery(): Promise<MasteryRecord[]>;

@@ -8,6 +8,7 @@ import { EtapiReadWeaveCourseApi, FileReadWeaveCourseApi, HttpReadWeaveCourseApi
 import { decodeReadWeaveStateContent, encodeReadWeaveStateContent } from "./etapi.js";
 import { EMPTY_STATE } from "./index.js";
 import { sha256Text, stableStringify } from "@course-os/domain";
+import * as stateDecoder from "./state-decoder.js";
 
 it("reads legacy state and round-trips a large compressed ReadWeave index", () => {
   const small = { releases: [{ id: "release-1" }] };
@@ -1023,7 +1024,7 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(sorted(await new EtapiReadWeaveCourseApi(config).listCostEntries())).toEqual(sorted([first, second, other, legacy, compact, orphan]));
   });
 
-  it("discovers scoped cost records once and bounds duplicate body reads to four while merging in page order", async () => {
+  it.each([false, true])("discovers scoped cost records once and bounds duplicate body reads to four while merging in page order (hints=%s)", async hinted => {
     const remote = new FakeEtapi();
     const config = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
     const api = new EtapiReadWeaveCourseApi(config);
@@ -1086,7 +1087,7 @@ describe("ReadWeave ETAPI adapter", () => {
         return response;
       } finally { active -= 1; }
     };
-    const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id });
+    const entries = await new EtapiReadWeaveCourseApi({ ...config, fetchImpl }).listCostEntries({ materialVersionId: target.id }, hinted ? [...target.pageIds, ...target.pageIds] : undefined);
     expect(peak).toBe(4);
     expect(active).toBe(0);
     expect(completed).toHaveLength(14);
@@ -1128,7 +1129,7 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(new Set(recovered).size).toBe(9);
   });
 
-  it("does not let an old recovery response overwrite a draft saved during a scoped cost read", async () => {
+  it.each([false, true])("does not let an old recovery/prefetch response overwrite a draft saved during a scoped cost read (hints=%s)", async hinted => {
     const remote = new FakeEtapi();
     const base = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
     const source = releaseWithPage();
@@ -1136,7 +1137,7 @@ describe("ReadWeave ETAPI adapter", () => {
     await setup.publishRelease(source, { ...manifest, courseReleaseId: source.id }, context);
     const saved = await setup.saveDraft(draftFor(source), 0, { ...context, idempotencyKey: "race-initial" });
     const noteId = remote.noteIdByTitle("Course OS draft record · page-1");
-    await remote.fetch("http://readweave/attributes", { method: "POST", body: JSON.stringify({
+    if (!hinted) await remote.fetch("http://readweave/attributes", { method: "POST", body: JSON.stringify({
       noteId, name: "courseOsDraftRecordPageId", value: "wrong-page" }) });
     let unblock!: () => void; let entered!: () => void; let stallOnce = true;
     const blocked = new Promise<void>(resolve => { unblock = resolve; });
@@ -1148,7 +1149,7 @@ describe("ReadWeave ETAPI adapter", () => {
       }
       return response;
     } });
-    const reading = reader.listCostEntries({ materialVersionId: source.id });
+    const reading = reader.listCostEntries({ materialVersionId: source.id }, hinted ? ["page-1"] : undefined);
     await started;
     const next = structuredClone(saved); next.page.blocks[0]!.markdown = "new concurrent teaching";
     const cost = costEntryFor(source, "concurrently-committed-cost");
@@ -6569,6 +6570,387 @@ function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; va
   }
   return undefined;
 }
+
+describe("PA18 independent cost DTO", () => {
+  const rootTitle = "00 Course OS 结构化索引";
+  const configFor = (remote: FakeEtapi) => ({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+  const setup = async (record = false) => {
+    const remote = new FakeEtapi(); remote.emitBlobIds = true;
+    const writer = new EtapiReadWeaveCourseApi(configFor(remote));
+    const release = releaseWithPage();
+    await writer.publishRelease(release, { ...manifest, courseReleaseId: release.id }, context);
+    const cost = costEntryFor(release, "dto-history");
+    if (record) await writer.appendCostEntry(cost, { ...context, idempotencyKey: cost.id });
+    const root = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    if (!record) { root.costEntries = [cost]; remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root)); }
+    return { remote, writer, release, cost, root, rootId: remote.noteIdByTitle(rootTitle) };
+  };
+  const waitFor = async (predicate: () => boolean) => { while (!predicate()) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const assertNoGeneric = (api: EtapiReadWeaveCourseApi) => {
+    expect((api as any).rootReadSnapshot).toBeUndefined();
+    expect((api as any).stateCache).toBeUndefined();
+    expect((api as any).bootstrapCache).toBeUndefined();
+    expect((api as any).draftPageRecordsHydrated).toBe(false);
+  };
+
+  it("PA18 fee pipeline hints retain exact ordered authority including legacy/retired costs", async () => {
+    const { remote, writer, release, cost, root } = await setup(true);
+    const retired = { ...costEntryFor(release, "hint-retired"), pageId: "retired-page" };
+    const legacy = costEntryFor(release, "hint-legacy");
+    root.costEntries = [retired, legacy, { ...cost, actualMicrousd: 1 }];
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    await writer.ensureMetadataIndex();
+    const filters = { materialVersionId: release.id };
+    const expected = await new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries(filters);
+    for (const hints of [[], ["page-1"], ["wrong"], ["page-1", "page-1", "wrong"], ["retired-page", "page-1"]]) {
+      const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+      expect(await reader.listCostEntries(filters, hints)).toEqual(expected);
+      expect((reader as any).draftPageRecordCache.has("wrong")).toBe(false); assertNoGeneric(reader);
+    }
+    for (const fallback of [{}, { materialVersionId: "unknown" }]) {
+      expect(await new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries(fallback, ["wrong", "page-1"]))
+        .toEqual(await new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries(fallback));
+    }
+  });
+
+  it("PA18 fee pipeline overlaps pure records with root and sends identity only for DTO root", async () => {
+    const { remote, release, cost, rootId } = await setup(true);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let releaseRoot!: () => void; let rootStarted!: () => void; let recordRead!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRoot = resolve; });
+    const rootEntered = new Promise<void>(resolve => { rootStarted = resolve; });
+    const recordEntered = new Promise<void>(resolve => { recordRead = resolve; });
+    const headers: { id: string; value: string | null }[] = [];
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const response = await remote.fetch(input, init);
+      if (path.endsWith("/content")) headers.push({ id: path, value: new Headers(init?.headers).get("Accept-Encoding") });
+      if (path === `/etapi/notes/${recordId}/content`) recordRead();
+      if (path === `/etapi/notes/${rootId}/content`) { rootStarted(); await gate; }
+      return response;
+    }});
+    const read = reader.listCostEntries({ materialVersionId: release.id }, ["page-1"]);
+    try {
+      await Promise.all([rootEntered, recordEntered]);
+      expect((reader as any).draftPageRecordCache.size).toBe(0);
+      expect((reader as any).activityRoutes).toBeUndefined();
+      releaseRoot(); expect(await read).toEqual([cost]); assertNoGeneric(reader);
+      expect(headers.find(row => row.id === `/etapi/notes/${rootId}/content`)?.value).toBe("identity");
+      expect(headers.find(row => row.id === `/etapi/notes/${recordId}/content`)?.value).toBeNull();
+      const full = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+        if (new URL(String(input)).pathname === `/etapi/notes/${rootId}/content`) expect(new Headers(init?.headers).get("Accept-Encoding")).toBeNull();
+        return remote.fetch(input, init);
+      }});
+      await full.getRelease(release.id);
+    } finally { releaseRoot(); await read.catch(() => undefined); }
+  });
+
+  it.each(["checksum", "workspace", "metadata"])("PA18 fee pipeline rejects %s without prefetch cache installation", async mode => {
+    const { remote, writer, release, root, rootId } = await setup(true);
+    await writer.ensureMetadataIndex();
+    if (mode === "checksum") {
+      const current = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+      current.syntheticIgnored = "synthetic checksum fixture".repeat(100_000);
+      const content = encodeReadWeaveStateContent(current);
+      expect(content.startsWith("COURSE_OS_BR_STATE_V1:")).toBe(true);
+      remote.editByTitle(rootTitle, content.replace(/^COURSE_OS_BR_STATE_V1:[a-f0-9]{64}:/, `COURSE_OS_BR_STATE_V1:${"0".repeat(64)}:`));
+    } else if (mode === "workspace") {
+      const current = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+      current.projections.courseRootNoteId = "foreign"; remote.editByTitle(rootTitle, encodeReadWeaveStateContent(current));
+    } else {
+      const title = "Course OS Metadata Index · personal";
+      const metadata = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+      metadata.workspaceId = "foreign"; remote.editByTitle(title, encodeReadWeaveStateContent(metadata));
+    }
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    await expect(reader.listCostEntries({ materialVersionId: release.id }, ["page-1"])).rejects.toThrow();
+    expect((reader as any).draftPageRecordCache.size).toBe(0);
+    expect((reader as any).activityRoutes).toBeUndefined(); assertNoGeneric(reader);
+  });
+
+  it("PA18 fee pipeline discards a late prefetch across local deletion/version change", async () => {
+    const { remote, release } = await setup(true);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let unblock!: () => void; let entered!: () => void; let first = true;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (first && new URL(String(input)).pathname === `/etapi/notes/${recordId}/content`) {
+        first = false; entered(); await gate;
+      }
+      return response;
+    }});
+    const pending = reader.listCostEntries({ materialVersionId: release.id }, ["page-1"]);
+    try {
+      await started;
+      await remote.fetch(`http://readweave/etapi/notes/${recordId}`, { method: "DELETE" });
+      (reader as any).stateVersion++; unblock();
+      expect(await pending).toEqual([]);
+      expect((reader as any).draftPageRecordCache.has("page-1")).toBe(false);
+    } finally { unblock(); await pending.catch(() => undefined); }
+  });
+
+  it.each(["sibling", "failure"])("PA18 fee pipeline parent index prefetch %s preserves direct workspace binding", async mode => {
+    const { remote, release, cost } = await setup(true);
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/etapi/notes" && url.searchParams.get("search") === "#courseOsIndex=personal"
+        && url.searchParams.get("ancestorNoteId") === "root") {
+        if (mode === "failure") return new Response("synthetic prefetch denied", { status: 403 });
+        const response = await remote.fetch(input, init); const body = await response.json();
+        body.results.push({ noteId: "sibling-non-child", title: "synthetic index", type: "text", mime: "application/json" });
+        return Response.json(body);
+      }
+      return remote.fetch(input, init);
+    }});
+    expect(await reader.listCostEntries({ materialVersionId: release.id }, ["page-1"])).toEqual([cost]);
+    expect(remote.requests.some(row => row.path.includes("sibling-non-child"))).toBe(false); assertNoGeneric(reader);
+  });
+
+  it("PA18 fee pipeline rejected root aborts and settles pending pure record bodies", async () => {
+    const { remote, release, root, rootId } = await setup(true);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    root.projections.courseRootNoteId = "foreign"; remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    let entered!: () => void; let aborted = 0; let live = 0;
+    const recordStarted = new Promise<void>(resolve => { entered = resolve; });
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === `/etapi/notes/${recordId}/content`) {
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          live++; entered();
+          init?.signal?.addEventListener("abort", () => { aborted++; live--; controller.error(init.signal!.reason); }, { once: true });
+        } }));
+      }
+      if (path === `/etapi/notes/${rootId}/content`) await recordStarted;
+      return remote.fetch(input, init);
+    }});
+    await expect(withReadBudget({ timeoutMs: 3000 }, () => reader.listCostEntries({ materialVersionId: release.id }, ["page-1"])))
+      .rejects.toThrow("READWEAVE_COURSE_INDEX_WORKSPACE_MISMATCH");
+    expect(aborted).toBe(1); expect(live).toBe(0);
+    expect((reader as any).draftPageRecordCache.size).toBe(0); expect((reader as any).activityRoutes).toBeUndefined();
+  });
+
+  it("PA18 priority dispatches root before pure hinted records, after workspace location", async () => {
+    const { remote, release, cost, rootId } = await setup(true);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let releaseLocation!: () => void; let releaseRoot!: () => void;
+    let locationEntered!: () => void; let rootEntered!: () => void; let recordEntered!: () => void;
+    const locationGate = new Promise<void>(resolve => { releaseLocation = resolve; });
+    const rootGate = new Promise<void>(resolve => { releaseRoot = resolve; });
+    const locationStarted = new Promise<void>(resolve => { locationEntered = resolve; });
+    const rootStarted = new Promise<void>(resolve => { rootEntered = resolve; });
+    const recordStarted = new Promise<void>(resolve => { recordEntered = resolve; });
+    const order: string[] = []; let recordSearches = 0;
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/etapi/notes" && url.searchParams.get("search")?.includes("#courseOsWorkspaceId=")) {
+        locationEntered(); await locationGate;
+      }
+      if (url.pathname === "/etapi/notes" && url.searchParams.get("search")?.includes("#courseOsDraftRecordPageId=")) {
+        recordSearches++; order.push("records"); expect(order[0]).toBe("root");
+      }
+      if (url.pathname === `/etapi/notes/${rootId}/content`) {
+        order.push("root"); rootEntered(); await rootGate;
+      }
+      const response = await remote.fetch(input, init);
+      if (url.pathname === `/etapi/notes/${recordId}/content`) recordEntered();
+      return response;
+    }});
+    const pending = withReadBudget({ timeoutMs: 3000 }, () => reader.listCostEntries({ materialVersionId: release.id }, ["page-1"]));
+    try {
+      await locationStarted;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(recordSearches).toBe(0); expect(order).toEqual([]);
+      releaseLocation();
+      await Promise.all([rootStarted, recordStarted]);
+      expect(order).toEqual(["root", "records"]);
+      expect((reader as any).draftPageRecordCache.size).toBe(0); expect((reader as any).activityRoutes).toBeUndefined();
+      releaseRoot(); expect(await pending).toEqual([cost]);
+      expect(recordSearches).toBe(1); assertNoGeneric(reader);
+    } finally { releaseLocation(); releaseRoot(); await pending.catch(() => undefined); }
+  });
+
+  it("keeps missing-page recovery scoped and historical costs without any partial generic cache", async () => {
+    const { remote, release, cost, rootId } = await setup();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    const full = vi.spyOn(api as any, "readRootSnapshot");
+    const bootstrap = vi.spyOn(api as any, "ensureWorkspaceResult");
+    const before = remote.requests.length;
+    await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
+    assertNoGeneric(api); expect(full).not.toHaveBeenCalled(); expect(bootstrap).not.toHaveBeenCalled();
+    expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(1);
+    expect(remote.requests.slice(before).every(row => row.method === "GET")).toBe(true);
+    expect((api as any).costRootReadSnapshot.dto.kind).toBe("course-os-cost-root-read");
+    // A subsequent full reader still receives the complete published page.
+    await expect(api.getRelease(release.id)).resolves.toEqual({ ...release, lifecycle: "published" });
+    expect((api as any).rootReadSnapshot.parsed.releases[0].pages).toEqual(release.pages);
+  });
+
+  it.each([false, true])("shares one cold root body and one decoder among four real read consumers while one cancels (hints=%s)", async hinted => {
+    const { remote, release, cost, rootId } = await setup(hinted);
+    let releaseBody!: () => void; let entered!: () => void; let aborts = 0;
+    const gate = new Promise<void>(resolve => { releaseBody = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname !== `/etapi/notes/${rootId}/content`) return remote.fetch(input, init);
+      const response = await remote.fetch(input, init); const content = await response.text();
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        entered();
+        init?.signal?.addEventListener("abort", () => { aborts++; controller.error(init.signal!.reason); }, { once: true });
+        void gate.then(() => { if (!init?.signal?.aborted) { controller.enqueue(new TextEncoder().encode(content)); controller.close(); } });
+      } }));
+    };
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl });
+    const decode = vi.spyOn(stateDecoder, "decodeReadWeaveCostRootAsync");
+    const controllers = Array.from({ length: 4 }, () => new AbortController());
+    const before = remote.requests.length;
+    const reads = controllers.map(controller => withReadBudget({ signal: controller.signal, timeoutMs: 3000 }, () => api.listCostEntries({ materialVersionId: release.id }, hinted ? ["page-1"] : undefined))
+      .then(value => ({ value, error: "" }), error => ({ value: undefined, error: String(error.message) })));
+    try {
+      await started;
+      await waitFor(() => [...(api as any).costRootReads.values()].some((read: any) => read.consumers === 4));
+      controllers[0]!.abort();
+      expect((await reads[0]!).error).toBe("READ_CANCELLED"); expect(aborts).toBe(0);
+      releaseBody();
+      for (const result of await Promise.all(reads.slice(1))) expect(result).toEqual({ value: [cost], error: "" });
+      expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content` && row.method === "GET")).toHaveLength(1);
+      expect(decode).toHaveBeenCalledTimes(1); expect((api as any).costRootReads.size).toBe(0);
+      assertNoGeneric(api);
+    } finally { releaseBody(); controllers.forEach(controller => controller.abort()); await Promise.all(reads); decode.mockRestore(); }
+  });
+
+  it.each([false, true])("all cancelled shared root consumers abort the body, clear the read, and allow recovery (hints=%s)", async hinted => {
+    const { remote, release, cost, rootId } = await setup(hinted);
+    let entered!: () => void; let aborts = 0; let stall = true;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (!stall || new URL(String(input)).pathname !== `/etapi/notes/${rootId}/content`) return remote.fetch(input, init);
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        entered(); init?.signal?.addEventListener("abort", () => { aborts++; controller.error(init.signal!.reason); }, { once: true });
+      } }));
+    }});
+    const controllers = [new AbortController(), new AbortController()];
+    const reads = controllers.map(controller => withReadBudget({ signal: controller.signal }, () => api.listCostEntries({ materialVersionId: release.id }, hinted ? ["page-1"] : undefined)).then(() => "unexpected", error => String(error.message)));
+    await started; await waitFor(() => [...(api as any).costRootReads.values()].some((read: any) => read.consumers === 2));
+    controllers.forEach(controller => controller.abort());
+    expect(await Promise.all(reads)).toEqual(["READ_CANCELLED", "READ_CANCELLED"]);
+    await waitFor(() => (api as any).costRootReads.size === 0);
+    expect(aborts).toBe(1); expect((api as any).costRootReadSnapshot).toBeUndefined();
+    expect((api as any).draftPageRecordCache.size).toBe(0); expect((api as any).activityRoutes).toBeUndefined();
+    stall = false; await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
+  });
+
+  it("revalidates root stamps, missing stamps and access; invalidation never trusts a stale DTO", async () => {
+    const { remote, release, cost, rootId, root } = await setup();
+    let denied = false;
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (denied && new URL(String(input)).pathname === `/etapi/notes/${rootId}`) return new Response("denied", { status: 403 });
+      return remote.fetch(input, init);
+    }});
+    await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
+    let before = remote.requests.length;
+    await api.listCostEntries({ materialVersionId: release.id });
+    expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(0);
+    root.costEntries.push(costEntryFor(release, "root-added-cost")); remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    before = remote.requests.length;
+    expect((await api.listCostEntries({ materialVersionId: release.id })).map(row => row.id)).toEqual([cost.id, "root-added-cost"]);
+    expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(1);
+    remote.emitBlobIds = false; before = remote.requests.length; await api.listCostEntries({ materialVersionId: release.id });
+    expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(1);
+    remote.emitBlobIds = true; denied = true; await expect(api.listCostEntries({ materialVersionId: release.id })).rejects.toThrow();
+    denied = false; (api as any).invalidateContentStamp(rootId); expect((api as any).costRootReadSnapshot).toBeUndefined();
+    await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toHaveLength(2);
+  });
+
+  it("does not install a late local-version root and returns the newer root under the same budget", async () => {
+    const { remote, release, cost, rootId, root } = await setup();
+    let unblock!: () => void; let entered!: () => void; let stall = true;
+    const gate = new Promise<void>(resolve => { unblock = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (stall && new URL(String(input)).pathname === `/etapi/notes/${rootId}/content`) { stall = false; entered(); await gate; }
+      return response;
+    }});
+    const read = withReadBudget({ timeoutMs: 3000 }, () => api.listCostEntries({ materialVersionId: release.id }));
+    await started;
+    root.costEntries.push(costEntryFor(release, "new-local-version")); remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    (api as any).stateVersion++; unblock();
+    expect((await read).map(row => row.id)).toEqual([cost.id, "new-local-version"]);
+    expect((api as any).costRootReadSnapshot.version).toBe((api as any).stateVersion);
+    expect((api as any).costRootReadSnapshot.dto.costEntries).toHaveLength(2); assertNoGeneric(api);
+  });
+
+  it.each(["workspace", "source", "revision", "rolled_back", "dual-null", "dual-receipt"])("fresh metadata rejects %s even with an unchanged root stamp", async mode => {
+    const { remote, writer, release } = await setup(); await writer.ensureMetadataIndex();
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    await api.listCostEntries({ materialVersionId: release.id });
+    const core = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    const metadataTitle = "Course OS Metadata Index · personal";
+    const metadata = decodeReadWeaveStateContent(remote.contentByTitle(metadataTitle)) as any;
+    let error = "READWEAVE_METADATA_INDEX_REVISION_INVALID";
+    if (mode === "workspace") { metadata.workspaceId = "other"; error = "READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH"; }
+    if (mode === "source") { metadata.stateNoteId = "other"; error = "READWEAVE_METADATA_INDEX_SOURCE_MISMATCH"; }
+    if (mode === "revision") { core.projections.metadataIndexRevision = metadata.revision + 1; }
+    if (mode === "rolled_back") metadata.status = "rolled_back";
+    if (mode === "dual-null") { core.projections.rootMaterialsNoteId = null; error = "READWEAVE_METADATA_ROOT_DUAL_AUTHORITY"; }
+    if (mode === "dual-receipt") { core.idempotency.unmigrated = { kind: "course", objectId: "legacy" }; error = "READWEAVE_METADATA_ROOT_DUAL_AUTHORITY"; }
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(core)); remote.editByTitle(metadataTitle, encodeReadWeaveStateContent(metadata));
+    await expect(api.listCostEntries({ materialVersionId: release.id })).rejects.toThrow(error); assertNoGeneric(api);
+  });
+
+  it("permits staged pointer and permanent-delete legacy receipt without mutating the DTO", async () => {
+    const { remote, writer, release, cost } = await setup(); await writer.ensureMetadataIndex();
+    const core = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    const title = "Course OS Metadata Index · personal"; const metadata = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+    metadata.status = "staged"; core.projections.metadataIndexRevision = metadata.revision + 1;
+    core.idempotency.retained = { kind: "permanent_delete", objectId: "legacy-confirmed" };
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(core)); remote.editByTitle(title, encodeReadWeaveStateContent(metadata));
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
+    const frozen = structuredClone((api as any).costRootReadSnapshot.dto);
+    metadata.status = "active"; metadata.revision += 2; remote.editByTitle(title, encodeReadWeaveStateContent(metadata));
+    await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
+    expect((api as any).costRootReadSnapshot.dto).toEqual(frozen); assertNoGeneric(api);
+  });
+
+  it("preserves cached record cost/draft association order exactly against the sequential oracle", async () => {
+    const { remote, release, root } = await setup();
+    const cost = (id: string, pageId: string | undefined, value: number) => ({ ...costEntryFor(release, id), pageId, actualMicrousd: value });
+    root.drafts = [draftFor(release), { ...draftFor(release), sourceReleaseId: "keep-second-first-match" }];
+    root.costEntries = [cost("cross", "A", 1), cost("b", "B", 2), cost("cross", "B", 3), cost("a", "A", 4), cost("orphan", undefined, 5), cost("cross", "A", 6)];
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    const records = ["A", "B", "A", "page-1"].map((owner, index) => ({ pageId: owner,
+      draft: { ...draftFor(release), pageId: owner, sourceReleaseId: `moved-${index}` },
+      projection: { pageNoteId: `synthetic-${index}`, sectionNoteIds: {}, blockHashes: {} },
+      costEntries: index === 1 ? [] : [cost("cross", owner, index + 10), cost(`new-${index}`, undefined, index + 20)],
+      conflicts: [], idempotency: Object.fromEntries([["__proto__", { kind: "draft", objectId: "synthetic" }]]) }));
+    const oracle = structuredClone(root); const frozen = structuredClone(records);
+    for (const [index, record] of records.entries()) {
+      (api as any).draftPageRecordCache.set(`fixture-key-${index}`, { noteId: `record-${index}`, record });
+      (api as any).mergeDraftPageRecord(oracle, record);
+    }
+    const dto = await (api as any).readCostReference();
+    expect(dto.costEntries).toEqual(oracle.costEntries);
+    expect(dto.drafts).toEqual(oracle.drafts.map((draft: LessonDraft) => ({ pageId: draft.pageId, sourceReleaseId: draft.sourceReleaseId })));
+    expect(records).toEqual(frozen); expect((api as any).costRootReadSnapshot.dto.costEntries).toEqual(root.costEntries);
+    dto.costEntries.find((entry: GenerationCostEntry) => entry.id === "cross").unitPriceSnapshot.capturedAt = "caller-owned-change";
+    expect(records).toEqual(frozen); assertNoGeneric(api);
+  });
+
+  it("retains unique-index and legacy-root binding checks without provisioning", async () => {
+    const { remote, release, cost, root, rootId } = await setup();
+    remote.removeNoteLabel(root.projections.courseRootNoteId, "courseOsType"); remote.removeNoteLabel(root.projections.courseRootNoteId, "courseOsWorkspaceId");
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    await expect(reader.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]); assertNoGeneric(reader);
+    remote.addNoteCopy(rootId, root.projections.courseRootNoteId);
+    const before = remote.requests.length;
+    await expect(new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries({ materialVersionId: release.id })).rejects.toThrow("READWEAVE_COURSE_INDEX_DUPLICATE");
+    expect(remote.requests.slice(before).every(row => row.method === "GET")).toBe(true);
+    expect(remote.requests.slice(before).some(row => row.path.endsWith("/content"))).toBe(false);
+  });
+});
 
 class FakeEtapi {
   emitBlobIds = false;

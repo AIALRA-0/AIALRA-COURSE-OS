@@ -1983,7 +1983,24 @@ export function createApp(dependencies: AppDependencies): Express {
         jobId: asOptionalString(request.query.jobId)
       };
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      const entries = (await dependencies.readweave.listCostEntries(filters)).filter((entry) => entry.workspaceId === workspaceId);
+      let pageIdsHint: readonly string[] | undefined;
+      const prefix = "material-version:";
+      if (filters.materialVersionId?.startsWith(prefix)) {
+        const importId = filters.materialVersionId.slice(prefix.length);
+        try {
+          const record = await dependencies.operations.getImport(importId, workspaceId);
+          if (record?.id === importId && record.workspaceId === workspaceId
+            && record.materialVersionId === filters.materialVersionId && Array.isArray(record.pageIds)) {
+            pageIdsHint = [...record.pageIds];
+          }
+        } catch (error) {
+          // Optional schedule discovery cannot become a new authority or mask
+          // the request's cancellation/deadline.
+          if (error instanceof Error && (error.name === "AbortError"
+            || error.message === "READ_CANCELLED" || error.message === "READ_DEADLINE_EXCEEDED")) throw error;
+        }
+      }
+      const entries = (await dependencies.readweave.listCostEntries(filters, pageIdsHint)).filter((entry) => entry.workspaceId === workspaceId);
       response.json({ entries, rollups: buildCostRollups(entries) });
     } catch (error) { next(error); }
   });
