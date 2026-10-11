@@ -1602,6 +1602,50 @@ describe("ReadWeave ETAPI adapter", () => {
     expect(remote.requests.filter((item) => item.method !== "GET")).toHaveLength(writesBeforeReplay);
   });
 
+  it("core mutation phase timing preserves registration, replay and errors without logging data", async () => {
+    const remote = new FakeEtapi();
+    const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
+    const source = { ...releaseWithPage(), lifecycle: "draft_source" as const };
+    const oldFlag = process.env.COURSE_OS_READWEAVE_TIMING;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      process.env.COURSE_OS_READWEAVE_TIMING = "1";
+      const saved = await api.registerDraftSource(source, context);
+      expect(saved).toMatchObject({ id: source.id, lifecycle: "draft_source", pages: source.pages });
+      const numericTiming = (event: string) => {
+        const call = info.mock.calls.find(([name]) => name === event);
+        expect(call).toBeDefined();
+        const values = JSON.parse(String(call![1])) as Record<string, unknown>;
+        for (const [key, value] of Object.entries(values)) {
+          if (key === "phase") expect(["encode", "put", "complete"]).toContain(value);
+          else if (["replay", "succeeded"].includes(key)) expect(typeof value).toBe("boolean");
+          else { expect(typeof value).toBe("number"); expect(Number.isFinite(value)).toBe(true); expect(value).toBeGreaterThanOrEqual(0); }
+        }
+        return values;
+      };
+      const mutation = numericTiming("course_os.readweave_core_mutation_timing");
+      for (const key of ["pendingReadWaitMs", "stateReadMs", "stateCloneMs", "pageMergeMs", "changeMs", "resultCloneMs", "commitMs", "totalMs"]) expect(mutation).toHaveProperty(key);
+      expect(mutation).toMatchObject({ replay: false, succeeded: true });
+      const write = numericTiming("course_os.readweave_state_write_timing");
+      for (const key of ["mergeBeforeEncodeMs", "metadataPrepareMs", "conflictConfirmMs", "mergeAfterWriteMs", "activityReconcileMs"]) expect(write).toHaveProperty(key);
+      expect(write).toMatchObject({ phase: "complete", succeeded: true });
+      const writes = remote.requests.filter(item => item.method !== "GET").length;
+      info.mockClear();
+      expect(await api.registerDraftSource(source, context)).toEqual(saved);
+      expect(remote.requests.filter(item => item.method !== "GET")).toHaveLength(writes);
+      expect(numericTiming("course_os.readweave_core_mutation_timing")).toMatchObject({ replay: true, succeeded: true });
+      expect(info.mock.calls.some(([event]) => event === "course_os.readweave_state_write_timing")).toBe(false);
+      info.mockClear();
+      await expect(api.registerDraftSource(source, { ...context, idempotencyKey: "different" })).rejects.toThrow("READWEAVE_DRAFT_SOURCE_EXISTS");
+      expect(numericTiming("course_os.readweave_core_mutation_timing")).toMatchObject({ succeeded: false });
+      info.mockImplementation(() => { throw new Error("TIMING_SINK_FAILURE"); });
+      expect(await api.registerDraftSource(source, context)).toEqual(saved);
+    } finally {
+      if (oldFlag === undefined) delete process.env.COURSE_OS_READWEAVE_TIMING; else process.env.COURSE_OS_READWEAVE_TIMING = oldFlag;
+      info.mockRestore();
+    }
+  });
+
   it("logs only numeric activity timing when enabled without changing data or replay writes", async () => {
     const remote = new FakeEtapi();
     const api = new EtapiReadWeaveCourseApi({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });

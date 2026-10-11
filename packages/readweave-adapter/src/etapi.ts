@@ -4109,6 +4109,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private async writeState(state: EtapiState): Promise<void> {
     const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
     let encodeMs: number | undefined;
+    const phases: Record<string, number> = {};
+    let phaseStartedAt = timingEnabled ? performance.now() : 0;
+    const markPhase = (name: string) => {
+      if (!timingEnabled) return;
+      const now = performance.now();
+      phases[name] = Math.round(now - phaseStartedAt);
+      phaseStartedAt = now;
+    };
     let snapshotBytes: number | undefined;
     let stateNotePutMs: number | undefined;
     let phase: "encode" | "put" | "complete" = "encode";
@@ -4116,7 +4124,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     try {
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
       this.upsertStableMaterialNodes(state);
+      markPhase("mergeBeforeEncodeMs");
       const split = await this.prepareMetadataAwareStateWrite(state);
+      markPhase("metadataPrepareMs");
       const encodeStartedAt = timingEnabled ? performance.now() : 0;
       let content: string;
       try {
@@ -4129,13 +4139,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       await this.putContent(state.projections.stateNoteId, content, timingEnabled
         ? (durationMs) => { stateNotePutMs = durationMs; }
         : undefined);
+      if (timingEnabled) phaseStartedAt = performance.now();
       await this.updateConfirmedConflicts(state.conflicts, false);
+      markPhase("conflictConfirmMs");
       const metadata = this.metadataIndexCache;
       if (metadata && state.projections.metadataIndexNoteId === metadata.noteId) {
         state.projections.metadataIndexRevision = metadata.index.revision;
       }
       this.lastWriteAt = new Date().toISOString();
       for (const located of this.draftPageRecordCache.values()) this.mergeDraftPageRecord(state, located.record);
+      markPhase("mergeAfterWriteMs");
       const commitCoreSnapshot = async () => {
         const activityNoteId = state.projections.activityStateNoteId;
         if (activityNoteId) {
@@ -4152,6 +4165,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       } else {
         await commitCoreSnapshot();
       }
+      markPhase("activityReconcileMs");
       phase = "complete";
       succeeded = true;
     } catch (error) {
@@ -4160,6 +4174,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     } finally {
       if (timingEnabled) {
         this.logWriteTiming("course_os.readweave_state_write_timing", {
+          ...phases,
           encodeMs,
           snapshotBytes,
           stateNotePutMs,
@@ -4586,18 +4601,38 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async mutate<T>(change: (state: EtapiState) => Promise<T>, context?: IdempotentWriteContext): Promise<T> {
     return this.enqueueWrite(async () => {
+      const timingEnabled = process.env.COURSE_OS_READWEAVE_TIMING === "1";
+      const startedAt = timingEnabled ? performance.now() : 0;
+      let phaseStartedAt = startedAt;
+      const phases: Record<string, number> = {};
+      const markPhase = (name: string) => {
+        if (!timingEnabled) return;
+        const now = performance.now();
+        phases[name] = Math.round(now - phaseStartedAt);
+        phaseStartedAt = now;
+      };
+      let succeeded = false;
+      let replay = false;
       try {
         const pendingRead = this.stateReadInFlight;
         if (pendingRead) await pendingRead.promise.catch(() => undefined);
+        markPhase("pendingReadWaitMs");
         // The API process is the only writer of the Course OS state note. Most
         // write routes have already loaded this snapshot to check workspace
         // ownership and revisions, so downloading the same multi-megabyte note
         // again only adds seconds of latency. An expired or missing snapshot is
         // still fetched from ReadWeave before the mutation.
-        const state = structuredClone(await this.readStateReference(true));
+        const reference = await this.readStateReference(true);
+        markPhase("stateReadMs");
+        const state = structuredClone(reference);
+        markPhase("stateCloneMs");
         await this.mergeDraftPageRecords(state);
-        const replay = Boolean(context && state.idempotency[context.idempotencyKey]);
-        const result = structuredClone(await change(state));
+        markPhase("pageMergeMs");
+        replay = Boolean(context && state.idempotency[context.idempotencyKey]);
+        const changed = await change(state);
+        markPhase("changeMs");
+        const result = structuredClone(changed);
+        markPhase("resultCloneMs");
         if (!replay) {
           // Learning routes own the separate activity index. A core snapshot
           // clone must never write that note or roll back concurrent activity.
@@ -4605,6 +4640,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         } else {
           await this.updateConfirmedConflicts(state.conflicts, false);
         }
+        markPhase("commitMs");
+        succeeded = true;
         return result;
       } catch (error) {
         // A callback can update its private state object after a remote
@@ -4612,6 +4649,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         // reader can observe an uncommitted local mutation.
         this.invalidateStateCache();
         throw error;
+      } finally {
+        if (timingEnabled) this.logWriteTiming("course_os.readweave_core_mutation_timing", {
+          ...phases, totalMs: Math.round(performance.now() - startedAt), replay, succeeded
+        });
       }
     }, context);
   }
