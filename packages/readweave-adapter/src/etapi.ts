@@ -3709,7 +3709,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       return work;
     }).then(value => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
     try {
-      const workspaceRootNoteId = await this.findWorkspaceRootNoteId();
+      let workspaceNote: EtapiNote | undefined;
+      const workspaceRootNoteId = await this.findWorkspaceRootNoteId(note => { workspaceNote = note; });
       const candidates = await prefetch;
       if (candidates.error) {
         if (isCostReadCancellation(candidates.error)) throw candidates.error;
@@ -3718,8 +3719,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       }
       // Broad parent discovery is speculative: uniqueness applies only after
       // the same fresh, direct-child permission binding as the original query.
+      // Reuse only this invocation's unique, freshly parent-bound search note.
+      // Trusted IDs and older search responses still require the original GET.
       const directIds = workspaceRootNoteId
-        ? new Set((await this.getNote(workspaceRootNoteId)).childNoteIds ?? []) : undefined;
+        ? new Set((workspaceNote?.noteId === workspaceRootNoteId && Array.isArray(workspaceNote.childNoteIds)
+          ? workspaceNote : await this.getNote(workspaceRootNoteId)).childNoteIds ?? []) : undefined;
       return { workspaceRootNoteId, indexes: candidates.value!.filter(note => !directIds || directIds.has(note.noteId)) };
     } finally {
       controller.abort();
@@ -4608,7 +4612,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return undefined;
   }
 
-  private async findWorkspaceRootNoteId(): Promise<string | undefined> {
+  private async findWorkspaceRootNoteId(onFound?: (note: EtapiNote) => void): Promise<string | undefined> {
     const trusted = this.trustedWorkspaceRootNoteId();
     if (trusted) return trusted;
 
@@ -4626,7 +4630,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const workspaceMatches = response.results.filter((note) => note.type === "text");
     const directMatches = workspaceMatches.filter((note) => directChildIds.has(note.noteId));
     if (directMatches.length > 1) throw new Error("READWEAVE_WORKSPACE_ROOT_AMBIGUOUS");
-    if (directMatches.length === 1) return directMatches[0]!.noteId;
+    if (directMatches.length === 1) {
+      const note = directMatches[0]!;
+      onFound?.(note);
+      return note.noteId;
+    }
     if (response.results.length > 0) throw new Error("READWEAVE_WORKSPACE_ROOT_NOT_FOUND");
     return undefined;
   }

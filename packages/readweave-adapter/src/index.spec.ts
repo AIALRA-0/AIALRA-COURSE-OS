@@ -6708,6 +6708,55 @@ describe("PA18 independent cost DTO", () => {
     expect(remote.requests.some(row => row.path.includes("sibling-non-child"))).toBe(false); assertNoGeneric(reader);
   });
 
+
+  it.each(["fresh", "missing children", "trusted metadata"])("cost discovery uses a fresh workspace snapshot with safe %s fallback", async mode => {
+    const { remote, writer, release, cost, root } = await setup(true);
+    remote.emitSearchChildNoteIds = true;
+    await writer.ensureMetadataIndex();
+    const workspaceId = root.projections.courseRootNoteId;
+    let rootMetadataGets = 0;
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/etapi/notes/${workspaceId}`) {
+        rootMetadataGets++;
+        if (mode === "fresh") return new Response("redundant metadata GET must not occur", { status: 503 });
+      }
+      const response = await remote.fetch(input, init);
+      if (mode === "missing children" && url.pathname === "/etapi/notes"
+        && url.searchParams.get("search")?.includes("courseOsType=")) {
+        const body = await response.json();
+        for (const note of body.results) delete note.childNoteIds;
+        return Response.json(body);
+      }
+      return response;
+    }});
+    if (mode === "trusted metadata") {
+      const located = await (reader as any).readMetadataIndex(remote.noteIdByTitle("Course OS Metadata Index · personal"));
+      (reader as any).cacheMetadataIndex(located);
+    }
+    const before = remote.requests.length;
+    expect(await reader.listCostEntries({ materialVersionId: release.id }, ["page-1"])).toEqual([cost]);
+    expect(rootMetadataGets).toBe(mode === "fresh" ? 0 : 1);
+    expect(remote.requests.slice(before).every(row => row.method === "GET")).toBe(true);
+    assertNoGeneric(reader);
+  });
+
+  it.each(["workspace", "index"])("cost snapshot discovery refuses duplicate direct %s authority without reading it", async mode => {
+    const { remote, release, root, rootId } = await setup(true);
+    remote.emitSearchChildNoteIds = true;
+    const workspaceId = root.projections.courseRootNoteId;
+    remote.addNoteCopy(mode === "workspace" ? workspaceId : rootId, mode === "workspace" ? "root" : workspaceId);
+    const before = remote.requests.length;
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    await expect(reader.listCostEntries({ materialVersionId: release.id }, ["page-1"]))
+      .rejects.toThrow(mode === "workspace" ? "READWEAVE_WORKSPACE_ROOT_AMBIGUOUS" : "READWEAVE_COURSE_INDEX_DUPLICATE");
+    const requests = remote.requests.slice(before);
+    expect(requests.every(row => row.method === "GET")).toBe(true);
+    expect(requests.some(row => row.path === `/notes/${rootId}/content`)).toBe(false);
+    expect((reader as any).draftPageRecordCache.size).toBe(0);
+    assertNoGeneric(reader);
+  });
+
   it("PA18 fee pipeline rejected root aborts and settles pending pure record bodies", async () => {
     const { remote, release, root, rootId } = await setup(true);
     const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
@@ -6953,6 +7002,7 @@ describe("PA18 independent cost DTO", () => {
 });
 
 class FakeEtapi {
+  emitSearchChildNoteIds = false;
   emitBlobIds = false;
   private contentStamp(content: string): Record<string, string> {
     return this.emitBlobIds ? { blobId: createHash("sha512").update(content).digest("base64").replace(/\+/gu, "X").replace(/\//gu, "Y").slice(0, 20) } : {};
@@ -6992,7 +7042,9 @@ class FakeEtapi {
           && (labels ? labels.labels[labels.operator === "OR" ? "some" : "every"](({ name, value }) =>
             Object.entries(note.labels).some(([key, actual]) => key.toLowerCase() === name && actual.toLowerCase() === value))
             : exactTitle ? note.title.includes(exactTitle) : false)
-          && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds, ...this.contentStamp(note.content) }));
+          && isDescendant(noteId)).map(([noteId, note]) => ({ noteId, title: note.title, type: note.type, mime: note.mime, parentBranchIds: note.parentBranchIds, ...this.contentStamp(note.content),
+            ...(this.emitSearchChildNoteIds ? { childNoteIds: [...this.branches.values()]
+              .filter(branch => branch.parentNoteId === noteId).map(branch => branch.noteId) } : {}) }));
       return Response.json({ results });
     }
     if (path === "/create-note" && init?.method === "POST") {
