@@ -542,7 +542,7 @@ export const api = {
   writingPolicy: (options?: ApiRequestOptions) => request<WritingPolicyCurrent>("/api/v1/writing-policy/current", { signal: options?.signal }),
   generationHarness: (options?: ApiRequestOptions) => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current", { signal: options?.signal }),
   preparedCosts: (filters: string | { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string }, retry: boolean, options?: ApiRequestOptions) =>
-    request<{ preparation?: { state: "preparing" | "ready" | "failed"; stage: "source" | "records" | "verify" | "complete";
+    confirmedPageRead<{ preparation?: { state: "preparing" | "ready" | "failed"; stage: "source" | "records" | "verify" | "complete";
       checkedRecords: number; totalRecords: number | null; startedAt: string; updatedAt: string; error?: string };
       entries?: GenerationCostEntry[]; rollups?: CostRollup[] }>(
       `/api/v1/costs?${new URLSearchParams({ ...Object.fromEntries(Object.entries(typeof filters === "string" ? { courseId: filters } : filters).filter(([, value]) => Boolean(value))), prepare: "1", ...(retry ? { retry: "1" } : {}) })}`,

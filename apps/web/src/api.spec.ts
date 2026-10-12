@@ -375,3 +375,24 @@ describe("bounded scoped cost preparation", () => {
     await expect(api.waitForCosts({ materialVersionId: "synthetic-material" })).rejects.toThrow("READWEAVE_ACCESS_DENIED");
   });
 });
+
+describe("prepared cost transport recovery", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("retries one transient prepared GET with the same filters", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ error: { code: "READ_DEADLINE_EXCEEDED", retryable: true } }, { status: 504 }))
+      .mockResolvedValueOnce(Response.json({ entries: [{ id: "cost-after-transient" }], rollups: [] }));
+    vi.stubGlobal("fetch", fetch);
+    expect(await api.waitForCosts({ materialVersionId: "synthetic-original-material" })).toMatchObject({ entries: [{ id: "cost-after-transient" }] });
+    expect(fetch).toHaveBeenCalledTimes(2);expect(fetch.mock.calls[0]![0]).toBe(fetch.mock.calls[1]![0]);
+  });
+  it("leaves a sustained deadline visible after the existing single retry", async () => {
+    const fetch = vi.fn().mockImplementation(async () => Response.json({ error: { code: "READ_DEADLINE_EXCEEDED", retryable: true } }, { status: 504 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(api.waitForCosts({ pageId: "synthetic-page" })).rejects.toMatchObject({ status: 504 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it("does not retry cost permission denial", async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json({ error: { code: "ACCESS_DENIED", retryable: false } }, { status: 403 }));
+    vi.stubGlobal("fetch", fetch);await expect(api.waitForCosts({ jobId: "synthetic-job" })).rejects.toMatchObject({ status: 403 });expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

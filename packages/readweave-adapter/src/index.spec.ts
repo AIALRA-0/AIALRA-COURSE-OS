@@ -6645,6 +6645,42 @@ describe("PA18 independent cost DTO", () => {
     await expect(reader.prepareCostLedger("foreign-workspace")).rejects.toThrow("READWEAVE_WORKSPACE_MISMATCH");
   });
 
+  it.each(["page", "root"])("reprepares ready cost records after another adapter changes %s authority", async mode => {
+    const { remote, writer, release, cost } = await setup(true);
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    const previous = (reader as any).costPreparation;
+    expect((await reader.prepareCostLedger("personal")).state).toBe("ready");
+    const next = costEntryFor(release, "changed-after-preparation");
+    if (mode === "page") await writer.appendCostEntry(next, { ...context, idempotencyKey: next.id });
+    else {
+      const root = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+      root.costEntries.push(next); remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    }
+    expect((await reader.prepareCostLedger("personal")).state).toBe("preparing");
+    const replacement = (reader as any).costPreparation; expect(replacement).not.toBe(previous);
+    await reader.prepareCostLedger("personal"); expect((reader as any).costPreparation).toBe(replacement);
+    await replacement.read.promise;
+    expect((await reader.listCostEntries({ courseId: release.courseId })).map(row => row.id)).toEqual(mode === "page" ? [cost.id, next.id] : [next.id, cost.id]);
+    assertNoGeneric(reader);
+  });
+
+  it.each(["denied", "cancelled"])("does not reuse a ready receipt when its root metadata becomes %s", async mode => {
+    const { remote, rootId } = await setup(true); let checking = false; const controller = new AbortController();
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (checking && (init?.method ?? "GET") === "GET" && new URL(String(input)).pathname === `/etapi/notes/${rootId}`) {
+        if (mode === "denied") return new Response("denied", { status: 403 });
+        controller.abort(new Error("READ_CANCELLED"));
+      }
+      return remote.fetch(input, init);
+    } });
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    const ready = (reader as any).costPreparation; checking = true;
+    await expect(withReadBudget({ signal: controller.signal }, () => reader.prepareCostLedger("personal")))
+      .rejects.toThrow(mode === "denied" ? "READWEAVE_ETAPI_403" : "READ_CANCELLED");
+    expect((reader as any).costPreparation).toBe(ready);
+  });
+
   it("cost preparation failure remains explicit without implicit repeat; deliberate retry recovers", async () => {
     const { remote, release, cost } = await setup(true); let fail = true;
     const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {

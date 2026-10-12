@@ -432,7 +432,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   // Only confirmed page-record commits bypass the immutable root clock.
   // Generic writes, invalidations and failed writes still advance it.
   private pageRecordCommitCount = 0;
-  private costPreparation?: { read: SharedRead<void>; progress: CostLedgerPreparation; rootVersion: number };
+  private costPreparation?: { read: SharedRead<void>; progress: CostLedgerPreparation; rootVersion: number; directory?: string; rootNoteId?: string; rootBlobId?: string };
 
   private get costRootVersion(): number { return this.stateVersion - this.pageRecordCommitCount; }
   private activityCache?: { state: EtapiActivityState; expiresAt: number };
@@ -914,15 +914,31 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const budget = currentReadBudget();
     if (budget) assertReadBudgetActive(budget);
     const previous = this.costPreparation;
-    if (previous && (previous.progress.state === "preparing"
-      || (previous.progress.state === "failed" && !retry)
-      || (previous.progress.state === "ready" && previous.rootVersion === this.costRootVersion))) {
+    const directoryStamp = (notes: EtapiNote[]) => JSON.stringify(notes.map(note => [note.noteId, note.blobId]));
+    if (previous && (previous.progress.state === "preparing" || (previous.progress.state === "failed" && !retry))) {
       return { ...previous.progress };
+    }
+    if (previous?.progress.state === "ready" && !retry && previous.rootVersion === this.costRootVersion) {
+      // Other workers do not advance this adapter's local clock. Verify their
+      // fresh source stamps before letting the ordinary deadline read consume
+      // a ready receipt. Changed bodies use the existing bounded preparation.
+      const [root, notes] = await Promise.all([
+        previous.rootNoteId ? this.getNote(previous.rootNoteId) : undefined,
+        this.findDraftPageRecordNotes()
+      ]);
+      if (budget) assertReadBudgetActive(budget);
+      if (this.costPreparation !== previous) return this.prepareCostLedger(workspaceId, retry);
+      // Missing stamps retain the original uncached final-body verification;
+      // they are not proof that an old body equals the current authority.
+      const rootChanged = Boolean(root?.blobId && root.blobId !== previous.rootBlobId);
+      if (!rootChanged && previous.rootVersion === this.costRootVersion && directoryStamp(notes) === previous.directory)
+        return { ...previous.progress };
     }
     const now = new Date().toISOString();
     const progress: CostLedgerPreparation = { state: "preparing", stage: "source",
       checkedRecords: 0, totalRecords: null, startedAt: now, updatedAt: now };
-    const preparation = { progress, rootVersion: this.costRootVersion, read: undefined as unknown as SharedRead<void> };
+    const preparation = { progress, rootVersion: this.costRootVersion, directory: undefined as string | undefined,
+      rootNoteId: undefined as string | undefined, rootBlobId: undefined as string | undefined, read: undefined as unknown as SharedRead<void> };
     const update = (patch: Partial<CostLedgerPreparation>) => Object.assign(progress, patch, { updatedAt: new Date().toISOString() });
     preparation.read = createSharedRead(async markIndependent => {
       markIndependent();
@@ -933,7 +949,6 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         await this.readCostReference();
         const before = this.costRootReadSnapshot;
         update({ stage: "records" });
-        const directoryStamp = (notes: EtapiNote[]) => JSON.stringify(notes.map(note => [note.noteId, note.blobId]));
         let directory = "";
         const records = await this.readDraftPageRecords(undefined, { install: false,
           onDirectory: notes => { directory = directoryStamp(notes); },
@@ -960,6 +975,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
             <= (observedVersions.get(located.record.pageId) ?? 0)) this.cacheDraftPageRecord(located);
         }
         preparation.rootVersion = rootVersion;
+        preparation.directory = confirmedDirectory;
+        preparation.rootNoteId = before?.noteId;
+        preparation.rootBlobId = before?.blobId;
         update({ state: "ready", stage: "complete" });
         return;
       }
