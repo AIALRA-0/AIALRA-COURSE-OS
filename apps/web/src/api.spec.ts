@@ -299,3 +299,47 @@ describe("confirmed learning read recovery", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("normal website login response classification", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const login = '<!doctype html><html><head><title>登录 · Course OS</title></head><body><div id="root"></div><script src="/assets/identity.js"></script></body></html>';
+  it("recognizes the Chinese login page and recovers the same import operation only after login", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(login, { headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(Response.json({ id: "synthetic-existing-import" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.recoverImport("synthetic-unchanged-operation")).rejects.toMatchObject({ code: "AUTH_REQUIRED", status: 200, retryable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(api.recoverImport("synthetic-unchanged-operation")).resolves.toMatchObject({ id: "synthetic-existing-import" });
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual(["/api/v1/import-operations/synthetic-unchanged-operation", "/api/v1/import-operations/synthetic-unchanged-operation"]);
+    expect(fetchMock.mock.calls.every(call => !call[1]?.method || call[1].method === "GET")).toBe(true);
+  });
+  it("uses the confirmed sign-in URL even when the HTML has no English login word", async () => {
+    const response = new Response('<html><title>账户</title></html>', { headers: { "content-type": "text/html" } });
+    Object.defineProperty(response, "url", { value: "https://synthetic.invalid/_aialra_auth/sign-in" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(api.recoverImport("synthetic-redirected-operation")).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
+  it("does not call unrelated HTML or JSON teaching content a login failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response('<html><title>Course OS</title></html>', { headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(Response.json({ id: "synthetic-import", notes: "登录示例与 password 名称都是教学文字" })));
+    await expect(api.recoverImport("synthetic-invalid-response")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    await expect(api.recoverImport("synthetic-json-response")).resolves.toMatchObject({ id: "synthetic-import" });
+  });
+  it.each([true, false])("classifies XHR login redirects without replaying the upload (login=%s)", async signIn => {
+    const sent: Array<{ headers: Record<string, string> }> = [];
+    class SyntheticXHR {
+      status = signIn ? 200 : 502;
+      responseText = signIn ? login : '<html><title>Upstream unavailable</title></html>';
+      responseURL = "https://synthetic.invalid/" + (signIn ? "_aialra_auth/sign-in" : "api/v1/imports");
+      timeout = 0; upload = {}; headers: Record<string, string> = {};
+      onload?: () => void; open() {};
+      setRequestHeader(name: string, value: string) { this.headers[name] = value; }
+      getResponseHeader() { return "text/html"; }
+      send() { sent.push({ headers: this.headers }); queueMicrotask(() => this.onload?.()); }
+    }
+    vi.stubGlobal("XMLHttpRequest", SyntheticXHR);
+    const result = api.importMaterial(new File(["synthetic file"], "slides.pdf"), undefined, { operationKey: "synthetic-original-key" });
+    await expect(result).rejects.toMatchObject({ code: signIn ? "AUTH_REQUIRED" : "IMPORT_RESULT_UNKNOWN", retryable: !signIn });
+    expect(sent).toHaveLength(1); expect(sent[0]!.headers["Idempotency-Key"]).toBe("synthetic-original-key");
+  });
+});

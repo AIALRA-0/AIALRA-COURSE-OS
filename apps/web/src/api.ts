@@ -89,6 +89,10 @@ function uploadImport<T = ImportRecord>(body: FormData, key: string, onUpload?: 
       ? new ApiRequestError("版式检查未完成；可以重新检查，尚未创建导入任务", "PDF_INSPECTION_UNAVAILABLE", 0, true)
       : new ApiRequestError("接单结果尚未确认；请恢复同次导入，不要重复创建任务", "IMPORT_RESULT_UNKNOWN", 0, true));
     xhr.onload = () => {
+      if (isLoginPage(xhr.getResponseHeader?.("content-type") || "", xhr.responseText, xhr.responseURL)) {
+        reject(new ApiRequestError("网站要求重新登录；登录后恢复同次导入，不要重复创建任务", "AUTH_REQUIRED", xhr.status, false));
+        return;
+      }
       let payload: unknown;
       try { payload = JSON.parse(xhr.responseText); } catch { reject(new ApiRequestError("接单响应无法确认，请恢复同次导入", "IMPORT_RESULT_UNKNOWN", xhr.status, true)); return; }
       if (xhr.status >= 200 && xhr.status < 300) { resolve(payload as T); return; }
@@ -154,8 +158,12 @@ function isHtmlResponse(contentType: string, body: string): boolean {
   return contentType.toLowerCase().includes("text/html") || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body);
 }
 
-function isLoginPage(contentType: string, body: string): boolean {
-  return isHtmlResponse(contentType, body) && /\b(?:sign\s*in|log\s*in|login|password|session\s+expired|authenticate)\b/i.test(body);
+function isLoginPage(contentType: string, body: string, responseUrl?: string): boolean {
+  if (!isHtmlResponse(contentType, body)) return false;
+  let signInRedirect = false;
+  try { signInRedirect = /\/_aialra_auth\/sign-in\/?$/.test(new URL(responseUrl || "").pathname); } catch { /* A missing response URL falls back to HTML identification. */ }
+  return signInRedirect || /<title\b[^>]*>[^<]*(?:登录|登入)[^<]*<\/title>/i.test(body)
+    || /\b(?:sign\s*in|log\s*in|login|password|session\s+expired|authenticate)\b/i.test(body);
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -235,7 +243,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
 
     const contentType = response.headers.get("content-type") || "";
-    if (isLoginPage(contentType, body)) {
+    if (isLoginPage(contentType, body, response.url)) {
       throw new ApiRequestError(
         "接口返回了登录页面，登录状态可能已失效，请重新登录",
         "AUTH_REQUIRED",
