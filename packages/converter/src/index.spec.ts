@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { convertMaterial, FileConversionQueueClient, FileConversionQueueWorker, type ProcessRunner } from "./index.js";
+import { convertMaterial, FileConversionQueueClient, FileConversionQueueWorker, type FileConversionQueueOptions, type ProcessRunner } from "./index.js";
+import type { ConversionRequest } from "@course-os/contracts";
 
 describe("offline material converter", () => {
   it("paginates a text syllabus and renders local SVG pages", async () => {
@@ -328,6 +329,243 @@ describe("offline material converter", () => {
     const result = JSON.parse(await readFile(join(queueRoot, "results", `${request.id}.json`), "utf8")) as { state: string; pages: unknown[] };
     expect(result).toMatchObject({ state: "completed" });
     expect(result.pages).toHaveLength(1);
+  });
+});
+
+describe("preview queue lanes", () => {
+  function worker(options: FileConversionQueueOptions, purpose?: "inspect" | "convert") {
+    const scopedOptions = { ...options, purpose };
+    return new FileConversionQueueWorker(scopedOptions);
+  }
+
+  async function fixture() {
+    const root = await mkdtemp(join(tmpdir(), "course-os-preview-lanes-"));
+    const queueRoot = join(root, "queue");
+    const sourcePath = join(root, "source.pdf");
+    await writeFile(sourcePath, "%PDF-1.7 synthetic queue fixture");
+    const request = (id: string, purpose?: "inspect"): ConversionRequest => ({
+      id, purpose, kind: "pdf", sourcePath, originalName: "source.pdf",
+      outputDir: join(root, id), createdAt: new Date().toISOString()
+    });
+    const enqueue = async (item: ConversionRequest, directory = "pending") => {
+      await mkdir(join(queueRoot, directory), { recursive: true });
+      await writeFile(join(queueRoot, directory, `${item.id}.json`), JSON.stringify(item));
+    };
+    return { root, queueRoot, request, enqueue };
+  }
+
+  function runner(gate?: { promise: Promise<void>; resolve: () => void }, started?: { resolve: () => void }): ProcessRunner {
+    return async (command, args, options) => {
+      if (command === "python") return { stdout: JSON.stringify({ pages: [], inspection: {
+        sourceSha256: "a".repeat(64), physicalPageCount: 10, logicalPageCount: 10
+      } }), stderr: "" };
+      if (command === "pdfinfo") return { stdout: "Pages: 42", stderr: "" };
+      if (command === "pdftoppm") {
+        started?.resolve();
+        await gate?.promise;
+        for (let page = 1; page <= 42; page++) await writeFile(join(options.cwd, `page-${page}.png`), testPng());
+      }
+      if (command === "pdftotext") await writeFile(args.at(-1)!, "Page\f".repeat(42));
+      return { stdout: "", stderr: "" };
+    };
+  }
+
+  it("finishes inspection while a real queue conversion is held at the render barrier", async () => {
+    const f = await fixture();
+    const gate = deferred();
+    const started = deferred();
+    const convert = worker({ queueRoot: f.queueRoot, runProcess: runner(gate, started), binaries: testBinaries() }, "convert");
+    const inspect = worker({ queueRoot: f.queueRoot, runProcess: runner(), binaries: testBinaries() }, "inspect");
+    await f.enqueue(f.request("a-active"));
+    const converting = convert.runOnce();
+    let converted = false;
+    void converting.then(() => { converted = true; }, () => undefined);
+    try {
+      await started.promise;
+      await f.enqueue(f.request("b-next-conversion"));
+      await f.enqueue(f.request("z-inspection", "inspect"));
+      expect(await inspect.runOnce()).toBe(true);
+      expect(await readdir(join(f.queueRoot, "results"))).toEqual(["z-inspection.json"]);
+      expect(JSON.parse(await readFile(join(f.queueRoot, "results", "z-inspection.json"), "utf8")))
+        .toMatchObject({ state: "completed", pages: [], inspection: { logicalPageCount: 10 } });
+      expect(converted).toBe(false);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual(["a-active.json"]);
+      expect(await readdir(join(f.queueRoot, "pending"))).toEqual(["b-next-conversion.json"]);
+    } finally {
+      gate.resolve();
+      await converting;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["inspect", "convert"] as const)("does not claim or recover foreign processing/results in the %s lane", async (purpose) => {
+    const f = await fixture();
+    const foreignPurpose = purpose === "inspect" ? undefined : "inspect";
+    const ownPurpose = purpose === "inspect" ? "inspect" : undefined;
+    try {
+      await f.enqueue(f.request("a-foreign-pending", foreignPurpose));
+      await f.enqueue(f.request("b-foreign-stale", foreignPurpose), "processing");
+      await f.enqueue(f.request("c-foreign-durable", foreignPurpose), "processing");
+      const old = new Date(Date.now() - 60_000);
+      for (const id of ["b-foreign-stale", "c-foreign-durable"]) await utimes(join(f.queueRoot, "processing", `${id}.json`), old, old);
+      await mkdir(join(f.queueRoot, "results"), { recursive: true });
+      await writeFile(join(f.queueRoot, "results", "c-foreign-durable.json"), JSON.stringify({ requestId: "c-foreign-durable", state: "completed", pages: [] }));
+      const lane = worker({ queueRoot: f.queueRoot, processingRecoveryMs: 0, runProcess: runner(), binaries: testBinaries() }, purpose);
+      expect(await lane.runOnce()).toBe(false);
+      expect(await readdir(join(f.queueRoot, "pending"))).toEqual(["a-foreign-pending.json"]);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual(["b-foreign-stale.json", "c-foreign-durable.json"]);
+      await f.enqueue(f.request("z-own-stale", ownPurpose), "processing");
+      await utimes(join(f.queueRoot, "processing", "z-own-stale.json"), old, old);
+      expect(await lane.runOnce()).toBe(true);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual(["b-foreign-stale.json", "c-foreign-durable.json"]);
+      expect(await readdir(join(f.queueRoot, "results"))).toEqual(["c-foreign-durable.json", "z-own-stale.json"]);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("keeps inspection requests working in the undefined legacy purpose mode", async () => {
+    const f = await fixture();
+    try {
+      await f.enqueue(f.request("legacy-inspection", "inspect"));
+      expect(await worker({ queueRoot: f.queueRoot, runProcess: runner(), binaries: testBinaries() }).runOnce()).toBe(true);
+      expect(JSON.parse(await readFile(join(f.queueRoot, "results", "legacy-inspection.json"), "utf8")))
+        .toMatchObject({ requestId: "legacy-inspection", state: "completed", pages: [] });
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refreshes processing mtime at claim rather than treating time queued as processing age", async () => {
+    const f = await fixture();
+    const gate = deferred();
+    const started = deferred();
+    await f.enqueue(f.request("old-pending"));
+    const old = new Date(Date.now() - 60_000);
+    await utimes(join(f.queueRoot, "pending", "old-pending.json"), old, old);
+    const beforeClaim = Date.now();
+    const options = { queueRoot: f.queueRoot, processingRecoveryMs: 30_000, runProcess: runner(gate, started), binaries: testBinaries() };
+    const converting = worker(options, "convert").runOnce();
+    try {
+      await started.promise;
+      const claimed = await stat(join(f.queueRoot, "processing", "old-pending.json"));
+      expect(claimed.mtimeMs).toBeGreaterThanOrEqual(beforeClaim - 5);
+      expect(await worker(options, "convert").runOnce()).toBe(false);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual(["old-pending.json"]);
+    } finally {
+      gate.resolve();
+      await converting;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses atomic claims once and preserves a durable result when a pending duplicate remains", async () => {
+    const f = await fixture();
+    const calls = vi.fn(runner());
+    const options = { queueRoot: f.queueRoot, runProcess: calls, binaries: testBinaries() };
+    try {
+      await f.enqueue(f.request("once", "inspect"));
+      const inspect = worker(options, "inspect");
+      const convert = worker(options, "convert");
+      const claims = await Promise.all([inspect.runOnce(), inspect.runOnce(), convert.runOnce()]);
+      expect(claims.sort()).toEqual([false, false, true]);
+      expect(calls).toHaveBeenCalledTimes(1);
+      const resultPath = join(f.queueRoot, "results", "once.json");
+      const durable = await readFile(resultPath, "utf8");
+      await writeFile(join(f.root, "once", "sentinel"), "keep output");
+      await f.enqueue(f.request("once", "inspect"));
+      expect(await worker(options, "inspect").runOnce()).toBe(true);
+      expect(await readFile(resultPath, "utf8")).toBe(durable);
+      expect(await readFile(join(f.root, "once", "sentinel"), "utf8")).toBe("keep output");
+      expect(calls).toHaveBeenCalledTimes(1);
+      const client = new FileConversionQueueClient({ queueRoot: f.queueRoot });
+      expect(await client.enqueueAndWait(f.request("once", "inspect"))).toEqual(JSON.parse(durable));
+      expect(await readdir(join(f.queueRoot, "pending"))).toEqual([]);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual([]);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("stops claims on shutdown while finishing the active job and its durable result", async () => {
+    const f = await fixture();
+    const gate = deferred();
+    const started = deferred();
+    const controller = new AbortController();
+    await f.enqueue(f.request("a-active"));
+    await f.enqueue(f.request("b-queued"));
+    const lane = worker({ queueRoot: f.queueRoot, runProcess: runner(gate, started), binaries: testBinaries(), pollIntervalMs: 1 }, "convert");
+    const serving = lane.serve(controller.signal);
+    let stopped = false;
+    void serving.then(() => { stopped = true; }, () => undefined);
+    try {
+      await started.promise;
+      controller.abort();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stopped).toBe(false);
+      gate.resolve();
+      await serving;
+      expect(await readdir(join(f.queueRoot, "results"))).toEqual(["a-active.json"]);
+      expect(await readdir(join(f.queueRoot, "pending"))).toEqual(["b-queued.json"]);
+      expect(await readdir(join(f.queueRoot, "processing"))).toEqual([]);
+      // Already-aborted shutdown must also prevent a direct claim during a scan.
+      expect(await lane.runOnce(controller.signal)).toBe(false);
+    } finally {
+      controller.abort();
+      gate.resolve();
+      await serving;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("preview queue lanes service shutdown", () => {
+  it.each(["SIGTERM", "SIGINT", "sibling error"] as const)("drains both service workers after %s", async (stop) => {
+    vi.resetModules();
+    const gates = [deferred(), deferred()];
+    const registered = deferred();
+    const signals: Array<AbortSignal | undefined> = [];
+    const purposes: Array<unknown> = [];
+    const handlers = new Map<string, () => void>();
+    const once = process.once.bind(process);
+    const listener = vi.spyOn(process, "once").mockImplementation(((event: string, handler: () => void) => {
+      if (event === "SIGTERM" || event === "SIGINT") { handlers.set(event, handler); return process; }
+      return once(event, handler);
+    }) as typeof process.once);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.doMock("@course-os/converter", () => ({ FileConversionQueueWorker: class {
+      constructor(options: FileConversionQueueOptions & { purpose?: string }) { purposes.push(options.purpose); }
+      async serve(signal?: AbortSignal) {
+        const index = signals.length;
+        signals.push(signal);
+        if (signals.length === 2) registered.resolve();
+        await gates[index]!.promise;
+        if (stop === "sibling error" && index === 0) throw new Error("QUEUE_LANE_FAILURE");
+      }
+    } }));
+    const entry = "../../../apps/converter/src/index.ts";
+    const boot = import(entry);
+    // Attach rejection handling immediately, including a failure before both workers start.
+    let settled = false;
+    const outcome = boot.then(() => { settled = true; return undefined; }, (error: unknown) => { settled = true; return error; });
+    try {
+      await Promise.race([registered.promise, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+      expect(purposes).toEqual(["inspect", "convert"]);
+      if (stop === "sibling error") gates[0]!.resolve();
+      else handlers.get(stop)!();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(signals.every((signal) => signal?.aborted)).toBe(true);
+      expect(settled).toBe(false);
+      if (stop !== "sibling error") gates[0]!.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      gates[1]!.resolve();
+      const result = await outcome;
+      if (stop === "sibling error") expect(result).toMatchObject({ message: "QUEUE_LANE_FAILURE" });
+      else expect(result).toBeUndefined();
+    } finally {
+      for (const handler of handlers.values()) handler();
+      gates.forEach((gate) => gate.resolve());
+      await outcome;
+      listener.mockRestore();
+      stdout.mockRestore();
+      vi.doUnmock("@course-os/converter");
+      vi.resetModules();
+    }
   });
 });
 

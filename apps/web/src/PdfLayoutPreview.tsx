@@ -12,7 +12,10 @@ export function PdfLayoutPreview({ inspection, selection, busy, error, onChange 
       <option value="auto">识别独立幻灯片，歧义页保留原页</option><option value="original">保留原始纸页</option>
     </select></label>
     {busy && <p className="pdf-layout-status" role="status" aria-live="polite">正在检查每页版式并准备预览，不会启动教学模型</p>}
-    {error && <p className="pdf-layout-error" role="alert">{error} · 可以选择保留原页后重新检查</p>}
+    {error && <div className="pdf-layout-error">
+      <p role="alert">{error} · 文件与页面处理选项已保留，重新检查不会提交导入或启动教学模型</p>
+      <button type="button" className="quiet-button" disabled={busy} onClick={() => onChange({ ...selection })}>重新检查版式</button>
+    </div>}
     {inspection && <>
       <div className="pdf-layout-summary"><strong>{inspection.physicalPageCount === inspection.logicalPageCount ? "原始页面" : "识别到双拼讲义"}：{inspection.physicalPageCount} 张纸页 → {inspection.logicalPageCount} 张页面</strong>
         <p>框线表示实际导入范围；确认导入后才执行转换。旧版本讲解和答案保持原关联。</p>

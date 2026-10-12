@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -58,6 +58,8 @@ export interface ConvertOptions {
 
 export interface FileConversionQueueOptions extends ConvertOptions {
   queueRoot: string;
+  /** Undefined keeps the legacy worker that processes all purposes. */
+  purpose?: "inspect" | "convert";
   pollIntervalMs?: number;
   resultTimeoutMs?: number;
   processingRecoveryMs?: number;
@@ -135,6 +137,7 @@ export class FileConversionQueueClient {
 }
 
 export class FileConversionQueueWorker {
+  private running = false;
   private readonly pendingDir: string;
   private readonly processingDir: string;
   private readonly resultsDir: string;
@@ -147,24 +150,51 @@ export class FileConversionQueueWorker {
     this.progressDir = join(options.queueRoot, "progress");
   }
 
-  async runOnce(): Promise<boolean> {
+  async runOnce(signal?: AbortSignal): Promise<boolean> {
+    if (this.running || signal?.aborted) return false;
+    this.running = true;
+    try { return await this.processNext(signal); }
+    finally { this.running = false; }
+  }
+
+  private owns(request: ConversionRequest): boolean {
+    return this.options.purpose === undefined || this.options.purpose === (request.purpose === "inspect" ? "inspect" : "convert");
+  }
+
+  private async processNext(signal?: AbortSignal): Promise<boolean> {
     await Promise.all([
       mkdir(this.pendingDir, { recursive: true }),
       mkdir(this.processingDir, { recursive: true }),
       mkdir(this.resultsDir, { recursive: true }),
       mkdir(this.progressDir, { recursive: true })
     ]);
-    await this.recoverStaleProcessing();
-    const name = (await readdir(this.pendingDir)).filter((item) => item.endsWith(".json")).sort()[0];
-    if (!name) return false;
-    const pendingPath = join(this.pendingDir, name);
-    const processingPath = join(this.processingDir, name);
-    try {
-      await rename(pendingPath, processingPath);
-    } catch {
-      return false;
+    if (signal?.aborted) return false;
+    await this.recoverStaleProcessing(signal);
+    const names = (await readdir(this.pendingDir)).filter((item) => item.endsWith(".json")).sort();
+    let processingPath: string | undefined;
+    for (const name of names) {
+      if (signal?.aborted) return false;
+      const pendingPath = join(this.pendingDir, name);
+      const request = await readJsonIfPresent<ConversionRequest>(pendingPath);
+      if (!request || !this.owns(request)) continue;
+      if (signal?.aborted) return false;
+      const claimedPath = join(this.processingDir, name);
+      try { await rename(pendingPath, claimedPath); }
+      catch { continue; }
+      // Renaming preserves mtime: queue wait must not count toward crash recovery.
+      const claimedAt = new Date();
+      await utimes(claimedPath, claimedAt, claimedAt);
+      processingPath = claimedPath;
+      break;
     }
+    if (!processingPath) return false;
     const request = JSON.parse(await readFile(processingPath, "utf8")) as ConversionRequest;
+    const resultPath = join(this.resultsDir, `${safeId(request.id)}.json`);
+    // A result may already be durable after a crash or a late duplicate enqueue.
+    if (await readJsonIfPresent<ConversionResult>(resultPath)) {
+      await rm(processingPath, { force: true });
+      return true;
+    }
     let lastProgress: ConversionProgressSnapshot = {
       requestId: request.id,
       stage: "preparing",
@@ -199,17 +229,20 @@ export class FileConversionQueueWorker {
       await publishProgress({ requestId: request.id, stage: "completed", pageCount: result.pages.length,
         completedPages: result.pages.length, updatedAt: result.completedAt });
     }
-    await writeJsonAtomic(join(this.resultsDir, `${safeId(request.id)}.json`), result);
+    await writeJsonAtomic(resultPath, result);
     await rm(processingPath, { force: true });
     return true;
   }
 
-  private async recoverStaleProcessing(): Promise<void> {
+  private async recoverStaleProcessing(signal?: AbortSignal): Promise<void> {
     const recoveryMs = this.options.processingRecoveryMs ?? PROCESS_TIMEOUT_MS * 2;
     const now = Date.now();
     const names = (await readdir(this.processingDir)).filter((item) => item.endsWith(".json"));
     for (const name of names) {
+      if (signal?.aborted) return;
       const processingPath = join(this.processingDir, name);
+      const request = await readJsonIfPresent<ConversionRequest>(processingPath);
+      if (!request || !this.owns(request)) continue;
       const resultPath = join(this.resultsDir, name);
       const existingResult = await readJsonIfPresent<ConversionResult>(resultPath);
       if (existingResult) {
@@ -230,8 +263,8 @@ export class FileConversionQueueWorker {
 
   async serve(signal?: AbortSignal): Promise<void> {
     while (!signal?.aborted) {
-      const processed = await this.runOnce();
-      if (!processed) await delay(this.options.pollIntervalMs ?? 250);
+      const processed = await this.runOnce(signal);
+      if (!processed && !signal?.aborted) await delay(this.options.pollIntervalMs ?? 250);
     }
   }
 }

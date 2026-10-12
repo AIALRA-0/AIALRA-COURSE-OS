@@ -3998,12 +3998,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async readRootSnapshot(noteId: string): Promise<Partial<EtapiState>> {
-    const observedVersion = this.stateVersion;
+    const observedVersion = this.costRootVersion;
     const cached = this.rootReadSnapshot;
     if (cached?.noteId === noteId && !this.writeContext.getStore()) {
       const note = await this.getNote(noteId);
       if (note.blobId && note.blobId === cached.blobId
-        && this.rootReadSnapshot === cached && this.stateVersion === observedVersion) {
+        && this.rootReadSnapshot === cached && this.costRootVersion === observedVersion) {
         const budget = currentReadBudget();
         if (budget) assertReadBudgetActive(budget);
         return rootReadView(cached.parsed);
@@ -4014,7 +4014,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const blobId = readweaveContentBlobId(content);
     const budget = currentReadBudget();
     if (budget) assertReadBudgetActive(budget);
-    if (!this.writeContext.getStore() && this.stateVersion === observedVersion) {
+    if (!this.writeContext.getStore() && this.costRootVersion === observedVersion) {
       this.rootReadSnapshot = { noteId, blobId, parsed };
     }
     return rootReadView(parsed);

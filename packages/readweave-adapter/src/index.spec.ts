@@ -6690,6 +6690,32 @@ describe("PA18 independent cost DTO", () => {
     expect((api as any).draftPageRecordsHydrated).toBe(false);
   };
 
+  it.each(["body", "stamp"])("keeps a pure root snapshot across an independent page commit during %s verification", async mode => {
+    const { remote, release, rootId } = await setup(true);let active = false, block = true, bodyReads = 0, stampReads = 0;
+    let started!: () => void, finish!: () => void;const entered = new Promise<void>(resolve => { started = resolve; });const held = new Promise<void>(resolve => { finish = resolve; });
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const path = new URL(String(input)).pathname;const response = await remote.fetch(input, init);
+      if (active && (init?.method ?? "GET") === "GET" && path === `/etapi/notes/${rootId}/content`) bodyReads++;
+      if (active && (init?.method ?? "GET") === "GET" && path === `/etapi/notes/${rootId}`) stampReads++;
+      if (active && block && path === `/etapi/notes/${rootId}${mode === "body" ? "/content" : ""}`) { block = false;started();await held; }
+      return response;
+    } });
+    await reader.getRelease(release.id);
+    const changed = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    changed.costEntries.push({ ...costEntryFor(release, "independent-root-history"), pageId: undefined });
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(changed));
+    if (mode === "stamp") await (reader as any).readRootSnapshot(rootId);
+    const rootVersion = (reader as any).costRootVersion, stateVersion = (reader as any).stateVersion;
+    active = true;const pending = (reader as any).readRootSnapshot(rootId);
+    try {
+      await entered;const added = costEntryFor(release, "pure-root-page-commit");await reader.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+      expect((reader as any).stateVersion).toBeGreaterThan(stateVersion);expect((reader as any).costRootVersion).toBe(rootVersion);
+      finish();const pure = await pending;expect(pure.costEntries.some((entry: GenerationCostEntry) => entry.id === added.id)).toBe(false);
+      await (reader as any).readRootSnapshot(rootId);expect(stampReads).toBeGreaterThan(0);expect(bodyReads).toBe(mode === "body" ? 1 : 0);
+      expect((await reader.listCostEntries({ pageId: "page-1" })).map(entry => entry.id)).toContain(added.id);
+    } finally { finish();await pending; }
+  });
+
   it("cost preparation shares one producer, reports verified progress, and leaves monetary authority to the final read", async () => {
     const { remote, release, cost } = await setup(true);
     const reader = new EtapiReadWeaveCourseApi(configFor(remote));
