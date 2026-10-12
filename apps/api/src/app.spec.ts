@@ -2547,13 +2547,13 @@ describe("Course OS API", () => {
     expect(await readweave.getDraftByPage("page-1")).toEqual(completedDraft);
   }, 15_000);
 
-  it("automatically retries transient lesson persistence while reusing the completed model response", async () => {
+  it.each(["READWEAVE_ETAPI_503:temporary", "READ_DEADLINE_EXCEEDED", "READWEAVE_SOURCE_REGISTRATION_TIMEOUT"])("recovers %s persistence without repeating the paid model response", async (failureCode) => {
     const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
     const { app, dependencies, readweave, release } = await seededApp(modelRouter);
     const save = readweave.saveDraftWithCost.bind(readweave);
     let failures = 2;
     vi.spyOn(readweave, "saveDraftWithCost").mockImplementation((...args) => {
-      if (failures-- > 0) return Promise.reject(new Error("READWEAVE_ETAPI_503:temporary"));
+      if (failures-- > 0) return Promise.reject(new Error(failureCode));
       return save(...args);
     });
     const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "recover-transient-store")
@@ -2563,6 +2563,20 @@ describe("Course OS API", () => {
     const state = await dependencies.operations.read();
     expect(state.events.filter(event => event.streamId === created.body.id && event.type === "generation.page.storage_retry")).toHaveLength(1);
     expect(await readweave.getDraftByPage("page-1")).toBeDefined();
+  }, 15_000);
+
+  it("stops deadline recovery after two attempts and retains the paid checkpoint", async () => {
+    const modelRouter: ModelRouterClient = { generateTeachingPackage: vi.fn(async () => testTeachingResult(0)) };
+    const { app, dependencies, readweave, release } = await seededApp(modelRouter);
+    vi.spyOn(readweave, "saveDraftWithCost").mockRejectedValue(new Error("READ_DEADLINE_EXCEEDED"));
+    const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "finite-deadline-recovery")
+      .send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 4 }).expect(202);
+    expect(await waitForJob(app, created.body.id)).toMatchObject({ completedPageIds: [], failedPageIds: ["page-1"] });
+    const state = await dependencies.operations.read();
+    expect(state.events.filter(event => event.streamId === created.body.id && event.type === "generation.page.storage_retry")).toHaveLength(2);
+    expect(state.generationCheckpoints[`${created.body.id}:page-1`]).toMatchObject({ kind: "page-generation-recovery-v1", teaching: { content: testTeachingResult(0).content } });
+    expect(modelRouter.generateTeachingPackage).toHaveBeenCalledTimes(1);
+    expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
   }, 15_000);
 
   it("starts teaching while the visual cost write is still pending", async () => {
@@ -4388,6 +4402,20 @@ describe("PA18 fee pipeline API scheduling hints", () => {
 });
 
 describe("opt-in complete course cost preparation", () => {
+  it.each(["materialVersionId", "pageId", "jobId"])("prepares %s with 202 and retains its original final filter", async selector => {
+    const { app, readweave } = await seededApp();
+    const prepare = vi.fn().mockResolvedValueOnce({ state: "preparing", stage: "records", checkedRecords: 0, totalRecords: 4 })
+      .mockResolvedValueOnce({ state: "ready", stage: "complete" });
+    (readweave as any).prepareCostLedger = prepare;
+    const costs = vi.spyOn(readweave, "listCostEntries");
+    const pending = await request(app).get("/api/v1/costs").query({ [selector]: "synthetic-scope", prepare: "1" });
+    expect(pending.status).toBe(202); expect(pending.body.entries).toBeUndefined(); expect(costs).not.toHaveBeenCalled();
+    const ready = await request(app).get("/api/v1/costs").query({ [selector]: "synthetic-scope", prepare: "1" });
+    expect(ready.status).toBe(200); expect(ready.body.entries).toEqual([]);
+    expect(costs.mock.calls[0]![0]).toMatchObject({ [selector]: "synthetic-scope" });
+    expect(prepare).toHaveBeenNthCalledWith(1, "personal", false);
+  });
+
   it("returns truthful 202 progress without entries and passes the current workspace and retry intent", async () => {
     const { app, readweave, release } = await seededApp();
     const prepare = vi.fn().mockResolvedValue({ state: "preparing", stage: "records", checkedRecords: 2, totalRecords: 8,

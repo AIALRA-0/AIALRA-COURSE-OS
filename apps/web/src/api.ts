@@ -541,12 +541,41 @@ export const api = {
   }),
   writingPolicy: (options?: ApiRequestOptions) => request<WritingPolicyCurrent>("/api/v1/writing-policy/current", { signal: options?.signal }),
   generationHarness: (options?: ApiRequestOptions) => request<GenerationHarnessCurrent>("/api/v1/generation-harness/current", { signal: options?.signal }),
-  preparedCosts: (courseId: string, retry: boolean, options?: ApiRequestOptions) =>
+  preparedCosts: (filters: string | { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string }, retry: boolean, options?: ApiRequestOptions) =>
     request<{ preparation?: { state: "preparing" | "ready" | "failed"; stage: "source" | "records" | "verify" | "complete";
       checkedRecords: number; totalRecords: number | null; startedAt: string; updatedAt: string; error?: string };
       entries?: GenerationCostEntry[]; rollups?: CostRollup[] }>(
-      `/api/v1/costs?${new URLSearchParams({ courseId, prepare: "1", ...(retry ? { retry: "1" } : {}) })}`,
+      `/api/v1/costs?${new URLSearchParams({ ...Object.fromEntries(Object.entries(typeof filters === "string" ? { courseId: filters } : filters).filter(([, value]) => Boolean(value))), prepare: "1", ...(retry ? { retry: "1" } : {}) })}`,
       { signal: options?.signal }),
+  waitForCosts: async (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string },
+    options: ApiRequestOptions & { retry?: boolean; onProgress?: (message: string) => void } = {}): Promise<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }> => {
+    // One bounded preparation owner serves all selectors. Each HTTP read keeps
+    // its ordinary deadline; cancelling a viewer does not cancel that owner.
+    const deadline = Date.now() + 190_000;
+    let first = true;
+    while (Date.now() < deadline) {
+      if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      const result = await api.preparedCosts(filters, first && options.retry === true, options);
+      first = false;
+      if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (result.entries && result.rollups) return { entries: result.entries, rollups: result.rollups };
+      const progress = result.preparation;
+      if (!progress) throw new Error("成本账本返回不完整");
+      if (progress.state === "failed") throw new Error(progress.error || "账本核对失败");
+      if (progress.state === "ready") throw new Error("成本账本返回不完整");
+      const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(progress.startedAt)) / 1000));
+      const stage = progress.stage === "source" ? "正在确认账本来源" : progress.stage === "verify" ? "正在复核账本修订"
+        : progress.totalRecords === null ? "正在读取历史记录目录" : `正在核对历史记录 ${progress.checkedRecords}/${progress.totalRecords} 条`;
+      options.onProgress?.(`${stage} · 已用 ${elapsed} 秒`);
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+        const timer = setTimeout(() => { options.signal?.removeEventListener("abort", abort); resolve(); }, 1000);
+        options.signal?.addEventListener("abort", abort, { once: true });
+        if (options.signal?.aborted) abort();
+      });
+    }
+    throw new Error("账本核对未在本次处理期限内完成，请重试");
+  },
   costs: (filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}, options?: ApiRequestOptions) => {
     const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<{ entries: GenerationCostEntry[]; rollups: CostRollup[] }>(`/api/v1/costs${query.size ? `?${query}` : ""}`, { signal: options?.signal });

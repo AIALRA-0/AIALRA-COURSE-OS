@@ -9,6 +9,7 @@ import { SelfRetellingPanel } from "./SelfRetellingPanel.js";
 import { createQuestionBatchState, isQuestionAnswerSaved, previewQuestionBank, questionAnswerKey, questionKindLabel, readQuestionBatchState, sameQuestionPreview, uniquePracticeQuestions, writeQuestionBatchState, type QuestionBatchSize, type QuestionBatchState } from "./question-preview.js";
 
 export function ExplanationPanel({ release, page, sessionId, onEnterStudio, loadRootRef, generatedReady, unpublishedDraftRevision }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void; loadRootRef?: { current: HTMLElement | null }; generatedReady?: boolean; unpublishedDraftRevision?: number }) {
+  const questionBankSignature = JSON.stringify(page.questionBank ?? []);
   const sections = useMemo(() => normalizeSections(page), [page]);
   const bodyReadable = page.lessonSections?.length
     ? page.lessonSections.some(section => section.kind === "full_explanation" && section.markdown?.trim())
@@ -24,7 +25,7 @@ export function ExplanationPanel({ release, page, sessionId, onEnterStudio, load
     if (!sessionId) return;
     // This page is already open. Reuse the same request when the learner reaches its questions.
     void api.selectQuestions(page.id, sessionId).catch(() => undefined);
-  }, [page.id, page.questionBank, sessionId]);
+  }, [page.id, questionBankSignature, sessionId]);
   useEffect(() => {
     setInteractiveReady(false);
     const marker = interactiveMarkerRef.current;
@@ -259,6 +260,7 @@ function ReadWeaveQuestions({ records, legacy, error, loading }: { records: Read
   </div>;
 }
 function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release: CourseRelease; page: PageLesson; sessionId?: string; onEnterStudio?: () => void }) {
+  const questionBankSignature = JSON.stringify(page.questionBank ?? []);
   const [batchState, setBatchState] = useState<QuestionBatchState>(() => sessionId ? readQuestionBatchState(sessionId, page.id) : createQuestionBatchState("", page.id));
   const batchStateRef = useRef(batchState);
   const [selection, setSelection] = useState<QuestionSelection>();
@@ -382,7 +384,7 @@ function RandomQuestions({ release, page, sessionId, onEnterStudio }: { release:
     const serial = ++selectionRequestSerial.current;
     loadSelection(state, serial);
     return () => { if (selectionRequestSerial.current === serial) selectionRequestSerial.current++; };
-  }, [page.id, page.questionBank, sessionId]);
+  }, [page.id, questionBankSignature, sessionId]);
 
   const chooseAnotherPair = (replayExhaustedBank = false) => {
     if (!sessionId) return;

@@ -17,7 +17,7 @@ export function classifyGenerationFailure(error: unknown): GenerationFailureRout
   const code = describeGenerationError(error).code;
   if (code === "PROVIDER_QUOTA_EXHAUSTED") return { category: "provider", action: "switch_provider", code };
   if (["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT"].includes(code)) return { category: "provider", action: "retry_stage", code };
-  if (code === "READWEAVE_UNAVAILABLE" || code === "READWEAVE_HASH_MISMATCH") return { category: "storage", action: "retry_readback", code };
+  if (code === "READWEAVE_UNAVAILABLE" || code === "READWEAVE_HASH_MISMATCH" || code === "READ_DEADLINE_EXCEEDED") return { category: "storage", action: "retry_readback", code };
   if (code.startsWith("READWEAVE_")) return { category: "storage", action: "pause", code };
   if (code === "LEASE_LOST") return { category: "internal", action: "retry_stage", code };
   if (code === "GENERATION_REPAIR_SCOPE_INVALID" || code === "FORMULA_INVALID" || code === "COVERAGE_GAP") return { category: "content", action: "pause", code };
@@ -40,7 +40,7 @@ export function shouldAutoRecoverGenerationFailure(
   return route.category === "provider" && route.action === "retry_stage";
 }
 
-const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE"]);
+const RETRYABLE = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK_FAILURE", "PROVIDER_RATE_LIMIT", "READWEAVE_UNAVAILABLE", "READ_DEADLINE_EXCEEDED"]);
 
 export function describeGenerationError(error: unknown): GenerationErrorDescriptor {
   const raw = error instanceof Error ? error.message : String(error || "INTERNAL_FAILURE");
@@ -78,6 +78,7 @@ function safeMessage(code: string): string {
   if (code === "PROVIDER_RATE_LIMIT") return "模型服务达到限额，请稍后重试";
   if (code === "PROVIDER_TIMEOUT") return "模型服务响应超时，当前页面未完成生成";
   if (code === "PROVIDER_INVALID_REQUEST") return "模型服务拒绝了生成请求，请检查当前提示词和输出结构";
+  if (code === "READ_DEADLINE_EXCEEDED") return "存储读取超过本次截止时间，保存结果尚未确认；已保留生成结果，可从失败页恢复";
   if (code === "READWEAVE_UNAVAILABLE") return "ReadWeave 暂时不可访问，内容尚未保存";
   if (code === "READWEAVE_ACCESS_DENIED") return "ReadWeave 拒绝了当前身份的访问，已保存的生成结果保留，请检查权限";
   if (code.startsWith("READWEAVE_") && code.includes("CONFLICT")) return "保存遇到版本或内容冲突，已保留生成结果，未覆盖已有内容";

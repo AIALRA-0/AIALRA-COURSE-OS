@@ -1983,7 +1983,7 @@ export function createApp(dependencies: AppDependencies): Express {
         jobId: asOptionalString(request.query.jobId)
       };
       const workspaceId = request.header("X-Workspace-Id") || "personal";
-      if (request.query.prepare === "1" && filters.courseId && !filters.materialVersionId && !filters.pageId && !filters.jobId
+      if (request.query.prepare === "1" && Object.values(filters).some(Boolean)
         && dependencies.readweave.prepareCostLedger) {
         const preparation = await dependencies.readweave.prepareCostLedger(workspaceId, request.query.retry === "1");
         if (preparation.state !== "ready") {
@@ -5447,6 +5447,7 @@ export function normalizeMultipartFilename(value: string): string {
 
 export function safeReadWeaveFailureKind(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
+  if (message === "READ_DEADLINE_EXCEEDED") return "read_deadline";
   const status = /^READWEAVE_ETAPI_(\d{3})(?::|$)/u.exec(message)?.[1];
   if (status) return `http_${status}`;
   if (message.startsWith("READWEAVE_ETAPI_NETWORK:")) return /abort|timeout/u.test(message.toLowerCase()) ? "timeout" : "network";
@@ -5459,7 +5460,8 @@ export function safeReadWeaveFailureKind(error: unknown): string {
 
 function isTransientReadWeaveFailure(error: unknown): boolean {
   const kind = safeReadWeaveFailureKind(error);
-  return kind === "http_429" || /^http_5\d\d$/u.test(kind) || kind === "network" || kind === "timeout";
+  return kind === "http_429" || /^http_5\d\d$/u.test(kind) || kind === "network" || kind === "timeout"
+    || kind === "read_deadline" || kind === "readweave_source_registration_timeout";
 }
 
 function isAllowedProviderBaseUrl(value: string): boolean {

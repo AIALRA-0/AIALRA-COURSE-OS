@@ -343,3 +343,35 @@ describe("normal website login response classification", () => {
     expect(sent).toHaveLength(1); expect(sent[0]!.headers["Idempotency-Key"]).toBe("synthetic-original-key");
   });
 });
+
+describe("bounded scoped cost preparation", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+  it("waits for actual preparation then reads the same selector without replaying retry intent", async () => {
+    vi.useFakeTimers();
+    const progress = { state: "preparing", stage: "records", checkedRecords: 2, totalRecords: 8, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ preparation: progress }, { status: 202 }))
+      .mockResolvedValueOnce(Response.json({ entries: [{ id: "confirmed-receipt" }], rollups: [] }));
+    vi.stubGlobal("fetch", fetch);
+    const updates: string[] = [];
+    const pending = api.waitForCosts({ jobId: "synthetic-job" }, { retry: true, onProgress: message => updates.push(message) });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await pending).toMatchObject({ entries: [{ id: "confirmed-receipt" }] });
+    expect(updates[0]).toContain("2/8"); expect(fetch).toHaveBeenCalledTimes(2);
+    const urls = fetch.mock.calls.map(([url]) => new URL(String(url), "http://synthetic"));
+    expect(urls.map(url => url.searchParams.get("jobId"))).toEqual(["synthetic-job", "synthetic-job"]);
+    expect(urls.map(url => url.searchParams.get("retry"))).toEqual(["1", null]);
+  });
+  it("cancels a waiting viewer without another HTTP request", async () => {
+    vi.useFakeTimers(); const controller = new AbortController();
+    const fetch = vi.fn().mockResolvedValue(Response.json({ preparation: { state: "preparing", stage: "source", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), checkedRecords: 0, totalRecords: null } }, { status: 202 }));
+    vi.stubGlobal("fetch", fetch);
+    const pending = api.waitForCosts({ pageId: "synthetic-page" }, { signal: controller.signal });
+    const checked = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0); controller.abort(); await checked;
+    await vi.advanceTimersByTimeAsync(1000); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("preserves a failed preparation as an error rather than zero costs", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ preparation: { state: "failed", error: "READWEAVE_ACCESS_DENIED" } }, { status: 202 })));
+    await expect(api.waitForCosts({ materialVersionId: "synthetic-material" })).rejects.toThrow("READWEAVE_ACCESS_DENIED");
+  });
+});

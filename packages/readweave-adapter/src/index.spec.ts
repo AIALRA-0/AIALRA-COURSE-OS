@@ -6523,6 +6523,39 @@ describe("TR20 authoritative content-stamp revalidation", () => {
     }
   });
 
+  it.each(["same-page cost", "other-page cost"])("does not restart a scoped page read after %s commits", async mode => {
+    const remote = new FakeEtapi();
+    const base = { baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch };
+    const source = releaseWithPage(); const other = structuredClone(source.pages[0]!); other.id = "page-2"; other.pageNumber = 2;
+    source.pages.push(other); source.pageIds.push(other.id);
+    const setup = new EtapiReadWeaveCourseApi(base);
+    await setup.publishRelease(source, { ...manifest, courseReleaseId: source.id }, context);
+    const first = costEntryFor(source, "page-first-cost");
+    await setup.appendCostEntry(first, { ...context, idempotencyKey: first.id });
+    await setup.appendCostEntry({ ...first, id: "other-first-cost", pageId: other.id }, { ...context, idempotencyKey: "other-first-cost" });
+    const noteId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let entered!: () => void; let unblock!: () => void; let stall = false; let reads = 0;
+    const started = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const api = new EtapiReadWeaveCourseApi({ ...base, fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if ((init?.method ?? "GET") === "GET" && new URL(String(input)).pathname === `/etapi/notes/${noteId}/content`) {
+        reads++; if (stall) { stall = false; entered(); await gate; }
+      }
+      return response;
+    } });
+    expect((await api.listCostEntries({ pageId: "page-1" })).map(x => x.id)).toEqual([first.id]);
+    // Force a fresh body using the existing missing-stamp fallback.
+    (api as any).draftPageRecordCache.get("page-1").blobId = undefined;
+    const before = reads; stall = true;
+    const pending = api.listCostEntries({ pageId: "page-1" }); await started;
+    const second = { ...first, id: "during-scoped-read", pageId: mode === "same-page cost" ? "page-1" : other.id };
+    try { await api.appendCostEntry(second, { ...context, idempotencyKey: second.id }); } finally { unblock(); }
+    const costs = await pending;
+    expect(costs.map(x => x.id)).toEqual(mode === "same-page cost" ? [first.id, second.id] : [first.id]);
+    if (mode === "other-page cost") expect(reads - before).toBe(1);
+    expect((await api.listCostEntries({ pageId: second.pageId })).map(x => x.id)).toContain(second.id);
+  });
+
   it("binds a page stamp to the fetched body across a search/body ABA change", async () => {
     const remote = new FakeEtapi(); remote.emitBlobIds = true;
     const writer = new EtapiReadWeaveCourseApi(configFor(remote));

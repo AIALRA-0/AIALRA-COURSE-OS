@@ -1731,6 +1731,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
   const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
   const [costs, setCosts] = useState<GenerationCostEntry[]>([]);
   const [costReadUnavailable, setCostReadUnavailable] = useState(false);
+  const [costProgress, setCostProgress] = useState("");
   const [error, setError] = useState("");
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryError, setRetryError] = useState("");
@@ -1741,12 +1742,13 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
     let cancelled = false;
     let timer = 0;
     let activeCostKey: string | undefined;
+    const costAbort = new AbortController();
     const costReadsInFlight = new Map<string, Promise<unknown>>();
     const readCosts = (key: string, read: () => Promise<{ entries: GenerationCostEntry[] }>) => {
       activeCostKey = key;
       beginImportCostRead(costReadsInFlight, key, read, () => !cancelled && activeCostKey === key,
-        (result) => { setCosts(result.entries); setCostReadUnavailable(false); },
-        () => setCostReadUnavailable(true));
+        (result) => { setCosts(result.entries); setCostReadUnavailable(false); setCostProgress(""); },
+        () => { setCostReadUnavailable(true); setCostProgress(""); });
     };
     const refresh = async () => {
       if (refreshing || cancelled) return;
@@ -1764,7 +1766,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
         }
         const standaloneJobId = standaloneGenerationJobId(importId);
         if (standaloneJobId) {
-          readCosts(`job:${standaloneJobId}`, () => api.costs({ jobId: standaloneJobId }));
+          readCosts(`job:${standaloneJobId}`, () => api.waitForCosts({ jobId: standaloneJobId }, { signal: costAbort.signal, onProgress: setCostProgress }));
           const job = await api.generationJob(standaloneJobId);
           if (cancelled) return;
           setRecord({
@@ -1786,7 +1788,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
             onProgress();
           }
         } else if (updated.generationPlanId) {
-          if (updated.materialVersionId) readCosts(`material:${updated.materialVersionId}`, () => api.costs({ materialVersionId: updated.materialVersionId! }));
+          if (updated.materialVersionId) readCosts(`material:${updated.materialVersionId}`, () => api.waitForCosts({ materialVersionId: updated.materialVersionId! }, { signal: costAbort.signal, onProgress: setCostProgress }));
           else activeCostKey = undefined;
           const planResult = await api.generationPlan(updated.generationPlanId);
           if (cancelled) return;
@@ -1817,7 +1819,7 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
     void refresh();
-    return () => { cancelled = true; window.clearTimeout(timer); window.removeEventListener("focus", onFocus); };
+    return () => { cancelled = true; costAbort.abort(); window.clearTimeout(timer); window.removeEventListener("focus", onFocus); };
   }, [importId, refreshNonce]);
   if (!record) return <section className="import-task-workspace" role="status"><header className="import-task-page-header"><div><span className="section-kicker">后台任务</span><h2>正在恢复任务状态</h2></div><button className="quiet-button" onClick={onClose}>返回课程</button></header><div className="import-activity-loading"><span className="loader" /><span>{error || "正在读取已保存的任务状态"}</span></div></section>;
   const retryFailed = async () => {
@@ -1837,10 +1839,10 @@ function ImportActivityDock({ importId, taskTitle, onReady, onProgress, onClose,
       setRetryingFailed(false);
     }
   };
-  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} onOpen={() => onOpen(record)} onGenerate={() => onOpen(record, "studio")} />;
+  return <ImportProgress record={record} taskTitle={taskTitle} plan={plan} activeJobs={activeJobs} costs={costs} costReadUnavailable={costReadUnavailable} costProgress={costProgress} error={error || retryError} retryingFailed={retryingFailed} onRetryFailed={() => void retryFailed()} onClose={onClose} onOpen={() => onOpen(record)} onGenerate={() => onOpen(record, "studio")} />;
 }
 
-export function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, error, retryingFailed, onRetryFailed, onClose, onOpen, onGenerate }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void; onOpen: () => void; onGenerate: () => void }) {
+export function ImportProgress({ record, taskTitle, plan, activeJobs, costs, costReadUnavailable, costProgress, error, retryingFailed, onRetryFailed, onClose, onOpen, onGenerate }: { record: WebImportRecord; taskTitle?: string; plan?: WebGenerationPlan; activeJobs: GenerationJob[]; costs: GenerationCostEntry[]; costReadUnavailable: boolean; costProgress?: string; error?: string; retryingFailed: boolean; onRetryFailed: () => void; onClose: () => void; onOpen: () => void; onGenerate: () => void }) {
   const [sourceEvents, setSourceEvents] = useState<ImportSourceEventEvidence & { importId: string }>({ importId: record.id, lastEventId: 0 });
   useEffect(() => {
     if (standaloneGenerationJobId(record.id) || typeof EventSource === "undefined") return;
@@ -1903,7 +1905,7 @@ export function ImportProgress({ record, taskTitle, plan, activeJobs, costs, cos
     || (awaitingPlanDetails ? "正在读取模型记录" : taskFinished ? "模型记录暂不可用" : recordedModelStage);
   const concurrency = formatTaskConcurrency(summary.concurrency);
   const confirmedCost = summary.costUsd === undefined ? undefined : `$${summary.costUsd.toFixed(4)}${summary.costBasis ? `（${summary.costBasis === "reported" ? "供应商回报" : summary.costBasis === "estimated" ? "价格估算" : "混合核算"}）` : ""}`;
-  const cost = costReadUnavailable ? confirmedCost ? `${confirmedCost}（成本暂不可读，显示上次确认值）` : "成本暂不可读" : confirmedCost ?? (awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用");
+  const cost = costProgress ? `${confirmedCost ? `${confirmedCost}（上次确认值） · ` : ""}${costProgress}` : costReadUnavailable ? confirmedCost ? `${confirmedCost}（成本暂不可读，显示上次确认值）` : "成本暂不可读" : confirmedCost ?? (awaitingPlanDetails ? "正在读取成本记录" : activity.busy ? "生成中，完成页面后结算" : "成本记录暂不可用");
   const completionScope = activity.overall ? auto ? "讲解完整保存" : "材料来源已保存" : activity.progressScope;
   const progressLabel = failedState ? record.state === "ready" ? "生成失败" : "导入失败" : cancelledState ? "已取消" : awaitingPlanDetails ? "正在读取任务进度"
     : progress === undefined ? activity.stale ? "状态待确认" : activity.busy ? "处理中" : "—"

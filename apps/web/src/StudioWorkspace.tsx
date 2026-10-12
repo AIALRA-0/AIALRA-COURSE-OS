@@ -342,11 +342,24 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
   const [harness, setHarness] = useState<GenerationHarnessCurrent>();
   const [entries, setEntries] = useState<GenerationCostEntry[]>([]);
   const [error, setError] = useState("");
-  const load = () => Promise.all([api.writingPolicy(), api.generationHarness(), api.costs({ pageId: page.id })]).then(([nextPolicy, nextHarness, costs]) => { setPolicy(nextPolicy); setHarness(nextHarness); setEntries(costs.entries); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取策略与模型记录"));
-  useEffect(() => { void load(); }, [page.id, job?.state]);
+  const pending = useRef<AbortController | undefined>(undefined);
+  const [costProgress, setCostProgress] = useState("");
+  const load = (retry = false) => {
+    pending.current?.abort();
+    const controller = new AbortController(); pending.current = controller;
+    const current = () => pending.current === controller && !controller.signal.aborted;
+    setError("");
+    const failed = (reason: unknown) => { if (current()) { setError(reason instanceof Error ? reason.message : "无法读取策略与模型记录"); setCostProgress(""); } };
+    void Promise.all([api.writingPolicy({ signal: controller.signal }), api.generationHarness({ signal: controller.signal })])
+      .then(([nextPolicy, nextHarness]) => { if (current()) { setPolicy(nextPolicy); setHarness(nextHarness); } }).catch(failed);
+    void api.waitForCosts({ pageId: page.id }, { signal: controller.signal, retry, onProgress: message => { if (current()) setCostProgress(message); } })
+      .then(costs => { if (current()) { setEntries(costs.entries); setCostProgress(""); } }).catch(failed);
+  };
+  useEffect(() => { load(); return () => { pending.current?.abort(); pending.current = undefined; }; }, [page.id, job?.state]);
   const latest = entries.at(-1);
   return <div className="inspector-body">
     <div className="route-summary"><span className="route-icon"><Icon name="sparkles" /></span><div><strong>{latest ? `${latest.provider} / ${latest.model}` : "等待模型调用"}</strong><span>{latest ? `${latest.durationMs} ms · ${latest.qualityPassed ? "质量检查通过" : "等待质量修复"}` : "这里显示实际调用，不展示预设模型"}</span></div></div>
+    {costProgress && <p role="status">{costProgress}</p>}
     <InspectorSection title="当前任务实证">
       <Definition label="供应商" value={latest?.provider || "尚无调用"} />
       <Definition label="模型" value={latest?.model || "尚无调用"} />
@@ -374,7 +387,7 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
       <Definition label="累计成本" value={`$${release.costUsd.toFixed(4)}`} />
     </InspectorSection>
     {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
-    <button className="quiet-button" onClick={load}>刷新策略与模型记录</button>
+    <button className="quiet-button" onClick={() => load(true)}>刷新策略与模型记录</button>
   </div>;
 }
 

@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { classifyGenerationFailure, describeGenerationError, shouldAutoRecoverGenerationFailure } from "./generation-errors.js";
 
 describe("generation error classification", () => {
+  it.each(["READ_DEADLINE_EXCEEDED", "READWEAVE_SOURCE_REGISTRATION_TIMEOUT"])("recovers storage %s without replaying page generation", code => {
+    expect(classifyGenerationFailure(new Error(code))).toMatchObject({ category: "storage", action: "retry_readback" });
+    expect(describeGenerationError(new Error(code)).retryable).toBe(true);
+    expect(describeGenerationError(new Error(code)).safeMessage).not.toContain("根据请求编号");
+    expect(shouldAutoRecoverGenerationFailure(new Error(code), 1, 0, 4)).toBe(false);
+  });
+  it("does not turn cancellation into a persistence retry", () => {
+    expect(describeGenerationError(new Error("READ_CANCELLED")).retryable).toBe(false);
+    expect(classifyGenerationFailure(new Error("READ_CANCELLED")).action).toBe("pause");
+  });
+
   it.each(["MODEL_PROVIDER_OUTPUT_LIMIT", "MODEL_PROVIDER_FAILED:max_output_tokens"])("reports %s as exhausted output, not an internal outage", code => {
     expect(classifyGenerationFailure(new Error(code))).toMatchObject({ category: "output", action: "pause", code: "MODEL_OUTPUT_LIMIT" });
     expect(describeGenerationError(new Error(code)).safeMessage).toContain("输出上限");

@@ -978,9 +978,11 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // before the root, metadata binding and complete authoritative route pass.
     const hintIds = filters.pageId ? [filters.pageId]
       : filters.materialVersionId ? [...new Set(pageIdsHint ?? [])] : [];
-    const courseOnly = Boolean(filters.courseId && !filters.pageId && !filters.materialVersionId && !this.writeContext.getStore());
+    const courseOnly = Boolean((filters.courseId || filters.jobId) && !filters.pageId && !filters.materialVersionId && !this.writeContext.getStore());
     const observedVersions = new Map(this.draftPageRecordVersions);
-    const scheduledVersion = this.stateVersion;
+    const pageOnly = Boolean(filters.pageId && !filters.materialVersionId && !this.writeContext.getStore());
+    const currentVersion = () => pageOnly ? this.costRootVersion : this.stateVersion;
+    const scheduledVersion = currentVersion();
     const controller = new AbortController();
     let prefetchWork: Promise<LocatedDraftPageRecord[]> | undefined;
     let prefetch: Promise<{ value: LocatedDraftPageRecord[] | undefined; error: unknown }> | undefined;
@@ -997,10 +999,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       let reference: CostRootReadDTO | undefined;
       let verifiedVersion: number;
       do {
-        verifiedVersion = this.stateVersion;
+        verifiedVersion = currentVersion();
         reference = filters.pageId || filters.materialVersionId || courseOnly
           ? await this.readCostReference(startPrefetch) : undefined;
-      } while (this.stateVersion !== verifiedVersion);
+      } while (currentVersion() !== verifiedVersion);
       const release = filters.materialVersionId
         ? reference?.releases.find(item => item.id === filters.materialVersionId) : undefined;
       const scoped = Boolean(reference && (filters.pageId || release) && (!filters.materialVersionId || release));
@@ -1025,7 +1027,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const freshRecords = await this.readDraftPageRecords(undefined, { install: false });
         const budget = currentReadBudget();
         if (budget) assertReadBudgetActive(budget);
-        if (this.stateVersion !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
+        if (currentVersion() !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
         for (const located of freshRecords) {
           if ((this.draftPageRecordVersions.get(located.record.pageId) ?? 0) <= (observedVersions.get(located.record.pageId) ?? 0)) {
             this.cacheDraftPageRecord(located);
@@ -1076,7 +1078,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         if (installBudget) assertReadBudgetActive(installBudget);
         // Generic deletion also advances the state version. Revalidate the root
         // rather than letting a delayed body restore a deleted cache entry.
-        if (this.stateVersion !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
+        if (currentVersion() !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
         for (const pageId of pageIds) {
           const located = records.get(pageId);
           if (located && (this.draftPageRecordVersions.get(pageId) ?? 0) <= (observedVersions.get(pageId) ?? 0)) {
@@ -1088,7 +1090,8 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           // Only a newer record committed/observed during this fresh read may
           // supersede its result. A missing remote record is not a cache hit.
           const cached = this.draftPageRecordCache.get(pageId);
-          if (located && cached && cached.record.draft.revision > located.record.draft.revision
+          if (located && cached && (cached.record.draft.revision > located.record.draft.revision
+              || (pageOnly && cached.noteId === located.noteId && cached.record.draft.revision === located.record.draft.revision))
             && (this.draftPageRecordVersions.get(pageId) ?? 0) > (observedVersions.get(pageId) ?? 0)) located = cached;
           for (const entry of located?.record.costEntries ?? []) costs.set(entry.id, entry);
         }
@@ -1246,10 +1249,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
 
   private async saveDraftInternal(draft: LessonDraft, expectedRevision: number, context: IdempotentWriteContext, sourceAsset?: DraftSourceAsset, cost?: GenerationCostEntry): Promise<LessonDraft> {
     return this.withDraftPageLock(draft.pageId, context, async () => {
-      const located = await this.findDraftPageRecord(draft.pageId);
+      const lookupStartedAt = performance.now();
+      const located = await this.findDraftPageRecord(draft.pageId).finally(() => {
+        if (process.env.COURSE_OS_READWEAVE_TIMING === "1") this.logWriteTiming("course_os.readweave_page_read_timing", { stage: "draft_record_lookup", durationMs: Math.round(performance.now() - lookupStartedAt) });
+      });
+      const referenceStartedAt = performance.now();
       const reference = located
         ? this.stateCache?.state ?? await this.draftWriteRouteReference()
         : await this.readStateReference(true, false);
+      if (process.env.COURSE_OS_READWEAVE_TIMING === "1") this.logWriteTiming("course_os.readweave_page_read_timing", { stage: "draft_route_reference", durationMs: Math.round(performance.now() - referenceStartedAt) });
       const previous = located?.record;
       const currentReference = previous?.draft ?? reference.drafts.find(item => item.pageId === draft.pageId);
       const replay = previous?.idempotency[context.idempotencyKey] ?? reference.idempotency[context.idempotencyKey];
@@ -3830,7 +3838,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   /** Locate with the existing authority checks, without bootstrap materialization. */
   private async readCostReference(onRootScheduled?: () => void): Promise<CostRootReadDTO | undefined> {
     for (;;) {
-      const version = this.stateVersion;
+      const version = this.costRootVersion;
       const known = this.bootstrapCache?.projection;
       const located = known ? undefined : await this.locateCostReadIndex();
       const workspaceRootNoteId = known ? known.courseRootNoteId : located!.workspaceRootNoteId;
@@ -3878,15 +3886,16 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         }
         if (!dto.metadataRootFieldsAreEmpty || dto.metadataReceiptKinds.some(kind => metadataIdempotencyKinds.has(kind) && kind !== "permanent_delete")) throw new Error("READWEAVE_METADATA_ROOT_DUAL_AUTHORITY");
         // This is the independent full metadata index, never the cost DTO.
-        if (this.stateVersion === version) this.cacheMetadataIndex(located);
+        if (this.costRootVersion === version) this.cacheMetadataIndex(located);
       }
       const budget = currentReadBudget();
       if (budget) assertReadBudgetActive(budget);
       // A local write finishing while root/metadata were read invalidates this
       // view. Retry under the same caller deadline; never install a late view.
-      if (this.stateVersion !== version) continue;
+      if (this.costRootVersion !== version) continue;
+      const overlayVersion = this.stateVersion;
       const cached = this.costReferenceCache;
-      if (cached?.root === dto && cached.version === version && cached.expiresAt > Date.now()) return cached.dto;
+      if (cached?.root === dto && cached.version === overlayVersion && cached.expiresAt > Date.now()) return cached.dto;
       const drafts = dto.drafts.map(draft => ({ ...draft }));
       const records = [...this.draftPageRecordCache.values()].map(located => located.record);
       let costEntries = [...dto.costEntries];
@@ -3909,7 +3918,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       // Like readStateReference, capture overlays when the reference is built,
       // not on every subsequent page read (which would resurrect removed costs).
       if (!this.writeContext.getStore()) this.costReferenceCache = {
-        root: dto, version, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs, dto: reference
+        root: dto, version: overlayVersion, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs, dto: reference
       };
       return reference;
     }
@@ -4371,14 +4380,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     draftPageWriteChains.set(lockKey, current);
     await predecessor.catch(() => undefined);
     const controller = context ? new AbortController() : undefined;
+    const lockStartedAt = performance.now();
+    let succeeded = false;
     const deadline = Date.now() + maximumSharedReadBudgetMs;
     const timer = controller ? setTimeout(() => controller.abort(new Error("READ_DEADLINE_EXCEEDED")), maximumSharedReadBudgetMs) : undefined;
     try {
       // Bound the necessary GETs independently of the HTTP reader. Keep the
       // lock until writes actually settle, even if their read budget expires.
-      return context ? await this.pageWriteReadBudget.run({ signal: controller!.signal, deadline },
+      const result = context ? await this.pageWriteReadBudget.run({ signal: controller!.signal, deadline },
         () => this.writeContext.run(context, work)) : await work();
+      succeeded = true; return result;
     } finally {
+      if (process.env.COURSE_OS_READWEAVE_TIMING === "1") this.logWriteTiming("course_os.readweave_page_lock_timing", { pageLockMs: Math.round(performance.now() - lockStartedAt), succeeded, write: Boolean(context) });
       if (timer !== undefined) clearTimeout(timer);
       release();
       if (draftPageWriteChains.get(lockKey) === current) draftPageWriteChains.delete(lockKey);
