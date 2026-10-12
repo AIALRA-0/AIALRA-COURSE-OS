@@ -86,6 +86,17 @@ export function toCourseReleaseIndex(release: CourseRelease): CourseReleaseIndex
   };
 }
 
+/** Transient preparation progress, never a partial monetary ledger. */
+export interface CostLedgerPreparation {
+  state: "preparing" | "ready" | "failed";
+  stage: "source" | "records" | "verify" | "complete";
+  checkedRecords: number;
+  totalRecords: number | null;
+  startedAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
 export interface ReadWeaveCourseApi {
   listCourses(): Promise<CourseProject[]>;
   createCourse(course: CourseProject, context: IdempotentWriteContext): Promise<CourseProject>;
@@ -109,6 +120,7 @@ export interface ReadWeaveCourseApi {
   updateReviewPlan(plan: ReviewPlan, expectedRevision: number, context: IdempotentWriteContext): Promise<ReviewPlan>;
   appendCostEntry(entry: GenerationCostEntry, context: IdempotentWriteContext): Promise<GenerationCostEntry>;
   listCostEntries(filters?: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string }, pageIdsHint?: readonly string[]): Promise<GenerationCostEntry[]>;
+  prepareCostLedger?(workspaceId: string, retry?: boolean): Promise<CostLedgerPreparation>;
   saveAttempt(attempt: AssessmentAttempt, mastery: MasteryRecord, context: IdempotentWriteContext): Promise<AssessmentAttempt>;
   listAssessmentAttempts(objectiveId?: string): Promise<AssessmentAttempt[]>;
   listMastery(): Promise<MasteryRecord[]>;

@@ -384,18 +384,43 @@ export function CostInspector({ release, page, job }: { release: CourseRelease; 
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const pending = useRef<AbortController | undefined>(undefined);
-  const load = () => {
+  const [progress, setProgress] = useState("正在读取课程费用账本");
+  const load = (retry = false) => {
     pending.current?.abort();
     const controller = new AbortController();
     pending.current = controller;
     setLoading(true);
     setError("");
-    return api.costs({ courseId: release.courseId }, { signal: controller.signal }).then((result) => {
-      if (pending.current !== controller || controller.signal.aborted) return;
-      setEntries(result.entries);
-      setRollups(result.rollups);
-      setLoading(false);
-    }).catch((reason) => {
+    setProgress("正在读取课程费用账本");
+    const active = () => pending.current === controller && !controller.signal.aborted;
+    const run = async () => {
+      let first = true;
+      while (active()) {
+        const result = await api.preparedCosts(release.courseId, first && retry, { signal: controller.signal });
+        first = false;
+        if (!active()) return;
+        if (result.preparation) {
+          const current = result.preparation;
+          if (current.state === "failed") throw new Error(current.error || "账本核对失败");
+          const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(current.startedAt)) / 1000));
+          const idle = Math.max(0, Math.floor((Date.now() - Date.parse(current.updatedAt)) / 1000));
+          const stage = current.stage === "source" ? "正在确认账本来源"
+            : current.stage === "verify" ? "正在复核账本修订"
+            : current.totalRecords === null ? "正在读取历史记录目录" : `正在核对历史记录 ${current.checkedRecords}/${current.totalRecords} 条`;
+          setProgress(`${stage} · 已用 ${elapsed} 秒${idle >= 30 ? ` · ${idle} 秒没有新的核对进展` : ""}`);
+          await new Promise<void>(resolve => {
+            const done = () => { clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); };
+            const timer = setTimeout(done, 1000);
+            controller.signal.addEventListener("abort", done, { once: true });
+          });
+          continue;
+        }
+        if (!result.entries || !result.rollups) throw new Error("成本账本返回不完整");
+        setEntries(result.entries); setRollups(result.rollups); setLoading(false);
+        return;
+      }
+    };
+    return run().catch((reason) => {
       if (pending.current !== controller || controller.signal.aborted) return;
       setError(reason instanceof Error ? reason.message : "成本账本读取失败");
       setLoading(false);
@@ -421,9 +446,9 @@ export function CostInspector({ release, page, job }: { release: CourseRelease; 
   const unknownCosts = entries.filter((item) => item.costBasis === "not_available").length;
   const snapshot = pageEntries.find((entry) => entry.unitPriceSnapshot.source !== "价格未配置")?.unitPriceSnapshot;
   if (loading || error) return <div className="inspector-body cost-inspector" aria-busy={loading}>
-    {loading ? <p role="status">正在读取课程费用账本</p>
+    {loading ? <p role="status">{progress}</p>
       : <div className="dialog-error" role="alert"><Icon name="warning" /><span>课程费用暂时不可读：{error}；尚未取得金额，不能按零费用显示</span></div>}
-    <button className="quiet-button" onClick={() => void load()} disabled={loading}>{loading ? "正在读取" : "重新读取成本账本"}</button>
+    <button className="quiet-button" onClick={() => void load(true)} disabled={loading}>{loading ? "正在读取" : "重新读取成本账本"}</button>
   </div>;
   return <div className="inspector-body cost-inspector">
     <div className="cost-hero"><div><span>课程累计</span><strong>{formatMicrousd(used)}</strong><small>供应商回报与价格估算合计</small></div><div><span>本页累计</span><strong>{formatMicrousd(pageUsed)}</strong><small>{pageEntries.length} 次调用</small></div></div>
@@ -436,7 +461,7 @@ export function CostInspector({ release, page, job }: { release: CourseRelease; 
     <InspectorSection title="按模型"><div className="cost-bars">{(course?.byModel ?? []).map((item) => { const amount = entries.filter((entry) => entry.model === item.model).reduce((sum, entry) => sum + accounted(entry), 0); return <div key={item.model}><span>{item.model}</span><i><b style={{ width: `${used ? amount / used * 100 : 0}%` }} /></i><strong>{formatMicrousd(amount)}</strong></div>; })}</div></InspectorSection>
     <InspectorSection title={`本页调用明细 · ${pageEntries.length}`}>{pageEntries.length ? <div className="cost-entry-list">{pageEntries.map((entry) => <article key={entry.id}><header><strong>{entry.model}</strong><span>{entry.costBasis === "not_available" ? `实际费用未知${entry.estimatedMicrousd > 0 ? `（预留估算 ${formatMicrousd(entry.estimatedMicrousd)}）` : ""}` : `${formatMicrousd(accounted(entry))}${entry.costBasis === "provider_reported" ? "（供应商回报）" : "（估算）"}`}</span></header><p>{stageLabel(entry.stage)} · {entry.inputTokens} 输入 · {entry.outputTokens} 输出 · {entry.durationMs} ms</p><small>{entry.status === "succeeded" ? `质量检查${entry.qualityPassed ? "通过" : "未通过"}` : entry.status === "cancelled" ? "调用已取消" : "调用失败"}</small></article>)}</div> : <p className="empty-inline">本页还没有模型调用记录</p>}</InspectorSection>
     {error && <p className="dialog-error"><Icon name="warning" />{error}</p>}
-    <button className="quiet-button" onClick={load}>刷新成本账本</button>
+    <button className="quiet-button" onClick={() => void load()}>刷新成本账本</button>
   </div>;
 }
 

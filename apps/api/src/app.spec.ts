@@ -4386,3 +4386,25 @@ describe("PA18 fee pipeline API scheduling hints", () => {
     expect(list).not.toHaveBeenCalled();
   });
 });
+
+describe("opt-in complete course cost preparation", () => {
+  it("returns truthful 202 progress without entries and passes the current workspace and retry intent", async () => {
+    const { app, readweave, release } = await seededApp();
+    const prepare = vi.fn().mockResolvedValue({ state: "preparing", stage: "records", checkedRecords: 2, totalRecords: 8,
+      startedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" });
+    (readweave as any).prepareCostLedger = prepare;
+    const costs = vi.spyOn(readweave, "listCostEntries");
+    const result = await request(app).get("/api/v1/costs").query({ courseId: release.courseId, prepare: "1", retry: "1" }).set("X-Workspace-Id", "personal");
+    expect(result.status).toBe(202); expect(result.body.preparation.checkedRecords).toBe(2);
+    expect(result.body.entries).toBeUndefined(); expect(result.body.rollups).toBeUndefined();
+    expect(prepare).toHaveBeenCalledWith("personal", true); expect(costs).not.toHaveBeenCalled();
+  });
+  it("ready preparation still performs a fresh workspace-filtered authoritative cost read", async () => {
+    const { app, readweave, release } = await seededApp();
+    (readweave as any).prepareCostLedger = vi.fn().mockResolvedValue({ state: "ready", stage: "complete" });
+    const costs = vi.spyOn(readweave, "listCostEntries");
+    const result = await request(app).get("/api/v1/costs").query({ courseId: release.courseId, prepare: "1" });
+    expect(result.status).toBe(200); expect(result.body).toMatchObject({ entries: [], rollups: [] });
+    expect(costs).toHaveBeenCalledTimes(1);
+  });
+});

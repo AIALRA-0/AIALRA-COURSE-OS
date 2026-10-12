@@ -32,7 +32,7 @@ import type {
   CourseTreeNode,
   TreeNodeProperties
 } from "@course-os/contracts";
-import type { CourseReleaseIndex, MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
+import type { CostLedgerPreparation, CourseReleaseIndex, MasteryReducer, QuestionAttemptTransactionResult, ReadWeaveCourseApi, ReadWeaveFileState } from "./index.js";
 import { EMPTY_STATE, defaultModelProviders, defaultModelRoutePolicy, defaultWorkspaceSettings, toCourseReleaseIndex } from "./index.js";
 import { isLegacyProjectionId, isStableMaterialId, materialGroups, materialTreeNode, stableMaterialId, validateMaterialReleaseTarget } from "./tree-identity.js";
 import { assertTrashReferencesSafe, trashDeleteIdempotencyKey, trashDeleteReplay, trashDeleteScope, type TrashDeleteOptions, type TrashNativeErasePlan, type TrashDeleteScope } from "./trash-safety.js";
@@ -429,6 +429,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   private rootReadSnapshot?: { noteId: string; blobId: string; parsed: Partial<EtapiState> };
   private stateReadInFlight?: SharedRead<EtapiState>;
   private stateVersion = 0;
+  // Only confirmed page-record commits bypass the immutable root clock.
+  // Generic writes, invalidations and failed writes still advance it.
+  private pageRecordCommitCount = 0;
+  private costPreparation?: { read: SharedRead<void>; progress: CostLedgerPreparation; rootVersion: number };
+
+  private get costRootVersion(): number { return this.stateVersion - this.pageRecordCommitCount; }
   private activityCache?: { state: EtapiActivityState; expiresAt: number };
   private activityReadInFlight?: SharedRead<EtapiActivityState>;
   private activityVersion = 0;
@@ -901,6 +907,62 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       await this.writeContext.run(context, () => this.ensureCostNoteOnce(parentNoteId, saved));
       return structuredClone(saved);
     });
+  }
+
+  async prepareCostLedger(workspaceId: string, retry = false): Promise<CostLedgerPreparation> {
+    if (workspaceId !== this.workspaceId) throw new Error("READWEAVE_WORKSPACE_MISMATCH");
+    const budget = currentReadBudget();
+    if (budget) assertReadBudgetActive(budget);
+    const previous = this.costPreparation;
+    if (previous && (previous.progress.state === "preparing"
+      || (previous.progress.state === "failed" && !retry)
+      || (previous.progress.state === "ready" && previous.rootVersion === this.costRootVersion))) {
+      return { ...previous.progress };
+    }
+    const now = new Date().toISOString();
+    const progress: CostLedgerPreparation = { state: "preparing", stage: "source",
+      checkedRecords: 0, totalRecords: null, startedAt: now, updatedAt: now };
+    const preparation = { progress, rootVersion: this.costRootVersion, read: undefined as unknown as SharedRead<void> };
+    const update = (patch: Partial<CostLedgerPreparation>) => Object.assign(progress, patch, { updatedAt: new Date().toISOString() });
+    preparation.read = createSharedRead(async markIndependent => {
+      markIndependent();
+      for (;;) {
+        update({ stage: "source", checkedRecords: 0, totalRecords: null });
+        const rootVersion = this.costRootVersion;
+        const observedVersions = new Map(this.draftPageRecordVersions);
+        await this.readCostReference();
+        const before = this.costRootReadSnapshot;
+        update({ stage: "records" });
+        const directoryStamp = (notes: EtapiNote[]) => JSON.stringify(notes.map(note => [note.noteId, note.blobId]));
+        let directory = "";
+        const records = await this.readDraftPageRecords(undefined, { install: false,
+          onDirectory: notes => { directory = directoryStamp(notes); },
+          onProgress: (checkedRecords, totalRecords) => update({ checkedRecords, totalRecords }) });
+        update({ stage: "verify" });
+        await this.readCostReference();
+        const confirmedDirectory = directoryStamp(await this.findDraftPageRecordNotes());
+        const activeBudget = currentReadBudget();
+        if (activeBudget) assertReadBudgetActive(activeBudget);
+        // The second authority read protects external root changes as well as
+        // local structural writes. Page writes retain their own version fence.
+        if (directory !== confirmedDirectory || rootVersion !== this.costRootVersion || before?.noteId !== this.costRootReadSnapshot?.noteId
+          || before?.blobId !== this.costRootReadSnapshot?.blobId) continue;
+        for (const located of records) {
+          if ((this.draftPageRecordVersions.get(located.record.pageId) ?? 0)
+            <= (observedVersions.get(located.record.pageId) ?? 0)) this.cacheDraftPageRecord(located);
+        }
+        preparation.rootVersion = rootVersion;
+        update({ state: "ready", stage: "complete" });
+        return;
+      }
+    }, { independent: true });
+    this.costPreparation = preparation;
+    void preparation.read.promise.catch((error: unknown) => {
+      const code = error instanceof Error ? error.message : "";
+      update({ state: "failed", error: /^(READWEAVE_[A-Z_]+|READ_(CANCELLED|DEADLINE_EXCEEDED))$/.test(code)
+        ? code : "COST_LEDGER_PREPARATION_FAILED" });
+    });
+    return { ...progress };
   }
 
   async listCostEntries(filters: { courseId?: string; materialVersionId?: string; pageId?: string; jobId?: string } = {}, pageIdsHint?: readonly string[]): Promise<GenerationCostEntry[]> {
@@ -3849,7 +3911,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     if (this.writeContext.getStore()) return this.loadCostRootSnapshot(noteId);
     const budget = currentReadBudget();
     if (budget) assertReadBudgetActive(budget);
-    const key = `${noteId}\u0000${this.stateVersion}`;
+    const key = `${noteId}\u0000${this.costRootVersion}`;
     let read = this.costRootReads.get(key);
     if (!read || read.controller.signal.aborted) {
       read = createSharedRead(() => this.pageWriteReadBudget.exit(() =>
@@ -3864,14 +3926,14 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
   }
 
   private async loadCostRootSnapshot(noteId: string): Promise<CostRootReadDTO> {
-    const version = this.stateVersion;
+    const version = this.costRootVersion;
     const full = this.rootReadSnapshot;
     const scoped = this.costRootReadSnapshot;
     if (!this.writeContext.getStore() && (full?.noteId === noteId || scoped?.noteId === noteId)) {
       const note = await this.getNote(noteId);
       const budget = currentReadBudget();
       if (budget) assertReadBudgetActive(budget);
-      if (this.stateVersion === version && note.blobId) {
+      if (this.costRootVersion === version && note.blobId) {
         if (scoped?.noteId === noteId && this.costRootReadSnapshot === scoped && note.blobId === scoped.blobId) return scoped.dto;
         if (full?.noteId === noteId && this.rootReadSnapshot === full && note.blobId === full.blobId) {
           const dto = projectReadWeaveCostRoot(full.parsed);
@@ -3886,7 +3948,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const blobId = readweaveContentBlobId(content);
     const budget = currentReadBudget();
     if (budget) assertReadBudgetActive(budget);
-    if (!this.writeContext.getStore() && this.stateVersion === version) {
+    if (!this.writeContext.getStore() && this.costRootVersion === version) {
       // A separate disposable read projection. It cannot satisfy any generic
       // state/bootstrap reader, writer, activity route or hydration operation.
       this.costRootReadSnapshot = { noteId, blobId, version, dto };
@@ -4022,10 +4084,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     await joinSharedRead(pendingRead, isWrite ? undefined : currentReadBudget(), { writeOwner: isWrite });
   }
 
-  private async readDraftPageRecords(pageId?: string | readonly string[], options: { install?: boolean } = {}): Promise<LocatedDraftPageRecord[]> {
-    const pageIds = pageId === undefined ? undefined : new Set(typeof pageId === "string" ? [pageId] : pageId);
-    if (pageIds?.size === 0) return [];
-    const observedVersions = new Map(this.draftPageRecordVersions);
+  private async findDraftPageRecordNotes(pageIds?: ReadonlySet<string>): Promise<EtapiNote[]> {
     const searches = pageIds
       ? [[...pageIds].map(id => `#courseOsDraftRecordPageId=${quoteSearchValue(id)}`).join(" OR ")]
       : ['#courseOsType="draft_record"', '"Course OS draft record"'];
@@ -4041,6 +4100,18 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const notes = [...new Map(responses.flatMap((response) => response.results)
       .filter((note) => note.title.startsWith("Course OS draft record · "))
       .map((note) => [note.noteId, note])).values()];
+    return notes;
+  }
+
+  private async readDraftPageRecords(pageId?: string | readonly string[], options: { install?: boolean; onProgress?: (checked: number, total: number) => void; onDirectory?: (notes: EtapiNote[]) => void } = {}): Promise<LocatedDraftPageRecord[]> {
+    const pageIds = pageId === undefined ? undefined : new Set(typeof pageId === "string" ? [pageId] : pageId);
+    if (pageIds?.size === 0) return [];
+    const observedVersions = new Map(this.draftPageRecordVersions);
+    const notes = await this.findDraftPageRecordNotes(pageIds);
+    options.onDirectory?.(notes);
+    let checked = 0;
+    options.onProgress?.(checked, notes.length);
+    const checkedRecord = () => { checked += 1; options.onProgress?.(checked, notes.length); };
     const concurrency = pageIds ? 4 : 8;
     const recordsBySearchOrder = new Array<LocatedDraftPageRecord | undefined>(notes.length);
     await forEachWithConcurrency(notes.map((note, index) => ({ note, index })), concurrency, async ({ note, index }) => {
@@ -4049,14 +4120,15 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
         if (budget) assertReadBudgetActive(budget);
         if (!pageIds || pageIds.has(cached.record.pageId)) recordsBySearchOrder[index] = cached;
+        checkedRecord();
         return;
       }
       const content = await this.getContent(note.noteId);
       const parsed = decodeReadWeaveStateContent(content) as Partial<EtapiDraftPageRecord>;
       const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
       if (budget) assertReadBudgetActive(budget);
-      if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) return;
-      if (pageIds && !pageIds.has(parsed.pageId)) return;
+      if (!parsed.pageId || !parsed.draft || !parsed.projection || parsed.draft.pageId !== parsed.pageId) { checkedRecord(); return; }
+      if (pageIds && !pageIds.has(parsed.pageId)) { checkedRecord(); return; }
       const located = {
         noteId: note.noteId,
         blobId: readweaveContentBlobId(content),
@@ -4071,6 +4143,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         }
       };
       recordsBySearchOrder[index] = located;
+      checkedRecord();
     });
     const located = recordsBySearchOrder.filter((item): item is LocatedDraftPageRecord => item !== undefined);
     const newest = new Map<string, LocatedDraftPageRecord>();
@@ -4386,6 +4459,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       this.cacheDraftPageRecord({ noteId: newerRecord?.noteId ?? savedNoteId, record: committed });
       this.lastWriteAt = new Date().toISOString();
       this.stateVersion += 1;
+      this.pageRecordCommitCount += 1;
       if (next) this.stateCache = { state: next, expiresAt: Date.now() + EtapiReadWeaveCourseApi.readCacheTtlMs };
       this.draftReadCache.delete(record.pageId);
       return savedNoteId;

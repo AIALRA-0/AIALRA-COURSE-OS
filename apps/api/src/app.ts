@@ -1983,6 +1983,14 @@ export function createApp(dependencies: AppDependencies): Express {
         jobId: asOptionalString(request.query.jobId)
       };
       const workspaceId = request.header("X-Workspace-Id") || "personal";
+      if (request.query.prepare === "1" && filters.courseId && !filters.materialVersionId && !filters.pageId && !filters.jobId
+        && dependencies.readweave.prepareCostLedger) {
+        const preparation = await dependencies.readweave.prepareCostLedger(workspaceId, request.query.retry === "1");
+        if (preparation.state !== "ready") {
+          response.status(202).json({ preparation });
+          return;
+        }
+      }
       let pageIdsHint: readonly string[] | undefined;
       const prefix = "material-version:";
       if (filters.materialVersionId?.startsWith(prefix)) {

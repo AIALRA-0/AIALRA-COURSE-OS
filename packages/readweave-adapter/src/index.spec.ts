@@ -1,3 +1,4 @@
+import { currentReadBudget } from "./read-budget.js";
 import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6592,6 +6593,119 @@ describe("PA18 independent cost DTO", () => {
     expect((api as any).bootstrapCache).toBeUndefined();
     expect((api as any).draftPageRecordsHydrated).toBe(false);
   };
+
+  it("cost preparation shares one producer, reports verified progress, and leaves monetary authority to the final read", async () => {
+    const { remote, release, cost } = await setup(true);
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const scan = vi.spyOn(reader as any, "readDraftPageRecords");
+    const first = await reader.prepareCostLedger("personal");
+    expect(first.state).toBe("preparing"); expect(first.totalRecords).toBeNull();
+    first.checkedRecords = 999;
+    const simultaneous = await Promise.all(Array.from({ length: 14 }, () => reader.prepareCostLedger("personal")));
+    expect(simultaneous.every(item => item.checkedRecords !== 999)).toBe(true);
+    await (reader as any).costPreparation.read.promise;
+    const ready = await reader.prepareCostLedger("personal");
+    expect(ready).toMatchObject({ state: "ready", stage: "complete", checkedRecords: 1, totalRecords: 1 });
+    expect(scan).toHaveBeenCalledTimes(1); assertNoGeneric(reader);
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+    await reader.prepareCostLedger("personal"); expect(scan).toHaveBeenCalledTimes(2);
+    await expect(reader.prepareCostLedger("foreign-workspace")).rejects.toThrow("READWEAVE_WORKSPACE_MISMATCH");
+  });
+
+  it("cost preparation failure remains explicit without implicit repeat; deliberate retry recovers", async () => {
+    const { remote, release, cost } = await setup(true); let fail = true;
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (fail && new URL(String(input)).pathname.endsWith("/content")) return new Response("unavailable", { status: 503 });
+      return remote.fetch(input, init);
+    }});
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise.catch(() => undefined);
+    const failed = await reader.prepareCostLedger("personal"); expect(failed.state).toBe("failed"); expect(failed.error).toBeTruthy();
+    const previous = (reader as any).costPreparation; fail = false;
+    expect((await reader.prepareCostLedger("personal")).state).toBe("failed"); expect((reader as any).costPreparation).toBe(previous);
+    await reader.prepareCostLedger("personal", true); await (reader as any).costPreparation.read.promise;
+    expect((await reader.prepareCostLedger("personal")).state).toBe("ready");
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+  });
+
+  it("foreground cancellation detaches without cancelling the independent cost preparation", async () => {
+    const { remote, release, cost } = await setup(true); let entered!: () => void; let finish!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const original = (reader as any).readDraftPageRecords.bind(reader);
+    vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async (...args: unknown[]) => {
+      entered(); await new Promise<void>(resolve => { finish = resolve; }); return original(...args);
+    });
+    const controller = new AbortController();
+    await withReadBudget({ signal: controller.signal, timeoutMs: 20 }, () => reader.prepareCostLedger("personal"));
+    await started; controller.abort();
+    expect((reader as any).costPreparation.read.controller.signal.aborted).toBe(false);
+    finish(); await (reader as any).costPreparation.read.promise;
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+  });
+
+  it("cost preparation does not install a stale record over a concurrent confirmed page commit", async () => {
+    const { remote, release, cost } = await setup(true); const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const original = (reader as any).readDraftPageRecords.bind(reader);
+    const next = costEntryFor(release, "concurrent-cost");
+    vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async (...args: unknown[]) => {
+      const rows = await original(...args);
+      await reader.appendCostEntry(next, { ...context, idempotencyKey: next.id });
+      return rows;
+    });
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost, next]);
+    expect((reader as any).pageRecordCommitCount).toBeGreaterThan(0);
+  });
+
+  it("cost preparation revalidates structural and external root changes before readiness", async () => {
+    const { remote, release, cost, root } = await setup(true); const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const original = (reader as any).readDraftPageRecords.bind(reader);
+    const next = { ...costEntryFor(release, "external-root-cost"), pageId: undefined };
+    vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async (...args: unknown[]) => {
+      const rows = await original(...args); root.costEntries.push(next);
+      remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root)); (reader as any).invalidateStateCache(); return rows;
+    });
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([next, cost]);
+    const previous = (reader as any).costPreparation;
+    (reader as any).invalidateStateCache(); expect((await reader.prepareCostLedger("personal")).state).toBe("preparing");
+    expect((reader as any).costPreparation).not.toBe(previous); await (reader as any).costPreparation.read.promise;
+  });
+
+  it("cost preparation rechecks directory stamps after an external page cost commit", async () => {
+    const { remote, writer, release, cost } = await setup(true); const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const original = (reader as any).readDraftPageRecords.bind(reader);
+    const next = costEntryFor(release, "external-page-cost");
+    const scan = vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async (...args: unknown[]) => {
+      const rows = await original(...args); await writer.appendCostEntry(next, { ...context, idempotencyKey: next.id }); return rows;
+    });
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost, next]);
+  });
+
+  it("cost preparation has an absolute bounded owner lifetime that polling cannot extend", async () => {
+    const { remote } = await setup(true); const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    let started!: () => void; let producerSignal!: AbortSignal;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async () => {
+      const budget = currentReadBudget()!; producerSignal = budget.signal;
+      started(); await new Promise<void>((_resolve, reject) => budget.signal!.addEventListener("abort", () => reject(budget.signal!.reason), { once: true }));
+      return [];
+    });
+    vi.useFakeTimers();
+    try {
+      await reader.prepareCostLedger("personal"); await entered;
+      const preparation = (reader as any).costPreparation;
+      const finished = preparation.read.promise.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(179000); await reader.prepareCostLedger("personal", true);
+      expect((reader as any).costPreparation).toBe(preparation);
+      await vi.advanceTimersByTimeAsync(1000); await finished;
+      expect(producerSignal.aborted).toBe(true);
+      expect((await reader.prepareCostLedger("personal")).state).toBe("failed");
+      expect((reader as any).draftPageRecordCache.size).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
 
   it("course-only DTO keeps complete ordered historical ledger across materials and foreign owners", async () => {
     const { remote, writer, release } = await setup(true);
