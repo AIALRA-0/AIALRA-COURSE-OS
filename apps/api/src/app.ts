@@ -4101,7 +4101,22 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
   const preparedSource = preparedImport?.preparedSourceSha256 && preparedImport.materialVersionId === initial.materialVersionId
     && preparedImport.sourceRegistration?.state === "pending"
     ? JSON.parse((await dependencies.cas.get(preparedImport.preparedSourceSha256)).toString("utf8")) as CourseRelease : undefined;
-  const release = preparedSource ?? await dependencies.readweave.getRelease(initial.materialVersionId);
+  let release = preparedSource;
+  if (!release) {
+    // A transient source read happens before model work and outside the page
+    // persistence loop. Recover it finitely instead of failing without a retry.
+    for (let attempt = 0; ; attempt += 1) {
+      try { release = await dependencies.readweave.getRelease(initial.materialVersionId); break; }
+      catch (error) {
+        if (attempt >= 2 || !isTransientReadWeaveFailure(error)) throw error;
+        await assertGenerationFence(jobId, fenceToken, dependencies);
+        await dependencies.operations.mutateGenerationJob(jobId, (_job, context) => {
+          context.appendEvent("generation.source.read_retry", { attempt: attempt + 1, issue: safeGenerationIssue(error) });
+        });
+        await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 500));
+      }
+    }
+  }
   if (preparedSource && (preparedSource.id !== initial.materialVersionId || preparedSource.manifestHash !== preparedImport!.sha256
     || preparedSource.lifecycle !== "draft_source" || initial.pageIds.some(id => !preparedSource.pageIds.includes(id)))) {
     await failGenerationJob(jobId, "READWEAVE_IMPORT_SOURCE_CONFLICT", dependencies, fenceToken);
@@ -4339,7 +4354,8 @@ async function runLocalJob(jobId: string, dependencies: AppDependencies, fenceTo
       };
       persistenceStage = "save_draft";
       const saveDraftStartedAt = Date.now();
-      const draftWriteContext = systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId);
+      const draftWriteContext = { ...systemWriteContext(`generation:${jobId}:attempt:${currentJob.attempt}:${page.id}:draft`, currentJob.workspaceId),
+        beforeWrite: () => assertGenerationFence(jobId, fenceToken, dependencies) };
       const bundledCost = Boolean(dependencies.readweave.saveDraftWithCost);
       const sourceAsset = release.lifecycle === "draft_source"
         ? await candidateSourceAsset(page, dependencies)
@@ -4630,7 +4646,8 @@ async function saveRecoverableBridge(
       markdown: receipt.response.markdown, sourceAnchorIds: page.anchors.map(item => item.id), atomIds: page.atoms.map(item => item.id) },
       ...(page.lessonSections ?? []).filter(section => section.kind !== "chapter_bridge")];
     const patch = { ...authority, page, generationJobId: jobId, contentHash: receipt.bridgedContentHash, updatedAt: receipt.updatedAt };
-    const write = systemWriteContext(receipt.writeIdempotencyKey, job.workspaceId);
+    const write = { ...systemWriteContext(receipt.writeIdempotencyKey, job.workspaceId),
+      beforeWrite: () => assertGenerationFence(jobId, fenceToken, dependencies) };
     await assertGenerationFence(jobId, fenceToken, dependencies);
     confirmed = dependencies.readweave.saveDraftWithCost
       ? await dependencies.readweave.saveDraftWithCost(patch, receipt.coreRevision, write, receipt.cost)
@@ -4820,7 +4837,8 @@ async function repairSavedMainContent(
   const hasFullExplanation = (page.lessonSections ?? []).some(section => section.kind === "full_explanation" && section.markdown?.trim());
   const status = hasFullExplanation && mainContentMarkdown.trim() ? "ready" : "needs_review";
   const updated: LessonDraft = { ...draft, status, page, contentHash: sha256Text(stableStringify(page)), updatedAt: new Date().toISOString() };
-  const write = systemWriteContext(`generation:${jobId}:attempt:${job.attempt}:${pageId}:main-content-format-repair`, job.workspaceId);
+  const write = { ...systemWriteContext(`generation:${jobId}:attempt:${job.attempt}:${pageId}:main-content-format-repair`, job.workspaceId),
+    beforeWrite: () => assertGenerationFence(jobId, fenceToken, dependencies) };
   const save = () => dependencies.readweave.saveDraftWithCost
     ? dependencies.readweave.saveDraftWithCost(updated, draft.revision, write, cost)
     : dependencies.readweave.saveDraft(updated, draft.revision, write);

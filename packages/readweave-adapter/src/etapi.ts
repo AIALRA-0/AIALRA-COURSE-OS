@@ -247,6 +247,8 @@ interface SharedRead<T> {
 // overlap briefly when ETAPI settings are replaced, so their page locks share
 // this process-wide map.
 const draftPageWriteChains = new Map<string, Promise<void>>();
+type DraftWriteContext = IdempotentWriteContext & { beforeWrite?: () => Promise<void> };
+const draftWriteSlots = new Map<string, { active: number; waiting: Array<() => void> }>();
 const etapiWriteChains = new Map<string, Promise<void>>();
 const etapiActivityWriteChains = new Map<string, Promise<void>>();
 
@@ -942,6 +944,10 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const update = (patch: Partial<CostLedgerPreparation>) => Object.assign(progress, patch, { updatedAt: new Date().toISOString() });
     preparation.read = createSharedRead(async markIndependent => {
       markIndependent();
+      // Uninstalled bodies belong only to this producer. A later pass can reuse
+      // one only when fresh authority lists the same note and actual body hash.
+      // This keeps a hot page from redownloading every unchanged historical page.
+      const candidateBodies = new Map<string, LocatedDraftPageRecord>();
       for (;;) {
         update({ stage: "source", checkedRecords: 0, totalRecords: null });
         const rootVersion = this.costRootVersion;
@@ -950,7 +956,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         const before = this.costRootReadSnapshot;
         update({ stage: "records" });
         let directory = "";
-        const records = await this.readDraftPageRecords(undefined, { install: false,
+        const records = await this.readDraftPageRecords(undefined, { install: false, candidateBodies,
           onDirectory: notes => { directory = directoryStamp(notes); },
           onProgress: (checkedRecords, totalRecords) => update({ checkedRecords, totalRecords }) });
         update({ stage: "verify" });
@@ -4138,7 +4144,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     return notes;
   }
 
-  private async readDraftPageRecords(pageId?: string | readonly string[], options: { install?: boolean; onProgress?: (checked: number, total: number) => void; onDirectory?: (notes: EtapiNote[]) => void } = {}): Promise<LocatedDraftPageRecord[]> {
+  private async readDraftPageRecords(pageId?: string | readonly string[], options: { install?: boolean; onProgress?: (checked: number, total: number) => void; onDirectory?: (notes: EtapiNote[]) => void; candidateBodies?: Map<string, LocatedDraftPageRecord> } = {}): Promise<LocatedDraftPageRecord[]> {
     const pageIds = pageId === undefined ? undefined : new Set(typeof pageId === "string" ? [pageId] : pageId);
     if (pageIds?.size === 0) return [];
     const observedVersions = new Map(this.draftPageRecordVersions);
@@ -4150,7 +4156,9 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const concurrency = pageIds ? 4 : 8;
     const recordsBySearchOrder = new Array<LocatedDraftPageRecord | undefined>(notes.length);
     await forEachWithConcurrency(notes.map((note, index) => ({ note, index })), concurrency, async ({ note, index }) => {
-      const cached = this.draftPageRecordCache.get(note.title.slice("Course OS draft record · ".length));
+      const temporary = options.candidateBodies?.get(note.noteId);
+      const cached = note.blobId && temporary?.blobId === note.blobId ? temporary
+        : this.draftPageRecordCache.get(note.title.slice("Course OS draft record · ".length));
       if (!this.writeContext.getStore() && note.blobId && cached?.noteId === note.noteId && cached.blobId === note.blobId) {
         const budget = this.writeContext.getStore() ? this.pageWriteReadBudget.getStore() : currentReadBudget();
         if (budget) assertReadBudgetActive(budget);
@@ -4177,6 +4185,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           conflicts: parsed.conflicts ?? []
         }
       };
+      options.candidateBodies?.set(note.noteId, located);
       recordsBySearchOrder[index] = located;
       checkedRecord();
     });
@@ -4390,19 +4399,41 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     };
   }
 
-  private async withDraftPageLock<T>(pageId: string, context: IdempotentWriteContext | undefined, work: () => Promise<T>): Promise<T> {
+  private async acquireDraftWriteSlot(): Promise<() => void> {
+    let slots = draftWriteSlots.get(this.writeQueueKey);
+    if (!slots) { slots = { active: 0, waiting: [] }; draftWriteSlots.set(this.writeQueueKey, slots); }
+    // Model output is already durable before waiting here. Bound the expensive
+    // authority/projection writes separately from model, reading and answers.
+    if (slots.active < 4) slots.active += 1;
+    else await new Promise<void>(resolve => slots!.waiting.push(resolve));
+    const owned = slots;
+    return () => {
+      const next = owned.waiting.shift();
+      if (next) next();
+      else {
+        owned.active -= 1;
+        if (owned.active === 0 && draftWriteSlots.get(this.writeQueueKey) === owned) draftWriteSlots.delete(this.writeQueueKey);
+      }
+    };
+  }
+
+  private async withDraftPageLock<T>(pageId: string, context: DraftWriteContext | undefined, work: () => Promise<T>): Promise<T> {
     const lockKey = [this.config.baseUrl, this.config.parentNoteId, this.workspaceId, pageId].join("\u0000");
     const predecessor = draftPageWriteChains.get(lockKey) ?? Promise.resolve();
     let release: () => void = () => {};
     const current = new Promise<void>((resolve) => { release = resolve; });
     draftPageWriteChains.set(lockKey, current);
     await predecessor.catch(() => undefined);
+    const releaseWriteSlot = context ? await this.acquireDraftWriteSlot() : undefined;
     const controller = context ? new AbortController() : undefined;
     const lockStartedAt = performance.now();
     let succeeded = false;
     const deadline = Date.now() + maximumSharedReadBudgetMs;
     const timer = controller ? setTimeout(() => controller.abort(new Error("READ_DEADLINE_EXCEEDED")), maximumSharedReadBudgetMs) : undefined;
     try {
+      // The queued owner can be cancelled or lose its lease before admission.
+      // This runtime-only guard is never serialized into storage or HTTP data.
+      if (context?.beforeWrite) await context.beforeWrite();
       // Bound the necessary GETs independently of the HTTP reader. Keep the
       // lock until writes actually settle, even if their read budget expires.
       const result = context ? await this.pageWriteReadBudget.run({ signal: controller!.signal, deadline },
@@ -4413,6 +4444,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       if (timer !== undefined) clearTimeout(timer);
       release();
       if (draftPageWriteChains.get(lockKey) === current) draftPageWriteChains.delete(lockKey);
+      releaseWriteSlot?.();
     }
   }
 

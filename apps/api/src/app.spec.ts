@@ -2888,6 +2888,38 @@ describe("Course OS API", () => {
     expect(costs.body.entries).toEqual([expect.objectContaining({ status: "failed", actualMicrousd: 2_000 })]);
   }, 60_000);
 
+  it("recovers a transient initial authoritative source read before making one model call", async () => {
+    const before = process.env.COURSE_OS_EXTERNAL_WORKER;process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    try {
+      let calls = 0;const { app, release, dependencies, readweave, operations } = await seededApp({ generateTeachingPackage: async () => { calls++;return testTeachingResult(0.001); } });
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "source-finite-recovery").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+      const source = vi.spyOn(readweave, "getRelease").mockRejectedValueOnce(Error("READWEAVE_ETAPI_503")).mockRejectedValueOnce(Error("READWEAVE_ETAPI_503"));
+      await executeGenerationJob(created.body.id, dependencies);
+      expect((await request(app).get(`/api/v1/generation-jobs/${created.body.id}`)).body.state).toBe("completed");
+      expect(calls).toBe(1);expect(source.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect((await operations.readGenerationJobEvents(created.body.id)).filter(event => event.type === "generation.source.read_retry")).toHaveLength(2);
+    } finally { if (before === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;else process.env.COURSE_OS_EXTERNAL_WORKER = before; }
+  });
+
+  it("rechecks the generation fence after a draft waits and retains billed output on cancellation", async () => {
+    const before = process.env.COURSE_OS_EXTERNAL_WORKER;process.env.COURSE_OS_EXTERNAL_WORKER = "true";
+    let enter!: () => void, finish!: () => void;const entered = new Promise<void>(resolve => { enter = resolve; });const held = new Promise<void>(resolve => { finish = resolve; });
+    try {
+      const { app, release, dependencies, readweave } = await seededApp({ generateTeachingPackage: async () => testTeachingResult(0.005) });
+      const original = readweave.saveDraftWithCost.bind(readweave);let committed = 0;
+      vi.spyOn(readweave, "saveDraftWithCost").mockImplementation(async (draft, revision, write, cost, asset) => {
+        enter();await held;const guard = (write as typeof write & { beforeWrite?: () => Promise<void> }).beforeWrite;
+        expect(guard).toBeTypeOf("function");await guard!();committed++;return original(draft, revision, write, cost, asset);
+      });
+      const created = await request(app).post("/api/v1/generation-jobs").set("Idempotency-Key", "queued-fence-cancel").send({ materialVersionId: release.id, pageIds: ["page-1"], budgetUsd: 1 }).expect(202);
+      const execution = executeGenerationJob(created.body.id, dependencies);await entered;
+      await request(app).post(`/api/v1/generation-jobs/${created.body.id}:cancel`).set("Idempotency-Key", "queued-fence-cancel-request").send({}).expect(200);
+      finish();await execution;expect(committed).toBe(0);expect(await readweave.getDraftByPage("page-1")).toBeUndefined();
+      expect((await request(app).get(`/api/v1/generation-jobs/${created.body.id}`)).body.state).toBe("cancelled");
+      const costs = await request(app).get(`/api/v1/costs?jobId=${created.body.id}`).expect(200);expect(costs.body.entries).toHaveLength(1);expect(costs.body.entries[0].actualMicrousd).toBe(5000);
+    } finally { finish?.();if (before === undefined) delete process.env.COURSE_OS_EXTERNAL_WORKER;else process.env.COURSE_OS_EXTERNAL_WORKER = before; }
+  });
+
   it("records already billed usage after cancellation without saving a stale draft", async () => {
     const beforeEnv = process.env.COURSE_OS_EXTERNAL_WORKER;
     process.env.COURSE_OS_EXTERNAL_WORKER = "true";

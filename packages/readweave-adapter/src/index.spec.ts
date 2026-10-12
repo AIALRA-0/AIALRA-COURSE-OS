@@ -6605,6 +6605,69 @@ function parseFakeLabelSearch(query: string): { labels: Array<{ name: string; va
   return undefined;
 }
 
+describe("bounded durable page writes", () => {
+  const make = (workspaceId = "personal") => new EtapiReadWeaveCourseApi({ baseUrl: "http://bounded-isolation", token: "synthetic", parentNoteId: "root", workspaceId, fetchImpl: new FakeEtapi().fetch });
+  it("bounds cross-page persistence while independent page reads and workspaces continue", async () => {
+    const first = make(), second = make(); const entered: number[] = []; const finishes: Array<() => void> = [];
+    const jobs = Array.from({ length: 5 }, (_, index) => (index % 2 ? first : second as any as EtapiReadWeaveCourseApi));
+    const pending = jobs.map((api, index) => (api as any).withDraftPageLock("admission-page-" + index, context, async () => {
+      entered.push(index); await new Promise<void>(resolve => finishes.push(resolve)); return index;
+    }));
+    try {
+      for (let i = 0; i < 5; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(entered).toHaveLength(4);
+      await expect((first as any).withDraftPageLock("independent-page", undefined, async () => "read" )).resolves.toBe("read");
+      await expect((make("other") as any).withDraftPageLock("other-page", context, async () => "other" )).resolves.toBe("other");
+      finishes[0]!(); for (let i = 0; i < 5; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(entered).toHaveLength(5);
+    } finally { for (const finish of finishes) finish(); await Promise.all(pending); }
+  });
+  it("starts the read deadline only after a queued page receives its save slot", async () => {
+    const api = make("deadline-isolation"); const finishes: Array<() => void> = []; let entered = 0;
+    vi.useFakeTimers();
+    const held = Array.from({ length: 4 }, (_, index) => (api as any).withDraftPageLock("deadline-held-" + index, context, async () => {
+      entered++; await new Promise<void>(resolve => finishes.push(resolve));
+    }));
+    let queuedBudget: { signal?: AbortSignal; deadline?: number } | undefined;
+    const queued = (api as any).withDraftPageLock("deadline-queued", context, async () => { queuedBudget = (api as any).pageWriteReadBudget.getStore(); });
+    try {
+      await vi.advanceTimersByTimeAsync(0); expect(entered).toBe(4);expect(queuedBudget).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(179000);expect(queuedBudget).toBeUndefined(); finishes[0]!();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      await queued;expect(queuedBudget?.signal?.aborted).toBe(false);expect(queuedBudget?.deadline! - Date.now()).toBe(180000);
+    } finally { for (const finish of finishes) finish();await Promise.all(held);await queued;vi.useRealTimers(); }
+  });
+
+  it.each(["cancelled", "lease lost", "guard read failed"])("rejects a queued %s owner without writes and releases its permit", async mode => {
+    const api = make("guard-" + mode); const finishes: Array<() => void> = []; let entered = 0;
+    const held = Array.from({ length: 4 }, (_, index) => (api as any).withDraftPageLock("held-" + index, context, async () => {
+      entered++;await new Promise<void>(resolve => finishes.push(resolve));
+    }));
+    let active = true; const write = vi.fn(); const failure = mode === "guard read failed" ? "READWEAVE_UNAVAILABLE" : "LEASE_LOST";
+    const queued = (api as any).withDraftPageLock("queued", { ...context, beforeWrite: async () => { if (!active) throw Error(failure); } }, write)
+      .catch((error: Error) => error.message);
+    try {
+      for (let i = 0; i < 5; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(entered).toBe(4);active = false;finishes[0]!();expect(await queued).toBe(failure);expect(write).not.toHaveBeenCalled();
+      await expect((api as any).withDraftPageLock("next", context, async () => "released")).resolves.toBe("released");
+    } finally { for (const finish of finishes) finish();await Promise.all(held);await queued; }
+  });
+
+  it("releases a failed write permit before a queued page starts", async () => {
+    const api = make("failure-isolation"); let fail!: () => void; const started: number[] = []; const ends: Array<() => void> = [];
+    const jobs = Array.from({ length: 5 }, (_, index) => (api as any).withDraftPageLock("failure-" + index, context, async () => {
+      started.push(index); if (index === 0) await new Promise<void>((_resolve, reject) => { fail = () => reject(Error("synthetic failure")); });
+      else await new Promise<void>(resolve => ends.push(resolve)); return index;
+    }).catch((error: Error) => error.message));
+    try {
+      for (let i = 0; i < 5; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(started).toHaveLength(4); fail();
+      for (let i = 0; i < 5; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(started).toHaveLength(5);
+    } finally { fail?.();for (const end of ends) end();expect((await Promise.all(jobs))[0]).toBe("synthetic failure"); }
+  });
+});
+
 describe("PA18 independent cost DTO", () => {
   const rootTitle = "00 Course OS 结构化索引";
   const configFor = (remote: FakeEtapi) => ({ baseUrl: "http://readweave", token: "secret", parentNoteId: "root", fetchImpl: remote.fetch });
@@ -6679,6 +6742,35 @@ describe("PA18 independent cost DTO", () => {
     await expect(withReadBudget({ signal: controller.signal }, () => reader.prepareCostLedger("personal")))
       .rejects.toThrow(mode === "denied" ? "READWEAVE_ETAPI_403" : "READ_CANCELLED");
     expect((reader as any).costPreparation).toBe(ready);
+  });
+
+  it("keeps stable body downloads once across a changing cost preparation pass", async () => {
+    const { remote, writer, release, cost } = await setup(true);
+    const second = { ...structuredClone(release), id: "hot-material", moduleId: "hot-module", pageIds: ["hot-page"],
+      pages: [{ ...structuredClone(release.pages[0]!), id: "hot-page" }] };
+    await writer.publishRelease(second, { ...manifest, courseReleaseId: second.id }, { ...context, idempotencyKey: "publish-hot" });
+    const hot = { ...costEntryFor(second, "initial-hot"), pageId: "hot-page" };
+    await writer.appendCostEntry(hot, { ...context, idempotencyKey: hot.id });
+    const stableId = remote.noteIdByTitle("Course OS draft record · page-1");
+    const hotId = remote.noteIdByTitle("Course OS draft record · hot-page");
+    const downloads = new Map<string, number>();
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if ((init?.method ?? "GET") === "GET" && [stableId, hotId].some(id => path === `/etapi/notes/${id}/content`)) downloads.set(path, (downloads.get(path) ?? 0) + 1);
+      return remote.fetch(input, init);
+    } });
+    const original = (reader as any).readDraftPageRecords.bind(reader);
+    const next = { ...costEntryFor(second, "later-hot"), pageId: "hot-page" };
+    const scan = vi.spyOn(reader as any, "readDraftPageRecords").mockImplementationOnce(async (...args: unknown[]) => {
+      const rows = await original(...args); await writer.appendCostEntry(next, { ...context, idempotencyKey: next.id }); return rows;
+    });
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(downloads.get(`/etapi/notes/${stableId}/content`)).toBe(1);
+    expect(downloads.get(`/etapi/notes/${hotId}/content`)).toBe(2);
+    const oracle = new EtapiReadWeaveCourseApi(configFor(remote));
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual(await oracle.listCostEntries({ courseId: release.courseId }));
+    expect((reader as any).costPreparation.progress.state).toBe("ready"); assertNoGeneric(reader);
   });
 
   it("cost preparation failure remains explicit without implicit repeat; deliberate retry recovers", async () => {
