@@ -940,12 +940,20 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
           onProgress: (checkedRecords, totalRecords) => update({ checkedRecords, totalRecords }) });
         update({ stage: "verify" });
         await this.readCostReference();
-        const confirmedDirectory = directoryStamp(await this.findDraftPageRecordNotes());
+        const confirmedNotes = await this.findDraftPageRecordNotes();
+        const confirmedDirectory = directoryStamp(confirmedNotes);
+        const confirmedBlobs = new Map(confirmedNotes.map(note => [note.noteId, note.blobId]));
+        // Directory A -> body B -> directory A must not install B. Missing
+        // stamps keep the original uncached-body fallback, never fake equality.
+        const changedBodies = records.some(located => {
+          const stamp = confirmedBlobs.get(located.noteId);
+          return Boolean(stamp && stamp !== located.blobId);
+        });
         const activeBudget = currentReadBudget();
         if (activeBudget) assertReadBudgetActive(activeBudget);
         // The second authority read protects external root changes as well as
         // local structural writes. Page writes retain their own version fence.
-        if (directory !== confirmedDirectory || rootVersion !== this.costRootVersion || before?.noteId !== this.costRootReadSnapshot?.noteId
+        if (changedBodies || directory !== confirmedDirectory || rootVersion !== this.costRootVersion || before?.noteId !== this.costRootReadSnapshot?.noteId
           || before?.blobId !== this.costRootReadSnapshot?.blobId) continue;
         for (const located of records) {
           if ((this.draftPageRecordVersions.get(located.record.pageId) ?? 0)

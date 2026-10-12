@@ -6707,6 +6707,36 @@ describe("PA18 independent cost DTO", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("cost preparation binds the actual body when the directory changes and returns to its original stamp", async () => {
+    const { remote, release, cost } = await setup(true);
+    const title = "Course OS draft record · page-1"; const noteId = remote.noteIdByTitle(title);
+    const original = remote.contentByTitle(title);
+    const changed = decodeReadWeaveStateContent(original) as any;
+    changed.costEntries.push({ ...costEntryFor(release, "intermediate-foreign-history"), pageId: "foreign-owner" });
+    let intermediate = true;
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (intermediate && new URL(String(input)).pathname === `/etapi/notes/${noteId}/content`) {
+        intermediate = false; remote.editByTitle(title, encodeReadWeaveStateContent(changed));
+        const response = await remote.fetch(input, init); remote.editByTitle(title, original); return response;
+      }
+      return remote.fetch(input, init);
+    }});
+    const scan = vi.spyOn(reader as any, "readDraftPageRecords");
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect((reader as any).draftPageRecordCache.get("page-1").record.costEntries).toEqual([cost]);
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+  });
+
+  it("cost preparation retains legacy missing-stamp fallback without an endless rescan", async () => {
+    const { remote, release, cost } = await setup(true); remote.emitBlobIds = false;
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    const scan = vi.spyOn(reader as any, "readDraftPageRecords");
+    await reader.prepareCostLedger("personal"); await (reader as any).costPreparation.read.promise;
+    expect(scan).toHaveBeenCalledTimes(1); expect((await reader.prepareCostLedger("personal")).state).toBe("ready");
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+  });
+
   it("course-only DTO keeps complete ordered historical ledger across materials and foreign owners", async () => {
     const { remote, writer, release } = await setup(true);
     const other = (id: string, courseId: string, pageId: string): CourseRelease => ({
