@@ -6593,6 +6593,100 @@ describe("PA18 independent cost DTO", () => {
     expect((api as any).draftPageRecordsHydrated).toBe(false);
   };
 
+  it("course-only DTO keeps complete ordered historical ledger across materials and foreign owners", async () => {
+    const { remote, writer, release } = await setup(true);
+    const other = (id: string, courseId: string, pageId: string): CourseRelease => ({
+      ...structuredClone(release), id, courseId, moduleId: id + "-module", pageIds: [pageId],
+      pages: [{ ...structuredClone(release.pages[0]!), id: pageId }]
+    });
+    const second = other("second-material", release.courseId, "second-page");
+    const foreign = other("foreign-material", "other-course", "foreign-page");
+    for (const item of [second, foreign]) {
+      await writer.publishRelease(item, { ...manifest, courseReleaseId: item.id }, { ...context, idempotencyKey: "publish-" + item.id });
+    }
+    for (const [item, id, courseId] of [[second, "second-cost", release.courseId],
+      [foreign, "foreign-owned-history", release.courseId], [foreign, "shadowed-history", foreign.courseId]] as const) {
+      const entry = { ...costEntryFor(item, id), pageId: item.pages[0]!.id, courseId };
+      await writer.appendCostEntry(entry, { ...context, idempotencyKey: entry.id });
+    }
+    const root = decodeReadWeaveStateContent(remote.contentByTitle(rootTitle)) as any;
+    root.costEntries = [{ ...costEntryFor(release, "retired-history"), pageId: "retired" },
+      { ...costEntryFor(release, "course-only-history"), pageId: undefined }, costEntryFor(release, "shadowed-history")];
+    root.projections.costIndexNoteId = remote.seedCostIndex([{ ...costEntryFor(release, "compact-history"), pageId: undefined }]);
+    remote.editByTitle(rootTitle, encodeReadWeaveStateContent(root));
+    const oracle = await new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries();
+    for (const courseId of [release.courseId, foreign.courseId, "missing-course"]) {
+      const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+      const generic = vi.spyOn(reader as any, "readState").mockImplementation(() => { throw Error("COURSE_COST_GENERIC_WORK_FORBIDDEN"); });
+      const actual = await reader.listCostEntries({ courseId }, ["untrusted-hint"]);
+      expect(actual).toEqual(oracle.filter(entry => entry.courseId === courseId));
+      expect(generic).not.toHaveBeenCalled(); assertNoGeneric(reader);
+      if (courseId === release.courseId) {
+        expect(actual.map(entry => entry.id)).toEqual(expect.arrayContaining(["foreign-owned-history", "compact-history", "retired-history", "course-only-history", "second-cost"]));
+        expect(actual.some(entry => entry.id === "shadowed-history")).toBe(false);
+        actual[0]!.unitPriceSnapshot.source = "caller mutation";
+        expect((await reader.listCostEntries({ courseId }))[0]!.unitPriceSnapshot.source).not.toBe("caller mutation");
+      }
+    }
+  });
+
+  it("course-only DTO sees same-adapter new cost without generic root or activity work", async () => {
+    const { remote, release, cost } = await setup(true);
+    const reader = new EtapiReadWeaveCourseApi(configFor(remote));
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost]);
+    const added = costEntryFor(release, "new-course-cost");
+    await reader.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+    const generic = vi.spyOn(reader as any, "readState").mockImplementation(() => { throw Error("COURSE_COST_GENERIC_WORK_FORBIDDEN"); });
+    expect(await reader.listCostEntries({ courseId: release.courseId })).toEqual([cost, added]);
+    expect(generic).not.toHaveBeenCalled();
+  });
+
+  it("course-only DTO preserves the fresh root refusal", async () => {
+    const { remote, release, rootId } = await setup(true); let deny = false;
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (deny && new URL(String(input)).pathname === `/etapi/notes/${rootId}`) return new Response("denied", { status: 403 });
+      return remote.fetch(input, init);
+    }});
+    await reader.listCostEntries({ courseId: release.courseId }); deny = true;
+    await expect(reader.listCostEntries({ courseId: release.courseId })).rejects.toThrow();
+    deny = false; await expect(reader.listCostEntries({ courseId: release.courseId })).resolves.toHaveLength(1);
+  });
+
+  it.each(["cancel", "deadline", "local commit"])("course-only complete record read guards %s before installation", async mode => {
+    const { remote, release, cost } = await setup(true);
+    const recordId = remote.noteIdByTitle("Course OS draft record · page-1");
+    let block = true; let entered!: () => void; let releaseRead!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const reader = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (block && new URL(String(input)).pathname === `/etapi/notes/${recordId}/content`) {
+        block = false;
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => reject(init?.signal?.reason ?? Error("READ_CANCELLED"));
+          releaseRead = () => { init?.signal?.removeEventListener("abort", abort); resolve(); };
+          init?.signal?.addEventListener("abort", abort, { once: true }); entered();
+        });
+      }
+      return response;
+    }});
+    const controller = new AbortController();
+    const pending = withReadBudget({ signal: controller.signal, timeoutMs: mode === "deadline" ? 100 : 3000 },
+      () => reader.listCostEntries({ courseId: release.courseId })).then(value => ({ value }), error => ({ error }));
+    try {
+      await started;
+      if (mode === "local commit") {
+        const added = costEntryFor(release, "during-course-read");
+        await reader.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+        releaseRead(); expect((await pending as { value: GenerationCostEntry[] }).value).toEqual([cost, added]);
+      } else {
+        if (mode === "cancel") controller.abort();
+        expect(String((await pending as { error: Error }).error.message)).toBe(mode === "cancel" ? "READ_CANCELLED" : "READ_DEADLINE_EXCEEDED");
+        expect((reader as any).draftPageRecordCache.size).toBe(0);
+      }
+    } finally { releaseRead?.(); await pending; }
+    await expect(reader.listCostEntries({ courseId: release.courseId })).resolves.toEqual(expect.arrayContaining([cost]));
+  });
+
   it("PA18 fee pipeline hints retain exact ordered authority including legacy/retired costs", async () => {
     const { remote, writer, release, cost, root } = await setup(true);
     const retired = { ...costEntryFor(release, "hint-retired"), pageId: "retired-page" };

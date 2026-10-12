@@ -250,7 +250,7 @@ export function StudioWorkspace({ release, page, sync, imageResources, rightColl
             {inspector === "quality" && <QualityInspector page={workingPage} validation={validation} coverage={coverage} />}
             {inspector === "source" && <SourceInspector page={workingPage} draft={draft} sync={sync} />}
             {inspector === "model" && <ModelInspector release={release} page={workingPage} job={generationJob} />}
-            {inspector === "cost" && <CostInspector release={release} page={workingPage} job={generationJob} />}
+            {inspector === "cost" && <CostInspector key={release.courseId} release={release} page={workingPage} job={generationJob} />}
           </div>
         </aside>}
       </div>
@@ -378,12 +378,33 @@ function ModelInspector({ release, page, job }: { release: CourseRelease; page: 
   </div>;
 }
 
-function CostInspector({ release, page, job }: { release: CourseRelease; page: PageLesson; job?: GenerationJob }) {
+export function CostInspector({ release, page, job }: { release: CourseRelease; page: PageLesson; job?: GenerationJob }) {
   const [entries, setEntries] = useState<GenerationCostEntry[]>([]);
   const [rollups, setRollups] = useState<CostRollup[]>([]);
   const [error, setError] = useState("");
-  const load = () => api.costs({ courseId: release.courseId }).then((result) => { setEntries(result.entries); setRollups(result.rollups); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "成本账本读取失败"));
-  useEffect(() => { load(); }, [release.courseId, job?.state]);
+  const [loading, setLoading] = useState(true);
+  const pending = useRef<AbortController | undefined>(undefined);
+  const load = () => {
+    pending.current?.abort();
+    const controller = new AbortController();
+    pending.current = controller;
+    setLoading(true);
+    setError("");
+    return api.costs({ courseId: release.courseId }, { signal: controller.signal }).then((result) => {
+      if (pending.current !== controller || controller.signal.aborted) return;
+      setEntries(result.entries);
+      setRollups(result.rollups);
+      setLoading(false);
+    }).catch((reason) => {
+      if (pending.current !== controller || controller.signal.aborted) return;
+      setError(reason instanceof Error ? reason.message : "成本账本读取失败");
+      setLoading(false);
+    });
+  };
+  useEffect(() => {
+    void load();
+    return () => { pending.current?.abort(); pending.current = undefined; };
+  }, [release.courseId, job?.state]);
   const course = rollups.find((item) => item.scope === "course" && item.scopeId === release.courseId);
   const pageEntries = entries.filter((item) => item.pageId === page.id).slice().reverse();
   const accounted = (entry: GenerationCostEntry) => entry.costBasis === "provider_reported" && entry.actualMicrousd !== null ? entry.actualMicrousd : entry.estimatedMicrousd;
@@ -399,6 +420,11 @@ function CostInspector({ release, page, job }: { release: CourseRelease; page: P
   const projectedCourseCost = entries.length > 0 ? Math.round(estimated / entries.length * release.pages.length) : 0;
   const unknownCosts = entries.filter((item) => item.costBasis === "not_available").length;
   const snapshot = pageEntries.find((entry) => entry.unitPriceSnapshot.source !== "价格未配置")?.unitPriceSnapshot;
+  if (loading || error) return <div className="inspector-body cost-inspector" aria-busy={loading}>
+    {loading ? <p role="status">正在读取课程费用账本</p>
+      : <div className="dialog-error" role="alert"><Icon name="warning" /><span>课程费用暂时不可读：{error}；尚未取得金额，不能按零费用显示</span></div>}
+    <button className="quiet-button" onClick={() => void load()} disabled={loading}>{loading ? "正在读取" : "重新读取成本账本"}</button>
+  </div>;
   return <div className="inspector-body cost-inspector">
     <div className="cost-hero"><div><span>课程累计</span><strong>{formatMicrousd(used)}</strong><small>供应商回报与价格估算合计</small></div><div><span>本页累计</span><strong>{formatMicrousd(pageUsed)}</strong><small>{pageEntries.length} 次调用</small></div></div>
     <div className="cost-ledger-grid"><div><span>供应商回报费用</span><strong>{cash}</strong><small>不是账单确认金额</small></div><div><span>套餐额度折算</span><strong>{quota}</strong><small>仅含供应商回报</small></div><div><span>预计完课成本</span><strong>{formatMicrousd(projectedCourseCost)}</strong><small>按当前平均调用外推</small></div><div><span>价格估算与预留</span><strong>{formatMicrousd(estimated)}</strong><small>{unknownCosts ? `${unknownCosts} 次调用实际费用未知` : "所有调用均可估算"}</small></div></div>

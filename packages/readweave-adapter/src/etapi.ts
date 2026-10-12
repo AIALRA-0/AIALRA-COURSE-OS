@@ -908,6 +908,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     // before the root, metadata binding and complete authoritative route pass.
     const hintIds = filters.pageId ? [filters.pageId]
       : filters.materialVersionId ? [...new Set(pageIdsHint ?? [])] : [];
+    const courseOnly = Boolean(filters.courseId && !filters.pageId && !filters.materialVersionId && !this.writeContext.getStore());
     const observedVersions = new Map(this.draftPageRecordVersions);
     const scheduledVersion = this.stateVersion;
     const controller = new AbortController();
@@ -927,7 +928,7 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
       let verifiedVersion: number;
       do {
         verifiedVersion = this.stateVersion;
-        reference = filters.pageId || filters.materialVersionId
+        reference = filters.pageId || filters.materialVersionId || courseOnly
           ? await this.readCostReference(startPrefetch) : undefined;
       } while (this.stateVersion !== verifiedVersion);
       const release = filters.materialVersionId
@@ -938,14 +939,38 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
         await prefetch;
         await prefetchWork?.catch(() => undefined);
       }
-      const state = scoped ? reference! : await this.readState();
+      const courseLedger = Boolean(courseOnly && reference);
+      const state = scoped || courseLedger ? reference! : await this.readState();
       const costIndex = state.projections.costIndexNoteId
         ? await this.readCostIndex(state.projections.costIndexNoteId)
         : undefined;
       // Merge the authoritative sources once per request. Rebuilding the entire
       // ledger for each page needlessly multiplies work on long materials.
-      const costs = new Map(mergeCostEntries(costIndex?.costEntries, state.costEntries)
+      let costs = new Map(mergeCostEntries(costIndex?.costEntries, state.costEntries)
         .map(entry => [entry.id, entry]));
+      if (courseLedger) {
+        // A durable page may hold historical costs belonging to another course.
+        // Keep complete discovery and the original cache/owner merge order;
+        // the cost DTO only removes unrelated teaching/activity copies.
+        const freshRecords = await this.readDraftPageRecords(undefined, { install: false });
+        const budget = currentReadBudget();
+        if (budget) assertReadBudgetActive(budget);
+        if (this.stateVersion !== verifiedVersion) return await this.listCostEntries(filters, pageIdsHint);
+        for (const located of freshRecords) {
+          if ((this.draftPageRecordVersions.get(located.record.pageId) ?? 0) <= (observedVersions.get(located.record.pageId) ?? 0)) {
+            this.cacheDraftPageRecord(located);
+          }
+        }
+        const records = [...this.draftPageRecordCache.values()].map(located => located.record);
+        if (records.length) {
+          const ledger = orderedOwnerLedger(state.costEntries, entry => entry.pageId, records[0]!.pageId);
+          for (const [index, record] of records.entries()) {
+            if (index > 0) ledger.movePage(record.pageId);
+            for (const entry of record.costEntries) ledger.put(structuredClone(entry));
+          }
+          costs = new Map(mergeCostEntries(costIndex?.costEntries, ledger.finish()).map(entry => [entry.id, entry]));
+        }
+      }
       if (scoped) {
         const pageIds = filters.pageId ? [filters.pageId] : [...new Set([
           ...release!.pageIds, ...release!.pages.map(page => page.id),

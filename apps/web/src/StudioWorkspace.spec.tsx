@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CourseRelease, PageLesson, QuestionBankItem } from "@course-os/contracts";
-import { StudioWorkspace } from "./StudioWorkspace.js";
+import { CostInspector, StudioWorkspace } from "./StudioWorkspace.js";
 
 function render(questions: QuestionBankItem[] = [], rightCollapsed = false) {
   const page = {
@@ -47,4 +47,15 @@ describe("Studio empty and question editor states", () => {
     expect(markup).toContain('class="studio-editor-content"');
     expect(markup).not.toContain('id="studio-inspector-panel"');
   });
+});
+
+
+it("does not render a zero-dollar ledger before the first authoritative cost response", () => {
+  const page = { id: "page-1" } as PageLesson;
+  const release = { id: "release-1", courseId: "course-1" } as CourseRelease;
+  const markup = renderToStaticMarkup(createElement(CostInspector, { release, page }));
+  expect(markup).toContain('aria-busy="true"');
+  expect(markup).toContain("正在读取课程费用账本");
+  expect(markup).not.toContain("$0.0000");
+  expect(markup).not.toContain("本页还没有模型调用记录");
 });
