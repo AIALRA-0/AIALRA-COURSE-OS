@@ -3842,12 +3842,12 @@ export class EtapiReadWeaveCourseApi implements ReadWeaveCourseApi {
     const version = this.stateVersion;
     const full = this.rootReadSnapshot;
     const scoped = this.costRootReadSnapshot;
-    if (!this.writeContext.getStore() && (full?.noteId === noteId || (scoped?.noteId === noteId && scoped.version === version))) {
+    if (!this.writeContext.getStore() && (full?.noteId === noteId || scoped?.noteId === noteId)) {
       const note = await this.getNote(noteId);
       const budget = currentReadBudget();
       if (budget) assertReadBudgetActive(budget);
       if (this.stateVersion === version && note.blobId) {
-        if (scoped?.noteId === noteId && scoped.version === version && this.costRootReadSnapshot === scoped && note.blobId === scoped.blobId) return scoped.dto;
+        if (scoped?.noteId === noteId && this.costRootReadSnapshot === scoped && note.blobId === scoped.blobId) return scoped.dto;
         if (full?.noteId === noteId && this.rootReadSnapshot === full && note.blobId === full.blobId) {
           const dto = projectReadWeaveCostRoot(full.parsed);
           if (budget) assertReadBudgetActive(budget);

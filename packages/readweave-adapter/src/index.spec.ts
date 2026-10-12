@@ -6890,6 +6890,116 @@ describe("PA18 independent cost DTO", () => {
     stall = false; await expect(api.listCostEntries({ materialVersionId: release.id })).resolves.toEqual([cost]);
   });
 
+
+  it("reuses immutable cost root after same-adapter page-cost commit while rebuilding overlays", async () => {
+    const { remote, release, cost, rootId } = await setup(true);
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    expect(await api.listCostEntries({ materialVersionId: release.id })).toEqual([cost]);
+    const snapshot = (api as any).costRootReadSnapshot;
+    const rootBody = remote.contentByTitle(rootTitle);
+    const added = costEntryFor(release, "same-adapter-page-cost");
+    await api.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+    expect((api as any).stateVersion).toBeGreaterThan(snapshot.version);
+    expect(remote.contentByTitle(rootTitle)).toBe(rootBody);
+    const decode = vi.spyOn(stateDecoder, "decodeReadWeaveCostRootAsync");
+    const before = remote.requests.length;
+    try {
+      expect(await api.listCostEntries({ materialVersionId: release.id })).toEqual([cost, added]);
+      expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}` && row.method === "GET")).toHaveLength(1);
+      expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(0);
+      expect(decode).not.toHaveBeenCalled();
+      expect((api as any).costRootReadSnapshot).toBe(snapshot);
+      expect((api as any).costReferenceCache.version).toBe((api as any).stateVersion);
+    } finally { decode.mockRestore(); }
+  });
+
+  it.each(["cancel", "deadline", "concurrent page commit"])("guards stale-version immutable root stamp reuse against %s", async mode => {
+    const { remote, release, cost, rootId } = await setup(true);
+    let block = false; let entered!: () => void; let unblock!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      const response = await remote.fetch(input, init);
+      if (block && new URL(String(input)).pathname === `/etapi/notes/${rootId}`) {
+        block = false;
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => reject(init?.signal?.reason ?? new Error("READ_CANCELLED"));
+          unblock = () => { init?.signal?.removeEventListener("abort", abort); resolve(); };
+          init?.signal?.addEventListener("abort", abort, { once: true }); entered();
+        });
+      }
+      return response;
+    }});
+    await api.listCostEntries({ materialVersionId: release.id });
+    const first = costEntryFor(release, "old-version-page-cost");
+    await api.appendCostEntry(first, { ...context, idempotencyKey: first.id });
+    const snapshot = (api as any).costRootReadSnapshot;
+    expect(snapshot.version).toBeLessThan((api as any).stateVersion);
+    block = true; const controller = new AbortController();
+    const pending = withReadBudget({ signal: controller.signal, timeoutMs: mode === "deadline" ? 100 : 3000 },
+      () => api.listCostEntries({ materialVersionId: release.id })).then(value => ({ value }), error => ({ error }));
+    try {
+      await started;
+      if (mode === "concurrent page commit") {
+        const second = costEntryFor(release, "committed-during-stamp");
+        await api.appendCostEntry(second, { ...context, idempotencyKey: second.id });
+        unblock();
+        expect((await pending as { value: GenerationCostEntry[] }).value).toEqual([cost, first, second]);
+      } else {
+        if (mode === "cancel") controller.abort();
+        expect(String((await pending as { error: Error }).error.message)).toBe(mode === "cancel" ? "READ_CANCELLED" : "READ_DEADLINE_EXCEEDED");
+        expect((api as any).costRootReadSnapshot).toBe(snapshot);
+      }
+    } finally { unblock?.(); await pending; }
+    await waitFor(() => (api as any).costRootReads.size === 0);
+    expect((await api.listCostEntries({ materialVersionId: release.id })).map(row => row.id)).toContain(first.id);
+  });
+
+  it.each(["PUT", "DELETE"])("invalidates old-version immutable root DTO through actual root %s", async method => {
+    const { remote, release, rootId, root } = await setup(true);
+    const api = new EtapiReadWeaveCourseApi(configFor(remote));
+    await api.listCostEntries({ materialVersionId: release.id });
+    const added = costEntryFor(release, "before-root-change");
+    await api.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+    expect((api as any).costRootReadSnapshot.version).toBeLessThan((api as any).stateVersion);
+    if (method === "PUT") {
+      root.costEntries.push(costEntryFor(release, "new-root-cost"));
+      await (api as any).putContent(rootId, encodeReadWeaveStateContent(root));
+      expect((api as any).costRootReadSnapshot).toBeUndefined();
+      const oracle = await new EtapiReadWeaveCourseApi(configFor(remote)).listCostEntries({ materialVersionId: release.id });
+      expect(await api.listCostEntries({ materialVersionId: release.id })).toEqual(oracle);
+      expect(oracle.some(row => row.id === "new-root-cost")).toBe(true);
+    } else {
+      await (api as any).deleteNote(rootId);
+      expect((api as any).costRootReadSnapshot).toBeUndefined();
+      await expect(api.listCostEntries({ materialVersionId: release.id })).rejects.toThrow();
+    }
+  });
+
+  it.each(["missing stamp", "access denied", "foreign metadata"])("retains fresh authority checks on old-version immutable root reuse: %s", async mode => {
+    const { remote, writer, release, rootId } = await setup(true);
+    await writer.ensureMetadataIndex(); let denied = false;
+    const api = new EtapiReadWeaveCourseApi({ ...configFor(remote), fetchImpl: async (input, init) => {
+      if (denied && new URL(String(input)).pathname === `/etapi/notes/${rootId}`) return new Response("denied", { status: 403 });
+      return remote.fetch(input, init);
+    }});
+    await api.listCostEntries({ materialVersionId: release.id });
+    const added = costEntryFor(release, "old-version-authority-check");
+    await api.appendCostEntry(added, { ...context, idempotencyKey: added.id });
+    expect((api as any).costRootReadSnapshot.version).toBeLessThan((api as any).stateVersion);
+    if (mode === "missing stamp") {
+      remote.emitBlobIds = false; const before = remote.requests.length;
+      expect((await api.listCostEntries({ materialVersionId: release.id })).some(row => row.id === added.id)).toBe(true);
+      expect(remote.requests.slice(before).filter(row => row.path === `/notes/${rootId}/content`)).toHaveLength(1);
+    } else if (mode === "access denied") {
+      denied = true; await expect(api.listCostEntries({ materialVersionId: release.id })).rejects.toThrow();
+    } else {
+      const title = "Course OS Metadata Index · personal";
+      const metadata = decodeReadWeaveStateContent(remote.contentByTitle(title)) as any;
+      metadata.workspaceId = "foreign"; remote.editByTitle(title, encodeReadWeaveStateContent(metadata));
+      await expect(api.listCostEntries({ materialVersionId: release.id })).rejects.toThrow("READWEAVE_METADATA_INDEX_WORKSPACE_MISMATCH");
+    }
+  });
+
   it("revalidates root stamps, missing stamps and access; invalidation never trusts a stale DTO", async () => {
     const { remote, release, cost, rootId, root } = await setup();
     let denied = false;
